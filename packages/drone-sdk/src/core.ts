@@ -1,4 +1,8 @@
-import { ValidationError } from './errors';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { ConflictError, NotFoundError, TimeoutError, TransportError, ValidationError } from './errors';
+import { hubTransport } from './hub';
 import type {
   AIClient,
   ChatEvent,
@@ -10,6 +14,7 @@ import type {
   DispatchOptions,
   DroneGroupSummary,
   DroneRecord,
+  DroneRuntime,
   DroneSDKOptions,
   DroneSummary,
   DroneTransport,
@@ -29,6 +34,8 @@ import type {
 } from './types';
 
 const DEFAULT_POLL_INTERVAL_MS = 500;
+const DEFAULT_HUB_BASE_URL = 'http://127.0.0.1:8787';
+const DEFAULT_SEND_ACCEPT_RETRY_WINDOW_MS = 90_000;
 
 type DroneSDK = {
   drones: DroneCollection;
@@ -46,13 +53,16 @@ export type DroneCollection = {
 
 export type GroupCollection = {
   get(name: string): DroneGroup;
+  create(name: string): DroneGroup;
   list(): Promise<DroneGroupSummary[]>;
 };
 
 export type DroneGroup = {
   readonly name: string;
+  create(input: Omit<CreateDroneBatchItem, 'group'>): Promise<Drone>;
   create(name: string, input?: Omit<CreateDroneInput, 'group'>): Promise<Drone>;
   createMany(inputs: Omit<CreateDroneBatchItem, 'group'>[]): Promise<CreateManyResult>;
+  createManyDrones(inputs: Omit<CreateDroneBatchItem, 'group'>[]): Promise<Drone[]>;
   list(): Promise<DroneSummary[]>;
 };
 
@@ -83,6 +93,10 @@ export type DroneChat = {
   clearQueue(): DroneChat;
   queued(): readonly MessageInput[];
   send(message: MessageInput, input?: SendOptions): Promise<Run>;
+  sendAndWait(
+    message: MessageInput,
+    input?: SendOptions & WaitOptions,
+  ): Promise<{ run: Run; status: RunResult['status']; text: string | null }>;
   dispatch(input?: DispatchOptions): Promise<Run>;
   messages: {
     list(input?: ListMessagesInput): Promise<ChatMessage[]>;
@@ -118,6 +132,19 @@ export type ChatBroadcast = {
   clearQueue(): ChatBroadcast;
   queued(): readonly MessageInput[];
   send(message: MessageInput, input?: SendOptions): Promise<Run[]>;
+  sendAndWait(
+    message: MessageInput,
+    input?: SendOptions & WaitOptions,
+  ): Promise<
+    Array<{
+      run: Run;
+      droneId: string;
+      droneName: string;
+      chatName: string;
+      status: RunResult['status'];
+      text: string | null;
+    }>
+  >;
   dispatch(input?: DispatchOptions): Promise<Run[]>;
 };
 
@@ -125,6 +152,18 @@ type SDKContext = {
   transport: DroneTransport;
   defaults?: RequestOptions;
 };
+
+type ResolvedHubConnection = {
+  baseUrl: string;
+  token: string;
+};
+
+function withDefaultRuntime<T extends { runtime?: DroneRuntime }>(input: T): T & { runtime: DroneRuntime } {
+  return {
+    ...input,
+    runtime: input.runtime ?? 'container',
+  };
+}
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -142,6 +181,16 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     };
     if (signal) signal.addEventListener('abort', onAbort, { once: true });
   });
+}
+
+function mergeAbortSignals(a?: AbortSignal, b?: AbortSignal): AbortSignal | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  a.addEventListener('abort', abort, { once: true });
+  b.addEventListener('abort', abort, { once: true });
+  return controller.signal;
 }
 
 function mergeOptions(base?: RequestOptions, next?: RequestOptions): RequestOptions | undefined {
@@ -169,6 +218,178 @@ function normalizeMessageInput(message: MessageInput): string {
   return value;
 }
 
+type HubStateSnapshot = {
+  apiHost: string;
+  apiPort: number;
+  pid?: number;
+  apiToken?: string;
+};
+
+function uniquePaths(paths: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const raw of paths) {
+    const candidate = raw.trim();
+    if (!candidate) continue;
+    const resolved = path.resolve(candidate);
+    if (seen.has(resolved)) continue;
+    seen.add(resolved);
+    result.push(resolved);
+  }
+  return result;
+}
+
+function sdkRepoRootCandidate(): string {
+  return path.resolve(__dirname, '..', '..', '..');
+}
+
+function defaultDroneDataDirs(): string[] {
+  const explicit = String(process.env.DRONE_DATA_DIR ?? '').trim();
+  if (explicit) return uniquePaths([explicit]);
+  const repoDataDir = path.join(sdkRepoRootCandidate(), 'data', 'drone');
+  if (process.platform === 'win32') {
+    const appData = String(process.env.APPDATA ?? '').trim() || path.join(os.homedir(), 'AppData', 'Roaming');
+    return uniquePaths([repoDataDir, path.join(appData, 'drone')]);
+  }
+  if (process.platform === 'darwin') {
+    return uniquePaths([repoDataDir, path.join(os.homedir(), 'Library', 'Application Support', 'drone')]);
+  }
+  const xdgDataHome = String(process.env.XDG_DATA_HOME ?? '').trim() || path.join(os.homedir(), '.local', 'share');
+  return uniquePaths([repoDataDir, path.join(xdgDataHome, 'drone'), path.join(os.homedir(), '.drone')]);
+}
+
+function readTrimmedFile(filePath: string): string {
+  try {
+    return fs.readFileSync(filePath, 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+
+function readHubStateSnapshot(filePath: string): HubStateSnapshot | null {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as {
+      apiHost?: unknown;
+      apiPort?: unknown;
+      pid?: unknown;
+      apiToken?: unknown;
+    };
+    const rawHost = String(parsed?.apiHost ?? '127.0.0.1').trim();
+    const host = rawHost === '0.0.0.0' || rawHost === '::' ? '127.0.0.1' : rawHost;
+    const port = Number(parsed?.apiPort);
+    if (!host || !Number.isFinite(port) || port <= 0) return null;
+    const pid = Number(parsed?.pid);
+    return {
+      apiHost: host,
+      apiPort: Math.floor(port),
+      ...(Number.isFinite(pid) && pid > 0 ? { pid: Math.floor(pid) } : {}),
+      ...(typeof parsed?.apiToken === 'string' && parsed.apiToken.trim() ? { apiToken: parsed.apiToken.trim() } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function readLinuxProcessEnvToken(pid: number): string {
+  if (process.platform !== 'linux') return '';
+  if (!Number.isFinite(pid) || pid <= 0) return '';
+  try {
+    const raw = fs.readFileSync(`/proc/${Math.floor(pid)}/environ`, 'utf8');
+    const values = raw.split('\0');
+    for (const value of values) {
+      if (!value.startsWith('DRONE_HUB_API_TOKEN=')) continue;
+      const token = value.slice('DRONE_HUB_API_TOKEN='.length).trim();
+      if (token) return token;
+    }
+  } catch {
+    // ignore
+  }
+  return '';
+}
+
+function resolveDiscoveredHubToken(): string {
+  const envToken = String(process.env.DRONE_TOKEN ?? process.env.DRONE_HUB_API_TOKEN ?? '').trim();
+  if (envToken) return envToken;
+  for (const dir of defaultDroneDataDirs()) {
+    const token = readTrimmedFile(path.join(dir, 'hub.token'));
+    if (token) return token;
+    const state = readHubStateSnapshot(path.join(dir, 'hub.json'));
+    const stateToken = String(state?.apiToken ?? '').trim();
+    if (stateToken) return stateToken;
+    const processToken = state?.pid ? readLinuxProcessEnvToken(state.pid) : '';
+    if (processToken) return processToken;
+  }
+  return '';
+}
+
+function resolveDiscoveredHubBaseUrl(): string {
+  const envBaseUrl = String(process.env.DRONE_HUB_BASE_URL ?? '').trim();
+  if (envBaseUrl) return envBaseUrl;
+  for (const dir of defaultDroneDataDirs()) {
+    const snapshot = readHubStateSnapshot(path.join(dir, 'hub.json'));
+    if (!snapshot) continue;
+    return `http://${snapshot.apiHost}:${snapshot.apiPort}`;
+  }
+  return DEFAULT_HUB_BASE_URL;
+}
+
+function resolveDiscoveredHubConnection(): ResolvedHubConnection | null {
+  const token = resolveDiscoveredHubToken();
+  if (!token) return null;
+  return {
+    baseUrl: resolveDiscoveredHubBaseUrl(),
+    token,
+  };
+}
+
+function createHubAIClient(connection: ResolvedHubConnection, defaults?: RequestOptions): AIClient {
+  return {
+    async ask(prompt: string, input?: RequestOptions): Promise<string> {
+      const text = String(prompt ?? '').trim();
+      if (!text) throw new ValidationError('prompt cannot be empty');
+      const requestOptions = mergeOptions(defaults, input);
+      const timeoutMs = requestOptions?.timeoutMs ?? 5000;
+      const timeoutController = new AbortController();
+      const signal = mergeAbortSignals(timeoutController.signal, requestOptions?.signal);
+      const timer = setTimeout(() => timeoutController.abort(), timeoutMs);
+      try {
+        const response = await fetch(new URL('/api/tldr/from-message', connection.baseUrl).toString(), {
+          method: 'POST',
+          signal,
+          headers: {
+            authorization: `Bearer ${connection.token}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            response: text,
+            prompt: '',
+            context: [],
+          }),
+        });
+        const raw = await response.text();
+        let data: any = null;
+        try {
+          data = raw ? JSON.parse(raw) : null;
+        } catch {
+          data = null;
+        }
+        if (!response.ok) {
+          const message = String(data?.error ?? raw ?? 'ai ask failed').trim();
+          throw new TransportError(message || 'ai ask failed', response.status);
+        }
+        return String(data?.tldr ?? '').trim();
+      } catch (error: any) {
+        if (error?.name === 'AbortError') {
+          throw new TimeoutError(`ai ask timeout after ${timeoutMs}ms`);
+        }
+        throw error;
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+  };
+}
+
 class DroneSDKImpl implements DroneSDK {
   readonly drones: DroneCollection;
   readonly groups: GroupCollection;
@@ -188,14 +409,14 @@ class DroneCollectionImpl implements DroneCollection {
 
   async create(name: string, input?: CreateDroneInput): Promise<Drone> {
     const record = await this.ctx.transport.createDrone(
-      { name, ...(input ?? {}) },
+      withDefaultRuntime({ name, ...(input ?? {}) }),
       this.ctx.defaults,
     );
     return new DroneImpl(this.ctx, record);
   }
 
   async createMany(inputs: CreateDroneBatchItem[]): Promise<CreateManyResult> {
-    return await this.ctx.transport.createDrones(inputs, this.ctx.defaults);
+    return await this.ctx.transport.createDrones(inputs.map((item) => withDefaultRuntime(item)), this.ctx.defaults);
   }
 
   async get(idOrName: string): Promise<Drone | null> {
@@ -215,6 +436,10 @@ class GroupCollectionImpl implements GroupCollection {
     return new DroneGroupImpl(this.ctx, name);
   }
 
+  create(name: string): DroneGroup {
+    return this.get(name);
+  }
+
   async list(): Promise<DroneGroupSummary[]> {
     return await this.ctx.transport.listGroups(this.ctx.defaults);
   }
@@ -223,13 +448,26 @@ class GroupCollectionImpl implements GroupCollection {
 class DroneGroupImpl implements DroneGroup {
   constructor(private readonly ctx: SDKContext, readonly name: string) {}
 
-  async create(name: string, input?: Omit<CreateDroneInput, 'group'>): Promise<Drone> {
-    return await new DroneCollectionImpl(this.ctx).create(name, { ...(input ?? {}), group: this.name });
+  async create(input: Omit<CreateDroneBatchItem, 'group'>): Promise<Drone>;
+  async create(name: string, input?: Omit<CreateDroneInput, 'group'>): Promise<Drone>;
+  async create(
+    nameOrInput: string | Omit<CreateDroneBatchItem, 'group'>,
+    input?: Omit<CreateDroneInput, 'group'>,
+  ): Promise<Drone> {
+    if (typeof nameOrInput === 'string') {
+      return await new DroneCollectionImpl(this.ctx).create(nameOrInput, { ...(input ?? {}), group: this.name });
+    }
+    const { name, ...rest } = nameOrInput;
+    return await new DroneCollectionImpl(this.ctx).create(name, { ...rest, group: this.name });
   }
 
   async createMany(inputs: Omit<CreateDroneBatchItem, 'group'>[]): Promise<CreateManyResult> {
-    const withGroup = inputs.map((item) => ({ ...item, group: this.name }));
+    const withGroup = inputs.map((item) => withDefaultRuntime({ ...item, group: this.name }));
     return await this.ctx.transport.createDrones(withGroup, this.ctx.defaults);
+  }
+
+  async createManyDrones(inputs: Omit<CreateDroneBatchItem, 'group'>[]): Promise<Drone[]> {
+    return await Promise.all(inputs.map(async (input) => await this.create(input)));
   }
 
   async list(): Promise<DroneSummary[]> {
@@ -372,13 +610,42 @@ class DroneChatImpl implements DroneChat {
 
   async send(message: MessageInput, input?: SendOptions): Promise<Run> {
     const normalized = normalizeMessageInput(message);
-    const record = await this.ctx.transport.sendMessage(
-      this.drone.id,
-      this.name,
-      normalized,
-      mergeOptions(this.ctx.defaults, input) as SendOptions | undefined,
-    );
+    const sendOptions = mergeOptions(this.ctx.defaults, input) as SendOptions | undefined;
+    const deadline = Date.now() + DEFAULT_SEND_ACCEPT_RETRY_WINDOW_MS;
+    let attempt = 0;
+    let record: RunRecord;
+    while (true) {
+      try {
+        record = await this.ctx.transport.sendMessage(
+          this.drone.id,
+          this.name,
+          normalized,
+          sendOptions,
+        );
+        break;
+      } catch (error) {
+        const message = String((error as Error)?.message ?? '');
+        const status = Number((error as { status?: unknown })?.status ?? NaN);
+        const retryable =
+          ((error instanceof ConflictError || status === 409) && /still starting/i.test(message)) ||
+          ((error instanceof NotFoundError || status === 404) && /unknown drone/i.test(message));
+        if (!retryable || Date.now() >= deadline) throw error;
+        const delayMs = Math.min(1_000, 200 + attempt * 150);
+        attempt += 1;
+        await sleep(delayMs, sendOptions?.signal);
+      }
+    }
     return new SingleRunImpl(this.ctx, this.drone.id, this.name, record);
+  }
+
+  async sendAndWait(
+    message: MessageInput,
+    input?: SendOptions & WaitOptions,
+  ): Promise<{ run: Run; status: RunResult['status']; text: string | null }> {
+    const run = await this.send(message, input);
+    const result = await run.wait(input);
+    const text = await run.lastMessageText(input);
+    return { run, status: result.status, text };
   }
 
   async dispatch(input?: DispatchOptions): Promise<Run> {
@@ -680,6 +947,37 @@ class ChatBroadcastImpl implements ChatBroadcast {
     return await Promise.all(chats.map(async (chat) => await chat.send(message, input)));
   }
 
+  async sendAndWait(
+    message: MessageInput,
+    input?: SendOptions & WaitOptions,
+  ): Promise<
+    Array<{
+      run: Run;
+      droneId: string;
+      droneName: string;
+      chatName: string;
+      status: RunResult['status'];
+      text: string | null;
+    }>
+  > {
+    const chats = await this.resolveChats();
+    return await Promise.all(
+      chats.map(async (chat) => {
+        const run = await chat.send(message, input);
+        const result = await run.wait(input);
+        const text = await run.lastMessageText(input);
+        return {
+          run,
+          droneId: chat.drone.id,
+          droneName: chat.drone.name,
+          chatName: chat.name,
+          status: result.status,
+          text,
+        };
+      }),
+    );
+  }
+
   async dispatch(input?: DispatchOptions): Promise<Run[]> {
     if (this.queueState.length === 0) throw new ValidationError('cannot dispatch an empty broadcast queue');
     const chats = await this.resolveChats();
@@ -695,6 +993,20 @@ class ChatBroadcastImpl implements ChatBroadcast {
   }
 }
 
-export function createDroneSDK(options: DroneSDKOptions): DroneSDK {
-  return new DroneSDKImpl({ transport: options.transport, defaults: options.defaults });
+function resolveDefaultTransport(): DroneTransport {
+  const connection = resolveDiscoveredHubConnection();
+  if (!connection) {
+    throw new ValidationError(
+      'Hub API token not found. Set DRONE_TOKEN or run `drone hub restart` so the SDK can auto-discover token.',
+    );
+  }
+  return hubTransport(connection);
+}
+
+export function createDroneSDK(options: DroneSDKOptions = {}): DroneSDK {
+  const discoveredConnection = resolveDiscoveredHubConnection();
+  return new DroneSDKImpl({
+    transport: options.transport ?? resolveDefaultTransport(),
+    defaults: options.defaults,
+  }, discoveredConnection ? createHubAIClient(discoveredConnection, options.defaults) : undefined);
 }

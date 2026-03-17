@@ -34,6 +34,8 @@ export type SubscribeMessagesInput = StreamOptions & {
 };
 
 export type CreateDroneInput = {
+  agent?: CreateDroneAgentInput;
+  model?: string;
   group?: string;
   runtime?: DroneRuntime;
   cwd?: string;
@@ -41,6 +43,14 @@ export type CreateDroneInput = {
   metadata?: Record<string, string>;
   idempotencyKey?: string;
 };
+
+export type CreateDroneAgentInput =
+  | 'cursor'
+  | 'codex'
+  | 'claude'
+  | 'opencode'
+  | { kind: 'builtin'; id: 'cursor' | 'codex' | 'claude' | 'opencode' }
+  | { kind: 'custom'; id: string; label: string; command: string };
 
 export type CreateDroneBatchItem = CreateDroneInput & {
   name: string;
@@ -178,6 +188,6 @@ export type AIClient = {
 };
 
 export type DroneSDKOptions = {
-  transport: DroneTransport;
+  transport?: DroneTransport;
   defaults?: RequestOptions;
 };

@@ -88,6 +88,64 @@ function normalizePrompt(message: MessageInput): string {
   return value;
 }
 
+type BuiltinSeedAgentId = 'cursor' | 'codex' | 'claude' | 'opencode';
+type SeedAgentBody =
+  | { kind: 'builtin'; id: BuiltinSeedAgentId }
+  | { kind: 'custom'; id: string; label: string; command: string };
+
+function normalizeBuiltinSeedAgentId(raw: unknown): BuiltinSeedAgentId | null {
+  const id = String(raw ?? '').trim().toLowerCase();
+  if (id === 'cursor' || id === 'codex' || id === 'claude' || id === 'opencode') return id;
+  return null;
+}
+
+function normalizeCreateSeedAgent(raw: unknown): SeedAgentBody | undefined {
+  if (raw == null) return undefined;
+  if (typeof raw === 'string') {
+    const id = normalizeBuiltinSeedAgentId(raw);
+    if (!id) throw new ValidationError(`invalid built-in agent id: ${raw}`);
+    return { kind: 'builtin', id };
+  }
+  if (typeof raw !== 'object') {
+    throw new ValidationError('agent must be a built-in id string or an agent object');
+  }
+
+  const kind = String((raw as any).kind ?? '').trim().toLowerCase();
+  if (kind === 'builtin') {
+    const id = normalizeBuiltinSeedAgentId((raw as any).id);
+    if (!id) throw new ValidationError('invalid built-in agent id');
+    return { kind: 'builtin', id };
+  }
+
+  const idRaw = String((raw as any).id ?? '').trim();
+  const label = String((raw as any).label ?? '').trim();
+  const command = String((raw as any).command ?? '').trim();
+
+  // Accept object shorthand for built-ins: { id: "codex" }.
+  if (!kind && !label && !command) {
+    const builtinId = normalizeBuiltinSeedAgentId(idRaw);
+    if (builtinId) return { kind: 'builtin', id: builtinId };
+  }
+
+  if (kind === 'custom' || !kind) {
+    if (!idRaw || !label || !command) {
+      throw new ValidationError('custom agent requires id, label, and command');
+    }
+    return { kind: 'custom', id: idRaw, label, command };
+  }
+
+  throw new ValidationError('agent.kind must be "builtin" or "custom"');
+}
+
+function resolveCreateSeedFields(input: CreateDroneBatchItem): { seedAgent?: SeedAgentBody; seedModel?: string } {
+  const seedAgent = normalizeCreateSeedAgent(input.agent);
+  const seedModel = String(input.model ?? '').trim() || undefined;
+  return {
+    ...(seedAgent ? { seedAgent } : {}),
+    ...(seedModel ? { seedModel } : {}),
+  };
+}
+
 async function requestJson<T extends JsonValue>(
   options: HubTransportOptions,
   pathname: string,
@@ -195,10 +253,13 @@ async function resolveDeleteMode(options: HubTransportOptions, requestOptions?: 
 export function hubTransport(options: HubTransportOptions): DroneTransport {
   return {
     async createDrone(input: CreateDroneBatchItem, requestOptions?: RequestOptions): Promise<DroneRecord> {
+      const { seedAgent, seedModel } = resolveCreateSeedFields(input);
       const body: JsonObject = {
         name: input.name,
         runtime: input.runtime ?? 'container',
       };
+      if (seedAgent) body.seedAgent = seedAgent as unknown as JsonObject;
+      if (seedModel) body.seedModel = seedModel;
       if (input.group) body.group = input.group;
       if (input.cwd) body.cwd = input.cwd;
       if (input.repoPath) body.repoPath = input.repoPath;
@@ -224,6 +285,7 @@ export function hubTransport(options: HubTransportOptions): DroneTransport {
           method: 'POST',
           body: JSON.stringify({
             drones: inputs.map((item) => ({
+              ...resolveCreateSeedFields(item),
               name: item.name,
               runtime: item.runtime ?? 'container',
               ...(item.group ? { group: item.group } : {}),

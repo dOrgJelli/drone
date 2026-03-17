@@ -4,6 +4,7 @@ export type {
   ChatEvent,
   ChatMessage,
   ChatSummary,
+  CreateDroneAgentInput,
   CreateDroneBatchItem,
   CreateDroneInput,
   CreateManyResult,

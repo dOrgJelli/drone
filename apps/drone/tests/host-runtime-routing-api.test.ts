@@ -348,6 +348,42 @@ describeSocketSuite('host runtime routing api', () => {
     expect(fs.existsSync(stagedPath)).toBe(true);
   });
 
+  test('queues prompt rows while drone is still pending startup', async () => {
+    const droneId = 'pending-startup-prompt';
+    const now = new Date().toISOString();
+    await updateRegistry((reg: any) => {
+      reg.pending = reg.pending ?? {};
+      reg.pending[droneId] = {
+        id: droneId,
+        name: droneId,
+        runtime: 'container',
+        phase: 'starting',
+        message: 'Starting…',
+        createdAt: now,
+        updatedAt: now,
+      };
+    });
+
+    const promptResp = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats/default/prompt`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'hello while starting' }),
+    });
+    expect(promptResp.r.status).toBe(202);
+    expect(promptResp.data?.ok).toBe(true);
+    expect(String(promptResp.data?.pendingState ?? '')).toBe('queued');
+    const promptId = String(promptResp.data?.promptId ?? '').trim();
+    expect(promptId.length).toBeGreaterThan(0);
+
+    const pendingResp = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats/default/pending`);
+    expect(pendingResp.r.status).toBe(200);
+    const rows = Array.isArray(pendingResp.data?.pending) ? pendingResp.data.pending : [];
+    const row = rows.find((entry: any) => String(entry?.id ?? '').trim() === promptId);
+    expect(row).toBeTruthy();
+    expect(String(row?.state ?? '')).toBe('queued');
+    expect(String(row?.prompt ?? '')).toBe('hello while starting');
+  });
+
   test('preview proxies directly to localhost port for host runtime drone', async () => {
     const upstream = http.createServer((req, res) => {
       res.statusCode = 200;

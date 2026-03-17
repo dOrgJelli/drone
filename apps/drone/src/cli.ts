@@ -385,6 +385,10 @@ function hubStatePath(): string {
   return path.join(droneDir(), 'hub.json');
 }
 
+function hubTokenPath(): string {
+  return path.join(droneDir(), 'hub.token');
+}
+
 function hubLogPath(): string {
   return path.join(droneDir(), 'hub.log');
 }
@@ -431,6 +435,21 @@ async function writeHubState(state: HubState): Promise<void> {
   await setPrivateFileModeBestEffort(p);
 }
 
+async function writeHubApiToken(token: string): Promise<void> {
+  await ensureDroneDir();
+  const p = hubTokenPath();
+  await fs.writeFile(p, `${String(token ?? '').trim()}\n`, 'utf8');
+  await setPrivateFileModeBestEffort(p);
+}
+
+async function clearHubApiTokenBestEffort(): Promise<void> {
+  try {
+    await fs.rm(hubTokenPath(), { force: true });
+  } catch {
+    // ignore
+  }
+}
+
 async function setPrivateFileModeBestEffort(p: string): Promise<void> {
   if (process.platform === 'win32') return;
   try {
@@ -447,6 +466,7 @@ async function removeHubStateIfOwnedByPid(pid: number): Promise<void> {
     const cur = await readHubState();
     if (cur && cur.pid === pid) {
       await fs.rm(hubStatePath(), { force: true });
+      await clearHubApiTokenBestEffort();
     }
   } catch {
     // ignore
@@ -1514,6 +1534,7 @@ async function hubRun(options: any) {
     startedAt: new Date().toISOString(),
     logPath: hubLogPath(),
   });
+  await writeHubApiToken(apiToken);
 
   // Repo root from this file's directory:
   // - src -> drone -> apps -> <repoRoot>
@@ -1651,10 +1672,12 @@ async function hubStop() {
       } catch {
         // ignore
       }
+      await clearHubApiTokenBestEffort();
       // eslint-disable-next-line no-console
       console.log(JSON.stringify({ ok: true, stopped: true, recovered: true, pids: recoveredPids }, null, 2));
       return;
     }
+    await clearHubApiTokenBestEffort();
     // eslint-disable-next-line no-console
     console.log(JSON.stringify({ ok: true, stopped: false, reason: 'not running' }, null, 2));
     return;
@@ -1667,6 +1690,7 @@ async function hubStop() {
     } catch {
       // ignore
     }
+    await clearHubApiTokenBestEffort();
     const recoveredPids = await findRecoverableHubRunnerPids(fallbackUiPort);
     if (recoveredPids.length > 0) {
       for (const recoveredPid of recoveredPids) {
@@ -1688,6 +1712,7 @@ async function hubStop() {
   } catch {
     // ignore
   }
+  await clearHubApiTokenBestEffort();
 
   // eslint-disable-next-line no-console
   console.log(JSON.stringify({ ok: true, stopped: true, pid }, null, 2));
