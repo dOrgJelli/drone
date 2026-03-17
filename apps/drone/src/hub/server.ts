@@ -45,6 +45,7 @@ import {
 } from '../host/api';
 import { jobsPlanFromAgentMessage, suggestDroneNameFromMessage } from './jobs-from-message';
 import { tldrFromAgentMessage } from './tldr-from-message';
+import { cloneChatEntryForDroneClone, maybeBootstrapPromptFromTranscript } from './chat-clone';
 import { hasActivePriorPendingPrompt, shouldDeferQueuedTranscriptPrompt, stalePendingPromptState } from './pendingPromptEnqueue';
 import {
   cleanupQuarantineWorktree,
@@ -2073,6 +2074,14 @@ async function sendPromptToChat(opts: {
             promptId,
           });
     const effectivePrompt = promptWithImageAttachments(opts.prompt, attachmentsForPrompt);
+    const promptWithHistory =
+      agent.kind === 'builtin'
+        ? maybeBootstrapPromptFromTranscript({
+            agentId: agent.id,
+            prompt: effectivePrompt,
+            chatEntry: chat,
+          })
+        : effectivePrompt;
     if (attachments.length > 0) {
       const attachmentsDir = buildChatAttachmentsDirectory({
         cwd,
@@ -2099,7 +2108,7 @@ async function sendPromptToChat(opts: {
         'set -euo pipefail',
         `mkdir -p ${bashQuote(cwd)} 2>/dev/null || true`,
         cdCommand,
-        `agent${modelArg} --resume ${bashQuote(chatId)} -f --approve-mcps --print ${bashQuote(effectivePrompt)}`,
+        `agent${modelArg} --resume ${bashQuote(chatId)} -f --approve-mcps --print ${bashQuote(promptWithHistory)}`,
       ].join('\n');
       await enqueueTranscriptPrompt({ id: opts.id, drone: d, waitForDaemonMs: opts.waitForDaemonMs, kind: 'cursor', script });
       return { ok: true as const, agent, mode: 'transcript' as const, chat: normalizedChat, turnOk: true as const };
@@ -2114,7 +2123,7 @@ async function sendPromptToChat(opts: {
           'set -euo pipefail',
           `mkdir -p ${bashQuote(cwd)} 2>/dev/null || true`,
           cdCommand,
-          `codex --ask-for-approval never exec${modelArg} --skip-git-repo-check --sandbox danger-full-access --json --color never ${bashQuote(effectivePrompt)}`,
+          `codex --ask-for-approval never exec${modelArg} --skip-git-repo-check --sandbox danger-full-access --json --color never ${bashQuote(promptWithHistory)}`,
         ].join('\n');
         await enqueueTranscriptPrompt({ id: opts.id, drone: d, waitForDaemonMs: opts.waitForDaemonMs, kind: 'codex', script });
         return { ok: true as const, agent, mode: 'transcript' as const, chat: normalizedChat, codexThreadId: null, turnOk: true as const };
@@ -2124,7 +2133,7 @@ async function sendPromptToChat(opts: {
         'set -euo pipefail',
         `mkdir -p ${bashQuote(cwd)} 2>/dev/null || true`,
         cdCommand,
-        `codex --ask-for-approval never exec${modelArg} --skip-git-repo-check --sandbox danger-full-access --json --color never resume ${bashQuote(existingThreadId)} ${bashQuote(effectivePrompt)}`,
+        `codex --ask-for-approval never exec${modelArg} --skip-git-repo-check --sandbox danger-full-access --json --color never resume ${bashQuote(existingThreadId)} ${bashQuote(promptWithHistory)}`,
       ].join('\n');
       await enqueueTranscriptPrompt({ id: opts.id, drone: d, waitForDaemonMs: opts.waitForDaemonMs, kind: 'codex', script });
       return {
@@ -2145,7 +2154,7 @@ async function sendPromptToChat(opts: {
         'set -euo pipefail',
         `mkdir -p ${bashQuote(cwd)} 2>/dev/null || true`,
         cdCommand,
-        `claude --print --dangerously-skip-permissions --output-format text${modelArg} --session-id ${bashQuote(claudeSessionId)} ${bashQuote(effectivePrompt)}`,
+        `claude --print --dangerously-skip-permissions --output-format text${modelArg} --session-id ${bashQuote(claudeSessionId)} ${bashQuote(promptWithHistory)}`,
       ].join('\n');
       await enqueueTranscriptPrompt({ id: opts.id, drone: d, waitForDaemonMs: opts.waitForDaemonMs, kind: 'claude', script });
       return {
@@ -2169,7 +2178,7 @@ async function sendPromptToChat(opts: {
         'set -euo pipefail',
         `mkdir -p ${bashQuote(cwd)} 2>/dev/null || true`,
         cdCommand,
-        `opencode run --format default --title ${bashQuote(title)}${modelArg}${resumeArg} ${bashQuote(effectivePrompt)}`,
+        `opencode run --format default --title ${bashQuote(title)}${modelArg}${resumeArg} ${bashQuote(promptWithHistory)}`,
       ].join('\n');
       await enqueueTranscriptPrompt({ id: opts.id, drone: d, waitForDaemonMs: opts.waitForDaemonMs, kind: 'opencode', script });
       return {
@@ -4596,8 +4605,9 @@ async function provisionDroneFromPending(name: string) {
     : [];
 
   // Optional: clone chats/transcripts from an existing drone into this newly-created one.
-  // This is best-effort and does NOT copy daemon-specific continuation IDs
-  // (e.g. codexThreadId/chatId/claudeSessionId/openCodeSessionId).
+  // Preserve provider/session continuation ids when present so the cloned drone can
+  // continue the exact same conversation. Transcript bootstrap remains as a fallback
+  // for chats that only have stored turns and no resumable session identifier.
   if (cloneFrom && cloneChats) {
     try {
       await updateRegistry((reg3Any: any) => {
@@ -4609,17 +4619,15 @@ async function provisionDroneFromPending(name: string) {
         if (!src || !srcChats) return;
         const cloned: any = {};
         for (const [chatName, entryRaw] of Object.entries(srcChats)) {
-          const entry: any = entryRaw ?? {};
+          const entry = cloneChatEntryForDroneClone(entryRaw);
           const agent = inferChatAgent(entry);
           const model = normalizeChatModel(entry?.model);
           const createdAt = typeof entry?.createdAt === 'string' && entry.createdAt.trim() ? String(entry.createdAt) : nowIso();
-          const turns = Array.isArray(entry?.turns) ? JSON.parse(JSON.stringify(entry.turns)) : undefined;
-          cloned[String(chatName)] = {
-            createdAt,
-            agent,
-            ...(model ? { model } : {}),
-            ...(turns ? { turns } : {}),
-          };
+          entry.createdAt = createdAt;
+          entry.agent = agent;
+          if (model) entry.model = model;
+          else delete entry.model;
+          cloned[String(chatName)] = entry;
         }
         dst.chats = dst.chats ?? {};
         dst.chats = { ...dst.chats, ...cloned };
