@@ -306,6 +306,16 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     }
     return out;
   }, [drones]);
+  const fleetParentIdByDroneId = React.useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const drone of drones) {
+      const id = String(drone?.id ?? '').trim();
+      const parentId = String(drone?.fleetParentId ?? '').trim();
+      if (!id || !parentId) continue;
+      out[id] = parentId;
+    }
+    return out;
+  }, [drones]);
   const validChatNodeIdSet = React.useMemo(() => {
     const out = new Set<string>();
     for (const drone of drones) {
@@ -1871,6 +1881,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
           orderedCanvasChatNodeIds={orderedCanvasChatNodeIds}
           droneNameById={droneNameById}
           droneRepoById={droneRepoById}
+          fleetParentIdByDroneId={fleetParentIdByDroneId}
           draftRepoLabel={canvasDraftRepoLabel}
           chatNodeStateById={chatNodeStateById}
           onActivateChatFromCanvas={onActivateChatFromCanvas}
@@ -1964,6 +1975,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
       defaultFsPathForCurrentDrone,
       droneNameById,
       droneRepoById,
+      fleetParentIdByDroneId,
       chatNodeStateById,
       onActivateChatFromCanvas,
       orderedCanvasChatNodeIds,

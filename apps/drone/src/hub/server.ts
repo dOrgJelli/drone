@@ -35,6 +35,10 @@ import {
   dvmSessionType,
 } from '../host/dvm';
 import {
+  fleetPolicySet as droneFleetPolicySet,
+  fleetRequestClaim as droneFleetRequestClaim,
+  fleetRequestList as droneFleetRequestList,
+  fleetRequestResolve as droneFleetRequestResolve,
   procStart,
   promptEnqueue as dronePromptEnqueue,
   promptCancel as dronePromptCancel,
@@ -131,7 +135,30 @@ import {
   type ArchiveRuntimePolicy,
   type LlmProviderId,
 } from './hub-settings';
+import {
+  decodeFleetCursor,
+  effectiveFleetLimits,
+  encodeFleetCursor,
+  fleetActorConfig,
+  fleetActorPayload,
+  fleetAuditList,
+  fleetAuditUsageCount,
+  fleetChildrenForActor,
+  fleetTargetAllowedForRead,
+  fleetTargetAllowedForSend,
+  sanitizeFleetCapabilities,
+  sanitizeFleetQuotas,
+  sanitizeFleetReadScopes,
+  setFleetActorConfig,
+  transcriptTurnsToFleetMessages,
+} from './fleet-helpers';
 import { pruneMissingRegistryDrones } from './stale-registry-prune';
+import {
+  FLEET_API_VERSION,
+  FLEET_CAPABILITY_CREATE,
+  FLEET_CAPABILITY_READ,
+  FLEET_CAPABILITY_SEND,
+} from '../fleet/contracts';
 
 const HUB_API_LOADED_AT = new Date().toISOString();
 const HUB_API_BUILD_ID = crypto.randomBytes(6).toString('hex');
@@ -415,6 +442,327 @@ async function resolveDroneOrRejectUpgrade(socket: any, droneRef: string): Promi
       rejectWebSocketUpgrade(socket, 404, 'Not Found');
     },
   );
+}
+
+const FLEET_AUDIT_MAX_EVENTS = 500;
+const FLEET_RECONCILE_INTERVAL_MS = 1500;
+
+let FLEET_RECONCILE_INTERVAL: ReturnType<typeof setInterval> | null = null;
+let FLEET_RECONCILE_BUSY = false;
+
+async function appendFleetAuditEvent(event: {
+  actor: string;
+  actorName: string;
+  action: 'create_child' | 'send_message' | 'read_messages';
+  status: 'accepted' | 'rejected';
+  target?: string | null;
+  targetName?: string | null;
+  reason?: string | null;
+  meta?: Record<string, unknown>;
+}): Promise<void> {
+  await updateRegistry((regAny: any) => {
+    const audit = fleetAuditList(regAny);
+    audit.unshift({
+      id: `fleet-audit-${crypto.randomBytes(8).toString('hex')}`,
+      at: nowIso(),
+      actor: event.actor,
+      actorName: event.actorName,
+      action: event.action,
+      target: event.target ?? null,
+      targetName: event.targetName ?? null,
+      status: event.status,
+      reason: event.reason ?? null,
+      meta: event.meta ?? {},
+    });
+    regAny.fleet.audit = audit.slice(0, FLEET_AUDIT_MAX_EVENTS);
+  });
+}
+
+
+async function listFleetMessagesForTarget(targetId: string, chatNameRaw: unknown) {
+  const resolved = await resolveDroneOrPendingForRead(targetId);
+  if (!resolved) throw new Error(`unknown drone: ${targetId}`);
+  const chatName = normalizeChatName(chatNameRaw);
+  if (resolved.kind === 'pending') return [];
+  await ensureChatEntry({ droneId: resolved.id, chatName });
+  await reconcileChatFromDaemon({ droneId: resolved.id, chatName }).catch(() => {});
+  const regAny: any = await loadRegistry();
+  const chat = regAny?.drones?.[resolved.id]?.chats?.[chatName] ?? null;
+  const turns = Array.isArray(chat?.turns) ? chat.turns : [];
+  return transcriptTurnsToFleetMessages(chatName, turns);
+}
+
+async function syncFleetPolicySnapshotToDrone(actorId: string, actorEntry: any): Promise<void> {
+  try {
+    const daemon = await resolveDroneDaemonClientForEntry(actorEntry);
+    if (!daemon) return;
+    const actorConfig = fleetActorConfig(actorEntry);
+    const limits = effectiveFleetLimits(actorEntry);
+    await droneFleetPolicySet(daemon.client, {
+      apiVersion: FLEET_API_VERSION,
+      enabled: actorConfig.enabled,
+      actor: {
+        id: actorId,
+        name: String(actorEntry?.name ?? actorId),
+      },
+      capabilities: actorConfig.capabilities,
+      readScopes: actorConfig.readScopes,
+      sendScopes: ['children', 'assigned'],
+      limits,
+    });
+  } catch {
+    // ignore (best-effort sync)
+  }
+}
+
+function fleetError(message: string, status: number = 400): Error & { status?: number } {
+  const err = new Error(message) as Error & { status?: number };
+  err.status = status;
+  return err;
+}
+
+async function processFleetRequest(actorId: string, actorEntry: any, request: any): Promise<unknown> {
+  const actorName = String(actorEntry?.name ?? actorId);
+  const actorConfig = fleetActorConfig(actorEntry);
+  const limits = effectiveFleetLimits(actorEntry);
+  const regAny: any = await loadRegistry();
+  const action = String(request?.type ?? '').trim() as 'create_child' | 'send_message' | 'read_messages';
+  const reject = async (message: string, status: number = 400, target?: { id: string; name: string } | null): Promise<never> => {
+    await appendFleetAuditEvent({
+      actor: actorId,
+      actorName,
+      action,
+      status: 'rejected',
+      target: target?.id ?? null,
+      targetName: target?.name ?? null,
+      reason: message,
+      meta: { requestId: String(request?.id ?? '') },
+    });
+    throw fleetError(message, status);
+  };
+
+  if (!actorConfig.enabled) {
+    await reject('fleet mode is disabled for this drone', 403);
+  }
+
+  if (action === 'create_child') {
+    if (!actorConfig.capabilities.includes(FLEET_CAPABILITY_CREATE)) await reject('missing capability: drone:create', 403);
+    const name = normalizeDroneDisplayName((request?.payload as any)?.name);
+    const groupRaw = typeof (request?.payload as any)?.group === 'string' ? String((request.payload as any).group).trim() : '';
+    const group = groupRaw || String(actorEntry?.group ?? '').trim() || '';
+    if (findDroneIdByRef(regAny, name)) await reject(`drone already exists: ${name}`, 409);
+    const children = fleetChildrenForActor(regAny, actorId);
+    if (children.length >= limits.maxChildren) await reject(`child limit reached (${limits.maxChildren})`, 429);
+    const creationsLastHour = fleetAuditUsageCount(regAny, { actorId, action: 'create_child', status: 'accepted', sinceMs: 60 * 60 * 1000 });
+    if (creationsLastHour >= limits.maxCreationsPerHour) await reject(`creation rate limit reached (${limits.maxCreationsPerHour}/hour)`, 429);
+    const pendingGlobal = Object.keys(regAny?.pending ?? {}).length;
+    if (pendingGlobal >= limits.maxPendingCreationsGlobal) await reject(`global pending creation limit reached (${limits.maxPendingCreationsGlobal})`, 429);
+    const childId = makeDroneIdentity();
+    const at = nowIso();
+    await updateRegistry((regLatest: any) => {
+      if (findDroneIdByRef(regLatest, name)) throw fleetError(`drone already exists: ${name}`, 409);
+      ensureGroupRegistered(regLatest, group || null, at);
+      regLatest.pending = regLatest.pending ?? {};
+      regLatest.pending[childId] = {
+        id: childId,
+        name,
+        group: group || undefined,
+        runtime: droneRuntime(actorEntry),
+        repoPath: String(actorEntry?.repoPath ?? '').trim(),
+        containerPort: Number(actorEntry?.containerPort ?? 7777),
+        build: false,
+        createdAt: at,
+        updatedAt: at,
+        phase: 'starting',
+        message: 'Starting…',
+        fleet: setFleetActorConfig({}, {
+          createdBy: actorId,
+          createdAt: at,
+          enabled: false,
+          capabilities: [],
+          readScopes: ['children'],
+          assigned: [],
+          quotas: {},
+        }).fleet,
+      };
+    });
+    enqueueProvisioning(childId);
+    await appendFleetAuditEvent({
+      actor: actorId,
+      actorName,
+      action: 'create_child',
+      status: 'accepted',
+      target: childId,
+      targetName: name,
+      meta: { requestId: String(request?.id ?? ''), group: group || null },
+    });
+    return { child: { id: childId, name, group: group || null, phase: 'starting' } };
+  }
+
+  if (action === 'send_message') {
+    if (!actorConfig.capabilities.includes(FLEET_CAPABILITY_SEND)) await reject('missing capability: drone:message:send', 403);
+    const targetRef = String((request?.payload as any)?.to ?? '').trim();
+    const targetFound = findDroneIdByRef(regAny, targetRef);
+    if (!targetFound) await reject(`unknown drone: ${targetRef}`, 404);
+    const targetResolved = targetFound!;
+    const targetEntry = regAny?.drones?.[targetResolved.id] ?? regAny?.pending?.[targetResolved.id] ?? null;
+    const target = { id: targetResolved.id, name: String(targetEntry?.name ?? targetResolved.id) };
+    const childIds = new Set(fleetChildrenForActor(regAny, actorId).map((item) => item.id));
+    if (!(targetResolved.id === actorId || childIds.has(targetResolved.id) || fleetTargetAllowedForSend(actorEntry, actorId, targetResolved.id))) {
+      await reject(`target not allowed: ${target.name}`, 403, target);
+    }
+    const message = String((request?.payload as any)?.message ?? '').trim();
+    if (!message) await reject('missing message', 400, target);
+    if (Buffer.byteLength(message, 'utf8') > limits.maxMessageSizeBytes) {
+      await reject(`message too large (max ${limits.maxMessageSizeBytes} bytes)`, 413, target);
+    }
+    const messagesLastMinute = fleetAuditUsageCount(regAny, { actorId, action: 'send_message', status: 'accepted', sinceMs: 60 * 1000 });
+    if (messagesLastMinute >= limits.maxMessagesPerMinute) {
+      await reject(`message rate limit reached (${limits.maxMessagesPerMinute}/minute)`, 429, target);
+    }
+    const chatName = normalizeChatName((request?.payload as any)?.chat ?? 'default');
+    const enqueued = await createOrEnqueuePromptUnified({
+      id: String(request?.id ?? '').trim() || undefined,
+      droneId: targetResolved.id,
+      chatName,
+      prompt: message,
+    });
+    if (enqueued.kind !== 'enqueued') await reject(enqueued.error, enqueued.status, target);
+    const enqueuedResult = enqueued as Extract<typeof enqueued, { kind: 'enqueued' }>;
+    await appendFleetAuditEvent({
+      actor: actorId,
+      actorName,
+      action: 'send_message',
+      status: 'accepted',
+      target: target.id,
+      targetName: target.name,
+      meta: { requestId: String(request?.id ?? ''), chat: chatName, promptId: enqueuedResult.id, pendingState: enqueuedResult.pendingState },
+    });
+    return {
+      target,
+      chat: chatName,
+      promptId: enqueuedResult.id,
+      pendingState: enqueuedResult.pendingState,
+    };
+  }
+
+  if (!actorConfig.capabilities.includes(FLEET_CAPABILITY_READ)) await reject('missing capability: drone:message:read', 403);
+  const sourceRef = String((request?.payload as any)?.from ?? '').trim();
+  const sourceFound = findDroneIdByRef(regAny, sourceRef);
+  if (!sourceFound) await reject(`unknown drone: ${sourceRef}`, 404);
+  const sourceResolved = sourceFound!;
+  const sourceEntry = regAny?.drones?.[sourceResolved.id] ?? regAny?.pending?.[sourceResolved.id] ?? null;
+  const source = { id: sourceResolved.id, name: String(sourceEntry?.name ?? sourceResolved.id) };
+  if (!fleetTargetAllowedForRead(regAny, actorEntry, actorId, sourceResolved.id)) {
+    await reject(`read not allowed for target: ${source.name}`, 403, source);
+  }
+  const chatName = normalizeChatName((request?.payload as any)?.chat ?? 'default');
+  const order: 'asc' | 'desc' = String((request?.payload as any)?.order ?? 'desc').trim().toLowerCase() === 'asc' ? 'asc' : 'desc';
+  const limit = clampInt(Number((request?.payload as any)?.limit ?? limits.defaultReadPageSize), 1, limits.maxReadPageSize);
+  const startIndex = decodeFleetCursor((request?.payload as any)?.cursor, order);
+  const messages = await listFleetMessagesForTarget(sourceResolved.id, chatName);
+  const sorted = [...messages].sort((a, b) =>
+    order === 'asc' ? Date.parse(a.createdAt) - Date.parse(b.createdAt) : Date.parse(b.createdAt) - Date.parse(a.createdAt),
+  );
+  const items: typeof sorted = [];
+  let returnedChars = 0;
+  let truncated = false;
+  let nextIndex = startIndex;
+  for (let index = startIndex; index < sorted.length && items.length < limit; index += 1) {
+    const item = sorted[index];
+    const content = String(item?.content ?? '');
+    const nextChars = returnedChars + content.length;
+    if (nextChars > limits.maxReadChars) {
+      if (items.length === 0 && limits.maxReadChars > 0) {
+        items.push({ ...item, content: content.slice(0, limits.maxReadChars) });
+        returnedChars = limits.maxReadChars;
+        nextIndex = index + 1;
+      }
+      truncated = true;
+      break;
+    }
+    items.push(item);
+    returnedChars = nextChars;
+    nextIndex = index + 1;
+  }
+  const hasMore = nextIndex < sorted.length;
+  await appendFleetAuditEvent({
+    actor: actorId,
+    actorName,
+    action: 'read_messages',
+    status: 'accepted',
+    target: source.id,
+    targetName: source.name,
+    meta: {
+      requestId: String(request?.id ?? ''),
+      chat: chatName,
+      returned: items.length,
+      returnedChars,
+      truncated,
+    },
+  });
+  return {
+    source,
+    chat: chatName,
+    order,
+    items,
+    nextCursor: hasMore ? encodeFleetCursor(nextIndex, order) : null,
+    hasMore,
+    truncated,
+    budget: {
+      maxChars: limits.maxReadChars,
+      returnedChars,
+    },
+  };
+}
+
+async function runFleetReconcilerCycle(): Promise<void> {
+  if (FLEET_RECONCILE_BUSY) return;
+  FLEET_RECONCILE_BUSY = true;
+  try {
+    const regAny: any = await loadRegistry();
+    for (const [actorId, actorEntry] of Object.entries(regAny?.drones ?? {})) {
+      let daemon: Awaited<ReturnType<typeof resolveDroneDaemonClientForEntry>> | null = null;
+      try {
+        daemon = await resolveDroneDaemonClientForEntry(actorEntry);
+      } catch {
+        daemon = null;
+      }
+      await syncFleetPolicySnapshotToDrone(String(actorId), actorEntry);
+      if (!daemon) continue;
+      let requests: any[] = [];
+      try {
+        const [queued, running] = await Promise.all([
+          droneFleetRequestList(daemon.client, { state: 'queued' }).catch(() => ({ requests: [] })),
+          droneFleetRequestList(daemon.client, { state: 'running' }).catch(() => ({ requests: [] })),
+        ]);
+        requests = [...(Array.isArray(queued?.requests) ? queued.requests : []), ...(Array.isArray(running?.requests) ? running.requests : [])];
+      } catch {
+        requests = [];
+      }
+      for (const request of requests) {
+        const requestId = String(request?.id ?? '').trim();
+        if (!requestId) continue;
+        try {
+          const claimed = await droneFleetRequestClaim(daemon.client, requestId).catch(() => null);
+          const claimedRequest = claimed?.request ?? null;
+          if (!claimedRequest || String(claimedRequest?.state ?? '') !== 'running') continue;
+          const result = await processFleetRequest(String(actorId), actorEntry, claimedRequest);
+          await droneFleetRequestResolve(daemon.client, requestId, { state: 'done', result });
+        } catch (error: any) {
+          const message = error?.message ?? String(error);
+          await droneFleetRequestResolve(daemon.client, requestId, { state: 'failed', error: message }).catch(() => {});
+          hubLog('warn', 'fleet request failed', {
+            actorId: String(actorId),
+            requestId,
+            error: message,
+          });
+        }
+      }
+    }
+  } finally {
+    FLEET_RECONCILE_BUSY = false;
+  }
 }
 
 async function handleFsUploadRoute(opts: {
@@ -4928,6 +5276,36 @@ async function provisionDroneFromPending(name: string) {
     }
   }
 
+  try {
+    await updateRegistry((regLatest: any) => {
+      const pendingLatest = regLatest?.pending?.[name] ?? null;
+      const fleetMeta = pendingLatest?.fleet && typeof pendingLatest.fleet === 'object' ? pendingLatest.fleet : null;
+      if (!fleetMeta) return;
+      const found = findDroneEntryByIdentity(regLatest, pendingDroneId);
+      if (!found) return;
+      const d = found.entry;
+      const current = fleetActorConfig(d);
+      setFleetActorConfig(d, {
+        createdBy:
+          typeof fleetMeta.createdBy === 'string' && fleetMeta.createdBy.trim()
+            ? String(fleetMeta.createdBy).trim()
+            : current.createdBy,
+        createdAt:
+          typeof fleetMeta.createdAt === 'string' && fleetMeta.createdAt.trim()
+            ? String(fleetMeta.createdAt).trim()
+            : current.createdAt,
+        enabled: fleetMeta.enabled === true,
+        capabilities: sanitizeFleetCapabilities(fleetMeta.capabilities),
+        readScopes: sanitizeFleetReadScopes(fleetMeta.readScopes),
+        assigned: fleetMeta.assigned,
+        quotas: sanitizeFleetQuotas(fleetMeta.quotas),
+      });
+      regLatest.drones[found.key] = d;
+    });
+  } catch {
+    // ignore (best-effort lineage persistence)
+  }
+
   // If this drone is repo-attached, seed the container with the host repo before we enqueue any seed prompt.
   // This uses dvm's offline repo workflow (no host bind mount).
   if (repoPath && runtime === 'container') {
@@ -6660,6 +7038,17 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
     }
   }
   triggerArchiveCleanup('startup');
+  if (!FLEET_RECONCILE_INTERVAL) {
+    FLEET_RECONCILE_INTERVAL = setInterval(() => {
+      void runFleetReconcilerCycle();
+    }, FLEET_RECONCILE_INTERVAL_MS);
+    try {
+      (FLEET_RECONCILE_INTERVAL as any).unref?.();
+    } catch {
+      // ignore
+    }
+  }
+  void runFleetReconcilerCycle();
 
   type TerminalWebSocketContext = {
     droneName: string;
@@ -7461,6 +7850,180 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         return;
       }
 
+      // GET /api/fleet/actors/:drone
+      if (method === 'GET' && parts.length === 4 && parts[0] === 'api' && parts[1] === 'fleet' && parts[2] === 'actors') {
+        const droneRef = decodeURIComponent(parts[3]);
+        const resolved = await resolveDroneOrRespond(res, droneRef);
+        if (!resolved) return;
+        try {
+          const regAny: any = await loadRegistry();
+          json(res, 200, fleetActorPayload(regAny, resolved.id));
+        } catch (error: any) {
+          json(res, 500, { ok: false, error: error?.message ?? String(error) });
+        }
+        return;
+      }
+
+      // POST /api/fleet/actors/:drone/config
+      if (
+        method === 'POST' &&
+        parts.length === 5 &&
+        parts[0] === 'api' &&
+        parts[1] === 'fleet' &&
+        parts[2] === 'actors' &&
+        parts[4] === 'config'
+      ) {
+        const droneRef = decodeURIComponent(parts[3]);
+        const resolved = await resolveDroneOrRespond(res, droneRef);
+        if (!resolved) return;
+        let body: any = null;
+        try {
+          body = await readJsonBody(req);
+        } catch (error: any) {
+          json(res, 400, { ok: false, error: error?.message ?? String(error) });
+          return;
+        }
+        try {
+          await updateRegistry((regAny: any) => {
+            const actor = regAny?.drones?.[resolved.id];
+            if (!actor) throw fleetError(`unknown drone: ${resolved.id}`, 404);
+            const current = fleetActorConfig(actor);
+            setFleetActorConfig(actor, {
+              enabled: body?.enabled == null ? current.enabled : body.enabled === true,
+              capabilities: Array.isArray(body?.capabilities) ? sanitizeFleetCapabilities(body.capabilities) : current.capabilities,
+              readScopes: Array.isArray(body?.readScopes) ? sanitizeFleetReadScopes(body.readScopes) : current.readScopes,
+              assigned: current.assigned,
+              quotas: body?.quotas && typeof body.quotas === 'object' && !Array.isArray(body.quotas) ? sanitizeFleetQuotas(body.quotas) : current.quotas,
+              createdBy: current.createdBy,
+              createdAt: current.createdAt,
+            });
+            regAny.drones[resolved.id] = actor;
+          });
+          const regAny: any = await loadRegistry();
+          const actor = regAny?.drones?.[resolved.id] ?? null;
+          if (actor) await syncFleetPolicySnapshotToDrone(resolved.id, actor);
+          json(res, 200, fleetActorPayload(regAny, resolved.id));
+        } catch (error: any) {
+          json(res, Number((error as any)?.status ?? 500), { ok: false, error: error?.message ?? String(error) });
+        }
+        return;
+      }
+
+      // POST /api/fleet/actors/:drone/assigned
+      if (
+        method === 'POST' &&
+        parts.length === 5 &&
+        parts[0] === 'api' &&
+        parts[1] === 'fleet' &&
+        parts[2] === 'actors' &&
+        parts[4] === 'assigned'
+      ) {
+        const droneRef = decodeURIComponent(parts[3]);
+        const resolved = await resolveDroneOrRespond(res, droneRef);
+        if (!resolved) return;
+        let body: any = null;
+        try {
+          body = await readJsonBody(req);
+        } catch (error: any) {
+          json(res, 400, { ok: false, error: error?.message ?? String(error) });
+          return;
+        }
+        const targetRef = String(body?.target ?? '').trim();
+        if (!targetRef) {
+          json(res, 400, { ok: false, error: 'missing target' });
+          return;
+        }
+        try {
+          await updateRegistry((regAny: any) => {
+            const actor = regAny?.drones?.[resolved.id];
+            if (!actor) throw fleetError(`unknown drone: ${resolved.id}`, 404);
+            const targetFound = findDroneIdByRef(regAny, targetRef);
+            if (!targetFound) throw fleetError(`unknown drone: ${targetRef}`, 404);
+            if (targetFound.id === resolved.id) throw fleetError('cannot assign actor to itself', 400);
+            const current = fleetActorConfig(actor);
+            setFleetActorConfig(actor, {
+              enabled: current.enabled,
+              capabilities: current.capabilities,
+              readScopes: current.readScopes,
+              assigned: Array.from(new Set([...current.assigned, targetFound.id])),
+              quotas: current.quotas,
+              createdBy: current.createdBy,
+              createdAt: current.createdAt,
+            });
+            regAny.drones[resolved.id] = actor;
+          });
+          const regAny: any = await loadRegistry();
+          const actor = regAny?.drones?.[resolved.id] ?? null;
+          if (actor) await syncFleetPolicySnapshotToDrone(resolved.id, actor);
+          json(res, 200, fleetActorPayload(regAny, resolved.id));
+        } catch (error: any) {
+          json(res, Number((error as any)?.status ?? 500), { ok: false, error: error?.message ?? String(error) });
+        }
+        return;
+      }
+
+      // DELETE /api/fleet/actors/:drone/assigned/:target
+      if (
+        method === 'DELETE' &&
+        parts.length === 6 &&
+        parts[0] === 'api' &&
+        parts[1] === 'fleet' &&
+        parts[2] === 'actors' &&
+        parts[4] === 'assigned'
+      ) {
+        const droneRef = decodeURIComponent(parts[3]);
+        const targetRef = decodeURIComponent(parts[5]);
+        const resolved = await resolveDroneOrRespond(res, droneRef);
+        if (!resolved) return;
+        try {
+          await updateRegistry((regAny: any) => {
+            const actor = regAny?.drones?.[resolved.id];
+            if (!actor) throw fleetError(`unknown drone: ${resolved.id}`, 404);
+            const current = fleetActorConfig(actor);
+            const targetFound = findDroneIdByRef(regAny, targetRef);
+            const targetId = targetFound?.id ?? targetRef;
+            setFleetActorConfig(actor, {
+              enabled: current.enabled,
+              capabilities: current.capabilities,
+              readScopes: current.readScopes,
+              assigned: current.assigned.filter((id) => id !== targetId),
+              quotas: current.quotas,
+              createdBy: current.createdBy,
+              createdAt: current.createdAt,
+            });
+            regAny.drones[resolved.id] = actor;
+          });
+          const regAny: any = await loadRegistry();
+          const actor = regAny?.drones?.[resolved.id] ?? null;
+          if (actor) await syncFleetPolicySnapshotToDrone(resolved.id, actor);
+          json(res, 200, fleetActorPayload(regAny, resolved.id));
+        } catch (error: any) {
+          json(res, Number((error as any)?.status ?? 500), { ok: false, error: error?.message ?? String(error) });
+        }
+        return;
+      }
+
+      // GET /api/fleet/audit
+      if (method === 'GET' && parts.length === 3 && parts[0] === 'api' && parts[1] === 'fleet' && parts[2] === 'audit') {
+        const actorFilter = String(u.searchParams.get('actor') ?? '').trim();
+        const targetFilter = String(u.searchParams.get('target') ?? '').trim();
+        const actionFilter = String(u.searchParams.get('action') ?? '').trim();
+        const statusFilter = String(u.searchParams.get('status') ?? '').trim();
+        const limit = clampInt(Number(u.searchParams.get('limit') ?? 100), 1, 200);
+        const regAny: any = await loadRegistry();
+        const items = fleetAuditList(regAny)
+          .filter((item: any) => {
+            if (actorFilter && String(item?.actor ?? '') !== actorFilter && String(item?.actorName ?? '') !== actorFilter) return false;
+            if (targetFilter && String(item?.target ?? '') !== targetFilter && String(item?.targetName ?? '') !== targetFilter) return false;
+            if (actionFilter && String(item?.action ?? '') !== actionFilter) return false;
+            if (statusFilter && String(item?.status ?? '') !== statusFilter) return false;
+            return true;
+          })
+          .slice(0, limit);
+        json(res, 200, { ok: true, items });
+        return;
+      }
+
       // POST /api/drones
       // Creates a new drone (container or host runtime, like `drone create`).
       if (method === 'POST' && parts.length === 2 && parts[0] === 'api' && parts[1] === 'drones') {
@@ -8032,6 +8595,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             name: String(p?.name ?? ''),
             group: typeof p?.group === 'string' && p.group.trim() ? p.group.trim() : null,
             createdAt: String(p?.createdAt ?? nowIso()),
+            fleetParentId: fleetActorConfig(p).createdBy,
             runtime,
             repoAttached,
             repoPath: repoAttached ? String(p?.repoPath ?? '') : '',
@@ -8112,6 +8676,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               name: d.name,
               group: d.group ?? null,
               createdAt: d.createdAt,
+              fleetParentId: fleetActorConfig(d).createdBy,
               runtime,
               repoAttached,
               repoPath: repoAttached ? repoPath : '',
@@ -14000,6 +14565,14 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           // ignore
         }
         ARCHIVE_CLEANUP_INTERVAL = null;
+      }
+      if (FLEET_RECONCILE_INTERVAL) {
+        try {
+          clearInterval(FLEET_RECONCILE_INTERVAL);
+        } catch {
+          // ignore
+        }
+        FLEET_RECONCILE_INTERVAL = null;
       }
     },
   };

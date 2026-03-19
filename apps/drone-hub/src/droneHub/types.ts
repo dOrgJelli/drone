@@ -3,6 +3,7 @@ export type DroneSummary = {
   name: string;
   group: string | null;
   createdAt: string;
+  fleetParentId?: string | null;
   runtime?: 'container' | 'host';
   repoAttached?: boolean;
   repoPath: string;

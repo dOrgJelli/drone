@@ -1,6 +1,7 @@
 import React from 'react';
 import { DroneCanvasDock } from '../canvas';
 import { DroneChangesDock } from '../changes';
+import { DroneFleetDock } from '../fleet';
 import { DroneFilesDock } from '../files';
 import { DroneLinksDock, DronePreviewDock } from '../overview';
 import { DronePullRequestsDock } from '../pullRequests';
@@ -30,6 +31,7 @@ type RightPanelTabContentProps = {
   orderedCanvasChatNodeIds: string[];
   droneNameById: Record<string, string>;
   droneRepoById: Record<string, string>;
+  fleetParentIdByDroneId: Record<string, string>;
   draftRepoLabel: string;
   chatNodeStateById: Record<
     string,
@@ -123,6 +125,7 @@ export function RightPanelTabContent({
   orderedCanvasChatNodeIds,
   droneNameById,
   droneRepoById,
+  fleetParentIdByDroneId,
   draftRepoLabel,
   chatNodeStateById,
   onActivateChatFromCanvas,
@@ -190,6 +193,7 @@ export function RightPanelTabContent({
           sidebarOrderedChatNodeIds={orderedCanvasChatNodeIds}
           sidebarSelectedChatNodeId={currentCanvasChatNodeId}
           droneRepoById={droneRepoById}
+          fleetParentIdByDroneId={fleetParentIdByDroneId}
           draftRepoLabel={draftRepoLabel}
           chatNodeStateById={chatNodeStateById}
           onActivateChat={onActivateChatFromCanvas}
@@ -222,6 +226,17 @@ export function RightPanelTabContent({
           droneName={drone.name}
           chatName={chatName}
           defaultCwd={defaultFsPathForCurrentDrone}
+          disabled={disabled}
+          hubPhase={drone.hubPhase}
+          hubMessage={drone.hubMessage}
+        />
+      );
+
+    case 'fleet':
+      return (
+        <DroneFleetDock
+          droneId={drone.id}
+          droneName={drone.name}
           disabled={disabled}
           hubPhase={drone.hubPhase}
           hubMessage={drone.hubMessage}

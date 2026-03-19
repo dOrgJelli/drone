@@ -15,6 +15,7 @@ async function main() {
   const root = path.resolve(__dirname, '..');
   await chmodExecutableBestEffort(path.join(root, 'dist', 'cli.js'));
   await chmodExecutableBestEffort(path.join(root, 'dist', 'daemon.js'));
+  await chmodExecutableBestEffort(path.join(root, 'dist', 'fleet.js'));
 }
 
 main().catch((error) => {
