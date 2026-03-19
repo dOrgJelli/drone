@@ -1,13 +1,11 @@
 import React from 'react';
 import { isUngroupedGroupName } from '../../domain';
-import { DroneCard } from '../overview';
-import { TypingDots } from '../overview/icons';
 import type { DroneSummary, RepoSummary } from '../types';
-import { DRONE_CHAT_DND_MIME, DRONE_DND_MIME, createCanvasChatNodeId } from './app-config';
-import { normalizedDroneChats } from './chat-node-helpers';
-import { compareDronesByNewestFirst, isDroneStartingOrSeeding } from './helpers';
+import { DRONE_DND_MIME } from './app-config';
+import { compareDronesByNewestFirst } from './helpers';
 import { IconAutoMinimize, IconBoard, IconChevron, IconColumns, IconFolder, IconList, IconPencil, IconPlus, IconPlusDouble, IconSettings, IconSidebarCollapse, IconSidebarExpand, IconSpinner, IconTrash, SkeletonLine } from './icons';
-import { buildSidebarDroneTree, type SidebarDroneTree } from './sidebar-drone-tree';
+import { SidebarDroneTreeList, sidebarInlineSectionKey, type SidebarInlineSectionKind } from './SidebarDroneTreeList';
+import { buildSidebarDroneTree } from './sidebar-drone-tree';
 import { useDroneSidebarUiState } from './use-drone-hub-ui-store';
 import { SIDEBAR_VISIBLE_MULTI_CHAT_GROUP, type SidebarGroup } from './use-sidebar-view-model';
 
@@ -16,7 +14,6 @@ const SIDEBAR_COLLAPSED_RAIL_WIDTH_PX = 40;
 const AUTO_MINIMIZE_COLLAPSE_DELAY_MS = 90;
 const AUTO_MINIMIZE_EXPAND_DELAY_MS = 120;
 const AUTO_MINIMIZE_REOPEN_GUARD_MS = 220;
-type SidebarInlineSectionKind = 'chats' | 'children';
 
 type SidebarIconButtonProps = {
   title: string;
@@ -51,47 +48,6 @@ function SidebarIconButton({
       tabIndex={tabIndex}
     >
       {children}
-    </button>
-  );
-}
-
-function sidebarInlineSectionKey(droneIdRaw: string, kind: SidebarInlineSectionKind): string {
-  const droneId = String(droneIdRaw ?? '').trim();
-  return `${kind}:${droneId}`;
-}
-
-function SidebarInlineSectionToggle({
-  expanded,
-  label,
-  countLabel,
-  onClick,
-  title,
-}: {
-  expanded: boolean;
-  label: string;
-  countLabel: string;
-  onClick: () => void;
-  title: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="w-full h-6 rounded border px-2 text-left text-[10px] transition-all flex items-center gap-1.5 border-transparent text-[var(--muted-dim)] hover:border-[var(--border-subtle)] hover:bg-[var(--hover)] hover:text-[var(--muted)]"
-      title={title}
-      aria-label={title}
-      aria-expanded={expanded}
-    >
-      <IconChevron down={expanded} className="opacity-70" />
-      <span
-        className="min-w-0 flex-1 truncate font-semibold tracking-wide uppercase"
-        style={{ fontFamily: 'var(--display)' }}
-      >
-        {label}
-      </span>
-      <span className="flex-shrink-0 font-mono text-[9px] text-[var(--muted-dim)]">
-        {countLabel}
-      </span>
     </button>
   );
 }
@@ -622,231 +578,32 @@ export function DroneSidebar({
       return changed ? next : prev;
     });
   }, [activeChatName, selectedDrone, sidebarDroneById]);
-
-  const renderDroneNode = React.useCallback(
-    (droneId: string, tree: SidebarDroneTree, opts?: { showGroup?: boolean }) => {
-      const d = sidebarDroneById[droneId];
-      if (!d) return null;
-      if (d.id === DRAFT_SIDEBAR_PLACEHOLDER_ID) {
-        return (
-          <div key={d.id} className="w-full text-left px-3 h-8 flex items-center rounded-md border bg-[var(--selected)] border-[var(--accent-muted)] relative">
-            <div className="absolute left-0 top-1 bottom-1 w-[2px] rounded-full bg-[var(--accent)]" />
-            <div className="flex-1 min-w-0 flex items-center gap-1.5">
-              <span className="flex-1 min-w-0 truncate text-[12.5px] font-semibold text-[var(--fg)]" title={`${d.name} · pending draft`}>
-                {d.name}
-              </span>
-              <span
-                className="flex-shrink-0 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-1 py-0.5 text-[9px] font-semibold tracking-wide uppercase text-[var(--muted-dim)]"
-                style={{ fontFamily: 'var(--display)' }}
-                title="Draft"
-              >
-                draft
-              </span>
-            </div>
-          </div>
-        );
-      }
-      const isOptimistic = sidebarOptimisticDroneIdSet.has(d.id);
-      const chats = normalizedDroneChats(d);
-      const hasOnlyDefaultChat = chats.length === 1 && chats[0] === 'default';
-      const hasChatSection = chats.length > 0 && !hasOnlyDefaultChat;
-      const childDroneIds = tree.childDroneIdsByParentId[d.id] ?? [];
-      const hasChildrenSection = childDroneIds.length > 0;
-      const chatsExpanded = !collapsedDroneSections[sidebarInlineSectionKey(d.id, 'chats')];
-      const childrenExpanded = !collapsedDroneSections[sidebarInlineSectionKey(d.id, 'children')];
-      const defaultChatNodeId = createCanvasChatNodeId(d.id, 'default');
-      const showDroneBusy =
-        !isDroneStartingOrSeeding(d.hubPhase) &&
-        hasOnlyDefaultChat &&
-        Boolean(defaultChatNodeId && busyChatNodeIdSet.has(defaultChatNodeId));
-      const showDroneUnread =
-        hasOnlyDefaultChat &&
-        Boolean(defaultChatNodeId && unreadAgentMessageByChatNodeId[defaultChatNodeId] === true);
-      const showGroup = opts?.showGroup;
-      return (
-        <div key={d.id} className="flex flex-col gap-0.5">
-          <DroneCard
-            drone={d}
-            displayName={uiDroneName(d.name)}
-            statusHint={isOptimistic ? 'queued' : undefined}
-            selected={selectedDroneSet.has(d.id)}
-            busy={
-              showDroneBusy
-            }
-            unreadAgentMessage={showDroneUnread}
-            showGroup={showGroup}
-            onClick={(rowOpts) => onSelectDroneCard(d.id, rowOpts)}
-            draggable={!movingDroneGroups && !isOptimistic}
-            onDragStart={(event) => {
-              onDroneDragStart(d.id, event);
-              if (!hasOnlyDefaultChat) return;
-              const nodeId = createCanvasChatNodeId(d.id, 'default');
-              if (!nodeId) return;
-              const payload = [{ nodeId, droneId: d.id, chatName: 'default' }];
-              try {
-                event.dataTransfer.setData(DRONE_CHAT_DND_MIME, JSON.stringify(payload));
-              } catch {
-                // Ignore drag payload assignment errors.
-              }
-            }}
-            onDragEnd={onDroneDragEnd}
-            onClone={() => onOpenCloneModal(d)}
-            onRename={() => onRenameDrone(d.id)}
-            onSetBaseImage={() => onSetDroneBaseImage(d.id)}
-            onDelete={() => onDeleteDrone(d.id)}
-            onErrorClick={onOpenDroneErrorModal}
-            cloneDisabled={
-              isOptimistic ||
-              Boolean(deletingDrones[d.id]) ||
-              Boolean(renamingDrones[d.id]) ||
-              Boolean(settingBaseImages[d.id]) ||
-              String(d.runtime ?? 'container').trim().toLowerCase() === 'host'
-            }
-            renameDisabled={
-              isOptimistic ||
-              Boolean(deletingDrones[d.id]) ||
-              Boolean(renamingDrones[d.id]) ||
-              Boolean(settingBaseImages[d.id]) ||
-              isDroneStartingOrSeeding(d.hubPhase)
-            }
-            renameBusy={Boolean(renamingDrones[d.id])}
-            setBaseImageDisabled={
-              isOptimistic ||
-              Boolean(deletingDrones[d.id]) ||
-              Boolean(renamingDrones[d.id]) ||
-              Boolean(settingBaseImages[d.id]) ||
-              isDroneStartingOrSeeding(d.hubPhase)
-            }
-            setBaseImageBusy={Boolean(settingBaseImages[d.id])}
-            deleteDisabled={
-              isOptimistic ||
-              Boolean(deletingDrones[d.id]) ||
-              Boolean(renamingDrones[d.id]) ||
-              Boolean(settingBaseImages[d.id])
-            }
-            deleteBusy={Boolean(deletingDrones[d.id])}
-          />
-          {hasChatSection ? (
-            <>
-              <div className="ml-5 mr-1">
-                <SidebarInlineSectionToggle
-                  expanded={chatsExpanded}
-                  label="Chats"
-                  countLabel={`${chats.length}`}
-                  onClick={() => toggleDroneSection(d.id, 'chats')}
-                  title={chatsExpanded ? `Collapse chats for ${uiDroneName(d.name)}` : `Expand chats for ${uiDroneName(d.name)}`}
-                />
-              </div>
-              {chatsExpanded ? (
-                <div className="ml-5 mr-1 flex flex-col gap-0.5">
-                  {chats.map((chatName) => {
-                    const chatNodeId = createCanvasChatNodeId(d.id, chatName);
-                    if (!chatNodeId) return null;
-                    const selected = selectedDrone === d.id && activeChatName === chatName;
-                    const unread = unreadAgentMessageByChatNodeId[chatNodeId] === true;
-                    const busy = busyChatNodeIdSet.has(chatNodeId);
-                    return (
-                      <button
-                        key={`${d.id}:${chatName}`}
-                        type="button"
-                        draggable={!movingDroneGroups && !isOptimistic}
-                        onDragStart={(event) => {
-                          event.stopPropagation();
-                          event.dataTransfer.effectAllowed = 'copyMove';
-                          const payload = [{ droneId: d.id, chatName }];
-                          try {
-                            event.dataTransfer.setData(DRONE_CHAT_DND_MIME, JSON.stringify(payload));
-                          } catch {
-                            // Ignore drag payload assignment errors.
-                          }
-                          try {
-                            event.dataTransfer.setData('text/plain', `${uiDroneName(d.name)} / ${chatName}`);
-                          } catch {
-                            // Ignore drag payload assignment errors.
-                          }
-                        }}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onSelectDroneChat(d.id, chatName);
-                        }}
-                        className={`w-full h-7 rounded border px-2 text-left text-[11px] transition-all flex items-center gap-1.5 ${
-                          selected
-                            ? 'border-[var(--accent-muted)] bg-[var(--selected)] text-[var(--fg)]'
-                            : 'border-transparent text-[var(--muted)] hover:border-[var(--border-subtle)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]'
-                        }`}
-                        title={`${uiDroneName(d.name)} / ${chatName}`}
-                      >
-                        {!busy && unread ? (
-                          <span className="h-1.5 w-1.5 rounded-full bg-[var(--yellow)] flex-shrink-0" />
-                        ) : (
-                          <span className="h-1.5 w-1.5 flex-shrink-0" />
-                        )}
-                        <span className="min-w-0 flex-1 truncate font-mono">
-                          {chatName}
-                        </span>
-                        {busy ? (
-                          <span className="inline-flex items-center flex-shrink-0" title="Agent responding">
-                            <TypingDots color="var(--yellow)" />
-                          </span>
-                        ) : null}
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : null}
-            </>
-          ) : null}
-          {hasChildrenSection ? (
-            <>
-              <div className="ml-5 mr-1">
-                <SidebarInlineSectionToggle
-                  expanded={childrenExpanded}
-                  label="Children"
-                  countLabel={`${childDroneIds.length}`}
-                  onClick={() => toggleDroneSection(d.id, 'children')}
-                  title={
-                    childrenExpanded
-                      ? `Collapse child drones for ${uiDroneName(d.name)}`
-                      : `Expand child drones for ${uiDroneName(d.name)}`
-                  }
-                />
-              </div>
-              {childrenExpanded ? (
-                <div className="ml-5 mr-1 flex flex-col gap-0.5">
-                  {childDroneIds.map((childDroneId) => renderDroneNode(childDroneId, tree, { showGroup: false }))}
-                </div>
-              ) : null}
-            </>
-          ) : null}
-        </div>
-      );
-    },
-    [
-      activeChatName,
-      collapsedDroneSections,
-      deletingDrones,
-      movingDroneGroups,
-      onDeleteDrone,
-      onDroneDragEnd,
-      onDroneDragStart,
-      onOpenCloneModal,
-      onOpenDroneErrorModal,
-      onRenameDrone,
-      onSelectDroneCard,
-      onSelectDroneChat,
-      onSetDroneBaseImage,
-      renamingDrones,
-      selectedDrone,
-      selectedDroneSet,
-      settingBaseImages,
-      busyChatNodeIdSet,
-      sidebarDroneById,
-      sidebarOptimisticDroneIdSet,
-      toggleDroneSection,
-      uiDroneName,
-      unreadAgentMessageByChatNodeId,
-    ],
-  );
+  const sharedDroneTreeListProps = {
+    droneById: sidebarDroneById,
+    draftSidebarPlaceholderId: DRAFT_SIDEBAR_PLACEHOLDER_ID,
+    selectedDroneSet,
+    selectedDrone,
+    activeChatName,
+    busyChatNodeIdSet,
+    unreadAgentMessageByChatNodeId,
+    deletingDrones,
+    renamingDrones,
+    settingBaseImages,
+    movingDroneGroups,
+    sidebarOptimisticDroneIdSet,
+    collapsedDroneSections,
+    uiDroneName,
+    onToggleSection: toggleDroneSection,
+    onSelectDroneCard,
+    onSelectDroneChat,
+    onOpenCloneModal,
+    onRenameDrone,
+    onSetDroneBaseImage,
+    onDeleteDrone,
+    onOpenDroneErrorModal,
+    onDroneDragStart,
+    onDroneDragEnd,
+  } satisfies Omit<React.ComponentProps<typeof SidebarDroneTreeList>, 'tree'>;
 
   return (
     <>
@@ -1045,7 +802,7 @@ export function DroneSidebar({
           )}
           <div className="flex flex-col gap-0.5 select-none">
             {viewMode === 'flat' ? (
-              flatSidebarTree.rootDroneIds.map((droneId) => renderDroneNode(droneId, flatSidebarTree))
+              <SidebarDroneTreeList {...sharedDroneTreeListProps} tree={flatSidebarTree} />
             ) : (
               <>
                 <div
@@ -1215,7 +972,7 @@ export function DroneSidebar({
                       </div>
                       {!collapsed && (
                         <div className="px-1.5 py-1.5 flex flex-col gap-0.5">
-                          {groupTree.rootDroneIds.map((droneId) => renderDroneNode(droneId, groupTree, { showGroup: false }))}
+                          <SidebarDroneTreeList {...sharedDroneTreeListProps} tree={groupTree} showGroup={false} />
                         </div>
                       )}
                     </div>

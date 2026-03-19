@@ -28,5 +28,24 @@ export function buildSidebarDroneTree(drones: DroneSummary[]): SidebarDroneTree 
     rootDroneIds.push(droneId);
   }
 
+  const reachableDroneIds = new Set<string>();
+  const visitReachable = (droneId: string) => {
+    if (!droneId || reachableDroneIds.has(droneId)) return;
+    reachableDroneIds.add(droneId);
+    for (const childDroneId of childDroneIdsByParentId[droneId] ?? []) {
+      visitReachable(childDroneId);
+    }
+  };
+
+  for (const rootDroneId of rootDroneIds) {
+    visitReachable(rootDroneId);
+  }
+  for (const drone of drones) {
+    const droneId = String(drone?.id ?? '').trim();
+    if (!droneId || reachableDroneIds.has(droneId)) continue;
+    rootDroneIds.push(droneId);
+    visitReachable(droneId);
+  }
+
   return { rootDroneIds, childDroneIdsByParentId };
 }
