@@ -28,6 +28,7 @@ import { RIGHT_PANEL_MIN_WIDTH_PX, type RightPanelTab } from './app-config';
 import type { StartupSeedState, TldrState } from './app-types';
 import type { RepoOpErrorMeta } from './helpers';
 import type { RightPanelWidthMode } from './right-panel-width';
+import type { DroneDeleteMode } from './settings-types';
 import { requestChangesPullRequest } from '../changes/navigation';
 import { chatInputDraftKeyForDroneChat, droneHomePath, isDroneStartingOrSeeding, resolveChatNameForDrone } from './helpers';
 import { resolvePreviewHostPane } from './locked-preview-host-pane';
@@ -63,6 +64,7 @@ type LaunchHint =
 
 type SelectedDroneWorkspaceProps = {
   currentDrone: DroneSummary;
+  deleteMode: DroneDeleteMode;
   currentDroneLabel: string;
   showRespondingAsStatusInHeader: boolean;
   chatUiMode: 'transcript' | 'cli';
@@ -189,6 +191,7 @@ type SelectedDroneWorkspaceProps = {
 
 export function SelectedDroneWorkspace({
   currentDrone,
+  deleteMode,
   currentDroneLabel,
   showRespondingAsStatusInHeader,
   chatUiMode,
@@ -764,7 +767,12 @@ export function SelectedDroneWorkspace({
       setChatInfoError('Default chat cannot be deleted.');
       return;
     }
-    if (!window.confirm(`Delete chat "${activeChatName}"?`)) return;
+    const actionLabel = deleteMode === 'archive' ? 'Archive' : 'Delete';
+    const confirmMessage =
+      deleteMode === 'archive'
+        ? `Archive chat "${activeChatName}"?\n\nYou can restore it from Settings > Archive before it auto-deletes.`
+        : `Delete chat "${activeChatName}"?`;
+    if (!window.confirm(confirmMessage)) return;
     setChatMutationBusy('delete');
     try {
       await requestJson<{ ok: true }>(
@@ -775,11 +783,11 @@ export function SelectedDroneWorkspace({
       setPendingChatSelection('default');
       setChatInfoError(null);
     } catch (e: any) {
-      reportChatMutationError('Delete chat', e);
+      reportChatMutationError(`${actionLabel} chat`, e);
     } finally {
       setChatMutationBusy(null);
     }
-  }, [activeChatName, currentDrone.id, reportChatMutationError, setChatInfoError, setSelectedChat]);
+  }, [activeChatName, currentDrone.id, deleteMode, reportChatMutationError, setChatInfoError, setSelectedChat]);
 
   return (
     <>
@@ -1098,9 +1106,15 @@ export function SelectedDroneWorkspace({
                   : 'bg-[rgba(255,255,255,.02)] border-[rgba(255,90,90,.25)] text-[var(--muted-dim)] hover:text-[var(--red)] hover:border-[rgba(255,90,90,.45)]'
               }`}
               style={{ fontFamily: 'var(--display)' }}
-              title={activeChatName === 'default' ? 'Default chat cannot be deleted' : 'Delete selected chat'}
+              title={
+                activeChatName === 'default'
+                  ? 'Default chat cannot be deleted'
+                  : deleteMode === 'archive'
+                    ? 'Archive selected chat'
+                    : 'Delete selected chat'
+              }
             >
-              {chatMutationBusy === 'delete' ? 'Deleting...' : 'Delete'}
+              {chatMutationBusy === 'delete' ? (deleteMode === 'archive' ? 'Archiving...' : 'Deleting...') : deleteMode === 'archive' ? 'Archive' : 'Delete'}
             </button>
           </div>
           {/* Spacer */}

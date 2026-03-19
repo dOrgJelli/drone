@@ -441,6 +441,7 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
     openCreateModal,
     openKanbanBoard,
     currentDrone,
+    deleteMode,
     currentDroneLabel,
     showRespondingAsStatusInHeader,
     chatUiMode,
@@ -651,6 +652,7 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
     selectedDroneWorkspaceProps: currentDrone
       ? {
           currentDrone,
+          deleteMode,
           currentDroneLabel,
           showRespondingAsStatusInHeader,
           chatUiMode,
