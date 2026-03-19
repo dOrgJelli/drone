@@ -1782,6 +1782,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
 
       const drone = drones.find((item) => item.id === droneId) ?? null;
       const chats = Array.isArray(drone?.chats) && drone!.chats.length > 0 ? drone!.chats : ['default'];
+      const deleteMode = deleteActionSettingsState.deleteSettings?.deleteAction.mode ?? 'permanent';
       if (!chats.includes(chatName)) return { ok: false, error: `Chat "${chatName}" is unavailable.` };
 
       if (chats.length <= 1) {
@@ -1796,7 +1797,11 @@ export function useDroneHubAppModel(): DroneHubAppModel {
 
       if (!autoDelete) {
         const droneLabel = drone ? uiDroneName(drone.name) : droneId;
-        const confirmed = window.confirm(`Delete chat "${chatName}" from "${droneLabel}"?`);
+        const confirmed = window.confirm(
+          deleteMode === 'archive'
+            ? `Archive chat "${chatName}" from "${droneLabel}"?\n\nYou can restore it from Settings > Archive before it auto-deletes.`
+            : `Delete chat "${chatName}" from "${droneLabel}"?`,
+        );
         if (!confirmed) return { ok: false, error: '' };
       }
 
@@ -1817,6 +1822,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     },
     [
       autoDelete,
+      deleteActionSettingsState.deleteSettings,
       deleteDrone,
       drones,
       requestJson,
@@ -2301,6 +2307,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     openCreateModal,
     openKanbanBoard,
     currentDrone,
+    deleteMode: deleteActionSettingsState.deleteSettings?.deleteAction.mode ?? 'permanent',
     currentDroneLabel,
     showRespondingAsStatusInHeader,
     chatUiMode,

@@ -185,6 +185,86 @@ describeSocketSuite('chat management api', () => {
     expect((listed.data?.chats ?? []).includes('qa')).toBe(false);
   });
 
+  test('archives chats when delete mode is archive and supports restore/delete-now', async () => {
+    const droneId = 'drone-chat-archive';
+    await seedDrone(droneId);
+
+    const settings = await apiFetch('/api/settings/delete-action', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        mode: 'archive',
+        archiveRetention: '1d',
+        archiveRuntimePolicy: 'keep-running',
+      }),
+    });
+    expect(settings.r.status).toBe(200);
+
+    const created = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'review' }),
+    });
+    expect(created.r.status).toBe(201);
+
+    const archived = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats/review`, {
+      method: 'DELETE',
+    });
+    expect(archived.r.status).toBe(200);
+    expect(archived.data?.archivedChat).toBe('review');
+
+    const listedAfterArchive = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats`);
+    expect(listedAfterArchive.r.status).toBe(200);
+    expect((listedAfterArchive.data?.chats ?? []).includes('review')).toBe(false);
+
+    const archivedChats = await apiFetch('/api/archive/chats');
+    expect(archivedChats.r.status).toBe(200);
+    expect(
+      (archivedChats.data?.archived ?? []).some(
+        (row: any) => row?.droneId === droneId && row?.chatName === 'review',
+      ),
+    ).toBe(true);
+
+    const restored = await apiFetch(`/api/archive/drones/${encodeURIComponent(droneId)}/chats/review/restore`, {
+      method: 'POST',
+    });
+    expect(restored.r.status).toBe(200);
+    expect(restored.data?.chat).toBe('review');
+
+    const listedAfterRestore = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats`);
+    expect(listedAfterRestore.r.status).toBe(200);
+    expect((listedAfterRestore.data?.chats ?? []).includes('review')).toBe(true);
+
+    const archivedAgain = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats/review`, {
+      method: 'DELETE',
+    });
+    expect(archivedAgain.r.status).toBe(200);
+
+    const deletedArchived = await apiFetch(`/api/archive/drones/${encodeURIComponent(droneId)}/chats/review`, {
+      method: 'DELETE',
+    });
+    expect(deletedArchived.r.status).toBe(200);
+    expect(deletedArchived.data?.deletedChat).toBe('review');
+
+    const archivedChatsAfterDelete = await apiFetch('/api/archive/chats');
+    expect(archivedChatsAfterDelete.r.status).toBe(200);
+    expect(
+      (archivedChatsAfterDelete.data?.archived ?? []).some(
+        (row: any) => row?.droneId === droneId && row?.chatName === 'review',
+      ),
+    ).toBe(false);
+
+    await apiFetch('/api/settings/delete-action', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        mode: 'permanent',
+        archiveRetention: '1d',
+        archiveRuntimePolicy: 'keep-running',
+      }),
+    });
+  });
+
   test('returns empty chat reads for pending drones instead of still-starting errors', async () => {
     const droneId = 'pending-chat-read';
     const now = new Date().toISOString();

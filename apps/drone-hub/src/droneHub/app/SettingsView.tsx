@@ -80,17 +80,25 @@ export function SettingsView({
     archivedDrones,
     archivedDronesLoading,
     archivedDronesError,
+    archivedChats,
+    archivedChatsLoading,
+    archivedChatsError,
     archiveNotice,
     restoringArchivedById,
     deletingArchivedById,
+    restoringArchivedChatByKey,
+    deletingArchivedChatByKey,
     setDeleteModeDraft,
     setArchiveRetentionDraft,
     setArchiveRuntimePolicyDraft,
     loadDeleteSettings,
     loadArchivedDrones,
+    loadArchivedChats,
     saveDeleteSettings,
     restoreArchivedDrone,
     permanentlyDeleteArchivedDrone,
+    restoreArchivedChat,
+    permanentlyDeleteArchivedChat,
   } = deleteAction;
   const {
     filesystemSettings,
@@ -123,6 +131,8 @@ export function SettingsView({
     llmSettingsLoading ||
     deleteSettingsLoading ||
     filesystemSettingsLoading ||
+    archivedDronesLoading ||
+    archivedChatsLoading ||
     savingOpenAiSettings ||
     clearingOpenAiSettings ||
     savingGeminiSettings ||
@@ -136,6 +146,7 @@ export function SettingsView({
     archiveRetentionDraft !== (deleteSettings?.deleteAction.archiveRetention ?? '1d') ||
     archiveRuntimePolicyDraft !== (deleteSettings?.deleteAction.archiveRuntimePolicy ?? 'keep-running');
   const archivedRows = archivedDrones?.archived ?? [];
+  const archivedChatRows = archivedChats?.archived ?? [];
   const currentUploadMaxBytes = filesystemSettings?.filesystem.uploadMaxBytes ?? null;
   const draftUploadMaxMiB = Number(uploadMaxMiBDraft);
   const draftUploadMaxBytes =
@@ -172,6 +183,7 @@ export function SettingsView({
                 void loadDeleteSettings();
                 void loadFilesystemSettings();
                 void loadArchivedDrones();
+                void loadArchivedChats();
                 void loadHubLogs();
               }}
               disabled={settingsBusy}
@@ -490,7 +502,7 @@ export function SettingsView({
                 Trash behavior
               </div>
               <div className="text-[11px] text-[var(--muted-dim)] leading-relaxed">
-                Choose whether the trash button permanently deletes drones now or archives them first.
+                Choose whether the trash button permanently deletes drones and chats now or archives them first.
               </div>
               <div className="text-[11px] text-[var(--muted-dim)]">
                 Active mode: <span className="text-[var(--fg-secondary)]">{activeDeleteMode === 'archive' ? 'Archive' : 'Permanent delete'}</span>
@@ -538,7 +550,7 @@ export function SettingsView({
               {deleteModeDraft === 'archive' && (
                 <div className="flex flex-col gap-2">
                   <div className="flex flex-wrap items-center gap-2">
-                    <div className="text-[11px] text-[var(--muted-dim)]">Runtime while archived:</div>
+                    <div className="text-[11px] text-[var(--muted-dim)]">Archived drones runtime:</div>
                     <select
                       value={archiveRuntimePolicyDraft}
                       onChange={(e) => setArchiveRuntimePolicyDraft(e.target.value as 'keep-running' | 'stop')}
@@ -553,7 +565,7 @@ export function SettingsView({
                     </select>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <div className="text-[11px] text-[var(--muted-dim)]">Auto-delete archived drones after:</div>
+                    <div className="text-[11px] text-[var(--muted-dim)]">Auto-delete archived drones and chats after:</div>
                     <select
                       value={archiveRetentionDraft}
                       onChange={(e) => setArchiveRetentionDraft(e.target.value as '1h' | '8h' | '1d' | '1w')}
@@ -594,27 +606,30 @@ export function SettingsView({
                     Archive
                   </div>
                   <div className="text-[11px] text-[var(--muted-dim)] mt-1">
-                    Review archived drones, restore them, or permanently delete them now.
+                    Review archived drones and chats, restore them, or permanently delete them now.
                   </div>
                 </div>
                 <button
                   type="button"
-                  onClick={() => void loadArchivedDrones()}
-                  disabled={archivedDronesLoading}
+                  onClick={() => {
+                    void loadArchivedDrones();
+                    void loadArchivedChats();
+                  }}
+                  disabled={archivedDronesLoading || archivedChatsLoading}
                   className={`h-8 px-3 rounded text-[11px] font-semibold tracking-wide uppercase border transition-all ${
-                    archivedDronesLoading
+                    archivedDronesLoading || archivedChatsLoading
                       ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
                       : 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]'
                   }`}
                   style={{ fontFamily: 'var(--display)' }}
                 >
-                  {archivedDronesLoading ? 'Refreshing…' : 'Refresh'}
+                  {archivedDronesLoading || archivedChatsLoading ? 'Refreshing…' : 'Refresh'}
                 </button>
               </div>
 
-              {archivedDronesError && (
+              {(archivedDronesError || archivedChatsError) && (
                 <div className="rounded border border-[rgba(255,90,90,.2)] bg-[var(--red-subtle)] px-3 py-2 text-[12px] text-[var(--red)]">
-                  {archivedDronesError}
+                  {archivedDronesError ?? archivedChatsError}
                 </div>
               )}
               {archiveNotice && (
@@ -624,7 +639,7 @@ export function SettingsView({
               )}
 
               {archivedDronesLoading && !archivedDrones ? (
-                <div className="text-[12px] text-[var(--muted-dim)]">Loading archive…</div>
+                <div className="text-[12px] text-[var(--muted-dim)]">Loading archived drones…</div>
               ) : archivedRows.length === 0 ? (
                 <div className="text-[11px] text-[var(--muted-dim)]">No archived drones.</div>
               ) : (
@@ -675,6 +690,80 @@ export function SettingsView({
                                 <button
                                   type="button"
                                   onClick={() => void permanentlyDeleteArchivedDrone(row.id)}
+                                  disabled={restoring || deleting}
+                                  className={`h-8 px-3 rounded text-[10px] font-semibold tracking-wide uppercase border transition-all ${
+                                    restoring || deleting
+                                      ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
+                                      : 'bg-[var(--red-subtle)] border-[rgba(255,90,90,.28)] text-[var(--red)] hover:bg-[rgba(255,90,90,.18)]'
+                                  }`}
+                                  style={{ fontFamily: 'var(--display)' }}
+                                >
+                                  {deleting ? 'Deleting…' : 'Delete now'}
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {archivedChatsLoading && !archivedChats ? (
+                <div className="text-[12px] text-[var(--muted-dim)]">Loading archived chats…</div>
+              ) : archivedChatRows.length === 0 ? (
+                <div className="text-[11px] text-[var(--muted-dim)]">No archived chats.</div>
+              ) : (
+                <div className="overflow-x-auto rounded border border-[var(--border-subtle)]">
+                  <table className="w-full min-w-[720px] text-left">
+                    <thead className="bg-[rgba(255,255,255,.02)]">
+                      <tr>
+                        <th className="px-3 py-2 text-[10px] uppercase tracking-[0.08em] text-[var(--muted-dim)] font-semibold">Drone</th>
+                        <th className="px-3 py-2 text-[10px] uppercase tracking-[0.08em] text-[var(--muted-dim)] font-semibold">Chat</th>
+                        <th className="px-3 py-2 text-[10px] uppercase tracking-[0.08em] text-[var(--muted-dim)] font-semibold">Archived</th>
+                        <th className="px-3 py-2 text-[10px] uppercase tracking-[0.08em] text-[var(--muted-dim)] font-semibold">Deletes</th>
+                        <th className="px-3 py-2 text-[10px] uppercase tracking-[0.08em] text-[var(--muted-dim)] font-semibold">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {archivedChatRows.map((row) => {
+                        const key = `${row.droneId}\u0000${row.chatName}`;
+                        const restoring = Boolean(restoringArchivedChatByKey[key]);
+                        const deleting = Boolean(deletingArchivedChatByKey[key]);
+                        return (
+                          <tr key={key} className="border-t border-[var(--border-subtle)]">
+                            <td className="px-3 py-2 align-top">
+                              <div className="text-[12px] text-[var(--fg-secondary)]">{row.droneName}</div>
+                              <div className="text-[10px] text-[var(--muted-dim)] font-mono mt-0.5">{row.droneId}</div>
+                            </td>
+                            <td className="px-3 py-2 align-top text-[12px] text-[var(--fg-secondary)]">
+                              {row.chatName}
+                            </td>
+                            <td className="px-3 py-2 align-top text-[11px] text-[var(--muted-dim)]">
+                              {new Date(row.archivedAt).toLocaleString()}
+                            </td>
+                            <td className="px-3 py-2 align-top text-[11px] text-[var(--muted-dim)]">
+                              {new Date(row.deleteAt).toLocaleString()}
+                            </td>
+                            <td className="px-3 py-2 align-top">
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => void restoreArchivedChat(row.droneId, row.chatName)}
+                                  disabled={restoring || deleting}
+                                  className={`h-8 px-3 rounded text-[10px] font-semibold tracking-wide uppercase border transition-all ${
+                                    restoring || deleting
+                                      ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
+                                      : 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]'
+                                  }`}
+                                  style={{ fontFamily: 'var(--display)' }}
+                                >
+                                  {restoring ? 'Restoring…' : 'Restore'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => void permanentlyDeleteArchivedChat(row.droneId, row.chatName)}
                                   disabled={restoring || deleting}
                                   className={`h-8 px-3 rounded text-[10px] font-semibold tracking-wide uppercase border transition-all ${
                                     restoring || deleting
