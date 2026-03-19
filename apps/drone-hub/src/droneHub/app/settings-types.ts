@@ -86,3 +86,21 @@ export type ArchivedDronesResponse = {
   total: number;
   now: string;
 };
+
+export type ArchivedChatSummary = {
+  droneId: string;
+  droneName: string;
+  chatName: string;
+  archivedAt: string;
+  deleteAt: string;
+  deleteInMs: number | null;
+  archiveRetention: ArchiveRetentionId;
+  archiveRetentionMs: number;
+};
+
+export type ArchivedChatsResponse = {
+  ok: true;
+  archived: ArchivedChatSummary[];
+  total: number;
+  now: string;
+};

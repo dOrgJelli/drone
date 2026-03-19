@@ -5,6 +5,43 @@ import path from 'node:path';
 import { droneRootPath, legacyDroneRootDirs } from './paths';
 import { normalizeDroneRuntime, type DroneRuntime } from './runtime';
 
+type DroneRegistryChatEntry = {
+  createdAt: string;
+  chatId?: string;
+  model?: string;
+  agent?:
+    | { kind: 'builtin'; id: 'cursor' | 'codex' | 'claude' | 'opencode' }
+    | { kind: 'custom'; id: string; label: string; command: string };
+  codexThreadId?: string;
+  claudeSessionId?: string;
+  openCodeSessionId?: string;
+  turns?: Array<{
+    at: string;
+    id?: string;
+    prompt: string;
+    ok: boolean;
+    output: string;
+    error?: string;
+    promptAt?: string;
+    completedAt?: string;
+  }>;
+  pendingPrompts?: Array<{
+    id: string;
+    at: string;
+    prompt: string;
+    state: 'queued' | 'sending' | 'sent' | 'failed';
+    cwd?: string | null;
+    error?: string;
+    updatedAt?: string;
+  }>;
+};
+
+type DroneRegistryArchivedChatEntry = DroneRegistryChatEntry & {
+  archivedAt: string;
+  deleteAt: string;
+  archiveRetention: '1h' | '8h' | '1d' | '1w';
+};
+
 type DroneRegistryV1 = {
   version: 1;
   /**
@@ -176,71 +213,8 @@ type DroneRegistryV1 = {
        * Optional per-drone chat IDs for persistent multi-turn agent sessions.
        * The host CLI stores these and uses Cursor Agent `--resume <chatId>`.
        */
-      chats?: Record<
-        string,
-        {
-          createdAt: string;
-          /**
-           * Legacy Cursor Agent chat ID (when using `agent --resume <chatId>`).
-           * Newer hub flows may omit this and rely on tmux session continuity instead.
-           */
-          chatId?: string;
-          model?: string;
-          /**
-           * Which agent implementation this chat uses.
-           *
-           * - builtin cursor/codex/claude/opencode: Drone Hub can render a clean "chat transcript" UI
-           * - custom: Drone Hub shows the full tmux/CLI output stream (as today)
-           */
-          agent?:
-            | { kind: 'builtin'; id: 'cursor' | 'codex' | 'claude' | 'opencode' }
-            | { kind: 'custom'; id: string; label: string; command: string };
-          /**
-           * Codex exec "thread_id" for `codex exec resume <thread_id>`.
-           */
-          codexThreadId?: string;
-          /**
-           * Claude Code session id (`claude --session-id`).
-           */
-          claudeSessionId?: string;
-          /**
-           * OpenCode session id (`opencode run --session`).
-           */
-          openCodeSessionId?: string;
-          /**
-           * Stored turns for transcript rendering.
-           */
-          turns?: Array<{
-            at: string;
-            id?: string;
-            prompt: string;
-            ok: boolean;
-            output: string;
-            error?: string;
-            promptAt?: string;
-            completedAt?: string;
-          }>;
-          /**
-           * Hub-side pending prompt queue for transcript UI (server-driven "sending…" state).
-           * This replaces browser-local pending prompt storage.
-           */
-          pendingPrompts?: Array<{
-            id: string;
-            at: string;
-            prompt: string;
-            /**
-             * - queued: persisted in registry but not yet enqueued into the drone daemon
-             * - sending: hub is attempting to enqueue into the daemon
-             * - sent: enqueued into daemon (queued/running/done will reconcile later)
-             * - failed: hub/daemon enqueue or run failure
-             */
-            state: 'queued' | 'sending' | 'sent' | 'failed';
-            cwd?: string | null;
-            error?: string;
-            updatedAt?: string;
-          }>;
-        }
-      >;
+      chats?: Record<string, DroneRegistryChatEntry>;
+      archivedChats?: Record<string, DroneRegistryArchivedChatEntry>;
     }
   >;
 };
