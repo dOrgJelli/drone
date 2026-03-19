@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { startDroneHubApiServer } from '../src/hub/server';
 import { resetDroneRootDirForTests } from '../src/host/paths';
-import { updateRegistry } from '../src/host/registry';
+import { loadRegistry, updateRegistry } from '../src/host/registry';
 import { getSocketListenSupport } from './socket-listen-support';
 
 type ApiResponse = {
@@ -42,8 +42,9 @@ describeSocketSuite('prompt automation api', () => {
     | ((opts: {
         body: any;
         id: string;
-      }) => { stdout?: string; stderr?: string } | null)
+      }) => { state?: string; stdout?: string; stderr?: string } | null)
     | null = null;
+  const mockPromptJobs = new Map<string, any>();
 
   const apiFetch = async (p: string, init?: RequestInit): Promise<ApiResponse> => {
     const r = await fetch(`${baseUrl}${p}`, {
@@ -104,7 +105,6 @@ describeSocketSuite('prompt automation api', () => {
     process.env.XDG_DATA_HOME = xdgDataHome;
     process.env.DRONE_DATA_DIR = droneDataDir;
     resetDroneRootDirForTests();
-    const jobs = new Map<string, any>();
     const daemon = Bun.serve({
       port: 0,
       fetch(req) {
@@ -120,9 +120,9 @@ describeSocketSuite('prompt automation api', () => {
             const id = String(body?.id ?? '').trim();
             const now = new Date().toISOString();
             const override = mockPromptOutputOverride?.({ body, id }) ?? null;
-            jobs.set(id, {
+            mockPromptJobs.set(id, {
               id,
-              state: 'done',
+              state: String(override?.state ?? 'done') || 'done',
               startedAt: now,
               finishedAt: now,
               stdout: String(override?.stdout ?? `mock-response:${id}`),
@@ -131,10 +131,25 @@ describeSocketSuite('prompt automation api', () => {
             return Response.json({ ok: true, accepted: true, id });
           });
         }
+        const promptCancelMatch = /^\/v1\/prompts\/([^/]+)\/cancel$/.exec(u.pathname);
+        if (promptCancelMatch && req.method === 'POST') {
+          const id = decodeURIComponent(promptCancelMatch[1] ?? '');
+          const job = mockPromptJobs.get(id);
+          if (!job) return Response.json({ ok: false, error: 'not found' }, { status: 404 });
+          const now = new Date().toISOString();
+          const next = {
+            ...job,
+            state: 'canceled',
+            finishedAt: now,
+            error: 'stopped by user',
+          };
+          mockPromptJobs.set(id, next);
+          return Response.json({ ok: true, job: next });
+        }
         const promptMatch = /^\/v1\/prompts\/([^/]+)$/.exec(u.pathname);
         if (promptMatch && req.method === 'GET') {
           const id = decodeURIComponent(promptMatch[1] ?? '');
-          const job = jobs.get(id);
+          const job = mockPromptJobs.get(id);
           if (!job) return Response.json({ ok: false, error: 'not found' }, { status: 404 });
           return Response.json({ ok: true, job });
         }
@@ -159,6 +174,218 @@ describeSocketSuite('prompt automation api', () => {
 
   afterEach(() => {
     mockPromptOutputOverride = null;
+    mockPromptJobs.clear();
+  });
+
+  test('stop endpoint cancels an active transcript response without creating a transcript turn', async () => {
+    const droneId = 'drone-stop-active-response';
+    const promptId = 'active-prompt';
+    const now = new Date().toISOString();
+    mockPromptJobs.set(promptId, {
+      id: promptId,
+      state: 'running',
+      startedAt: now,
+      stdout: 'partial output',
+      stderr: '',
+    });
+    await updateRegistry((reg: any) => {
+      reg.drones = reg.drones ?? {};
+      reg.drones[droneId] = {
+        id: droneId,
+        name: droneId,
+        hostPort: mockDaemon?.port ?? 1,
+        token: 'mock-token',
+        containerPort: 7777,
+        repoPath: '',
+        createdAt: now,
+        chats: {
+          default: {
+            createdAt: now,
+            agent: { kind: 'builtin', id: 'cursor' },
+            turns: [],
+            pendingPrompts: [
+              {
+                id: promptId,
+                at: now,
+                updatedAt: now,
+                prompt: 'write the patch',
+                state: 'sent',
+              },
+            ],
+          },
+        },
+      };
+    });
+
+    const stopped = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats/default/stop`, {
+      method: 'POST',
+    });
+    expect(stopped.r.status).toBe(200);
+    expect(Boolean(stopped.data?.stopped)).toBe(true);
+    expect(stopped.data?.mode).toBe('transcript');
+    expect(stopped.data?.stoppedPromptIds).toEqual([promptId]);
+
+    const pending = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats/default/pending`);
+    expect(pending.r.status).toBe(200);
+    const pendingRows = Array.isArray(pending.data?.pending) ? pending.data.pending : [];
+    expect(pendingRows).toHaveLength(1);
+    expect(String(pendingRows[0]?.state ?? '')).toBe('failed');
+    expect(String(pendingRows[0]?.error ?? '')).toContain('Stopped by user');
+
+    const transcript = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats/default/transcript?turn=all`);
+    expect(transcript.r.status).toBe(200);
+    expect(Array.isArray(transcript.data?.transcripts)).toBe(true);
+    expect(transcript.data?.transcripts).toEqual([]);
+
+    expect(String(mockPromptJobs.get(promptId)?.state ?? '')).toBe('canceled');
+  });
+
+  test('archiving a host-backed drone stops prompt jobs and clears queued automations', async () => {
+    const droneId = 'drone-archive-stop-host';
+    const promptId = 'archive-blocking-prompt';
+    const now = new Date().toISOString();
+    mockPromptJobs.set(promptId, {
+      id: promptId,
+      state: 'running',
+      startedAt: now,
+      stdout: 'partial output',
+      stderr: '',
+    });
+    await updateRegistry((reg: any) => {
+      reg.drones = reg.drones ?? {};
+      reg.drones[droneId] = {
+        id: droneId,
+        name: droneId,
+        runtime: 'host',
+        hostPort: mockDaemon?.port ?? 1,
+        token: 'mock-token',
+        containerPort: 7777,
+        repoPath: '',
+        createdAt: now,
+        chats: {
+          default: {
+            createdAt: now,
+            agent: { kind: 'builtin', id: 'cursor' },
+            turns: [],
+            pendingPrompts: [
+              {
+                id: promptId,
+                at: now,
+                updatedAt: now,
+                prompt: 'still running',
+                state: 'sent',
+              },
+            ],
+          },
+        },
+      };
+    });
+
+    const firstAutomation = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats/default/automations/start`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        automationId: 'loop-1',
+        automationLabel: 'Loop 1',
+        prompt: 'repeat',
+        runs: 2,
+      }),
+    });
+    expect(firstAutomation.r.status).toBe(202);
+    expect(firstAutomation.data?.job?.running).toBe(true);
+
+    const secondAutomation = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats/default/automations/start`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        automationId: 'loop-2',
+        automationLabel: 'Loop 2',
+        prompt: 'repeat again',
+        runs: 2,
+      }),
+    });
+    expect(secondAutomation.r.status).toBe(202);
+    expect(Number(secondAutomation.data?.job?.queuedCount ?? 0)).toBeGreaterThan(0);
+
+    const archived = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/archive`, {
+      method: 'POST',
+    });
+    expect(archived.r.status).toBe(200);
+    expect(archived.data?.archived).toBe(true);
+
+    expect(String(mockPromptJobs.get(promptId)?.state ?? '')).toBe('canceled');
+
+    const regAfterArchive = await loadRegistry();
+    const archivedEntry = regAfterArchive?.archived?.[droneId];
+    expect(archivedEntry).toBeTruthy();
+    expect(regAfterArchive?.drones?.[droneId]).toBeUndefined();
+    const archivedPending = Array.isArray(archivedEntry?.chats?.default?.pendingPrompts)
+      ? archivedEntry.chats.default.pendingPrompts
+      : [];
+    expect(String(archivedPending[0]?.state ?? '')).toBe('failed');
+    expect(String(archivedPending[0]?.error ?? '')).toContain('archived');
+
+    const restored = await apiFetch(`/api/archive/drones/${encodeURIComponent(droneId)}/restore`, {
+      method: 'POST',
+    });
+    expect(restored.r.status).toBe(200);
+
+    const automationStatus = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats/default/automations/status`);
+    expect(automationStatus.r.status).toBe(200);
+    expect(automationStatus.data?.job?.status).toBe('idle');
+    expect(automationStatus.data?.job?.running).toBe(false);
+    expect(Number(automationStatus.data?.job?.queuedCount ?? -1)).toBe(0);
+  });
+
+  test('deleting a host-backed drone stops active prompt jobs before removing it', async () => {
+    const droneId = 'drone-delete-stop-host';
+    const promptId = 'delete-active-prompt';
+    const now = new Date().toISOString();
+    mockPromptJobs.set(promptId, {
+      id: promptId,
+      state: 'running',
+      startedAt: now,
+      stdout: 'partial output',
+      stderr: '',
+    });
+    await updateRegistry((reg: any) => {
+      reg.drones = reg.drones ?? {};
+      reg.drones[droneId] = {
+        id: droneId,
+        name: droneId,
+        runtime: 'host',
+        hostPort: mockDaemon?.port ?? 1,
+        token: 'mock-token',
+        containerPort: 7777,
+        repoPath: '',
+        createdAt: now,
+        chats: {
+          default: {
+            createdAt: now,
+            agent: { kind: 'builtin', id: 'cursor' },
+            turns: [],
+            pendingPrompts: [
+              {
+                id: promptId,
+                at: now,
+                updatedAt: now,
+                prompt: 'delete this drone',
+                state: 'sent',
+              },
+            ],
+          },
+        },
+      };
+    });
+
+    const deleted = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}?keepVolume=1`, {
+      method: 'DELETE',
+    });
+    expect(deleted.r.status).toBe(200);
+    expect(String(mockPromptJobs.get(promptId)?.state ?? '')).toBe('canceled');
+
+    const regAfterDelete = await loadRegistry();
+    expect(regAfterDelete?.drones?.[droneId]).toBeUndefined();
   });
 
   test('generates a unique automation jobKey for each run execution', async () => {

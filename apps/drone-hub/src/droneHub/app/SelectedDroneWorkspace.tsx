@@ -142,6 +142,10 @@ type SelectedDroneWorkspaceProps = {
   promptError: string | null;
   sendingPrompt: boolean;
   sendPromptText: (payload: ChatSendPayload) => Promise<boolean>;
+  canStopResponse: boolean;
+  requestStopResponse: () => Promise<void>;
+  stoppingResponse: boolean;
+  stopResponseError: string | null;
   requestCancelPendingPrompt: (promptId: string) => Promise<void>;
   requestUnstickPendingPrompt: (promptId: string) => Promise<void>;
   cancellingPendingPromptById: Record<string, true>;
@@ -264,6 +268,10 @@ export function SelectedDroneWorkspace({
   promptError,
   sendingPrompt,
   sendPromptText,
+  canStopResponse,
+  requestStopResponse,
+  stoppingResponse,
+  stopResponseError,
   requestCancelPendingPrompt,
   requestUnstickPendingPrompt,
   cancellingPendingPromptById,
@@ -1739,12 +1747,18 @@ export function SelectedDroneWorkspace({
                 focusTargetId="primary-chat"
                 draftValue={chatDraftValue}
                 onDraftValueChange={(next) => setChatInputDraft(chatDraftKey, next)}
-                promptError={promptError}
+                promptError={stopResponseError || promptError}
                 sending={sendingPrompt}
-                waiting={chatUiMode === 'transcript' && visiblePendingPromptsWithStartup.some((p) => p.state !== 'failed')}
+                waiting={
+                  chatUiMode === 'transcript'
+                    ? visiblePendingPromptsWithStartup.some((p) => p.state !== 'failed')
+                    : (showRespondingAsStatusInHeader || canStopResponse)
+                }
                 automationActions={chatAutomationActions}
                 lockComposerWhileAutomationActive={false}
                 autoFocus={shouldAutoFocusInput}
+                onStop={canStopResponse ? () => requestStopResponse() : undefined}
+                stopping={stoppingResponse}
                 onSend={async (payload: ChatSendPayload) => {
                   try {
                     return await sendPromptText(payload);

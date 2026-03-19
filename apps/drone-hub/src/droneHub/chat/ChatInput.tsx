@@ -60,6 +60,8 @@ export function ChatInput({
   automationMenuLabel = 'Automations',
   lockComposerWhileAutomationActive = true,
   onSend,
+  onStop,
+  stopping = false,
 }: {
   resetKey: string;
   droneName: string;
@@ -77,6 +79,8 @@ export function ChatInput({
   automationMenuLabel?: string;
   lockComposerWhileAutomationActive?: boolean;
   onSend: (payload: ChatSendPayload) => Promise<boolean>;
+  onStop?: () => Promise<void> | void;
+  stopping?: boolean;
 }) {
   const [uncontrolledDraft, setUncontrolledDraft] = React.useState('');
   const [attachments, setAttachments] = React.useState<DraftImageAttachment[]>([]);
@@ -211,6 +215,7 @@ export function ChatInput({
 
   const trimmed = draft.trim();
   const sendDisabled = composerLocked || (trimmed.length === 0 && attachments.length === 0);
+  const showStopAction = waiting && typeof onStop === 'function';
   const hasModeHint = modeHint.trim().length > 0;
 
   function openPicker() {
@@ -543,17 +548,27 @@ export function ChatInput({
             )}
             <button
               type="button"
-              onClick={() => sendNow()}
-              disabled={sendDisabled}
+              onClick={() => {
+                if (showStopAction) {
+                  void onStop?.();
+                  return;
+                }
+                sendNow();
+              }}
+              disabled={showStopAction ? stopping : sendDisabled}
               className={`inline-flex items-center justify-center h-9 min-w-[80px] px-4 rounded-md text-[11px] font-semibold tracking-wide uppercase border transition-all ${
-                sendDisabled
-                  ? 'opacity-40 cursor-not-allowed bg-[var(--panel-raised)] border-[var(--border-subtle)] text-[var(--muted)]'
-                  : 'bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-fg)] hover:shadow-[var(--glow-accent)] hover:brightness-110'
+                showStopAction
+                  ? stopping
+                    ? 'opacity-50 cursor-not-allowed bg-[var(--red-subtle)] border-[rgba(255,90,90,.2)] text-[var(--red)]'
+                    : 'bg-[var(--red-subtle)] border-[rgba(255,90,90,.35)] text-[var(--red)] hover:bg-[rgba(255,90,90,.14)]'
+                  : sendDisabled
+                    ? 'opacity-40 cursor-not-allowed bg-[var(--panel-raised)] border-[var(--border-subtle)] text-[var(--muted)]'
+                    : 'bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-fg)] hover:shadow-[var(--glow-accent)] hover:brightness-110'
               }`}
               style={{ fontFamily: 'var(--display)' }}
-              title="Send"
+              title={showStopAction ? 'Stop response' : 'Send'}
             >
-              {sending ? 'Sending...' : waiting ? 'Waiting...' : 'Send'}
+              {showStopAction ? (stopping ? 'Stopping...' : 'Stop') : sending ? 'Sending...' : waiting ? 'Waiting...' : 'Send'}
             </button>
           </div>
           <AutomationRunnerPanel

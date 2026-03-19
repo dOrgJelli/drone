@@ -48,7 +48,9 @@ export const PendingTranscriptTurn = React.memo(function PendingTranscriptTurn({
   const attachments = normalizeImageAttachmentRefs((item as any).attachments);
   const promptText = isAttachmentOnlyPrompt(item.prompt, attachments) ? '' : item.prompt;
   const isFailed = item.state === 'failed';
-  const badgeLabel = isFailed ? 'Failed' : item.state === 'queued' ? 'Queued' : 'Pending';
+  const isStopped =
+    isFailed && /stopped by user|stopped before submission|stopped because the drone was archived|stopped because the drone was deleted/i.test(String(item.error ?? ''));
+  const badgeLabel = isStopped ? 'Stopped' : isFailed ? 'Failed' : item.state === 'queued' ? 'Queued' : 'Pending';
   const activeAtMs = parseTimeMs(item.updatedAt ?? item.at);
   const ageMs = activeAtMs == null ? 0 : Math.max(0, nowMs - activeAtMs);
   const canRequestUnstick =
@@ -94,7 +96,9 @@ export const PendingTranscriptTurn = React.memo(function PendingTranscriptTurn({
             <span
               className={`text-[9px] font-semibold tracking-wide uppercase px-1.5 py-0.5 rounded border ${
                 isFailed
-                  ? 'text-[var(--red)] bg-[var(--red-subtle)] border-[rgba(255,90,90,.2)]'
+                  ? isStopped
+                    ? 'text-[var(--yellow)] bg-[var(--yellow-subtle)] border-[rgba(255,178,36,.2)]'
+                    : 'text-[var(--red)] bg-[var(--red-subtle)] border-[rgba(255,90,90,.2)]'
                   : 'text-[var(--muted-dim)] bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)]'
               }`}
               style={{ fontFamily: 'var(--display)' }}
@@ -201,7 +205,11 @@ export const PendingTranscriptTurn = React.memo(function PendingTranscriptTurn({
             </div>
             <div
               className={`border rounded-lg rounded-tl-sm px-4 py-3 relative group ${
-                isFailed ? 'bg-[var(--red-subtle)] border-[rgba(255,90,90,.2)]' : 'bg-[var(--accent-subtle)] border-[rgba(167,139,250,.12)]'
+                isFailed
+                  ? isStopped
+                    ? 'bg-[var(--yellow-subtle)] border-[rgba(255,178,36,.18)]'
+                    : 'bg-[var(--red-subtle)] border-[rgba(255,90,90,.2)]'
+                  : 'bg-[var(--accent-subtle)] border-[rgba(167,139,250,.12)]'
               }`}
             >
               {copiedToastRole === 'agent' ? (
@@ -228,7 +236,11 @@ export const PendingTranscriptTurn = React.memo(function PendingTranscriptTurn({
                 </button>
               ) : null}
               {isFailed ? (
-                <div className="text-[12.5px] leading-[1.6] text-[var(--red)] whitespace-pre-wrap">
+                <div
+                  className={`text-[12.5px] leading-[1.6] whitespace-pre-wrap ${
+                    isStopped ? 'text-[var(--yellow)]' : 'text-[var(--red)]'
+                  }`}
+                >
                   {stripAnsi(item.error || 'failed to send')}
                 </div>
               ) : (

@@ -92,6 +92,10 @@ export async function promptGet(client: DroneClient, id: string) {
   return await req(client, 'GET', `/v1/prompts/${encodeURIComponent(id)}`);
 }
 
+export async function promptCancel(client: DroneClient, id: string) {
+  return await req(client, 'POST', `/v1/prompts/${encodeURIComponent(id)}/cancel`);
+}
+
 export async function terminalInput(client: DroneClient, payload: { session: string; data: string }) {
   return await req(client, 'POST', '/v1/terminal/input', payload);
 }
@@ -109,4 +113,3 @@ export async function terminalOutput(client: DroneClient, payload: { session: st
 export async function terminalPrompt(client: DroneClient, payload: { session: string }) {
   return await req(client, 'GET', `/v1/terminal/prompt?session=${encodeURIComponent(payload.session)}`);
 }
-
