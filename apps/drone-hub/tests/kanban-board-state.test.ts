@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   createDefaultKanbanBoardState,
+  moveKanbanCard,
   parsePastedKanbanCard,
   sanitizeKanbanBoardState,
 } from '../src/droneHub/app/kanban-board-state';
@@ -62,5 +63,42 @@ describe('kanban board state helpers', () => {
     });
 
     expect(parsePastedKanbanCard('')).toBeNull();
+  });
+
+  test('moves cards within and across lanes', () => {
+    const board = sanitizeKanbanBoardState({
+      lanes: [
+        {
+          id: 'todo',
+          title: 'To do',
+          cards: [
+            { id: 'a', title: 'A', description: '' },
+            { id: 'b', title: 'B', description: '' },
+          ],
+        },
+        {
+          id: 'review',
+          title: 'Review',
+          cards: [{ id: 'c', title: 'C', description: '' }],
+        },
+      ],
+    });
+
+    const reordered = moveKanbanCard(board, {
+      cardId: 'b',
+      fromLaneId: 'todo',
+      toLaneId: 'todo',
+      toIndex: 0,
+    });
+    expect(reordered.lanes[0]?.cards.map((card) => card.id)).toEqual(['b', 'a']);
+
+    const movedAcross = moveKanbanCard(reordered, {
+      cardId: 'a',
+      fromLaneId: 'todo',
+      toLaneId: 'review',
+      toIndex: 1,
+    });
+    expect(movedAcross.lanes[0]?.cards.map((card) => card.id)).toEqual(['b']);
+    expect(movedAcross.lanes[1]?.cards.map((card) => card.id)).toEqual(['c', 'a']);
   });
 });

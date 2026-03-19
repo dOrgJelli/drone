@@ -14,6 +14,13 @@ export type KanbanBoardState = {
   lanes: KanbanLane[];
 };
 
+export type MoveKanbanCardInput = {
+  cardId: string;
+  fromLaneId: string;
+  toLaneId: string;
+  toIndex: number;
+};
+
 const DEFAULT_KANBAN_LANE_TITLES = ['To do', 'In progress', 'Review', 'Done'] as const;
 const PASTED_TEXT_INLINE_TITLE_MAX_CHARS = 24;
 
@@ -123,5 +130,47 @@ export function parsePastedKanbanCard(
     title: fallbackTitleFromText(normalized),
     description: normalized,
     needsGeneratedTitle: true,
+  };
+}
+
+export function moveKanbanCard(board: KanbanBoardState, input: MoveKanbanCardInput): KanbanBoardState {
+  const cardId = String(input.cardId ?? '').trim();
+  const fromLaneId = String(input.fromLaneId ?? '').trim();
+  const toLaneId = String(input.toLaneId ?? '').trim();
+  const toIndexRaw = Number(input.toIndex);
+  if (!cardId || !fromLaneId || !toLaneId || !Number.isFinite(toIndexRaw)) return board;
+
+  const sourceLane = board.lanes.find((lane) => lane.id === fromLaneId) ?? null;
+  const targetLane = board.lanes.find((lane) => lane.id === toLaneId) ?? null;
+  if (!sourceLane || !targetLane) return board;
+
+  const sourceIndex = sourceLane.cards.findIndex((card) => card.id === cardId);
+  if (sourceIndex < 0) return board;
+
+  const card = sourceLane.cards[sourceIndex] ?? null;
+  if (!card) return board;
+
+  const sourceCards = sourceLane.cards.filter((item) => item.id !== cardId);
+  const unclampedTargetIndex = fromLaneId === toLaneId && sourceIndex < toIndexRaw ? toIndexRaw - 1 : toIndexRaw;
+  const targetIndex = Math.max(0, Math.min(targetLane.cards.length, unclampedTargetIndex));
+
+  return {
+    ...board,
+    lanes: board.lanes.map((lane) => {
+      if (lane.id === fromLaneId && lane.id === toLaneId) {
+        const nextCards = sourceCards.slice();
+        nextCards.splice(targetIndex, 0, card);
+        return { ...lane, cards: nextCards };
+      }
+      if (lane.id === fromLaneId) {
+        return { ...lane, cards: sourceCards };
+      }
+      if (lane.id === toLaneId) {
+        const nextCards = lane.cards.slice();
+        nextCards.splice(targetIndex, 0, card);
+        return { ...lane, cards: nextCards };
+      }
+      return lane;
+    }),
   };
 }
