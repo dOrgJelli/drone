@@ -102,7 +102,11 @@ const DEFAULT_ARCHIVE_RUNTIME_POLICY: ArchiveRuntimePolicy = 'keep-running';
 export const FILESYSTEM_UPLOAD_MAX_BYTES_MIN = 1 * 1024 * 1024;
 export const FILESYSTEM_UPLOAD_MAX_BYTES_MAX = 8 * 1024 * 1024 * 1024;
 export const FILESYSTEM_UPLOAD_MAX_BYTES_DEFAULT = 2 * 1024 * 1024 * 1024;
-const DEFAULT_KANBAN_FIRST_LANE_TITLE = 'Inbox';
+const DEFAULT_KANBAN_LANE_TITLES = ['To do', 'In progress', 'Review', 'Done'] as const;
+
+function defaultKanbanLaneTitle(index: number): string {
+  return DEFAULT_KANBAN_LANE_TITLES[index] ?? `Lane ${index + 1}`;
+}
 
 function createKanbanEntityId(prefix: 'lane' | 'card'): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
@@ -110,13 +114,11 @@ function createKanbanEntityId(prefix: 'lane' | 'card'): string {
 
 function createDefaultKanbanBoardSettings(): KanbanBoardSettings {
   return {
-    lanes: [
-      {
-        id: createKanbanEntityId('lane'),
-        title: DEFAULT_KANBAN_FIRST_LANE_TITLE,
-        cards: [],
-      },
-    ],
+    lanes: DEFAULT_KANBAN_LANE_TITLES.map((title) => ({
+      id: createKanbanEntityId('lane'),
+      title,
+      cards: [],
+    })),
   };
 }
 
@@ -141,7 +143,7 @@ function sanitizeKanbanBoardSettings(value: unknown): KanbanBoardSettings {
     }
     lanes.push({
       id: String(laneRecord.id ?? '').trim() || createKanbanEntityId('lane'),
-      title: String(laneRecord.title ?? '').trim() || (i === 0 ? DEFAULT_KANBAN_FIRST_LANE_TITLE : `Lane ${i + 1}`),
+      title: String(laneRecord.title ?? '').trim() || defaultKanbanLaneTitle(i),
       cards,
     });
   }

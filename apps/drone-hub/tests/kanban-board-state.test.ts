@@ -6,11 +6,10 @@ import {
 } from '../src/droneHub/app/kanban-board-state';
 
 describe('kanban board state helpers', () => {
-  test('creates a default board with a single inbox lane', () => {
+  test('creates a default board with the standard workflow lanes', () => {
     const board = createDefaultKanbanBoardState();
-    expect(board.lanes).toHaveLength(1);
-    expect(board.lanes[0]?.title).toBe('Inbox');
-    expect(board.lanes[0]?.cards).toEqual([]);
+    expect(board.lanes.map((lane) => lane.title)).toEqual(['To do', 'In progress', 'Review', 'Done']);
+    expect(board.lanes.every((lane) => lane.cards.length === 0)).toBe(true);
   });
 
   test('sanitizes invalid persisted state and preserves valid cards', () => {
