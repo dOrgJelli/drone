@@ -35,6 +35,11 @@ function isEditablePasteTarget(target: EventTarget | null): boolean {
   return Boolean(target.closest('input, textarea, select, [contenteditable="true"]'));
 }
 
+function isCardControlTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return Boolean(target.closest('button, input, textarea, select, [contenteditable="true"]'));
+}
+
 function laneCountLabel(count: number): string {
   return `${count} lane${count === 1 ? '' : 's'}`;
 }
@@ -51,6 +56,11 @@ function descriptionSnippet(textRaw: string): string {
   const normalized = String(textRaw ?? '').replace(/\s+/g, ' ').trim();
   if (!normalized) return '';
   return normalized.length > 92 ? `${normalized.slice(0, 89).trimEnd()}...` : normalized;
+}
+
+function cardDropIndex(event: React.DragEvent<HTMLElement>, cardIndex: number): number {
+  const bounds = event.currentTarget.getBoundingClientRect();
+  return event.clientY < bounds.top + bounds.height / 2 ? cardIndex : cardIndex + 1;
 }
 
 export function KanbanBoardWorkspace({
@@ -96,6 +106,13 @@ export function KanbanBoardWorkspace({
     const cardId = String(cardIdRaw ?? '').trim();
     if (!laneId || !cardId) return;
     setSelectedCardRef({ laneId, cardId });
+  }, []);
+
+  const toggleCard = React.useCallback((laneIdRaw: string, cardIdRaw: string) => {
+    const laneId = String(laneIdRaw ?? '').trim();
+    const cardId = String(cardIdRaw ?? '').trim();
+    if (!laneId || !cardId) return;
+    setSelectedCardRef((prev) => (prev?.laneId === laneId && prev.cardId === cardId ? null : { laneId, cardId }));
   }, []);
 
   const addLane = React.useCallback(() => {
@@ -416,13 +433,35 @@ export function KanbanBoardWorkspace({
                 </div>
 
                 <div className="flex-1 min-h-0 overflow-y-auto pr-1">
-                  <div className="space-y-2">
+                  <div
+                    className={`space-y-2 rounded-[18px] p-1 transition-all ${
+                      dropTargetRef?.laneId === lane.id && dropTargetRef.index === lane.cards.length
+                        ? 'bg-[rgba(157,202,255,.05)]'
+                        : ''
+                    }`}
+                    onDragOver={(event) => {
+                      if (!draggedCardRef) return;
+                      event.preventDefault();
+                      if (event.target === event.currentTarget) {
+                        setDropTargetRef({ laneId: lane.id, index: lane.cards.length });
+                      }
+                      if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+                    }}
+                    onDrop={(event) => {
+                      if (!draggedCardRef) return;
+                      event.preventDefault();
+                      if (event.target === event.currentTarget) {
+                        handleDropAt(lane.id, lane.cards.length);
+                      }
+                    }}
+                  >
                     {lane.cards.length === 0 ? (
                       <div
                         onDragOver={(event) => {
                           if (!draggedCardRef) return;
                           event.preventDefault();
                           setDropTargetRef({ laneId: lane.id, index: 0 });
+                          if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
                         }}
                         onDrop={(event) => {
                           event.preventDefault();
@@ -441,33 +480,22 @@ export function KanbanBoardWorkspace({
                     {lane.cards.map((card, cardIdx) => {
                       const selected = selectedCardRef?.cardId === card.id && selectedCardRef.laneId === lane.id;
                       const snippet = descriptionSnippet(card.description);
+                      const dropBefore = dropTargetRef?.laneId === lane.id && dropTargetRef.index === cardIdx;
+                      const dropAfter = dropTargetRef?.laneId === lane.id && dropTargetRef.index === cardIdx + 1;
                       return (
-                        <React.Fragment key={card.id}>
-                          <div
-                            onDragOver={(event) => {
-                              if (!draggedCardRef) return;
-                              event.preventDefault();
-                              setDropTargetRef({ laneId: lane.id, index: cardIdx });
-                            }}
-                            onDrop={(event) => {
-                              event.preventDefault();
-                              handleDropAt(lane.id, cardIdx);
-                            }}
-                            className={`h-2 rounded-full transition-all ${
-                              dropTargetRef?.laneId === lane.id && dropTargetRef.index === cardIdx
-                                ? 'bg-[rgba(157,202,255,.35)]'
-                                : ''
-                            }`}
-                          />
+                        <div key={card.id} className="relative">
+                          {dropBefore ? (
+                            <div className="pointer-events-none absolute -top-1 left-3 right-3 z-10 h-0.5 rounded-full bg-[rgba(157,202,255,.9)]" />
+                          ) : null}
                           <article
                             draggable={!controlsLocked}
                             onDragStart={(event) => {
-                              if (controlsLocked || isEditablePasteTarget(event.target)) {
+                              if (controlsLocked) {
                                 event.preventDefault();
                                 return;
                               }
                               setDraggedCardRef({ laneId: lane.id, cardId: card.id });
-                              setDropTargetRef({ laneId: lane.id, index: cardIdx });
+                              setDropTargetRef({ laneId: lane.id, index: cardIdx + 1 });
                               if (event.dataTransfer) {
                                 event.dataTransfer.effectAllowed = 'move';
                                 event.dataTransfer.setData('text/plain', card.id);
@@ -477,7 +505,21 @@ export function KanbanBoardWorkspace({
                               setDraggedCardRef(null);
                               setDropTargetRef(null);
                             }}
-                            onClick={() => selectCard(lane.id, card.id)}
+                            onDragOver={(event) => {
+                              if (!draggedCardRef) return;
+                              event.preventDefault();
+                              setDropTargetRef({ laneId: lane.id, index: cardDropIndex(event, cardIdx) });
+                              if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+                            }}
+                            onDrop={(event) => {
+                              if (!draggedCardRef) return;
+                              event.preventDefault();
+                              handleDropAt(lane.id, cardDropIndex(event, cardIdx));
+                            }}
+                            onClick={(event) => {
+                              if (isCardControlTarget(event.target)) return;
+                              toggleCard(lane.id, card.id);
+                            }}
                             className={`rounded-[16px] border px-3.5 py-3 transition-all ${
                               selected
                                 ? 'border-[rgba(255,255,255,.16)] bg-[rgba(255,255,255,.08)]'
@@ -486,16 +528,26 @@ export function KanbanBoardWorkspace({
                           >
                             <div className="flex items-start gap-2">
                               <div className="min-w-0 flex-1">
-                                <input
-                                  value={card.title}
-                                  onFocus={() => selectCard(lane.id, card.id)}
-                                  onChange={(event) => updateCard(lane.id, card.id, { title: event.target.value })}
-                                  disabled={controlsLocked}
-                                  placeholder="Task title"
-                                  className={`w-full bg-transparent text-[13px] font-medium focus:outline-none ${
-                                    controlsLocked ? 'cursor-not-allowed text-[var(--muted)] opacity-70' : 'text-[var(--fg)]'
-                                  }`}
-                                />
+                                {selected ? (
+                                  <input
+                                    value={card.title}
+                                    onFocus={() => selectCard(lane.id, card.id)}
+                                    onChange={(event) => updateCard(lane.id, card.id, { title: event.target.value })}
+                                    disabled={controlsLocked}
+                                    placeholder="Task title"
+                                    className={`w-full bg-transparent text-[13px] font-medium focus:outline-none ${
+                                      controlsLocked ? 'cursor-not-allowed text-[var(--muted)] opacity-70' : 'text-[var(--fg)]'
+                                    }`}
+                                  />
+                                ) : (
+                                  <div
+                                    className={`w-full bg-transparent text-left text-[13px] font-medium focus:outline-none ${
+                                      controlsLocked ? 'cursor-not-allowed text-[var(--muted)] opacity-70' : 'text-[var(--fg)]'
+                                    }`}
+                                  >
+                                    {card.title || 'Untitled task'}
+                                  </div>
+                                )}
                               </div>
                               <button
                                 type="button"
@@ -535,28 +587,13 @@ export function KanbanBoardWorkspace({
                               </div>
                             ) : null}
                           </article>
-                        </React.Fragment>
+                          {dropAfter ? (
+                            <div className="pointer-events-none absolute -bottom-1 left-3 right-3 z-10 h-0.5 rounded-full bg-[rgba(157,202,255,.9)]" />
+                          ) : null}
+                        </div>
                       );
                     })}
 
-                    {lane.cards.length > 0 ? (
-                      <div
-                        onDragOver={(event) => {
-                          if (!draggedCardRef) return;
-                          event.preventDefault();
-                          setDropTargetRef({ laneId: lane.id, index: lane.cards.length });
-                        }}
-                        onDrop={(event) => {
-                          event.preventDefault();
-                          handleDropAt(lane.id, lane.cards.length);
-                        }}
-                        className={`h-2 rounded-full transition-all ${
-                          dropTargetRef?.laneId === lane.id && dropTargetRef.index === lane.cards.length
-                            ? 'bg-[rgba(157,202,255,.35)]'
-                            : ''
-                        }`}
-                      />
-                    ) : null}
                   </div>
                 </div>
 
