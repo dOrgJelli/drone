@@ -1,6 +1,7 @@
 import React from 'react';
 import {
   DndContext,
+  DragOverlay,
   KeyboardSensor,
   PointerSensor,
   closestCenter,
@@ -219,7 +220,7 @@ function SortableKanbanCard({
         selected
           ? 'border-[rgba(255,255,255,.16)] bg-[rgba(255,255,255,.08)]'
           : 'border-[rgba(255,255,255,.05)] bg-[rgba(255,255,255,.03)] hover:bg-[rgba(255,255,255,.05)]'
-      } ${isDragging || activeDragCardId === card.id ? 'opacity-55 shadow-[0_10px_30px_rgba(0,0,0,.2)]' : ''}`}
+      } ${isDragging || activeDragCardId === card.id ? 'opacity-25' : ''}`}
     >
       <div className="flex items-start gap-2">
         <button
@@ -297,6 +298,22 @@ function SortableKanbanCard({
   );
 }
 
+function DragOverlayKanbanCard({ card }: { card: KanbanCard }) {
+  const snippet = descriptionSnippet(card.description);
+
+  return (
+    <article className="w-[264px] rounded-[16px] border border-[rgba(255,255,255,.16)] bg-[rgba(24,24,28,.92)] px-3.5 py-3 shadow-[0_18px_48px_rgba(0,0,0,.38)] backdrop-blur-sm">
+      <div className="flex items-start gap-2">
+        <div className="mt-0.5 inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full text-[var(--muted-dim)]">
+          {dragHandleDots()}
+        </div>
+        <div className="min-w-0 flex-1 text-[13px] font-medium text-[var(--fg)]">{card.title || 'Untitled task'}</div>
+      </div>
+      {snippet ? <div className="mt-2 text-[11px] leading-5 text-[var(--muted-dim)]">{snippet}</div> : null}
+    </article>
+  );
+}
+
 function KanbanLaneCards({
   lane,
   controlsLocked,
@@ -362,6 +379,14 @@ export function KanbanBoardWorkspace({
     () => board.lanes.reduce((sum, lane) => sum + lane.cards.length, 0),
     [board.lanes],
   );
+  const activeDragCard = React.useMemo(() => {
+    if (!activeDragCardId) return null;
+    for (const lane of board.lanes) {
+      const card = lane.cards.find((item) => item.id === activeDragCardId) ?? null;
+      if (card) return card;
+    }
+    return null;
+  }, [activeDragCardId, board.lanes]);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
@@ -803,6 +828,9 @@ export function KanbanBoardWorkspace({
             </button>
           </div>
         </div>
+        <DragOverlay>
+          {activeDragCard ? <DragOverlayKanbanCard card={activeDragCard} /> : null}
+        </DragOverlay>
       </DndContext>
     </div>
   );
