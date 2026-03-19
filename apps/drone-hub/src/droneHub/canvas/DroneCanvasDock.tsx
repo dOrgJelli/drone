@@ -26,6 +26,12 @@ import {
   isCanvasDraftNodeId,
   useDroneCanvasStore,
 } from './use-drone-canvas-store';
+import {
+  buildLineagePath,
+  measureRectInWorldSpace,
+  resolveLineageEndpoint,
+  type CanvasRect,
+} from './lineage-geometry';
 
 const NODE_HEIGHT_PX = 54;
 const DROP_STACK_SPACING_Y_PX = 48;
@@ -88,6 +94,27 @@ type CanvasLineageEdge = {
   key: string;
   path: string;
 };
+
+function areCanvasRectMapsEqual(a: Record<string, CanvasRect>, b: Record<string, CanvasRect>): boolean {
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  for (const key of aKeys) {
+    const rectA = a[key];
+    const rectB = b[key];
+    if (!rectB) return false;
+    if (
+      rectA.x !== rectB.x ||
+      rectA.y !== rectB.y ||
+      rectA.width !== rectB.width ||
+      rectA.height !== rectB.height
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function hasChatDragPayload(event: React.DragEvent<HTMLElement>): boolean {
   const transfer = event.dataTransfer;
   if (!transfer) return false;
@@ -156,61 +183,6 @@ function getNodeWidthPx(labelRaw: string, secondaryLabelRaw?: string): number {
     NODE_MIN_WIDTH_PX,
     Math.min(NODE_MAX_WIDTH_PX, contentWidth + NODE_HORIZONTAL_PADDING_PX),
   );
-}
-
-function resolveLineageEndpoint(
-  source: { x: number; y: number; width: number; height: number },
-  target: { x: number; y: number; width: number; height: number },
-): { startX: number; startY: number; endX: number; endY: number } {
-  const sourceCenterX = source.x + source.width / 2;
-  const sourceCenterY = source.y + source.height / 2;
-  const targetCenterX = target.x + target.width / 2;
-  const targetCenterY = target.y + target.height / 2;
-  const dx = targetCenterX - sourceCenterX;
-  const dy = targetCenterY - sourceCenterY;
-
-  if (Math.abs(dx) >= Math.abs(dy)) {
-    return dx >= 0
-      ? {
-          startX: source.x + source.width,
-          startY: sourceCenterY,
-          endX: target.x,
-          endY: targetCenterY,
-        }
-      : {
-          startX: source.x,
-          startY: sourceCenterY,
-          endX: target.x + target.width,
-          endY: targetCenterY,
-        };
-  }
-
-  return dy >= 0
-    ? {
-        startX: sourceCenterX,
-        startY: source.y + source.height,
-        endX: targetCenterX,
-        endY: target.y,
-      }
-    : {
-        startX: sourceCenterX,
-        startY: source.y,
-        endX: targetCenterX,
-        endY: target.y + target.height,
-      };
-}
-
-function buildLineagePath(startX: number, startY: number, endX: number, endY: number): string {
-  const dx = endX - startX;
-  const dy = endY - startY;
-  const controlOffset = Math.max(28, Math.min(120, Math.abs(dx) * 0.35 + Math.abs(dy) * 0.14));
-  const horizontal = Math.abs(dx) >= Math.abs(dy);
-  if (horizontal) {
-    const direction = dx >= 0 ? 1 : -1;
-    return `M ${startX} ${startY} C ${startX + controlOffset * direction} ${startY}, ${endX - controlOffset * direction} ${endY}, ${endX} ${endY}`;
-  }
-  const direction = dy >= 0 ? 1 : -1;
-  return `M ${startX} ${startY} C ${startX} ${startY + controlOffset * direction}, ${endX} ${endY - controlOffset * direction}, ${endX} ${endY}`;
 }
 
 function clampDraftSpawnCount(valueRaw: number): number {
@@ -418,6 +390,7 @@ export function DroneCanvasDock({
     })),
   );
   const viewportRef = React.useRef<HTMLDivElement | null>(null);
+  const worldLayerRef = React.useRef<HTMLDivElement | null>(null);
   const lineageMarkerId = React.useId();
   const nodeDragRef = React.useRef<NodeDragState | null>(null);
   const panDragRef = React.useRef<PanDragState | null>(null);
@@ -439,6 +412,7 @@ export function DroneCanvasDock({
   const [draftSpawnCount, setDraftSpawnCount] = React.useState('1');
   const [messageError, setMessageError] = React.useState<string | null>(null);
   const [messagePendingCount, setMessagePendingCount] = React.useState(0);
+  const [renderedNodeBoundsById, setRenderedNodeBoundsById] = React.useState<Record<string, CanvasRect>>({});
   const messageInputRef = React.useRef<HTMLTextAreaElement | null>(null);
   const draftCreateInFlightRef = React.useRef<Set<string>>(new Set());
   const messageSending = messagePendingCount > 0;
@@ -462,6 +436,18 @@ export function DroneCanvasDock({
     }
     return out;
   }, [droneNameById, nodes]);
+  const fallbackNodeBoundsById = React.useMemo(() => {
+    const out: Record<string, CanvasRect> = {};
+    for (const node of nodes) {
+      out[node.droneId] = {
+        x: node.x,
+        y: node.y,
+        width: nodeWidthByDroneId[node.droneId] ?? NODE_MIN_WIDTH_PX,
+        height: NODE_HEIGHT_PX,
+      };
+    }
+    return out;
+  }, [nodeWidthByDroneId, nodes]);
   const lineageEdges = React.useMemo(() => {
     const preferredNodeByDroneId: Record<string, (typeof nodes)[number]> = {};
     for (const node of nodes) {
@@ -484,18 +470,9 @@ export function DroneCanvasDock({
       const childNode = preferredNodeByDroneId[childDroneId];
       const parentNode = preferredNodeByDroneId[parentDroneId];
       if (!childNode || !parentNode) continue;
-      const source = {
-        x: parentNode.x,
-        y: parentNode.y,
-        width: nodeWidthByDroneId[parentNode.droneId] ?? NODE_MIN_WIDTH_PX,
-        height: NODE_HEIGHT_PX,
-      };
-      const target = {
-        x: childNode.x,
-        y: childNode.y,
-        width: nodeWidthByDroneId[childNode.droneId] ?? NODE_MIN_WIDTH_PX,
-        height: NODE_HEIGHT_PX,
-      };
+      const source = renderedNodeBoundsById[parentNode.droneId] ?? fallbackNodeBoundsById[parentNode.droneId];
+      const target = renderedNodeBoundsById[childNode.droneId] ?? fallbackNodeBoundsById[childNode.droneId];
+      if (!source || !target) continue;
       const { startX, startY, endX, endY } = resolveLineageEndpoint(source, target);
       edges.push({
         key: `${parentDroneId}->${childDroneId}`,
@@ -503,7 +480,7 @@ export function DroneCanvasDock({
       });
     }
     return edges;
-  }, [fleetParentIdByDroneId, nodeWidthByDroneId, nodes]);
+  }, [fallbackNodeBoundsById, fleetParentIdByDroneId, nodes, renderedNodeBoundsById]);
   const selectedDroneIdSet = React.useMemo(() => new Set(selectedDroneIds), [selectedDroneIds]);
   const selectedDraftNodeId = React.useMemo(() => {
     if (selectedDroneIds.length !== 1) return null;
@@ -550,6 +527,22 @@ export function DroneCanvasDock({
       delete nodeElementByDroneIdRef.current[key];
     }
   }, [nodeOrder]);
+
+  React.useLayoutEffect(() => {
+    const worldLayer = worldLayerRef.current;
+    if (!worldLayer || nodes.length === 0) {
+      setRenderedNodeBoundsById((prev) => (Object.keys(prev).length === 0 ? prev : {}));
+      return;
+    }
+    const worldRect = worldLayer.getBoundingClientRect();
+    const next: Record<string, CanvasRect> = {};
+    for (const node of nodes) {
+      const element = nodeElementByDroneIdRef.current[node.droneId];
+      if (!element) continue;
+      next[node.droneId] = measureRectInWorldSpace(element.getBoundingClientRect(), worldRect, scale);
+    }
+    setRenderedNodeBoundsById((prev) => (areCanvasRectMapsEqual(prev, next) ? prev : next));
+  }, [nodes, scale]);
 
   const focusMessageInput = React.useCallback(() => {
     requestAnimationFrame(() => {
@@ -1880,6 +1873,7 @@ export function DroneCanvasDock({
         />
 
         <div
+          ref={worldLayerRef}
           className="absolute left-0 top-0"
           style={{
             transform: `translate(${panX}px, ${panY}px) scale(${scale})`,
