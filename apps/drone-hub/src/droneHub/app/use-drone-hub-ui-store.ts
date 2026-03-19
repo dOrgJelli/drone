@@ -25,7 +25,6 @@ import {
 } from './automation-config';
 import {
   createDefaultKanbanBoardState,
-  sanitizeKanbanBoardState,
   type KanbanBoardState,
 } from './kanban-board-state';
 
@@ -356,7 +355,7 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
       setKanbanBoardOpen: (next) => set((s) => ({ kanbanBoardOpen: resolveNext(s.kanbanBoardOpen, next) })),
       setKanbanBoard: (next) =>
         set((s) => ({
-          kanbanBoard: sanitizeKanbanBoardState(resolveNext(s.kanbanBoard, next)),
+          kanbanBoard: resolveNext(s.kanbanBoard, next),
         })),
       setGroupBroadcastExpanded: (next) => set((s) => ({ groupBroadcastExpanded: resolveNext(s.groupBroadcastExpanded, next) })),
       setGroupMultiChatColumnWidth: (next) =>
