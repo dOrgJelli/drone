@@ -14,7 +14,11 @@ export type KanbanBoardState = {
   lanes: KanbanLane[];
 };
 
-const DEFAULT_FIRST_LANE_TITLE = 'Inbox';
+const DEFAULT_KANBAN_LANE_TITLES = ['To do', 'In progress', 'Review', 'Done'] as const;
+
+function defaultKanbanLaneTitle(index: number): string {
+  return DEFAULT_KANBAN_LANE_TITLES[index] ?? `Lane ${index + 1}`;
+}
 
 function createKanbanId(prefix: 'lane' | 'card'): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
@@ -32,14 +36,14 @@ export function createKanbanLane(seed?: Partial<Pick<KanbanLane, 'title' | 'card
   const cards = Array.isArray(seed?.cards) ? seed.cards : [];
   return {
     id: createKanbanId('lane'),
-    title: String(seed?.title ?? '').trim() || DEFAULT_FIRST_LANE_TITLE,
+    title: String(seed?.title ?? '').trim() || defaultKanbanLaneTitle(0),
     cards: cards.map((card) => createKanbanCard(card)),
   };
 }
 
 export function createDefaultKanbanBoardState(): KanbanBoardState {
   return {
-    lanes: [createKanbanLane({ title: DEFAULT_FIRST_LANE_TITLE })],
+    lanes: DEFAULT_KANBAN_LANE_TITLES.map((title) => createKanbanLane({ title })),
   };
 }
 
@@ -51,7 +55,7 @@ export function sanitizeKanbanBoardState(value: unknown): KanbanBoardState {
     const laneRaw = lanesRaw[i];
     if (!laneRaw || typeof laneRaw !== 'object' || Array.isArray(laneRaw)) continue;
     const laneRecord = laneRaw as Record<string, unknown>;
-    const title = String(laneRecord.title ?? '').trim() || (i === 0 ? DEFAULT_FIRST_LANE_TITLE : `Lane ${i + 1}`);
+    const title = String(laneRecord.title ?? '').trim() || defaultKanbanLaneTitle(i);
     const cardsRaw = Array.isArray(laneRecord.cards) ? laneRecord.cards : [];
     const cards: KanbanCard[] = [];
     for (const cardRaw of cardsRaw) {
