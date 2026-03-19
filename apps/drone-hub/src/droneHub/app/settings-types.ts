@@ -1,3 +1,5 @@
+import type { KanbanBoardState } from './kanban-board-state';
+
 export type LlmProviderId = 'openai' | 'gemini';
 export type DroneDeleteMode = 'permanent' | 'archive';
 export type ArchiveRetentionId = '1h' | '8h' | '1d' | '1w';
@@ -55,6 +57,12 @@ export type FilesystemSettingsResponse = {
     maxUploadMaxBytes: number;
     defaultUploadMaxBytes: number;
   };
+};
+
+export type KanbanBoardSettingsResponse = {
+  ok: true;
+  kanbanBoard: KanbanBoardState;
+  updatedAt: string | null;
 };
 
 export type ArchivedDroneSummary = {

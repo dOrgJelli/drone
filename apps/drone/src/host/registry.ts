@@ -33,6 +33,18 @@ type DroneRegistryV1 = {
       uploadMaxBytes?: number;
       updatedAt?: string;
     };
+    kanbanBoard?: {
+      lanes?: Array<{
+        id?: string;
+        title?: string;
+        cards?: Array<{
+          id?: string;
+          title?: string;
+          description?: string;
+        }>;
+      }>;
+      updatedAt?: string;
+    };
   };
   /**
    * Host-side list of repositories the user has "registered" with `drone repo`.

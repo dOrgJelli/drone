@@ -36,6 +36,7 @@ type UseDroneHubLifecycleEffectsArgs = {
   droneErrorModal: DroneErrorModalState | null;
   setDroneErrorModal: Setter<DroneErrorModalState | null>;
   openDraftChatComposer: (opts?: { repoPath?: string | null; group?: string | null }) => void;
+  openKanbanBoard: () => void;
   openGroupMultiChat: (group: string) => void;
   openSidebarVisibleMultiChat: () => void;
   toggleTldrFromShortcut: () => void;
@@ -60,6 +61,7 @@ type UseDroneHubLifecycleEffectsArgs = {
   rightPanelBottomTab: RightPanelTab;
   setRightPanelOpen: Setter<boolean>;
   rightPanelWidth: number;
+  rightPanelWidthMode: string;
   rightPanelWidthMax: number;
   setRightPanelWidth: Setter<number>;
   setRightPanelTab: Setter<RightPanelTab>;
@@ -104,6 +106,7 @@ export function useDroneHubLifecycleEffects({
   droneErrorModal,
   setDroneErrorModal,
   openDraftChatComposer,
+  openKanbanBoard,
   openGroupMultiChat,
   openSidebarVisibleMultiChat,
   toggleTldrFromShortcut,
@@ -271,6 +274,10 @@ export function useDroneHubLifecycleEffects({
         }
         return true;
       },
+      openKanbanBoard: () => {
+        openKanbanBoard();
+        return true;
+      },
       focusPrimaryChatInput: () => {
         const modalOpen = Boolean(document.querySelector('[role="dialog"][aria-modal="true"]'));
         if (modalOpen) return false;
@@ -408,6 +415,7 @@ export function useDroneHubLifecycleEffects({
   }, [
     currentDrone,
     openDraftChatComposer,
+    openKanbanBoard,
     openGroupMultiChat,
     openSidebarVisibleMultiChat,
     rightPanelBottomTab,

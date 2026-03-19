@@ -1,5 +1,6 @@
 export type ShortcutActionId =
   | 'createDraftDrone'
+  | 'openKanbanBoard'
   | 'focusPrimaryChatInput'
   | 'markSelectedDronesUnread'
   | 'toggleSidebarCollapsed'
@@ -35,6 +36,11 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     id: 'createDraftDrone',
     label: 'Create new drone',
     description: 'Opens the quick single-drone composer.',
+  },
+  {
+    id: 'openKanbanBoard',
+    label: 'Open task board',
+    description: 'Opens the full-window Kanban board.',
   },
   {
     id: 'focusPrimaryChatInput',
@@ -100,6 +106,7 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
 
 const DEFAULT_SHORTCUT_BINDINGS: ShortcutBindingMap = {
   createDraftDrone: { key: 'tab', mod: false, ctrl: false, meta: false, alt: false, shift: false },
+  openKanbanBoard: { key: 'z', mod: false, ctrl: false, meta: false, alt: false, shift: false },
   focusPrimaryChatInput: { key: 'enter', mod: false, ctrl: false, meta: false, alt: false, shift: false },
   markSelectedDronesUnread: { key: 'q', mod: false, ctrl: false, meta: false, alt: false, shift: false },
   toggleSidebarCollapsed: { key: 'a', mod: false, ctrl: false, meta: false, alt: false, shift: false },
@@ -162,6 +169,7 @@ export function sanitizeSingleShortcutBinding(value: unknown, fallback: Shortcut
 export function cloneDefaultShortcutBindings(): ShortcutBindingMap {
   return {
     createDraftDrone: { ...DEFAULT_SHORTCUT_BINDINGS.createDraftDrone! },
+    openKanbanBoard: { ...DEFAULT_SHORTCUT_BINDINGS.openKanbanBoard! },
     focusPrimaryChatInput: { ...DEFAULT_SHORTCUT_BINDINGS.focusPrimaryChatInput! },
     markSelectedDronesUnread: { ...DEFAULT_SHORTCUT_BINDINGS.markSelectedDronesUnread! },
     toggleSidebarCollapsed: { ...DEFAULT_SHORTCUT_BINDINGS.toggleSidebarCollapsed! },

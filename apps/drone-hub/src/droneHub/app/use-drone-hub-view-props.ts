@@ -35,6 +35,7 @@ export function useDroneHubSidebarProps(args: any): DroneSidebarProps {
     draftSidebarPlaceholder,
     openDraftChatComposer,
     openCreateModal,
+    openKanbanBoard,
     selectDroneCard,
     selectDroneChat,
     openCloneModal,
@@ -91,6 +92,7 @@ export function useDroneHubSidebarProps(args: any): DroneSidebarProps {
     draftSidebarPlaceholder,
     onOpenDraftChatComposer: openDraftChatComposer,
     onOpenCreateModal: openCreateModal,
+    onOpenKanbanBoard: openKanbanBoard,
     onSelectDroneCard: selectDroneCard,
     onSelectDroneChat: (droneId, chatName) => {
       selectDroneChat(droneId, chatName);
@@ -388,6 +390,14 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
     onReplayOnboarding,
     onResetOnboarding,
     draftChat,
+    kanbanBoardOpen,
+    kanbanBoard,
+    setKanbanBoard,
+    boardLoading,
+    boardSaving,
+    boardError,
+    boardUpdatedAt,
+    reloadBoard,
     nowMs,
     createRuntime,
     setCreateRuntime,
@@ -398,6 +408,7 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
     draftAutoRenaming,
     spawnAgentConfig,
     createRepoMenuEntries,
+    setCustomAgentModalOpen,
     draftCreateName,
     draftCreateGroup,
     draftCreateError,
@@ -427,6 +438,7 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
     dronesError,
     openDraftChatComposer,
     openCreateModal,
+    openKanbanBoard,
     currentDrone,
     currentDroneLabel,
     showRespondingAsStatusInHeader,
@@ -539,6 +551,7 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
     startRightPanelResize,
     renderRightPanelTabContent,
     renderPersistentPreviewContent,
+    setKanbanBoardOpen,
   } = args;
 
   return {
@@ -590,6 +603,22 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
           onCreateEmptyDrone: () => createDroneFromDraft({ createMode: 'without-chat' }),
         }
       : null,
+    kanbanBoardWorkspaceProps: kanbanBoardOpen
+      ? {
+          board: kanbanBoard,
+          spawnAgentMenuEntries,
+          spawnAgentConfig,
+          createRepoMenuEntries,
+          boardLoading,
+          boardSaving,
+          boardError,
+          boardUpdatedAt,
+          onReloadBoard: reloadBoard,
+          onOpenCustomAgentModal: () => setCustomAgentModalOpen(true),
+          onBoardChange: setKanbanBoard,
+          onClose: () => setKanbanBoardOpen(false),
+        }
+      : null,
     groupMultiChatWorkspaceProps: selectedGroupMultiChatData
       ? {
           selectedGroupMultiChatData,
@@ -610,6 +639,7 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
       dronesError,
       onOpenDraftChatComposer: openDraftChatComposer,
       onOpenCreateModal: openCreateModal,
+      onOpenKanbanBoard: openKanbanBoard,
     },
     renderPersistentPreviewContent,
     selectedDroneWorkspaceProps: currentDrone

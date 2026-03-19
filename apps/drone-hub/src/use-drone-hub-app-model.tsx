@@ -37,6 +37,7 @@ import { useGroupBroadcast } from './droneHub/app/use-group-broadcast';
 import { useGroupManagement } from './droneHub/app/use-group-management';
 import { useJobsWorkflow } from './droneHub/app/use-jobs-workflow';
 import { useLlmSettings } from './droneHub/app/use-llm-settings';
+import { useKanbanBoardSettings } from './droneHub/app/use-kanban-board-settings';
 import { useDeleteActionSettings } from './droneHub/app/use-delete-action-settings';
 import { useFilesystemSettings } from './droneHub/app/use-filesystem-settings';
 import { useQueuedPromptsState } from './droneHub/app/use-queued-prompts-state';
@@ -128,6 +129,8 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     selectedDrone,
     selectedDroneIds,
     selectedGroupMultiChat,
+    kanbanBoardOpen,
+    kanbanBoard,
     selectedChat,
     draftChat,
     reposModalOpen,
@@ -154,6 +157,8 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setSelectedDrone,
     setSelectedDroneIds,
     setSelectedGroupMultiChat,
+    setKanbanBoardOpen,
+    setKanbanBoard,
     setGroupBroadcastExpanded,
     setSelectedChat,
     setDraftChat,
@@ -407,6 +412,17 @@ export function useDroneHubAppModel(): DroneHubAppModel {
   const previousBusyChatNodeIdSetRef = React.useRef<Set<string>>(new Set());
   const droneIdentityByNameRef = React.useRef<Record<string, string>>({});
   const llmSettingsState = useLlmSettings(requestJson);
+  const {
+    boardLoading,
+    boardSaving,
+    boardError,
+    boardUpdatedAt,
+    reloadBoard,
+  } = useKanbanBoardSettings({
+    board: kanbanBoard,
+    setBoard: setKanbanBoard,
+    requestJson,
+  });
   const deleteActionSettingsState = useDeleteActionSettings(requestJson);
   const filesystemSettingsState = useFilesystemSettings(requestJson);
   const { llmSettings } = llmSettingsState;
@@ -728,27 +744,62 @@ export function useDroneHubAppModel(): DroneHubAppModel {
       setChatHeaderRepoPath,
       setSelectedDrone,
       setSelectedDroneIds,
+      setKanbanBoardOpen,
       setSelectedChat,
       resetDraftNameSuggestSeq: () => {
         draftNameSuggestSeqRef.current = 0;
       },
     });
 
+  const openKanbanBoard = React.useCallback(() => {
+    setAppView('workspace');
+    setCreateOpen(false);
+    setCreateError(null);
+    setDraftChat(null);
+    setDraftCreateOpen(false);
+    setDraftCreateError(null);
+    setSelectedGroupMultiChat(null);
+    setSelectedDrone(null);
+    setSelectedDroneIds([]);
+    selectionAnchorRef.current = null;
+    preferredSelectedDroneRef.current = null;
+    preferredSelectedDroneHoldUntilRef.current = 0;
+    setSelectedChat('default');
+    setKanbanBoardOpen(true);
+  }, [
+    preferredSelectedDroneHoldUntilRef,
+    preferredSelectedDroneRef,
+    selectionAnchorRef,
+    setAppView,
+    setCreateError,
+    setCreateOpen,
+    setDraftChat,
+    setDraftCreateError,
+    setDraftCreateOpen,
+    setKanbanBoardOpen,
+    setSelectedChat,
+    setSelectedDrone,
+    setSelectedDroneIds,
+    setSelectedGroupMultiChat,
+  ]);
+
   const openGroupMultiChat = React.useCallback(
     (groupRaw: string) => {
       const group = String(groupRaw ?? '').trim();
       if (!group) return;
       setAppView('workspace');
+      setKanbanBoardOpen(false);
       setDraftChat(null);
       setDraftCreateOpen(false);
       setDraftCreateError(null);
       setSelectedGroupMultiChat(group);
     },
-    [setAppView, setDraftChat, setDraftCreateError, setDraftCreateOpen, setSelectedGroupMultiChat],
+    [setAppView, setDraftChat, setDraftCreateError, setDraftCreateOpen, setKanbanBoardOpen, setSelectedGroupMultiChat],
   );
   const openSidebarVisibleMultiChat = React.useCallback(() => {
     if (sidebarVisibleDrones.length === 0) return;
     setAppView('workspace');
+    setKanbanBoardOpen(false);
     setDraftChat(null);
     setDraftCreateOpen(false);
     setDraftCreateError(null);
@@ -758,6 +809,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setDraftChat,
     setDraftCreateError,
     setDraftCreateOpen,
+    setKanbanBoardOpen,
     setSelectedGroupMultiChat,
     sidebarVisibleDrones.length,
   ]);
@@ -876,6 +928,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setSelectedDrone,
     setSelectedDroneIds,
     setSelectedGroupMultiChat,
+    setKanbanBoardOpen,
     setSelectedChat,
   });
   const selectDroneCard = React.useCallback(
@@ -1142,6 +1195,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     droneErrorModal,
     setDroneErrorModal,
     openDraftChatComposer,
+    openKanbanBoard,
     openGroupMultiChat,
     openSidebarVisibleMultiChat,
     toggleTldrFromShortcut,
@@ -2018,6 +2072,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     draftSidebarPlaceholder,
     openDraftChatComposer,
     openCreateModal,
+    openKanbanBoard,
     selectDroneCard,
     selectDroneChat,
     openCloneModal,
@@ -2158,6 +2213,14 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     onReplayOnboarding: requestGuidedOnboardingReplay,
     onResetOnboarding: resetGuidedOnboardingDismissals,
     draftChat,
+    kanbanBoardOpen,
+    kanbanBoard,
+    setKanbanBoard,
+    boardLoading,
+    boardSaving,
+    boardError,
+    boardUpdatedAt,
+    reloadBoard,
     nowMs,
     createRuntime,
     setCreateRuntime,
@@ -2168,6 +2231,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     draftAutoRenaming,
     spawnAgentConfig,
     createRepoMenuEntries,
+    setCustomAgentModalOpen,
     draftCreateName,
     draftCreateGroup,
     draftCreateError,
@@ -2197,6 +2261,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     dronesError,
     openDraftChatComposer,
     openCreateModal,
+    openKanbanBoard,
     currentDrone,
     currentDroneLabel,
     showRespondingAsStatusInHeader,

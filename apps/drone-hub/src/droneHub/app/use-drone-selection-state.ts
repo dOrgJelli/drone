@@ -41,6 +41,7 @@ type UseDroneSelectionStateArgs = {
   setSelectedDrone: React.Dispatch<React.SetStateAction<string | null>>;
   setSelectedDroneIds: React.Dispatch<React.SetStateAction<string[]>>;
   setSelectedGroupMultiChat: React.Dispatch<React.SetStateAction<string | null>>;
+  setKanbanBoardOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setSelectedChat: React.Dispatch<React.SetStateAction<string>>;
 };
 
@@ -66,6 +67,7 @@ export function useDroneSelectionState({
   setSelectedDrone,
   setSelectedDroneIds,
   setSelectedGroupMultiChat,
+  setKanbanBoardOpen,
   setSelectedChat,
 }: UseDroneSelectionStateArgs) {
   const lastSelectedChatByDroneRef = React.useRef<Record<string, string>>({});
@@ -96,6 +98,7 @@ export function useDroneSelectionState({
       preferredSelectedDroneHoldUntilRef.current = 0;
       setAppView('workspace');
       setSelectedGroupMultiChat(null);
+      setKanbanBoardOpen(false);
       setDraftChat(null);
       setDraftCreateOpen(false);
       setDraftCreateError(null);
@@ -144,6 +147,7 @@ export function useDroneSelectionState({
       setDraftChat,
       setDraftCreateError,
       setDraftCreateOpen,
+      setKanbanBoardOpen,
       setSelectedChat,
       setSelectedDrone,
       setSelectedDroneIds,
@@ -176,6 +180,14 @@ export function useDroneSelectionState({
 
   // Auto-select first drone (and recover from deletions).
   React.useEffect(() => {
+    if (kanbanBoardOpen) {
+      if (selectedDrone) setSelectedDrone(null);
+      setSelectedDroneIds((prev) => (prev.length === 0 ? prev : []));
+      selectionAnchorRef.current = null;
+      preferredSelectedDroneRef.current = null;
+      preferredSelectedDroneHoldUntilRef.current = 0;
+      return;
+    }
     if (draftChat) {
       if (!draftChat.prompt) {
         if (selectedDrone) setSelectedDrone(null);
@@ -229,6 +241,7 @@ export function useDroneSelectionState({
   }, [
     draftChat,
     dronesFilteredByRepo,
+    kanbanBoardOpen,
     preferredSelectedDroneHoldUntilRef,
     preferredSelectedDroneRef,
     resolveChatForDrone,

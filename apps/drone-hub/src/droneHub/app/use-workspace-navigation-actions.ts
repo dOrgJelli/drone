@@ -39,6 +39,7 @@ type UseWorkspaceNavigationActionsArgs = {
   setChatHeaderRepoPath: React.Dispatch<React.SetStateAction<string>>;
   setSelectedDrone: React.Dispatch<React.SetStateAction<string | null>>;
   setSelectedDroneIds: React.Dispatch<React.SetStateAction<string[]>>;
+  setKanbanBoardOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setSelectedChat: React.Dispatch<React.SetStateAction<string>>;
   resetDraftNameSuggestSeq: () => void;
 };
@@ -84,12 +85,14 @@ export function useWorkspaceNavigationActions({
   setChatHeaderRepoPath,
   setSelectedDrone,
   setSelectedDroneIds,
+  setKanbanBoardOpen,
   setSelectedChat,
   resetDraftNameSuggestSeq,
 }: UseWorkspaceNavigationActionsArgs) {
   const openCreateModal = React.useCallback(() => {
     if (creating) return;
     setAppView('workspace');
+    setKanbanBoardOpen(false);
     setDraftChat(null);
     setDraftCreateOpen(false);
     setDraftCreateError(null);
@@ -115,6 +118,7 @@ export function useWorkspaceNavigationActions({
     creating,
     normalizeCreateRepoPath,
     setAppView,
+    setKanbanBoardOpen,
     setCloneIncludeChats,
     setCloneSourceId,
     setCreateError,
@@ -142,6 +146,7 @@ export function useWorkspaceNavigationActions({
       setChatHeaderRepoPath(normalizeCreateRepoPath(activeRepo));
     }
     setAppView('workspace');
+    setKanbanBoardOpen(false);
     setCreateOpen(false);
     setCreateError(null);
     setDraftCreateOpen(false);
@@ -171,6 +176,7 @@ export function useWorkspaceNavigationActions({
     selectionAnchorRef,
     setAppView,
     setChatHeaderRepoPath,
+    setKanbanBoardOpen,
     setCreateError,
     setCreateOpen,
     setCreateRuntime,
@@ -195,6 +201,7 @@ export function useWorkspaceNavigationActions({
       const sourceRuntime = String(source?.runtime ?? 'container').trim().toLowerCase();
       if (sourceRuntime === 'host') return;
       setAppView('workspace');
+      setKanbanBoardOpen(false);
       setDraftChat(null);
       setDraftCreateOpen(false);
       setDraftCreateError(null);
@@ -222,6 +229,7 @@ export function useWorkspaceNavigationActions({
       normalizeCreateRepoPath,
       renamingDrones,
       setAppView,
+      setKanbanBoardOpen,
       setCloneIncludeChats,
       setCloneSourceId,
       setCreateError,

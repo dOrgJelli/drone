@@ -37,6 +37,22 @@ export function IconColumns({ className }: { className?: string }) {
   );
 }
 
+export function IconBoard({ className }: { className?: string }) {
+  return (
+    <svg className={className} width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="1.5" y="2.5" width="4" height="11" rx="1" />
+      <rect x="6" y="2.5" width="4" height="11" rx="1" />
+      <rect x="10.5" y="2.5" width="4" height="11" rx="1" />
+      <path d="M2.7 5h1.6" />
+      <path d="M7.2 5h1.6" />
+      <path d="M11.7 5h1.6" />
+      <path d="M2.7 7.7h1" />
+      <path d="M7.2 7.7h1" />
+      <path d="M11.7 7.7h1" />
+    </svg>
+  );
+}
+
 export function IconAutoMinimize({ className }: { className?: string }) {
   return (
     <svg className={className} width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
