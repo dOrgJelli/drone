@@ -17,6 +17,7 @@ import {
   hostDroneDaemonTokenPath,
   hostDroneRootPath,
   hostDroneWorkspacePath,
+  installFleetCliScript,
   normalizeDroneRuntime,
   type DroneRuntime,
 } from './host/runtime';
@@ -980,6 +981,10 @@ createCommand
       throw new Error(clearDaemonRuntime.stderr || clearDaemonRuntime.stdout || 'failed clearing daemon runtime in container');
     }
     await dvmCopyToContainer(containerName, resolveDroneDaemonRuntimeDir(), '/dvm-data/drone', { clean: false });
+    const installFleetCli = await dvmExec(containerName, 'bash', ['-lc', installFleetCliScript()]);
+    if (installFleetCli.code !== 0) {
+      throw new Error(installFleetCli.stderr || installFleetCli.stdout || 'failed installing fleet CLI in container');
+    }
 
     await dvmSessionStart(
       containerName,

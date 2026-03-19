@@ -27,6 +27,7 @@ export function useDroneHubRegistryData({
     2000,
     [],
   );
+  const dronesErrorUi = dronesResp ? null : dronesError;
   const polledDrones = dronesResp?.drones ?? [];
 
   const drones = React.useMemo(() => {
@@ -143,7 +144,7 @@ export function useDroneHubRegistryData({
   return {
     polledDrones,
     drones,
-    dronesError,
+    dronesError: dronesErrorUi,
     dronesLoading,
     repos,
     reposError,

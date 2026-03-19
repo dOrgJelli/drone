@@ -12,7 +12,7 @@ import { RawData, WebSocket, WebSocketServer } from 'ws';
 
 import { droneRootPath } from '../host/paths';
 import { loadRegistry, updateRegistry } from '../host/registry';
-import { normalizeDroneRuntime, type DroneRuntime } from '../host/runtime';
+import { installFleetCliScript, normalizeDroneRuntime, type DroneRuntime } from '../host/runtime';
 import {
   dvmBaseSet,
   dvmCopyFromContainer,
@@ -635,7 +635,13 @@ async function processFleetRequest(actorId: string, actorEntry: any, request: an
       status: 'accepted',
       target: target.id,
       targetName: target.name,
-      meta: { requestId: String(request?.id ?? ''), chat: chatName, promptId: enqueuedResult.id, pendingState: enqueuedResult.pendingState },
+      meta: {
+        requestId: String(request?.id ?? ''),
+        chat: chatName,
+        promptId: enqueuedResult.id,
+        pendingState: enqueuedResult.pendingState,
+        messagePreview: message.length > 400 ? `${message.slice(0, 397)}...` : message,
+      },
     });
     return {
       target,
@@ -5521,6 +5527,10 @@ async function upgradeDroneDaemonInContainer(opts: { containerName: string; cont
     throw new Error(clearDaemonRuntime.stderr || clearDaemonRuntime.stdout || 'failed clearing daemon runtime in container');
   }
   await dvmCopyToContainer(opts.containerName, resolveDroneDaemonRuntimeDir(), '/dvm-data/drone', { clean: false });
+  const installFleetCli = await dvmExec(opts.containerName, 'bash', ['-lc', installFleetCliScript()]);
+  if (installFleetCli.code !== 0) {
+    throw new Error(installFleetCli.stderr || installFleetCli.stdout || 'failed installing fleet CLI in container');
+  }
 
   // Restart daemon session so new code is loaded.
   await dvmExec(opts.containerName, 'bash', ['-lc', 'tmux kill-session -t drone-daemon 2>/dev/null || true']);

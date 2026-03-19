@@ -3,6 +3,10 @@ import { droneRootPath } from './paths';
 
 export type DroneRuntime = 'container' | 'host';
 
+function shellQuote(raw: string): string {
+  return `'${String(raw ?? '').replace(/'/g, `'\\''`)}'`;
+}
+
 function safePathSegment(raw: string, fallback: string): string {
   const cleaned = String(raw ?? '')
     .trim()
@@ -42,4 +46,19 @@ export function hostDroneDaemonTokenPath(droneIdRaw: string): string {
 
 export function hostDroneDaemonLogPath(droneIdRaw: string): string {
   return path.join(hostDroneRootPath(droneIdRaw), 'daemon.log');
+}
+
+export function installFleetCliScript(opts?: { runtimeDir?: string; binPath?: string }): string {
+  const runtimeDir = String(opts?.runtimeDir ?? '/dvm-data/drone/dist').trim() || '/dvm-data/drone/dist';
+  const binPath = String(opts?.binPath ?? '/usr/local/bin/fleet').trim() || '/usr/local/bin/fleet';
+  const fleetJs = path.posix.join(runtimeDir, 'fleet.js');
+  return [
+    'set -euo pipefail',
+    `mkdir -p ${shellQuote(path.posix.dirname(binPath))}`,
+    `cat > ${shellQuote(binPath)} <<'EOF'`,
+    '#!/usr/bin/env bash',
+    `exec node ${shellQuote(fleetJs)} "$@"`,
+    'EOF',
+    `chmod 755 ${shellQuote(binPath)}`,
+  ].join('\n');
 }
