@@ -54,7 +54,10 @@ export function fleetActorConfig(entry: any): FleetActorConfig {
   const raw = entry?.fleet && typeof entry.fleet === 'object' ? entry.fleet : {};
   return {
     enabled: raw.enabled === true,
-    capabilities: sanitizeFleetCapabilities(raw.capabilities),
+    capabilities:
+      raw.capabilities === undefined
+        ? [FLEET_CAPABILITY_CREATE, FLEET_CAPABILITY_SEND, FLEET_CAPABILITY_READ]
+        : sanitizeFleetCapabilities(raw.capabilities),
     readScopes: sanitizeFleetReadScopes(raw.readScopes),
     assigned: sanitizeFleetAssigned(raw.assigned),
     quotas: sanitizeFleetQuotas(raw.quotas),

@@ -136,9 +136,9 @@ function policyDraftStateFromPayload(data: FleetActorPayload | null): FleetPolic
   return {
     enabled: data?.config.enabled ?? false,
     capabilities: {
-      'drone:create': Boolean(data?.config.capabilities.includes('drone:create')),
-      'drone:message:send': Boolean(data?.config.capabilities.includes('drone:message:send')),
-      'drone:message:read': Boolean(data?.config.capabilities.includes('drone:message:read')),
+      'drone:create': data ? Boolean(data.config.capabilities.includes('drone:create')) : true,
+      'drone:message:send': data ? Boolean(data.config.capabilities.includes('drone:message:send')) : true,
+      'drone:message:read': data ? Boolean(data.config.capabilities.includes('drone:message:read')) : true,
     },
     readScopes: {
       children: Boolean(data?.config.readScopes.includes('children') ?? true),
@@ -200,9 +200,9 @@ export function DroneFleetDock({
   const [error, setError] = React.useState<string | null>(null);
   const [enabled, setEnabled] = React.useState(false);
   const [capabilities, setCapabilities] = React.useState<Record<string, boolean>>({
-    'drone:create': false,
-    'drone:message:send': false,
-    'drone:message:read': false,
+    'drone:create': true,
+    'drone:message:send': true,
+    'drone:message:read': true,
   });
   const [readScopes, setReadScopes] = React.useState<Record<string, boolean>>({
     children: true,
