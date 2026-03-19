@@ -44,7 +44,7 @@ import {
   terminalOutput as droneTerminalOutput,
   terminalPrompt as droneTerminalPrompt,
 } from '../host/api';
-import { jobsPlanFromAgentMessage, suggestDroneNameFromMessage } from './jobs-from-message';
+import { jobsPlanFromAgentMessage, suggestDroneNameFromMessage, suggestTaskTitleFromMessage } from './jobs-from-message';
 import { tldrFromAgentMessage } from './tldr-from-message';
 import { cloneChatEntryForDroneClone, maybeBootstrapPromptFromTranscript } from './chat-clone';
 import { hasActivePriorPendingPrompt, shouldDeferQueuedTranscriptPrompt, stalePendingPromptState } from './pendingPromptEnqueue';
@@ -7329,6 +7329,69 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             requestedDroneId,
             messageLength,
             model: String(process.env.DRONE_HUB_DRONE_NAME_MODEL ?? '').trim() || null,
+            error: e?.message ?? String(e),
+          });
+          json(res, 500, { ok: false, error: e?.message ?? String(e) });
+          return;
+        }
+      }
+
+      // POST /api/tasks/title-from-message
+      // Suggests a human-readable task title from pasted task text.
+      if (method === 'POST' && pathname === '/api/tasks/title-from-message') {
+        let body: any = null;
+        try {
+          body = await readJsonBody(req);
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+          return;
+        }
+
+        const message = String(body?.message ?? '').trim();
+        if (!message) {
+          json(res, 400, { ok: false, error: 'missing message' });
+          return;
+        }
+        const sourceRaw = typeof body?.source === 'string' ? body.source.trim() : '';
+        const source = sourceRaw ? sourceRaw.slice(0, 64) : null;
+        const messageLength = message.length;
+
+        let selectedProvider: LlmProviderId | null = null;
+        try {
+          const { provider } = await resolveEffectiveLlmProvider();
+          selectedProvider = provider;
+          const resolved = await resolveEffectiveProviderApiKeySettings(provider);
+          if (!resolved.apiKey) {
+            if (source) {
+              hubLog('warn', 'task-title-from-message rejected: missing provider key', {
+                provider,
+                source,
+                messageLength,
+              });
+            }
+            json(res, 412, {
+              ok: false,
+              error: `Missing ${providerDisplayName(provider)} API key. Configure it in Settings.`,
+            });
+            return;
+          }
+          const title = await suggestTaskTitleFromMessage(message, { provider, apiKey: resolved.apiKey });
+          if (source) {
+            hubLog('info', 'task-title-from-message suggested', {
+              provider,
+              source,
+              suggestedTitle: title,
+              messageLength,
+            });
+          }
+          json(res, 200, { ok: true, title });
+          return;
+        } catch (e: any) {
+          hubLog('error', 'task-title-from-message request failed', {
+            provider: selectedProvider,
+            source,
+            messageLength,
+            model: String(process.env.DRONE_HUB_TASK_TITLE_MODEL ?? '').trim() || null,
             error: e?.message ?? String(e),
           });
           json(res, 500, { ok: false, error: e?.message ?? String(e) });
