@@ -2,8 +2,8 @@ import React from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { ChatInput, type ChatImageAttachmentPayload, type ChatInputAutomationAction, type ChatSendPayload, EmptyState, PendingTranscriptTurn } from '../chat';
 import { draftChatInputResetKey, droneChatQueueKey } from './helpers';
-import { IconChat, IconChevron } from './icons';
-import { UiMenuSelect, type UiMenuSelectEntry } from '../../ui/menuSelect';
+import { IconChat } from './icons';
+import type { UiMenuSelectEntry } from '../../ui/menuSelect';
 import type { ChatAgentConfig } from '../../domain';
 import type { DraftChatState } from './app-types';
 import type { QueuedPrompt } from './use-queued-prompts-state';
@@ -22,6 +22,7 @@ import {
 import type { DraftAutomationStartInput } from './use-drone-creation-actions';
 import { SegmentedToolbarToggle } from './SegmentedToolbarToggle';
 import { visibleDraftQueuedPrompts as resolveVisibleDraftQueuedPrompts } from './draft-chat-queue';
+import { SpawnContextToolbar } from './SpawnContextToolbar';
 
 type DraftChatWorkspaceProps = {
   draftChat: DraftChatState;
@@ -82,26 +83,14 @@ export function DraftChatWorkspace({
   onSetDraftCreateError,
 }: DraftChatWorkspaceProps) {
   const {
-    spawnAgentKey,
-    spawnModel,
-    chatHeaderRepoPath,
     pullHostBranchBeforeCreate,
     automations,
-    setSpawnAgentKey,
-    setSpawnModel,
-    setChatHeaderRepoPath,
     setPullHostBranchBeforeCreate,
     setCustomAgentModalOpen,
   } = useDroneHubUiStore(
     useShallow((s) => ({
-      spawnAgentKey: s.spawnAgentKey,
-      spawnModel: s.spawnModel,
-      chatHeaderRepoPath: s.chatHeaderRepoPath,
       pullHostBranchBeforeCreate: s.pullHostBranchBeforeCreate,
       automations: s.automations,
-      setSpawnAgentKey: s.setSpawnAgentKey,
-      setSpawnModel: s.setSpawnModel,
-      setChatHeaderRepoPath: s.setChatHeaderRepoPath,
       setPullHostBranchBeforeCreate: s.setPullHostBranchBeforeCreate,
       setCustomAgentModalOpen: s.setCustomAgentModalOpen,
     })),
@@ -305,91 +294,20 @@ export function DraftChatWorkspace({
                 Clear
               </button>
             </div>
-            {createWithChat ? (
-              <div className="flex items-center gap-1.5">
-                <span className="text-[10px] font-semibold text-[var(--muted-dim)] tracking-wide uppercase" style={{ fontFamily: 'var(--display)' }}>
-                  Agent
-                </span>
-                <UiMenuSelect
-                  variant="toolbar"
-                  value={spawnAgentKey}
-                  onValueChange={setSpawnAgentKey}
-                  entries={filteredSpawnAgentMenuEntries}
-                  disabled={controlsLocked}
-                  triggerClassName="min-w-[170px] max-w-[240px]"
-                  panelClassName="w-[320px]"
-                  title="Choose agent for this new drone."
-                  chevron={() => <IconChevron down className="text-[var(--muted-dim)] opacity-60" />}
-                />
-                <button
-                  type="button"
-                  onClick={() => setCustomAgentModalOpen(true)}
-                  disabled={controlsLocked || hostCustomAgentsUnsupported}
-                  className={`inline-flex items-center gap-1 h-[28px] px-2 rounded border border-[var(--border-subtle)] text-[10px] font-semibold tracking-wide uppercase transition-all ${
-                    controlsLocked || hostCustomAgentsUnsupported
-                      ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)]'
-                      : 'bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)] hover:text-[var(--muted)] hover:border-[var(--border)]'
-                  }`}
-                  style={{ fontFamily: 'var(--display)' }}
-                  title={hostCustomAgentsUnsupported ? 'Custom agents are not yet supported for host runtime.' : 'Manage custom agents'}
-                >
-                  Custom
-                </button>
-              </div>
-            ) : null}
-            {createWithChat && spawnAgentConfig.kind === 'builtin' ? (
-              <div className="flex items-center gap-1.5">
-                <span className="text-[10px] font-semibold text-[var(--muted-dim)] tracking-wide uppercase" style={{ fontFamily: 'var(--display)' }}>
-                  Model
-                </span>
-                <input
-                  value={spawnModel}
-                  onChange={(e) => setSpawnModel(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Escape') e.currentTarget.blur();
-                  }}
-                  disabled={controlsLocked}
-                  placeholder="Default model"
-                  className={`h-[28px] w-[170px] rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-2 text-[11px] text-[var(--muted)] placeholder:text-[var(--muted-dim)] focus:outline-none transition-all font-mono ${
-                    controlsLocked ? 'opacity-40 cursor-not-allowed' : 'hover:text-[var(--fg-secondary)] hover:border-[var(--border)]'
-                  }`}
-                  title="Set default model for this new drone chat."
-                />
-                <button
-                  type="button"
-                  onClick={() => setSpawnModel('')}
-                  disabled={controlsLocked || !spawnModel.trim()}
-                  className={`inline-flex items-center gap-1 h-[28px] px-2 rounded border border-[var(--border-subtle)] text-[10px] font-semibold tracking-wide uppercase transition-all ${
-                    controlsLocked || !spawnModel.trim()
-                      ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)]'
-                      : 'bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)] hover:text-[var(--muted)] hover:border-[var(--border)]'
-                  }`}
-                  style={{ fontFamily: 'var(--display)' }}
-                  title="Clear model override"
-                >
-                  Clear
-                </button>
-              </div>
-            ) : null}
-            <div className="flex items-center gap-1.5">
-              <span className="text-[10px] font-semibold text-[var(--muted-dim)] tracking-wide uppercase" style={{ fontFamily: 'var(--display)' }}>
-                Repo
-              </span>
-              <UiMenuSelect
-                variant="toolbar"
-                value={chatHeaderRepoPath}
-                onValueChange={setChatHeaderRepoPath}
-                entries={createRepoMenuEntries}
-                disabled={controlsLocked}
-                triggerClassName="min-w-[220px] max-w-[420px]"
-                panelClassName="w-[720px] max-w-[calc(100vw-3rem)]"
-                menuClassName="max-h-[240px] overflow-y-auto"
-                title={chatHeaderRepoPath || 'No repo'}
-                triggerLabel={chatHeaderRepoPath || 'No repo'}
-                triggerLabelClassName={chatHeaderRepoPath ? 'font-mono text-[11px]' : undefined}
-                chevron={() => <IconChevron down className="text-[var(--muted-dim)] opacity-60" />}
-              />
-            </div>
+            <SpawnContextToolbar
+              agentMenuEntries={filteredSpawnAgentMenuEntries}
+              spawnAgentConfig={spawnAgentConfig}
+              createRepoMenuEntries={createRepoMenuEntries}
+              onOpenCustomAgentModal={() => setCustomAgentModalOpen(true)}
+              agentTitle="Choose agent for this new drone."
+              modelTitle="Set default model for this new drone chat."
+              customButtonTitle={
+                hostCustomAgentsUnsupported ? 'Custom agents are not yet supported for host runtime.' : 'Manage custom agents'
+              }
+              controlsLocked={controlsLocked}
+              showAgentControls={createWithChat}
+              customButtonDisabled={hostCustomAgentsUnsupported}
+            />
             <div className="flex items-center gap-1.5">
               <span className="text-[10px] font-semibold text-[var(--muted-dim)] tracking-wide uppercase" style={{ fontFamily: 'var(--display)' }}>
                 Group

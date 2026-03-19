@@ -114,6 +114,7 @@ import {
   parseLlmProvider,
   providerDisplayName,
   providerKeySettingsResponse,
+  resolveKanbanBoardSettingsResponse,
   resolveDeleteActionSettingsResponse,
   resolveEffectiveFilesystemSettings,
   resolveEffectiveDeleteActionSettings,
@@ -123,6 +124,7 @@ import {
   resolveLlmSettingsResponse,
   upsertStoredDeleteActionSettings,
   upsertStoredFilesystemSettings,
+  upsertStoredKanbanBoardSettings,
   upsertStoredLlmProvider,
   upsertStoredProviderApiKey,
   type ArchiveRetentionId,
@@ -7123,6 +7125,26 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           }
           await upsertStoredFilesystemSettings({ uploadMaxBytes });
           json(res, 200, await resolveFilesystemSettingsResponse());
+          return;
+        }
+      }
+
+      if (pathname === '/api/settings/kanban-board') {
+        if (method === 'GET') {
+          json(res, 200, await resolveKanbanBoardSettingsResponse());
+          return;
+        }
+
+        if (method === 'POST') {
+          let body: any = null;
+          try {
+            body = await readJsonBody(req);
+          } catch (e: any) {
+            json(res, 400, { ok: false, error: e?.message ?? String(e) });
+            return;
+          }
+          await upsertStoredKanbanBoardSettings(body?.kanbanBoard);
+          json(res, 200, await resolveKanbanBoardSettingsResponse());
           return;
         }
       }

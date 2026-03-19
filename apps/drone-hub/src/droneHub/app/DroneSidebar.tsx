@@ -6,7 +6,7 @@ import type { DroneSummary, RepoSummary } from '../types';
 import { DRONE_CHAT_DND_MIME, DRONE_DND_MIME, createCanvasChatNodeId } from './app-config';
 import { normalizedDroneChats } from './chat-node-helpers';
 import { compareDronesByNewestFirst, isDroneStartingOrSeeding } from './helpers';
-import { IconAutoMinimize, IconChevron, IconColumns, IconFolder, IconList, IconPencil, IconPlus, IconPlusDouble, IconSettings, IconSidebarCollapse, IconSidebarExpand, IconSpinner, IconTrash, SkeletonLine } from './icons';
+import { IconAutoMinimize, IconBoard, IconChevron, IconColumns, IconFolder, IconList, IconPencil, IconPlus, IconPlusDouble, IconSettings, IconSidebarCollapse, IconSidebarExpand, IconSpinner, IconTrash, SkeletonLine } from './icons';
 import { useDroneSidebarUiState } from './use-drone-hub-ui-store';
 import { SIDEBAR_VISIBLE_MULTI_CHAT_GROUP, type SidebarGroup } from './use-sidebar-view-model';
 
@@ -100,6 +100,7 @@ export type DroneSidebarProps = {
   draftSidebarPlaceholder: DraftSidebarPlaceholder | null;
   onOpenDraftChatComposer: () => void;
   onOpenCreateModal: () => void;
+  onOpenKanbanBoard: () => void;
   onSelectDroneCard: (droneId: string, opts?: { toggle?: boolean; range?: boolean }) => void;
   onSelectDroneChat: (droneId: string, chatName: string) => void;
   onOpenCloneModal: (drone: DroneSummary) => void;
@@ -163,6 +164,7 @@ export function DroneSidebar({
   draftSidebarPlaceholder,
   onOpenDraftChatComposer,
   onOpenCreateModal,
+  onOpenKanbanBoard,
   onSelectDroneCard,
   onSelectDroneChat,
   onOpenCloneModal,
@@ -197,6 +199,7 @@ export function DroneSidebar({
     selectedDrone,
     selectedChat,
     selectedGroupMultiChat,
+    kanbanBoardOpen,
     sidebarReposCollapsed,
     sidebarAutoMinimize,
     autoDelete,
@@ -770,6 +773,19 @@ export function DroneSidebar({
               </button>
               <button
                 type="button"
+                onClick={onOpenKanbanBoard}
+                className={`inline-flex items-center justify-center w-7 h-7 rounded border transition-all ${
+                  kanbanBoardOpen
+                    ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
+                    : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:text-[var(--accent)] hover:border-[var(--accent-muted)] hover:bg-[var(--accent-subtle)]'
+                }`}
+                title="Open task board"
+                aria-label="Open task board"
+              >
+                <IconBoard className="opacity-80" />
+              </button>
+              <button
+                type="button"
                 onClick={() => setAppView((prev) => (prev === 'settings' ? 'workspace' : 'settings'))}
                 className={`inline-flex items-center justify-center w-7 h-7 rounded border transition-all ${
                   appView === 'settings'
@@ -845,6 +861,22 @@ export function DroneSidebar({
                   <IconPlusDouble className="opacity-80" />
                   <span className="font-semibold tracking-wide uppercase" style={{ fontFamily: 'var(--display)' }}>
                     Create multiple drones
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={onOpenKanbanBoard}
+                  className={`w-full inline-flex items-center gap-2 h-[30px] px-3 rounded border transition-all ${
+                    kanbanBoardOpen
+                      ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
+                      : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:text-[var(--accent)] hover:border-[var(--accent-muted)] hover:bg-[var(--accent-subtle)]'
+                  }`}
+                  title="Open task board"
+                  aria-label="Open task board"
+                >
+                  <IconBoard className="opacity-80" />
+                  <span className="font-semibold tracking-wide uppercase" style={{ fontFamily: 'var(--display)' }}>
+                    Open task board
                   </span>
                 </button>
               </div>
@@ -1332,6 +1364,20 @@ export function DroneSidebar({
           tabIndex={collapsedRailInteractive ? 0 : -1}
         >
           <IconPlusDouble className="opacity-80" />
+        </SidebarIconButton>
+        <SidebarIconButton
+          onClick={() => { setSidebarCollapsed(false); onOpenKanbanBoard(); }}
+          className={`border ${
+            kanbanBoardOpen
+              ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
+              : 'border-[var(--border-subtle)] text-[var(--muted)] hover:text-[var(--accent)] hover:border-[var(--accent-muted)] hover:bg-[var(--accent-subtle)]'
+          }`}
+          title="Open task board"
+          ariaLabel="Open task board"
+          disabled={!collapsedRailInteractive}
+          tabIndex={collapsedRailInteractive ? 0 : -1}
+        >
+          <IconBoard className="opacity-80" />
         </SidebarIconButton>
         <SidebarIconButton
           onClick={() => { setSidebarCollapsed(false); onOpenVisibleMultiChat(); }}

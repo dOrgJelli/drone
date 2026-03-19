@@ -23,6 +23,11 @@ import {
   patchAutomationConfig,
   type AutomationConfig,
 } from './automation-config';
+import {
+  createDefaultKanbanBoardState,
+  sanitizeKanbanBoardState,
+  type KanbanBoardState,
+} from './kanban-board-state';
 
 type Updater<T> = T | ((prev: T) => T);
 
@@ -50,6 +55,8 @@ type DroneHubUiState = {
   selectedDrone: string | null;
   selectedDroneIds: string[];
   selectedGroupMultiChat: string | null;
+  kanbanBoardOpen: boolean;
+  kanbanBoard: KanbanBoardState;
   groupBroadcastExpanded: boolean;
   groupMultiChatColumnWidth: number;
   groupMultiChatStatusSort: boolean;
@@ -91,6 +98,8 @@ type DroneHubUiState = {
   setSelectedDrone: (next: Updater<string | null>) => void;
   setSelectedDroneIds: (next: Updater<string[]>) => void;
   setSelectedGroupMultiChat: (next: Updater<string | null>) => void;
+  setKanbanBoardOpen: (next: Updater<boolean>) => void;
+  setKanbanBoard: (next: Updater<KanbanBoardState>) => void;
   setGroupBroadcastExpanded: (next: Updater<boolean>) => void;
   setGroupMultiChatColumnWidth: (next: Updater<number>) => void;
   setGroupMultiChatStatusSort: (next: Updater<boolean>) => void;
@@ -301,6 +310,8 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
       selectedDrone: null,
       selectedDroneIds: [],
       selectedGroupMultiChat: null,
+      kanbanBoardOpen: false,
+      kanbanBoard: createDefaultKanbanBoardState(),
       groupBroadcastExpanded: false,
       groupMultiChatColumnWidth: GROUP_MULTI_CHAT_COLUMN_WIDTH_DEFAULT_PX,
       groupMultiChatStatusSort: false,
@@ -342,6 +353,11 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
       setSelectedDrone: (next) => set((s) => ({ selectedDrone: resolveNext(s.selectedDrone, next) })),
       setSelectedDroneIds: (next) => set((s) => ({ selectedDroneIds: resolveNext(s.selectedDroneIds, next) })),
       setSelectedGroupMultiChat: (next) => set((s) => ({ selectedGroupMultiChat: resolveNext(s.selectedGroupMultiChat, next) })),
+      setKanbanBoardOpen: (next) => set((s) => ({ kanbanBoardOpen: resolveNext(s.kanbanBoardOpen, next) })),
+      setKanbanBoard: (next) =>
+        set((s) => ({
+          kanbanBoard: sanitizeKanbanBoardState(resolveNext(s.kanbanBoard, next)),
+        })),
       setGroupBroadcastExpanded: (next) => set((s) => ({ groupBroadcastExpanded: resolveNext(s.groupBroadcastExpanded, next) })),
       setGroupMultiChatColumnWidth: (next) =>
         set((s) => ({
@@ -496,10 +512,13 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
       }),
       merge: (persistedState, currentState) => {
         const persisted = (persistedState as Partial<DroneHubUiPersistedState>) ?? {};
+        const { kanbanBoard: _ignoredKanbanBoard, ...persistedRest } = persisted as Partial<
+          DroneHubUiPersistedState & { kanbanBoard?: unknown }
+        >;
         const migratedShortcutBindings = migrateLegacyShortcutBindings(persisted.shortcutBindings);
         return {
           ...currentState,
-          ...persisted,
+          ...persistedRest,
           appView: normalizeAppView(persisted.appView ?? currentState.appView),
           sidebarAutoMinimize: normalizeBoolean(persisted.sidebarAutoMinimize ?? currentState.sidebarAutoMinimize),
           sidebarGroupingMode: normalizeSidebarGroupingMode(
@@ -546,6 +565,8 @@ export function useDroneHubAppModelUiState() {
       selectedDrone: s.selectedDrone,
       selectedDroneIds: s.selectedDroneIds,
       selectedGroupMultiChat: s.selectedGroupMultiChat,
+      kanbanBoardOpen: s.kanbanBoardOpen,
+      kanbanBoard: s.kanbanBoard,
       selectedChat: s.selectedChat,
       draftChat: s.draftChat,
       sidebarCollapsed: s.sidebarCollapsed,
@@ -574,6 +595,8 @@ export function useDroneHubAppModelUiState() {
       setSelectedDrone: s.setSelectedDrone,
       setSelectedDroneIds: s.setSelectedDroneIds,
       setSelectedGroupMultiChat: s.setSelectedGroupMultiChat,
+      setKanbanBoardOpen: s.setKanbanBoardOpen,
+      setKanbanBoard: s.setKanbanBoard,
       setGroupBroadcastExpanded: s.setGroupBroadcastExpanded,
       setSelectedChat: s.setSelectedChat,
       setDraftChat: s.setDraftChat,
@@ -613,6 +636,7 @@ export function useDroneSidebarUiState() {
       selectedDrone: s.selectedDrone,
       selectedChat: s.selectedChat,
       selectedGroupMultiChat: s.selectedGroupMultiChat,
+      kanbanBoardOpen: s.kanbanBoardOpen,
       sidebarReposCollapsed: s.sidebarReposCollapsed,
       sidebarAutoMinimize: s.sidebarAutoMinimize,
       sidebarGroupingMode: s.sidebarGroupingMode,
@@ -624,6 +648,7 @@ export function useDroneSidebarUiState() {
       setSidebarGroupingMode: s.setSidebarGroupingMode,
       setActiveRepoPath: s.setActiveRepoPath,
       setAutoDelete: s.setAutoDelete,
+      setKanbanBoardOpen: s.setKanbanBoardOpen,
       setSidebarCollapsed: s.setSidebarCollapsed,
     })),
   );
