@@ -1,4 +1,22 @@
 import React from 'react';
+import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  useDroppable,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  type DragStartEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import type { ChatAgentConfig } from '../../domain';
 import type { UiMenuSelectEntry } from '../../ui/menuSelect';
 import {
@@ -7,6 +25,8 @@ import {
   moveKanbanCard,
   parsePastedKanbanCard,
   type KanbanBoardState,
+  type KanbanCard,
+  type KanbanLane,
 } from './kanban-board-state';
 import { IconBoard, IconPlus, IconTrash } from './icons';
 import { SpawnContextToolbar } from './SpawnContextToolbar';
@@ -32,9 +52,32 @@ type KanbanCardRef = {
   cardId: string;
 };
 
-type KanbanDropTarget = {
+type KanbanCardLocation = {
   laneId: string;
   index: number;
+};
+
+type SortableKanbanCardProps = {
+  card: KanbanCard;
+  laneId: string;
+  controlsLocked: boolean;
+  selected: boolean;
+  activeDragCardId: string | null;
+  onToggleCard: (laneId: string, cardId: string) => void;
+  onSelectCard: (laneId: string, cardId: string) => void;
+  onUpdateCard: (laneId: string, cardId: string, patch: { title?: string; description?: string }) => void;
+  onRemoveCard: (laneId: string, cardId: string) => void;
+};
+
+type KanbanLaneCardsProps = {
+  lane: KanbanLane;
+  controlsLocked: boolean;
+  selectedCardRef: KanbanCardRef | null;
+  activeDragCardId: string | null;
+  onToggleCard: (laneId: string, cardId: string) => void;
+  onSelectCard: (laneId: string, cardId: string) => void;
+  onUpdateCard: (laneId: string, cardId: string, patch: { title?: string; description?: string }) => void;
+  onRemoveCard: (laneId: string, cardId: string) => void;
 };
 
 const LANE_ACCENTS = ['#D6D06B', '#75B3FF', '#F0B447', '#39D59C'] as const;
@@ -68,36 +111,231 @@ function descriptionSnippet(textRaw: string): string {
   return normalized.length > 92 ? `${normalized.slice(0, 89).trimEnd()}...` : normalized;
 }
 
-function resolveDropTargetFromPoint(
-  rootEl: HTMLDivElement | null,
-  clientX: number,
-  clientY: number,
-): KanbanDropTarget | null {
-  if (!rootEl) return null;
-  const hit = document.elementFromPoint(clientX, clientY);
-  if (!(hit instanceof HTMLElement) || !rootEl.contains(hit)) return null;
-
-  const cardEl = hit.closest('[data-kanban-card-id]');
-  if (cardEl instanceof HTMLElement && rootEl.contains(cardEl)) {
-    const laneId = String(cardEl.dataset.kanbanLaneId ?? '').trim();
-    const cardIndex = Number(cardEl.dataset.kanbanCardIndex);
-    if (!laneId || !Number.isFinite(cardIndex)) return null;
-    const bounds = cardEl.getBoundingClientRect();
-    return {
-      laneId,
-      index: clientY < bounds.top + bounds.height / 2 ? cardIndex : cardIndex + 1,
-    };
+function findKanbanCardLocation(board: KanbanBoardState, cardIdRaw: string): KanbanCardLocation | null {
+  const cardId = String(cardIdRaw ?? '').trim();
+  if (!cardId) return null;
+  for (const lane of board.lanes) {
+    const index = lane.cards.findIndex((card) => card.id === cardId);
+    if (index >= 0) return { laneId: lane.id, index };
   }
-
-  const laneEl = hit.closest('[data-kanban-lane-body]');
-  if (laneEl instanceof HTMLElement && rootEl.contains(laneEl)) {
-    const laneId = String(laneEl.dataset.kanbanLaneBody ?? '').trim();
-    const cardCount = Number(laneEl.dataset.kanbanLaneCardCount);
-    if (!laneId || !Number.isFinite(cardCount)) return null;
-    return { laneId, index: cardCount };
-  }
-
   return null;
+}
+
+function dragHandleDots() {
+  return (
+    <span className="grid grid-cols-2 gap-[2px]" aria-hidden="true">
+      <span className="h-1 w-1 rounded-full bg-current opacity-70" />
+      <span className="h-1 w-1 rounded-full bg-current opacity-70" />
+      <span className="h-1 w-1 rounded-full bg-current opacity-70" />
+      <span className="h-1 w-1 rounded-full bg-current opacity-70" />
+      <span className="h-1 w-1 rounded-full bg-current opacity-70" />
+      <span className="h-1 w-1 rounded-full bg-current opacity-70" />
+    </span>
+  );
+}
+
+function EmptyKanbanLaneDropTarget({ laneId, controlsLocked }: { laneId: string; controlsLocked: boolean }) {
+  const { isOver, setNodeRef } = useDroppable({
+    id: `lane:${laneId}`,
+    data: { type: 'lane', laneId },
+    disabled: controlsLocked,
+  });
+
+  return (
+    <div
+      ref={setNodeRef}
+      className={`rounded-[14px] border px-3 py-5 text-[11px] text-[var(--muted-dim)] transition-all ${
+        isOver
+          ? 'border-[rgba(157,202,255,.5)] bg-[rgba(157,202,255,.08)]'
+          : 'border-dashed border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)]'
+      }`}
+    >
+      Add a task or paste plain text on the board background.
+    </div>
+  );
+}
+
+function KanbanLaneEndDropTarget({ laneId, controlsLocked }: { laneId: string; controlsLocked: boolean }) {
+  const { isOver, setNodeRef } = useDroppable({
+    id: `lane-end:${laneId}`,
+    data: { type: 'lane-end', laneId },
+    disabled: controlsLocked,
+  });
+
+  return (
+    <div
+      ref={setNodeRef}
+      className={`mx-3 h-4 rounded-full transition-all ${
+        isOver ? 'bg-[rgba(157,202,255,.22)]' : 'bg-transparent'
+      }`}
+    >
+      <div className={`mx-auto mt-[7px] h-0.5 rounded-full transition-all ${isOver ? 'w-full bg-[rgba(157,202,255,.9)]' : 'w-10 bg-[rgba(255,255,255,.07)]'}`} />
+    </div>
+  );
+}
+
+function SortableKanbanCard({
+  card,
+  laneId,
+  controlsLocked,
+  selected,
+  activeDragCardId,
+  onToggleCard,
+  onSelectCard,
+  onUpdateCard,
+  onRemoveCard,
+}: SortableKanbanCardProps) {
+  const {
+    attributes,
+    listeners,
+    setActivatorNodeRef,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({
+    id: card.id,
+    data: { type: 'card', laneId },
+    disabled: controlsLocked,
+  });
+  const style = React.useMemo(
+    () => ({
+      transform: CSS.Transform.toString(transform),
+      transition,
+    }),
+    [transform, transition],
+  );
+  const snippet = descriptionSnippet(card.description);
+
+  return (
+    <article
+      ref={setNodeRef}
+      style={style}
+      onClick={(event) => {
+        if (isCardControlTarget(event.target)) return;
+        onToggleCard(laneId, card.id);
+      }}
+      className={`rounded-[16px] border px-3.5 py-3 transition-all ${
+        selected
+          ? 'border-[rgba(255,255,255,.16)] bg-[rgba(255,255,255,.08)]'
+          : 'border-[rgba(255,255,255,.05)] bg-[rgba(255,255,255,.03)] hover:bg-[rgba(255,255,255,.05)]'
+      } ${isDragging || activeDragCardId === card.id ? 'opacity-55 shadow-[0_10px_30px_rgba(0,0,0,.2)]' : ''}`}
+    >
+      <div className="flex items-start gap-2">
+        <button
+          ref={setActivatorNodeRef}
+          type="button"
+          {...attributes}
+          {...(controlsLocked ? {} : listeners)}
+          onClick={(event) => event.stopPropagation()}
+          disabled={controlsLocked}
+          title={controlsLocked ? 'Board is loading' : 'Drag task'}
+          className={`mt-0.5 inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full text-[var(--muted-dim)] transition-all ${
+            controlsLocked
+              ? 'cursor-not-allowed opacity-30'
+              : 'cursor-grab touch-none hover:bg-[rgba(255,255,255,.05)] hover:text-[var(--fg)] active:cursor-grabbing'
+          }`}
+        >
+          {dragHandleDots()}
+        </button>
+        <div className="min-w-0 flex-1">
+          {selected ? (
+            <input
+              value={card.title}
+              onFocus={() => onSelectCard(laneId, card.id)}
+              onChange={(event) => onUpdateCard(laneId, card.id, { title: event.target.value })}
+              disabled={controlsLocked}
+              placeholder="Task title"
+              className={`w-full bg-transparent text-[13px] font-medium focus:outline-none ${
+                controlsLocked ? 'cursor-not-allowed text-[var(--muted)] opacity-70' : 'text-[var(--fg)]'
+              }`}
+            />
+          ) : (
+            <div
+              className={`w-full bg-transparent text-left text-[13px] font-medium ${
+                controlsLocked ? 'cursor-not-allowed text-[var(--muted)] opacity-70' : 'text-[var(--fg)]'
+              }`}
+            >
+              {card.title || 'Untitled task'}
+            </div>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onRemoveCard(laneId, card.id);
+          }}
+          disabled={controlsLocked}
+          className={`inline-flex h-7 w-7 items-center justify-center rounded-full transition-all ${
+            controlsLocked
+              ? 'cursor-not-allowed text-[var(--muted-dim)] opacity-30'
+              : 'text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.05)] hover:text-[var(--red)]'
+          }`}
+          title={controlsLocked ? 'Board is loading' : 'Delete task'}
+        >
+          <IconTrash className="opacity-80" />
+        </button>
+      </div>
+      {selected ? (
+        <div className="mt-3">
+          <textarea
+            value={card.description}
+            onChange={(event) => onUpdateCard(laneId, card.id, { description: event.target.value })}
+            disabled={controlsLocked}
+            placeholder="Description"
+            rows={4}
+            className={`w-full resize-none bg-transparent text-[11px] leading-5 placeholder:text-[var(--muted-dim)] focus:outline-none ${
+              controlsLocked ? 'cursor-not-allowed text-[var(--muted-dim)] opacity-70' : 'text-[var(--muted)]'
+            }`}
+          />
+        </div>
+      ) : snippet ? (
+        <div className="mt-2 text-[11px] leading-5 text-[var(--muted-dim)]">{snippet}</div>
+      ) : null}
+    </article>
+  );
+}
+
+function KanbanLaneCards({
+  lane,
+  controlsLocked,
+  selectedCardRef,
+  activeDragCardId,
+  onToggleCard,
+  onSelectCard,
+  onUpdateCard,
+  onRemoveCard,
+}: KanbanLaneCardsProps) {
+  const cardIds = React.useMemo(() => lane.cards.map((card) => card.id), [lane.cards]);
+
+  return (
+    <div className="space-y-2 rounded-[18px] p-1">
+      <SortableContext items={cardIds} strategy={verticalListSortingStrategy}>
+        {lane.cards.length === 0 ? (
+          <EmptyKanbanLaneDropTarget laneId={lane.id} controlsLocked={controlsLocked} />
+        ) : (
+          <>
+            {lane.cards.map((card) => (
+              <SortableKanbanCard
+                key={card.id}
+                card={card}
+                laneId={lane.id}
+                controlsLocked={controlsLocked}
+                selected={selectedCardRef?.laneId === lane.id && selectedCardRef?.cardId === card.id}
+                activeDragCardId={activeDragCardId}
+                onToggleCard={onToggleCard}
+                onSelectCard={onSelectCard}
+                onUpdateCard={onUpdateCard}
+                onRemoveCard={onRemoveCard}
+              />
+            ))}
+            <KanbanLaneEndDropTarget laneId={lane.id} controlsLocked={controlsLocked} />
+          </>
+        )}
+      </SortableContext>
+    </div>
+  );
 }
 
 export function KanbanBoardWorkspace({
@@ -116,18 +354,17 @@ export function KanbanBoardWorkspace({
   onClose,
 }: KanbanBoardWorkspaceProps) {
   const rootRef = React.useRef<HTMLDivElement | null>(null);
-  const dragCandidateRef = React.useRef<null | (KanbanCardRef & { startX: number; startY: number })>(null);
-  const dragActiveRef = React.useRef(false);
-  const suppressClickRef = React.useRef(false);
-  const dropTargetStateRef = React.useRef<KanbanDropTarget | null>(null);
   const controlsLocked = boardLoading;
   const [selectedCardRef, setSelectedCardRef] = React.useState<KanbanCardRef | null>(null);
-  const [draggedCardRef, setDraggedCardRef] = React.useState<KanbanCardRef | null>(null);
-  const [dropTargetRef, setDropTargetRef] = React.useState<KanbanDropTarget | null>(null);
+  const [activeDragCardId, setActiveDragCardId] = React.useState<string | null>(null);
   const laneCount = board.lanes.length;
   const cardCount = React.useMemo(
     () => board.lanes.reduce((sum, lane) => sum + lane.cards.length, 0),
     [board.lanes],
+  );
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
   const selectedCardEntry = React.useMemo(() => {
@@ -141,10 +378,6 @@ export function KanbanBoardWorkspace({
   React.useEffect(() => {
     if (selectedCardRef && !selectedCardEntry) setSelectedCardRef(null);
   }, [selectedCardEntry, selectedCardRef]);
-
-  React.useEffect(() => {
-    dropTargetStateRef.current = dropTargetRef;
-  }, [dropTargetRef]);
 
   const selectCard = React.useCallback((laneIdRaw: string, cardIdRaw: string) => {
     const laneId = String(laneIdRaw ?? '').trim();
@@ -196,7 +429,6 @@ export function KanbanBoardWorkspace({
         lanes: prev.lanes.filter((item) => item.id !== laneId),
       }));
       setSelectedCardRef((prev) => (prev?.laneId === laneId ? null : prev));
-      setDropTargetRef((prev) => (prev?.laneId === laneId ? null : prev));
     },
     [board.lanes, onBoardChange],
   );
@@ -276,91 +508,61 @@ export function KanbanBoardWorkspace({
         ),
       }));
       setSelectedCardRef((prev) => (prev?.cardId === cardId ? null : prev));
-      setDraggedCardRef((prev) => (prev?.cardId === cardId ? null : prev));
+      setActiveDragCardId((prev) => (prev === cardId ? null : prev));
     },
     [onBoardChange],
   );
 
-  const commitDrop = React.useCallback(
-    (dragRef: KanbanCardRef, target: KanbanDropTarget) => {
-      const laneId = String(target.laneId ?? '').trim();
-      const index = Number(target.index);
-      if (!laneId || !Number.isFinite(index)) return;
-      onBoardChange((prev) => moveKanbanCard(prev, { ...dragRef, toLaneId: laneId, toIndex: index }));
-      setSelectedCardRef({ laneId, cardId: dragRef.cardId });
+  const handleDragStart = React.useCallback((event: DragStartEvent) => {
+    const cardId = String(event.active.id ?? '').trim();
+    setActiveDragCardId(cardId || null);
+  }, []);
+
+  const handleDragEnd = React.useCallback(
+    (event: DragEndEvent) => {
+      setActiveDragCardId(null);
+      const activeCardId = String(event.active.id ?? '').trim();
+      const overId = String(event.over?.id ?? '').trim();
+      if (!activeCardId || !event.over || !overId) return;
+
+      const activeLocation = findKanbanCardLocation(board, activeCardId);
+      if (!activeLocation) return;
+
+      const overType = String((event.over.data.current as { type?: string } | undefined)?.type ?? '').trim();
+      let toLaneId = '';
+      let toIndex = 0;
+
+      if (overType === 'lane' || overType === 'lane-end') {
+        toLaneId = String((event.over.data.current as { laneId?: string } | undefined)?.laneId ?? '').trim();
+        if (!toLaneId) return;
+        toIndex = board.lanes.find((lane) => lane.id === toLaneId)?.cards.length ?? 0;
+      } else {
+        const overLocation = findKanbanCardLocation(board, overId);
+        if (!overLocation) return;
+        toLaneId = overLocation.laneId;
+        const activeRect = event.active.rect.current.translated ?? event.active.rect.current.initial;
+        const activeMidpoint = (activeRect?.top ?? 0) + (activeRect?.height ?? 0) / 2;
+        const overMidpoint = event.over.rect.top + event.over.rect.height / 2;
+        const placeAfter = activeMidpoint > overMidpoint;
+        toIndex = overLocation.index + (placeAfter ? 1 : 0);
+      }
+
+      onBoardChange((prev) =>
+        moveKanbanCard(prev, {
+          cardId: activeCardId,
+          fromLaneId: activeLocation.laneId,
+          toLaneId,
+          toIndex,
+        }),
+      );
+      setSelectedCardRef({ laneId: toLaneId, cardId: activeCardId });
     },
-    [onBoardChange],
+    [board, onBoardChange],
   );
 
-  const clearPointerDrag = React.useCallback(() => {
-    dragCandidateRef.current = null;
-    dragActiveRef.current = false;
-    setDraggedCardRef(null);
-    setDropTargetRef(null);
-    document.body.style.removeProperty('user-select');
+  const handleDragCancel = React.useCallback(() => {
+    setActiveDragCardId(null);
   }, []);
-
-  const updateDropTargetFromPoint = React.useCallback((clientX: number, clientY: number) => {
-    const nextTarget = resolveDropTargetFromPoint(rootRef.current, clientX, clientY);
-    setDropTargetRef((prev) =>
-      prev?.laneId === nextTarget?.laneId && prev?.index === nextTarget?.index ? prev : nextTarget
-    );
-  }, []);
-
-  React.useEffect(() => {
-    const handlePointerMove = (event: PointerEvent) => {
-      const candidate = dragCandidateRef.current;
-      if (!candidate || controlsLocked) return;
-      const movedEnough = Math.hypot(event.clientX - candidate.startX, event.clientY - candidate.startY) >= 6;
-      if (!dragActiveRef.current && !movedEnough) return;
-      if (!dragActiveRef.current) {
-        dragActiveRef.current = true;
-        suppressClickRef.current = true;
-        setDraggedCardRef({ laneId: candidate.laneId, cardId: candidate.cardId });
-        document.body.style.setProperty('user-select', 'none');
-      }
-      updateDropTargetFromPoint(event.clientX, event.clientY);
-    };
-
-    const finishPointerDrag = (clientX: number, clientY: number) => {
-      const candidate = dragCandidateRef.current;
-      const didDrag = dragActiveRef.current;
-      const target = resolveDropTargetFromPoint(rootRef.current, clientX, clientY) ?? dropTargetStateRef.current;
-      clearPointerDrag();
-      if (candidate && didDrag && target) {
-        commitDrop(candidate, target);
-      }
-      if (didDrag) {
-        window.setTimeout(() => {
-          suppressClickRef.current = false;
-        }, 0);
-      }
-    };
-
-    const handlePointerUp = (event: PointerEvent) => {
-      if (!dragCandidateRef.current) return;
-      finishPointerDrag(event.clientX, event.clientY);
-    };
-
-    const handlePointerCancel = () => {
-      if (!dragCandidateRef.current) return;
-      clearPointerDrag();
-      window.setTimeout(() => {
-        suppressClickRef.current = false;
-      }, 0);
-    };
-
-    window.addEventListener('pointermove', handlePointerMove);
-    window.addEventListener('pointerup', handlePointerUp);
-    window.addEventListener('pointercancel', handlePointerCancel);
-    window.addEventListener('blur', handlePointerCancel);
-    return () => {
-      window.removeEventListener('pointermove', handlePointerMove);
-      window.removeEventListener('pointerup', handlePointerUp);
-      window.removeEventListener('pointercancel', handlePointerCancel);
-      window.removeEventListener('blur', handlePointerCancel);
-    };
-  }, [clearPointerDrag, commitDrop, controlsLocked, updateDropTargetFromPoint]);
 
   const handlePasteCapture = React.useCallback(
     (event: React.ClipboardEvent<HTMLDivElement>) => {
@@ -501,211 +703,107 @@ export function KanbanBoardWorkspace({
         </div>
       </div>
 
-      <div className="flex-1 min-h-0 overflow-x-auto overflow-y-hidden px-6 py-6">
-        <div className="flex h-full min-h-0 w-max items-start gap-6 pr-6">
-          {board.lanes.map((lane, laneIdx) => {
-            const accent = laneAccent(laneIdx);
-            return (
-              <section key={lane.id} className="flex h-full min-h-0 w-[300px] flex-col gap-3">
-                <div className="flex items-center justify-between gap-3 px-2">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2 text-[12px] text-[var(--muted)]">
-                      <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: accent }} />
-                      <input
-                        value={lane.title}
-                        onChange={(event) => updateLaneTitle(lane.id, event.target.value)}
-                        disabled={controlsLocked}
-                        placeholder={`Lane ${laneIdx + 1}`}
-                        className={`min-w-0 flex-1 bg-transparent font-medium focus:outline-none ${
-                          controlsLocked ? 'cursor-not-allowed opacity-70' : ''
-                        }`}
-                      />
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragStart={handleDragStart}
+        onDragEnd={handleDragEnd}
+        onDragCancel={handleDragCancel}
+      >
+        <div className="flex-1 min-h-0 overflow-x-auto overflow-y-hidden px-6 py-6">
+          <div className="flex h-full min-h-0 w-max items-start gap-6 pr-6">
+            {board.lanes.map((lane, laneIdx) => {
+              const accent = laneAccent(laneIdx);
+              return (
+                <section key={lane.id} className="flex h-full min-h-0 w-[300px] flex-col gap-3">
+                  <div className="flex items-center justify-between gap-3 px-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 text-[12px] text-[var(--muted)]">
+                        <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: accent }} />
+                        <input
+                          value={lane.title}
+                          onChange={(event) => updateLaneTitle(lane.id, event.target.value)}
+                          disabled={controlsLocked}
+                          placeholder={`Lane ${laneIdx + 1}`}
+                          className={`min-w-0 flex-1 bg-transparent font-medium focus:outline-none ${
+                            controlsLocked ? 'cursor-not-allowed opacity-70' : ''
+                          }`}
+                        />
+                      </div>
+                      <div className="mt-1 flex items-center gap-2 text-[10px] text-[var(--muted-dim)]">
+                        <span>{lane.cards.length}</span>
+                        {laneIdx === 0 ? (
+                          <span className="rounded-full bg-[rgba(255,255,255,.04)] px-2 py-0.5 text-[#9DCAFF]">
+                            Paste target
+                          </span>
+                        ) : null}
+                      </div>
                     </div>
-                    <div className="mt-1 flex items-center gap-2 text-[10px] text-[var(--muted-dim)]">
-                      <span>{lane.cards.length}</span>
-                      {laneIdx === 0 ? (
-                        <span className="rounded-full bg-[rgba(255,255,255,.04)] px-2 py-0.5 text-[#9DCAFF]">
-                          Paste target
-                        </span>
-                      ) : null}
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => removeLane(lane.id)}
+                      disabled={controlsLocked || board.lanes.length <= 1}
+                      className={`inline-flex h-7 w-7 items-center justify-center rounded-full transition-all ${
+                        controlsLocked || board.lanes.length <= 1
+                          ? 'cursor-not-allowed text-[var(--muted-dim)] opacity-30'
+                          : 'text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.05)] hover:text-[var(--red)]'
+                      }`}
+                      title={
+                        controlsLocked ? 'Board is loading' : board.lanes.length <= 1 ? 'Keep at least one lane' : 'Delete lane'
+                      }
+                    >
+                      <IconTrash className="opacity-80" />
+                    </button>
                   </div>
+
+                  <div className="flex-1 min-h-0 overflow-y-auto pr-1">
+                    <KanbanLaneCards
+                      lane={lane}
+                      controlsLocked={controlsLocked}
+                      selectedCardRef={selectedCardRef}
+                      activeDragCardId={activeDragCardId}
+                      onToggleCard={toggleCard}
+                      onSelectCard={selectCard}
+                      onUpdateCard={updateCard}
+                      onRemoveCard={removeCard}
+                    />
+                  </div>
+
                   <button
                     type="button"
-                    onClick={() => removeLane(lane.id)}
-                    disabled={controlsLocked || board.lanes.length <= 1}
-                    className={`inline-flex h-7 w-7 items-center justify-center rounded-full transition-all ${
-                      controlsLocked || board.lanes.length <= 1
-                        ? 'cursor-not-allowed text-[var(--muted-dim)] opacity-30'
-                        : 'text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.05)] hover:text-[var(--red)]'
+                    onClick={() => addCard(lane.id)}
+                    disabled={controlsLocked}
+                    className={`inline-flex h-8 items-center gap-1.5 self-start rounded-full px-3 text-[10px] font-semibold uppercase tracking-wide transition-all ${
+                      controlsLocked
+                        ? 'cursor-not-allowed bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] opacity-40'
+                        : 'bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.07)] hover:text-[var(--fg)]'
                     }`}
-                    title={controlsLocked ? 'Board is loading' : board.lanes.length <= 1 ? 'Keep at least one lane' : 'Delete lane'}
+                    style={{ fontFamily: 'var(--display)' }}
                   >
-                    <IconTrash className="opacity-80" />
+                    <IconPlus className="opacity-80" />
+                    Add task
                   </button>
-                </div>
+                </section>
+              );
+            })}
 
-                <div className="flex-1 min-h-0 overflow-y-auto pr-1">
-                  <div
-                    data-kanban-lane-body={lane.id}
-                    data-kanban-lane-card-count={lane.cards.length}
-                    className={`space-y-2 rounded-[18px] p-1 transition-all ${
-                      dropTargetRef?.laneId === lane.id && dropTargetRef.index === lane.cards.length
-                        ? 'bg-[rgba(157,202,255,.05)]'
-                        : ''
-                    }`}
-                  >
-                    {lane.cards.length === 0 ? (
-                      <div
-                        className={`rounded-[14px] border px-3 py-5 text-[11px] text-[var(--muted-dim)] transition-all ${
-                          dropTargetRef?.laneId === lane.id && dropTargetRef.index === 0
-                            ? 'border-[rgba(157,202,255,.5)] bg-[rgba(157,202,255,.08)]'
-                            : 'border-dashed border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)]'
-                        }`}
-                      >
-                        Add a task or paste plain text on the board background.
-                      </div>
-                    ) : null}
-
-                    {lane.cards.map((card, cardIdx) => {
-                      const selected = selectedCardRef?.cardId === card.id && selectedCardRef.laneId === lane.id;
-                      const snippet = descriptionSnippet(card.description);
-                      const dropBefore = dropTargetRef?.laneId === lane.id && dropTargetRef.index === cardIdx;
-                      const dropAfter = dropTargetRef?.laneId === lane.id && dropTargetRef.index === cardIdx + 1;
-                      return (
-                        <div key={card.id} className="relative">
-                          {dropBefore ? (
-                            <div className="pointer-events-none absolute -top-1 left-3 right-3 z-10 h-0.5 rounded-full bg-[rgba(157,202,255,.9)]" />
-                          ) : null}
-                          <article
-                            data-kanban-card-id={card.id}
-                            data-kanban-card-index={cardIdx}
-                            data-kanban-lane-id={lane.id}
-                            onPointerDown={(event) => {
-                              if (controlsLocked || event.button !== 0 || isCardControlTarget(event.target)) return;
-                              dragCandidateRef.current = {
-                                laneId: lane.id,
-                                cardId: card.id,
-                                startX: event.clientX,
-                                startY: event.clientY,
-                              };
-                            }}
-                            onClick={(event) => {
-                              if (suppressClickRef.current) return;
-                              if (isCardControlTarget(event.target)) return;
-                              toggleCard(lane.id, card.id);
-                            }}
-                            className={`rounded-[16px] border px-3.5 py-3 transition-all ${
-                              selected
-                                ? 'border-[rgba(255,255,255,.16)] bg-[rgba(255,255,255,.08)]'
-                                : 'border-[rgba(255,255,255,.05)] bg-[rgba(255,255,255,.03)] hover:bg-[rgba(255,255,255,.05)]'
-                            } ${draggedCardRef?.cardId === card.id ? 'cursor-grabbing opacity-50' : controlsLocked ? '' : 'cursor-grab'}`}
-                          >
-                            <div className="flex items-start gap-2">
-                              <div className="min-w-0 flex-1">
-                                {selected ? (
-                                  <input
-                                    value={card.title}
-                                    onFocus={() => selectCard(lane.id, card.id)}
-                                    onChange={(event) => updateCard(lane.id, card.id, { title: event.target.value })}
-                                    disabled={controlsLocked}
-                                    placeholder="Task title"
-                                    className={`w-full bg-transparent text-[13px] font-medium focus:outline-none ${
-                                      controlsLocked ? 'cursor-not-allowed text-[var(--muted)] opacity-70' : 'text-[var(--fg)]'
-                                    }`}
-                                  />
-                                ) : (
-                                  <div
-                                    className={`w-full bg-transparent text-left text-[13px] font-medium focus:outline-none ${
-                                      controlsLocked ? 'cursor-not-allowed text-[var(--muted)] opacity-70' : 'text-[var(--fg)]'
-                                    }`}
-                                  >
-                                    {card.title || 'Untitled task'}
-                                  </div>
-                                )}
-                              </div>
-                              <button
-                                type="button"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  removeCard(lane.id, card.id);
-                                }}
-                                disabled={controlsLocked}
-                                className={`inline-flex h-7 w-7 items-center justify-center rounded-full transition-all ${
-                                  controlsLocked
-                                    ? 'cursor-not-allowed text-[var(--muted-dim)] opacity-30'
-                                    : 'text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.05)] hover:text-[var(--red)]'
-                                }`}
-                                title={controlsLocked ? 'Board is loading' : 'Delete task'}
-                              >
-                                <IconTrash className="opacity-80" />
-                              </button>
-                            </div>
-                            {selected ? (
-                              <div className="mt-3">
-                                <textarea
-                                  value={card.description}
-                                  onChange={(event) => updateCard(lane.id, card.id, { description: event.target.value })}
-                                  disabled={controlsLocked}
-                                  placeholder="Description"
-                                  rows={4}
-                                  className={`w-full resize-none bg-transparent text-[11px] leading-5 placeholder:text-[var(--muted-dim)] focus:outline-none ${
-                                    controlsLocked
-                                      ? 'cursor-not-allowed text-[var(--muted-dim)] opacity-70'
-                                      : 'text-[var(--muted)]'
-                                  }`}
-                                />
-                              </div>
-                            ) : snippet ? (
-                              <div className="mt-2 text-[11px] leading-5 text-[var(--muted-dim)]">
-                                {snippet}
-                              </div>
-                            ) : null}
-                          </article>
-                          {dropAfter ? (
-                            <div className="pointer-events-none absolute -bottom-1 left-3 right-3 z-10 h-0.5 rounded-full bg-[rgba(157,202,255,.9)]" />
-                          ) : null}
-                        </div>
-                      );
-                    })}
-
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => addCard(lane.id)}
-                  disabled={controlsLocked}
-                  className={`inline-flex h-8 items-center gap-1.5 self-start rounded-full px-3 text-[10px] font-semibold uppercase tracking-wide transition-all ${
-                    controlsLocked
-                      ? 'cursor-not-allowed bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] opacity-40'
-                      : 'bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.07)] hover:text-[var(--fg)]'
-                  }`}
-                  style={{ fontFamily: 'var(--display)' }}
-                >
-                  <IconPlus className="opacity-80" />
-                  Add task
-                </button>
-              </section>
-            );
-          })}
-
-          <button
-            type="button"
-            onClick={addLane}
-            disabled={controlsLocked}
-            className={`inline-flex h-10 self-start items-center gap-1.5 rounded-full px-4 text-[10px] font-semibold uppercase tracking-wide transition-all ${
-              controlsLocked
-                ? 'cursor-not-allowed bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] opacity-40'
-                : 'bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.07)] hover:text-[var(--fg)]'
-            }`}
-            style={{ fontFamily: 'var(--display)' }}
-          >
-            <IconPlus className="opacity-80" />
-            Add lane
-          </button>
+            <button
+              type="button"
+              onClick={addLane}
+              disabled={controlsLocked}
+              className={`inline-flex h-10 self-start items-center gap-1.5 rounded-full px-4 text-[10px] font-semibold uppercase tracking-wide transition-all ${
+                controlsLocked
+                  ? 'cursor-not-allowed bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] opacity-40'
+                  : 'bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.07)] hover:text-[var(--fg)]'
+              }`}
+              style={{ fontFamily: 'var(--display)' }}
+            >
+              <IconPlus className="opacity-80" />
+              Add lane
+            </button>
+          </div>
         </div>
-      </div>
+      </DndContext>
     </div>
   );
 }
