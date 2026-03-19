@@ -84,6 +84,11 @@ type DroneCanvasIndicatorState = {
   unreadAgentMessage: boolean;
 };
 
+type CanvasLineageEdge = {
+  key: string;
+  path: string;
+};
+
 function parseDraggedChatNodeIds(event: React.DragEvent<HTMLElement>): string[] {
   return parseDraggedChatPayload(event.dataTransfer.getData(DRONE_CHAT_DND_MIME));
 }
@@ -156,6 +161,61 @@ function getNodeWidthPx(labelRaw: string, secondaryLabelRaw?: string): number {
     NODE_MIN_WIDTH_PX,
     Math.min(NODE_MAX_WIDTH_PX, contentWidth + NODE_HORIZONTAL_PADDING_PX),
   );
+}
+
+function resolveLineageEndpoint(
+  source: { x: number; y: number; width: number; height: number },
+  target: { x: number; y: number; width: number; height: number },
+): { startX: number; startY: number; endX: number; endY: number } {
+  const sourceCenterX = source.x + source.width / 2;
+  const sourceCenterY = source.y + source.height / 2;
+  const targetCenterX = target.x + target.width / 2;
+  const targetCenterY = target.y + target.height / 2;
+  const dx = targetCenterX - sourceCenterX;
+  const dy = targetCenterY - sourceCenterY;
+
+  if (Math.abs(dx) >= Math.abs(dy)) {
+    return dx >= 0
+      ? {
+          startX: source.x + source.width,
+          startY: sourceCenterY,
+          endX: target.x,
+          endY: targetCenterY,
+        }
+      : {
+          startX: source.x,
+          startY: sourceCenterY,
+          endX: target.x + target.width,
+          endY: targetCenterY,
+        };
+  }
+
+  return dy >= 0
+    ? {
+        startX: sourceCenterX,
+        startY: source.y + source.height,
+        endX: targetCenterX,
+        endY: target.y,
+      }
+    : {
+        startX: sourceCenterX,
+        startY: source.y,
+        endX: targetCenterX,
+        endY: target.y + target.height,
+      };
+}
+
+function buildLineagePath(startX: number, startY: number, endX: number, endY: number): string {
+  const dx = endX - startX;
+  const dy = endY - startY;
+  const controlOffset = Math.max(28, Math.min(120, Math.abs(dx) * 0.35 + Math.abs(dy) * 0.14));
+  const horizontal = Math.abs(dx) >= Math.abs(dy);
+  if (horizontal) {
+    const direction = dx >= 0 ? 1 : -1;
+    return `M ${startX} ${startY} C ${startX + controlOffset * direction} ${startY}, ${endX - controlOffset * direction} ${endY}, ${endX} ${endY}`;
+  }
+  const direction = dy >= 0 ? 1 : -1;
+  return `M ${startX} ${startY} C ${startX} ${startY + controlOffset * direction}, ${endX} ${endY - controlOffset * direction}, ${endX} ${endY}`;
 }
 
 function clampDraftSpawnCount(valueRaw: number): number {
@@ -244,6 +304,7 @@ export function DroneCanvasDock({
   sidebarOrderedChatNodeIds,
   sidebarSelectedChatNodeId,
   droneRepoById,
+  fleetParentIdByDroneId,
   draftRepoLabel,
   chatNodeStateById,
   onActivateChat,
@@ -270,6 +331,7 @@ export function DroneCanvasDock({
   sidebarOrderedChatNodeIds: string[];
   sidebarSelectedChatNodeId?: string | null;
   droneRepoById: Record<string, string>;
+  fleetParentIdByDroneId: Record<string, string>;
   draftRepoLabel?: string;
   chatNodeStateById: Record<string, DroneCanvasIndicatorState>;
   onActivateChat?: (droneId: string, chatName: string) => void;
@@ -361,6 +423,7 @@ export function DroneCanvasDock({
     })),
   );
   const viewportRef = React.useRef<HTMLDivElement | null>(null);
+  const lineageMarkerId = React.useId();
   const nodeDragRef = React.useRef<NodeDragState | null>(null);
   const panDragRef = React.useRef<PanDragState | null>(null);
   const marqueeDragRef = React.useRef<MarqueeDragState | null>(null);
@@ -404,6 +467,48 @@ export function DroneCanvasDock({
     }
     return out;
   }, [droneNameById, nodes]);
+  const lineageEdges = React.useMemo(() => {
+    const preferredNodeByDroneId: Record<string, (typeof nodes)[number]> = {};
+    for (const node of nodes) {
+      if (isCanvasDraftNodeId(node.droneId)) continue;
+      const chatRef = parseCanvasChatNodeId(node.droneId);
+      if (!chatRef) continue;
+      const current = preferredNodeByDroneId[chatRef.droneId];
+      if (!current) {
+        preferredNodeByDroneId[chatRef.droneId] = node;
+        continue;
+      }
+      const currentChat = parseCanvasChatNodeId(current.droneId);
+      if (currentChat?.chatName !== 'default' && chatRef.chatName === 'default') {
+        preferredNodeByDroneId[chatRef.droneId] = node;
+      }
+    }
+
+    const edges: CanvasLineageEdge[] = [];
+    for (const [childDroneId, parentDroneId] of Object.entries(fleetParentIdByDroneId)) {
+      const childNode = preferredNodeByDroneId[childDroneId];
+      const parentNode = preferredNodeByDroneId[parentDroneId];
+      if (!childNode || !parentNode) continue;
+      const source = {
+        x: parentNode.x,
+        y: parentNode.y,
+        width: nodeWidthByDroneId[parentNode.droneId] ?? NODE_MIN_WIDTH_PX,
+        height: NODE_HEIGHT_PX,
+      };
+      const target = {
+        x: childNode.x,
+        y: childNode.y,
+        width: nodeWidthByDroneId[childNode.droneId] ?? NODE_MIN_WIDTH_PX,
+        height: NODE_HEIGHT_PX,
+      };
+      const { startX, startY, endX, endY } = resolveLineageEndpoint(source, target);
+      edges.push({
+        key: `${parentDroneId}->${childDroneId}`,
+        path: buildLineagePath(startX, startY, endX, endY),
+      });
+    }
+    return edges;
+  }, [fleetParentIdByDroneId, nodeWidthByDroneId, nodes]);
   const selectedDroneIdSet = React.useMemo(() => new Set(selectedDroneIds), [selectedDroneIds]);
   const selectedDraftNodeId = React.useMemo(() => {
     if (selectedDroneIds.length !== 1) return null;
@@ -1787,6 +1892,41 @@ export function DroneCanvasDock({
             transformOrigin: '0 0',
           }}
         >
+          {lineageEdges.length > 0 ? (
+            <svg
+              width="1"
+              height="1"
+              className="absolute left-0 top-0 pointer-events-none overflow-visible"
+              style={{ overflow: 'visible' }}
+              aria-hidden="true"
+            >
+              <defs>
+                <marker
+                  id={lineageMarkerId}
+                  viewBox="0 0 10 10"
+                  refX="8"
+                  refY="5"
+                  markerWidth="7"
+                  markerHeight="7"
+                  orient="auto-start-reverse"
+                >
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill="rgba(123, 188, 255, 0.92)" />
+                </marker>
+              </defs>
+              {lineageEdges.map((edge) => (
+                <path
+                  key={edge.key}
+                  d={edge.path}
+                  fill="none"
+                  stroke="rgba(123, 188, 255, 0.74)"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  markerEnd={`url(#${lineageMarkerId})`}
+                />
+              ))}
+            </svg>
+          ) : null}
           {nodes.map((node) => {
             const draftNode = isCanvasDraftNodeId(node.droneId);
             const chatRef = draftNode ? null : parseCanvasChatNodeId(node.droneId);

@@ -31,6 +31,7 @@ type RightPanelTabContentProps = {
   orderedCanvasChatNodeIds: string[];
   droneNameById: Record<string, string>;
   droneRepoById: Record<string, string>;
+  fleetParentIdByDroneId: Record<string, string>;
   draftRepoLabel: string;
   chatNodeStateById: Record<
     string,
@@ -124,6 +125,7 @@ export function RightPanelTabContent({
   orderedCanvasChatNodeIds,
   droneNameById,
   droneRepoById,
+  fleetParentIdByDroneId,
   draftRepoLabel,
   chatNodeStateById,
   onActivateChatFromCanvas,
@@ -191,6 +193,7 @@ export function RightPanelTabContent({
           sidebarOrderedChatNodeIds={orderedCanvasChatNodeIds}
           sidebarSelectedChatNodeId={currentCanvasChatNodeId}
           droneRepoById={droneRepoById}
+          fleetParentIdByDroneId={fleetParentIdByDroneId}
           draftRepoLabel={draftRepoLabel}
           chatNodeStateById={chatNodeStateById}
           onActivateChat={onActivateChatFromCanvas}
