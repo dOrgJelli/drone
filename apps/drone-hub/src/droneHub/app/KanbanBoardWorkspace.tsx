@@ -122,17 +122,8 @@ function findKanbanCardLocation(board: KanbanBoardState, cardIdRaw: string): Kan
   return null;
 }
 
-function dragHandleDots() {
-  return (
-    <span className="grid grid-cols-2 gap-[2px]" aria-hidden="true">
-      <span className="h-1 w-1 rounded-full bg-current opacity-70" />
-      <span className="h-1 w-1 rounded-full bg-current opacity-70" />
-      <span className="h-1 w-1 rounded-full bg-current opacity-70" />
-      <span className="h-1 w-1 rounded-full bg-current opacity-70" />
-      <span className="h-1 w-1 rounded-full bg-current opacity-70" />
-      <span className="h-1 w-1 rounded-full bg-current opacity-70" />
-    </span>
-  );
+function stopCardDragActivation(event: React.PointerEvent<HTMLElement>) {
+  event.stopPropagation();
 }
 
 function EmptyKanbanLaneDropTarget({ laneId, controlsLocked }: { laneId: string; controlsLocked: boolean }) {
@@ -189,7 +180,6 @@ function SortableKanbanCard({
   const {
     attributes,
     listeners,
-    setActivatorNodeRef,
     setNodeRef,
     transform,
     transition,
@@ -212,6 +202,8 @@ function SortableKanbanCard({
     <article
       ref={setNodeRef}
       style={style}
+      {...attributes}
+      {...(controlsLocked ? {} : listeners)}
       onClick={(event) => {
         if (isCardControlTarget(event.target)) return;
         onToggleCard(laneId, card.id);
@@ -220,29 +212,14 @@ function SortableKanbanCard({
         selected
           ? 'border-[rgba(255,255,255,.16)] bg-[rgba(255,255,255,.08)]'
           : 'border-[rgba(255,255,255,.05)] bg-[rgba(255,255,255,.03)] hover:bg-[rgba(255,255,255,.05)]'
-      } ${isDragging || activeDragCardId === card.id ? 'opacity-25' : ''}`}
+      } ${isDragging || activeDragCardId === card.id ? 'cursor-grabbing opacity-25' : controlsLocked ? '' : 'cursor-grab touch-none active:cursor-grabbing'}`}
     >
       <div className="flex items-start gap-2">
-        <button
-          ref={setActivatorNodeRef}
-          type="button"
-          {...attributes}
-          {...(controlsLocked ? {} : listeners)}
-          onClick={(event) => event.stopPropagation()}
-          disabled={controlsLocked}
-          title={controlsLocked ? 'Board is loading' : 'Drag task'}
-          className={`mt-0.5 inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full text-[var(--muted-dim)] transition-all ${
-            controlsLocked
-              ? 'cursor-not-allowed opacity-30'
-              : 'cursor-grab touch-none hover:bg-[rgba(255,255,255,.05)] hover:text-[var(--fg)] active:cursor-grabbing'
-          }`}
-        >
-          {dragHandleDots()}
-        </button>
         <div className="min-w-0 flex-1">
           {selected ? (
             <input
               value={card.title}
+              onPointerDown={stopCardDragActivation}
               onFocus={() => onSelectCard(laneId, card.id)}
               onChange={(event) => onUpdateCard(laneId, card.id, { title: event.target.value })}
               disabled={controlsLocked}
@@ -267,6 +244,7 @@ function SortableKanbanCard({
             event.stopPropagation();
             onRemoveCard(laneId, card.id);
           }}
+          onPointerDown={stopCardDragActivation}
           disabled={controlsLocked}
           className={`inline-flex h-7 w-7 items-center justify-center rounded-full transition-all ${
             controlsLocked
@@ -282,6 +260,7 @@ function SortableKanbanCard({
         <div className="mt-3">
           <textarea
             value={card.description}
+            onPointerDown={stopCardDragActivation}
             onChange={(event) => onUpdateCard(laneId, card.id, { description: event.target.value })}
             disabled={controlsLocked}
             placeholder="Description"
@@ -303,12 +282,7 @@ function DragOverlayKanbanCard({ card }: { card: KanbanCard }) {
 
   return (
     <article className="w-[264px] rounded-[16px] border border-[rgba(255,255,255,.16)] bg-[rgba(24,24,28,.92)] px-3.5 py-3 shadow-[0_18px_48px_rgba(0,0,0,.38)] backdrop-blur-sm">
-      <div className="flex items-start gap-2">
-        <div className="mt-0.5 inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full text-[var(--muted-dim)]">
-          {dragHandleDots()}
-        </div>
-        <div className="min-w-0 flex-1 text-[13px] font-medium text-[var(--fg)]">{card.title || 'Untitled task'}</div>
-      </div>
+      <div className="text-[13px] font-medium text-[var(--fg)]">{card.title || 'Untitled task'}</div>
       {snippet ? <div className="mt-2 text-[11px] leading-5 text-[var(--muted-dim)]">{snippet}</div> : null}
     </article>
   );
