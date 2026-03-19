@@ -7,6 +7,7 @@ export type RightPanelTabId =
   | 'files'
   | 'preview'
   | 'links'
+  | 'fleet'
   | 'changes'
   | 'prs'
   | 'canvas';

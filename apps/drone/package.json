@@ -2,7 +2,10 @@
   "name": "drone",
   "version": "0.1.0",
   "description": "Drone: per-container agent wrapper daemon + host CLI (via dvm)",
-  "bin": "dist/cli.js",
+  "bin": {
+    "drone": "dist/cli.js",
+    "fleet": "dist/fleet.js"
+  },
   "main": "dist/cli.js",
   "type": "commonjs",
   "files": [

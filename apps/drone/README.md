@@ -28,13 +28,14 @@ bun --filter dvm run build
 # build drone CLI + daemon
 bun --filter drone run build
 
-# install both commands into your shell PATH
+# install the commands into your shell PATH
 npm link ./apps/dvm
 npm link ./apps/drone
 
 # verify
 dvm --help
 drone --help
+fleet --help
 ```
 
 ## Security
@@ -179,6 +180,12 @@ drone purge --orphans --apply --keep-volume
 
 # start the local Drone Hub (detached by default)
 drone hub
+
+# inside a drone/container: inspect fleet access and queue fleet actions
+fleet capabilities
+fleet create --name reviewer-1 --wait
+fleet send --to reviewer-1 --chat default --message "Check the auth handler" --wait
+fleet read --from reviewer-1 --chat default --limit 20
 
 # explicitly manage the detached Hub
 drone hub start --port 5174 --api-port 0 --host 127.0.0.1

@@ -5,6 +5,15 @@ import path from 'node:path';
 import { URL } from 'node:url';
 import { promisify } from 'node:util';
 
+import {
+  FLEET_API_VERSION,
+  type FleetPolicySnapshot,
+  type FleetRequestIndex,
+  type FleetRequestRecord,
+  type FleetRequestState,
+  type FleetRequestType,
+} from './fleet/contracts';
+
 const execFileAsync = promisify(execFile);
 
 type DroneState = {
@@ -117,6 +126,95 @@ async function loadPromptIndex(promptsDir: string): Promise<PromptIndex> {
 
 async function savePromptIndex(promptsDir: string, idx: PromptIndex): Promise<void> {
   await writeJsonFileAtomic(path.join(promptsDir, 'queue.json'), idx);
+}
+
+async function loadFleetRequestIndex(fleetDir: string): Promise<FleetRequestIndex> {
+  const raw = await readJsonFile(path.join(fleetDir, 'requests.json'), { order: [], idempotency: {} as Record<string, string> });
+  return {
+    order: Array.isArray(raw?.order) ? raw.order.map(String).filter(Boolean) : [],
+    idempotency:
+      raw?.idempotency && typeof raw.idempotency === 'object' && !Array.isArray(raw.idempotency)
+        ? (Object.fromEntries(Object.entries(raw.idempotency).map(([key, value]) => [String(key), String(value)])) as Record<string, string>)
+        : {},
+  };
+}
+
+async function saveFleetRequestIndex(fleetDir: string, idx: FleetRequestIndex): Promise<void> {
+  await writeJsonFileAtomic(path.join(fleetDir, 'requests.json'), idx);
+}
+
+async function loadFleetRequest(fleetDir: string, idRaw: string): Promise<FleetRequestRecord | null> {
+  const id = String(idRaw ?? '').trim();
+  if (!id) return null;
+  const p = path.join(fleetDir, 'requests', `${id}.json`);
+  if (!(await fileExists(p))) return null;
+  return await readJsonFile<FleetRequestRecord>(p, null as any);
+}
+
+async function saveFleetRequest(fleetDir: string, request: FleetRequestRecord): Promise<void> {
+  await writeJsonFileAtomic(path.join(fleetDir, 'requests', `${request.id}.json`), request);
+}
+
+async function listFleetRequests(fleetDir: string, state?: FleetRequestState): Promise<FleetRequestRecord[]> {
+  const idx = await loadFleetRequestIndex(fleetDir);
+  const items: FleetRequestRecord[] = [];
+  for (const id of idx.order) {
+    const request = await loadFleetRequest(fleetDir, id);
+    if (!request) continue;
+    if (state && request.state !== state) continue;
+    items.push(request);
+  }
+  return items;
+}
+
+async function loadFleetPolicySnapshot(fleetDir: string): Promise<FleetPolicySnapshot> {
+  const fallback: FleetPolicySnapshot = {
+    apiVersion: FLEET_API_VERSION,
+    enabled: false,
+    actor: { id: null, name: null },
+    capabilities: [],
+    readScopes: ['children'],
+    sendScopes: ['children', 'assigned'],
+    limits: {},
+    updatedAt: nowIso(),
+  };
+  const raw = await readJsonFile(path.join(fleetDir, 'policy.json'), fallback);
+  return {
+    apiVersion: typeof raw?.apiVersion === 'string' && raw.apiVersion.trim() ? raw.apiVersion.trim() : fallback.apiVersion,
+    enabled: raw?.enabled === true,
+    actor: {
+      id: typeof raw?.actor?.id === 'string' && raw.actor.id.trim() ? raw.actor.id.trim() : null,
+      name: typeof raw?.actor?.name === 'string' && raw.actor.name.trim() ? raw.actor.name.trim() : null,
+    },
+    capabilities: Array.isArray(raw?.capabilities) ? raw.capabilities.map(String).filter(Boolean) : [],
+    readScopes: Array.isArray(raw?.readScopes) ? raw.readScopes.map(String).filter(Boolean) : fallback.readScopes,
+    sendScopes: Array.isArray(raw?.sendScopes) ? raw.sendScopes.map(String).filter(Boolean) : fallback.sendScopes,
+    limits:
+      raw?.limits && typeof raw.limits === 'object' && !Array.isArray(raw.limits)
+        ? (Object.fromEntries(
+            Object.entries(raw.limits)
+              .map(([key, value]) => [String(key), Number(value)])
+              .filter(([, value]) => Number.isFinite(value)),
+          ) as Record<string, number>)
+        : {},
+    updatedAt: typeof raw?.updatedAt === 'string' && raw.updatedAt.trim() ? raw.updatedAt.trim() : fallback.updatedAt,
+  };
+}
+
+async function saveFleetPolicySnapshot(fleetDir: string, snapshot: FleetPolicySnapshot): Promise<void> {
+  await writeJsonFileAtomic(path.join(fleetDir, 'policy.json'), snapshot);
+}
+
+function normalizeFleetRequestState(raw: unknown): FleetRequestState | null {
+  const value = String(raw ?? '').trim().toLowerCase();
+  if (value === 'queued' || value === 'running' || value === 'done' || value === 'failed') return value;
+  return null;
+}
+
+function normalizeFleetRequestType(raw: unknown): FleetRequestType | null {
+  const value = String(raw ?? '').trim().toLowerCase();
+  if (value === 'create_child' || value === 'send_message' || value === 'read_messages') return value;
+  return null;
 }
 
 function promptSessionName(id: string): string {
@@ -534,6 +632,9 @@ async function main() {
   const promptOutDir = path.join(promptsDir, 'out');
   await ensureDir(promptJobsDir);
   await ensureDir(promptOutDir);
+  const fleetDir = path.join(dataDir, 'fleet');
+  const fleetRequestsDir = path.join(fleetDir, 'requests');
+  await ensureDir(fleetRequestsDir);
 
   let promptPumpBusy = false;
   async function pumpPrompts() {
@@ -616,6 +717,173 @@ async function main() {
 
       if (method === 'GET' && pathname === '/v1/health') {
         json(res, 200, { ok: true, name: 'drone-daemon', time: new Date().toISOString() });
+        return;
+      }
+
+      if (method === 'GET' && pathname === '/v1/fleet/capabilities') {
+        const snapshot = await loadFleetPolicySnapshot(fleetDir);
+        json(res, 200, { ok: true, ...snapshot });
+        return;
+      }
+
+      if (method === 'GET' && pathname === '/v1/fleet/help') {
+        const snapshot = await loadFleetPolicySnapshot(fleetDir);
+        json(res, 200, {
+          ok: true,
+          ...snapshot,
+          commands: [
+            'fleet create --name <child> --group <group> [--idempotency-key <key>]',
+            'fleet send --to <drone> --chat <chat> --message "<text>"',
+            'fleet read --from <drone> --chat <chat> --limit 20 [--cursor <cursor>]',
+            'fleet request status --id <requestId>',
+            'fleet capabilities',
+          ],
+        });
+        return;
+      }
+
+      if (method === 'POST' && pathname === '/v1/fleet/policy') {
+        const body = await readJson(req);
+        const nextSnapshot: FleetPolicySnapshot = {
+          apiVersion: typeof body?.apiVersion === 'string' && body.apiVersion.trim() ? body.apiVersion.trim() : FLEET_API_VERSION,
+          enabled: body?.enabled === true,
+          actor: {
+            id: typeof body?.actor?.id === 'string' && body.actor.id.trim() ? body.actor.id.trim() : null,
+            name: typeof body?.actor?.name === 'string' && body.actor.name.trim() ? body.actor.name.trim() : null,
+          },
+          capabilities: Array.isArray(body?.capabilities) ? body.capabilities.map(String).filter(Boolean) : [],
+          readScopes: Array.isArray(body?.readScopes) ? body.readScopes.map(String).filter(Boolean) : ['children'],
+          sendScopes: Array.isArray(body?.sendScopes) ? body.sendScopes.map(String).filter(Boolean) : ['children', 'assigned'],
+          limits:
+            body?.limits && typeof body.limits === 'object' && !Array.isArray(body.limits)
+              ? (Object.fromEntries(
+                  Object.entries(body.limits)
+                    .map(([key, value]) => [String(key), Number(value)])
+                    .filter(([, value]) => Number.isFinite(value)),
+                ) as Record<string, number>)
+              : {},
+          updatedAt: nowIso(),
+        };
+        await saveFleetPolicySnapshot(fleetDir, nextSnapshot);
+        json(res, 200, { ok: true, snapshot: nextSnapshot });
+        return;
+      }
+
+      if (method === 'POST' && pathname === '/v1/fleet/requests') {
+        const body = await readJson(req);
+        const type = normalizeFleetRequestType(body?.type);
+        if (!type) {
+          json(res, 400, { error: 'invalid type (expected create_child|send_message|read_messages)' });
+          return;
+        }
+        const payload =
+          body?.payload && typeof body.payload === 'object' && !Array.isArray(body.payload)
+            ? (body.payload as Record<string, unknown>)
+            : null;
+        if (!payload) {
+          json(res, 400, { error: 'missing payload' });
+          return;
+        }
+
+        const idempotencyKeyRaw = typeof body?.idempotencyKey === 'string' ? body.idempotencyKey.trim() : '';
+        const idx = await loadFleetRequestIndex(fleetDir);
+        if (idempotencyKeyRaw) {
+          const existingId = idx.idempotency[idempotencyKeyRaw];
+          if (existingId) {
+            const existing = await loadFleetRequest(fleetDir, existingId);
+            if (existing) {
+              json(res, 200, { ok: true, request: existing, note: 'already exists' });
+              return;
+            }
+          }
+        }
+
+        const id = `fleet-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        const createdAt = nowIso();
+        const request: FleetRequestRecord = {
+          id,
+          ...(idempotencyKeyRaw ? { idempotencyKey: idempotencyKeyRaw } : {}),
+          type,
+          payload,
+          state: 'queued',
+          createdAt,
+          updatedAt: createdAt,
+        };
+        await saveFleetRequest(fleetDir, request);
+        const order = Array.isArray(idx.order) ? idx.order.map(String).filter(Boolean) : [];
+        order.push(id);
+        idx.order = order.slice(-500);
+        if (idempotencyKeyRaw) idx.idempotency[idempotencyKeyRaw] = id;
+        await saveFleetRequestIndex(fleetDir, idx);
+        json(res, 202, { ok: true, request });
+        return;
+      }
+
+      if (method === 'GET' && pathname === '/v1/fleet/requests') {
+        const stateRaw = u.searchParams.get('state');
+        const state = normalizeFleetRequestState(stateRaw);
+        if (stateRaw != null && state == null) {
+          json(res, 400, { error: 'invalid state (expected queued|running|done|failed)' });
+          return;
+        }
+        const requests = await listFleetRequests(fleetDir, state ?? undefined);
+        json(res, 200, { ok: true, requests });
+        return;
+      }
+
+      const fleetRequestMatch = pathname.match(/^\/v1\/fleet\/requests\/([^/]+)$/);
+      if (method === 'GET' && fleetRequestMatch) {
+        const id = decodeURIComponent(fleetRequestMatch[1] ?? '');
+        const request = await loadFleetRequest(fleetDir, id);
+        if (!request) {
+          json(res, 404, { error: 'not found' });
+          return;
+        }
+        json(res, 200, { ok: true, request });
+        return;
+      }
+
+      const fleetClaimMatch = pathname.match(/^\/v1\/fleet\/requests\/([^/]+)\/claim$/);
+      if (method === 'POST' && fleetClaimMatch) {
+        const id = decodeURIComponent(fleetClaimMatch[1] ?? '');
+        const request = await loadFleetRequest(fleetDir, id);
+        if (!request) {
+          json(res, 404, { error: 'not found' });
+          return;
+        }
+        if (request.state === 'done' || request.state === 'failed') {
+          json(res, 200, { ok: true, request, note: 'already terminal' });
+          return;
+        }
+        const next: FleetRequestRecord = { ...request, state: 'running', updatedAt: nowIso() };
+        await saveFleetRequest(fleetDir, next);
+        json(res, 200, { ok: true, request: next });
+        return;
+      }
+
+      const fleetResolveMatch = pathname.match(/^\/v1\/fleet\/requests\/([^/]+)\/resolve$/);
+      if (method === 'POST' && fleetResolveMatch) {
+        const id = decodeURIComponent(fleetResolveMatch[1] ?? '');
+        const request = await loadFleetRequest(fleetDir, id);
+        if (!request) {
+          json(res, 404, { error: 'not found' });
+          return;
+        }
+        const body = await readJson(req);
+        const state = normalizeFleetRequestState(body?.state);
+        if (state !== 'done' && state !== 'failed') {
+          json(res, 400, { error: 'invalid state (expected done|failed)' });
+          return;
+        }
+        const next: FleetRequestRecord = {
+          ...request,
+          state,
+          updatedAt: nowIso(),
+          result: state === 'done' ? body?.result : undefined,
+          error: state === 'failed' ? (typeof body?.error === 'string' && body.error.trim() ? body.error.trim() : 'failed') : undefined,
+        };
+        await saveFleetRequest(fleetDir, next);
+        json(res, 200, { ok: true, request: next });
         return;
       }
 

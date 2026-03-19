@@ -1,3 +1,5 @@
+import type { FleetRequestState, FleetRequestType } from '../fleet/contracts';
+
 export type DroneClient = {
   baseUrl: string;
   token: string;
@@ -94,6 +96,61 @@ export async function promptGet(client: DroneClient, id: string) {
 
 export async function promptCancel(client: DroneClient, id: string) {
   return await req(client, 'POST', `/v1/prompts/${encodeURIComponent(id)}/cancel`);
+}
+
+export async function fleetCapabilities(client: DroneClient) {
+  return await req(client, 'GET', '/v1/fleet/capabilities');
+}
+
+export async function fleetHelp(client: DroneClient) {
+  return await req(client, 'GET', '/v1/fleet/help');
+}
+
+export async function fleetPolicySet(
+  client: DroneClient,
+  payload: {
+    apiVersion?: string;
+    enabled: boolean;
+    actor: { id?: string | null; name?: string | null };
+    capabilities: string[];
+    readScopes?: string[];
+    sendScopes?: string[];
+    limits?: Record<string, number>;
+  },
+) {
+  return await req(client, 'POST', '/v1/fleet/policy', payload);
+}
+
+export async function fleetRequestCreate(
+  client: DroneClient,
+  payload: {
+    idempotencyKey?: string;
+    type: FleetRequestType;
+    payload: Record<string, unknown>;
+  },
+) {
+  return await req(client, 'POST', '/v1/fleet/requests', payload);
+}
+
+export async function fleetRequestList(client: DroneClient, input?: { state?: FleetRequestState }) {
+  const qs = input?.state ? `?state=${encodeURIComponent(input.state)}` : '';
+  return await req(client, 'GET', `/v1/fleet/requests${qs}`);
+}
+
+export async function fleetRequestGet(client: DroneClient, id: string) {
+  return await req(client, 'GET', `/v1/fleet/requests/${encodeURIComponent(id)}`);
+}
+
+export async function fleetRequestClaim(client: DroneClient, id: string) {
+  return await req(client, 'POST', `/v1/fleet/requests/${encodeURIComponent(id)}/claim`);
+}
+
+export async function fleetRequestResolve(
+  client: DroneClient,
+  id: string,
+  payload: { state: 'done' | 'failed'; result?: unknown; error?: string },
+) {
+  return await req(client, 'POST', `/v1/fleet/requests/${encodeURIComponent(id)}/resolve`, payload);
 }
 
 export async function terminalInput(client: DroneClient, payload: { session: string; data: string }) {
