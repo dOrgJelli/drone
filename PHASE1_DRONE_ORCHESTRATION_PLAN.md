@@ -78,7 +78,7 @@ Optional read scope extension for later:
 
 ## Limits and Quotas (Phase 1 Defaults)
 
-These should be configurable by env/settings, with safe defaults:
+These should be configurable by hub settings, with safe defaults:
 
 - Max children per parent drone: `5`
 - Max creations per parent per hour: `10`
