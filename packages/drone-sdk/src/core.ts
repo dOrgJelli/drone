@@ -47,6 +47,8 @@ type DroneSDK = {
 export type DroneCollection = {
   create(name: string, input?: CreateDroneInput): Promise<Drone>;
   createMany(inputs: CreateDroneBatchItem[]): Promise<CreateManyResult>;
+  clone(source: CloneSource, name: string, input?: Omit<CreateDroneInput, 'cloneFrom'>): Promise<Drone>;
+  cloneMany(inputs: CloneDroneInput[]): Promise<CreateManyResult>;
   get(idOrName: string): Promise<Drone | null>;
   list(input?: ListDronesInput): Promise<DroneSummary[]>;
 };
@@ -63,7 +65,20 @@ export type DroneGroup = {
   create(name: string, input?: Omit<CreateDroneInput, 'group'>): Promise<Drone>;
   createMany(inputs: Omit<CreateDroneBatchItem, 'group'>[]): Promise<CreateManyResult>;
   createManyDrones(inputs: Omit<CreateDroneBatchItem, 'group'>[]): Promise<Drone[]>;
+  cloneTo(targetGroup: string, options?: GroupCloneOptions): Promise<CreateManyResult>;
   list(): Promise<DroneSummary[]>;
+};
+
+export type CloneSource = string | Drone | DroneSummary;
+export type CloneDroneInput = Omit<CreateDroneInput, 'cloneFrom'> & {
+  source: CloneSource;
+  name: string;
+};
+
+export type GroupCloneOptions = {
+  namePrefix?: string;
+  nameSuffix?: string;
+  cloneChats?: boolean;
 };
 
 export type Drone = {
@@ -163,6 +178,19 @@ function withDefaultRuntime<T extends { runtime?: DroneRuntime }>(input: T): T &
     ...input,
     runtime: input.runtime ?? 'container',
   };
+}
+
+function normalizeCloneSource(source: CloneSource): string {
+  if (typeof source === 'string') {
+    const value = source.trim();
+    if (!value) throw new ValidationError('clone source cannot be empty');
+    return value;
+  }
+  const id = String((source as any)?.id ?? '').trim();
+  if (id) return id;
+  const name = String((source as any)?.name ?? '').trim();
+  if (name) return name;
+  throw new ValidationError('clone source must include an id or name');
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -419,6 +447,23 @@ class DroneCollectionImpl implements DroneCollection {
     return await this.ctx.transport.createDrones(inputs.map((item) => withDefaultRuntime(item)), this.ctx.defaults);
   }
 
+  async clone(source: CloneSource, name: string, input?: Omit<CreateDroneInput, 'cloneFrom'>): Promise<Drone> {
+    return await this.create(name, {
+      ...(input ?? {}),
+      cloneFrom: normalizeCloneSource(source),
+    });
+  }
+
+  async cloneMany(inputs: CloneDroneInput[]): Promise<CreateManyResult> {
+    if (inputs.length === 0) return { accepted: [], rejected: [] };
+    return await this.createMany(
+      inputs.map(({ source, ...item }) => ({
+        ...item,
+        cloneFrom: normalizeCloneSource(source),
+      })),
+    );
+  }
+
   async get(idOrName: string): Promise<Drone | null> {
     const record = await this.ctx.transport.getDrone(idOrName, this.ctx.defaults);
     return record ? new DroneImpl(this.ctx, record) : null;
@@ -468,6 +513,26 @@ class DroneGroupImpl implements DroneGroup {
 
   async createManyDrones(inputs: Omit<CreateDroneBatchItem, 'group'>[]): Promise<Drone[]> {
     return await Promise.all(inputs.map(async (input) => await this.create(input)));
+  }
+
+  async cloneTo(targetGroup: string, options?: GroupCloneOptions): Promise<CreateManyResult> {
+    const destination = String(targetGroup ?? '').trim();
+    if (!destination) throw new ValidationError('target group cannot be empty');
+    const sourceDrones = await this.list();
+    if (sourceDrones.length === 0) return { accepted: [], rejected: [] };
+
+    const prefix = options?.namePrefix ?? '';
+    const suffix = options?.nameSuffix ?? '-clone';
+    const cloneChats = options?.cloneChats ?? true;
+
+    return await new DroneCollectionImpl(this.ctx).createMany(
+      sourceDrones.map((source) => ({
+        name: `${prefix}${source.name}${suffix}`,
+        group: destination,
+        cloneFrom: source.id,
+        cloneChats,
+      })),
+    );
   }
 
   async list(): Promise<DroneSummary[]> {

@@ -185,6 +185,40 @@ describe('drone-sdk core', () => {
     expect(listed.map((drone) => drone.name).sort()).toEqual(['a', 'b', 'c']);
   });
 
+  test('supports cloning one or many drones', async () => {
+    const sdk = createDroneSDK({
+      transport: createMockTransport(),
+    });
+
+    const source = await sdk.drones.create('source-drone', { group: 'source' });
+    const single = await sdk.drones.clone(source, 'source-drone-copy', { group: 'target' });
+    const many = await sdk.drones.cloneMany([
+      { source, name: 'source-drone-copy-2', group: 'target' },
+      { source: source.id, name: 'source-drone-copy-3', group: 'target' },
+    ]);
+
+    expect(single.name).toBe('source-drone-copy');
+    expect(single.group).toBe('target');
+    expect(many.accepted.map((drone) => drone.name).sort()).toEqual([
+      'source-drone-copy-2',
+      'source-drone-copy-3',
+    ]);
+  });
+
+  test('supports cloning a full group to another group', async () => {
+    const sdk = createDroneSDK({
+      transport: createMockTransport(),
+    });
+
+    const source = sdk.groups.create('source-group');
+    await source.createManyDrones([{ name: 'a' }, { name: 'b' }]);
+    const cloned = await source.cloneTo('target-group', { nameSuffix: '-copy' });
+    const target = await sdk.groups.get('target-group').list();
+
+    expect(cloned.accepted.map((drone) => drone.name).sort()).toEqual(['a-copy', 'b-copy']);
+    expect(target.map((drone) => drone.name).sort()).toEqual(['a-copy', 'b-copy']);
+  });
+
   test('auto-discovers hub token and baseUrl from DRONE_DATA_DIR', async () => {
     const previousDataDir = process.env.DRONE_DATA_DIR;
     const previousToken = process.env.DRONE_TOKEN;

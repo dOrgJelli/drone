@@ -24,6 +24,7 @@ type UseDroneSelectionStateArgs = {
   selectedDrone: string | null;
   selectedDroneIds: string[];
   selectedChat: string;
+  kanbanBoardOpen: boolean;
   draftChat: { prompt: unknown | null } | null;
   drones: DroneSummary[];
   dronesFilteredByRepo: DroneSummary[];
@@ -50,6 +51,7 @@ export function useDroneSelectionState({
   selectedDrone,
   selectedDroneIds,
   selectedChat,
+  kanbanBoardOpen,
   draftChat,
   drones,
   dronesFilteredByRepo,

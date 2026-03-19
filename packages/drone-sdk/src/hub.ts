@@ -263,6 +263,8 @@ export function hubTransport(options: HubTransportOptions): DroneTransport {
       if (input.group) body.group = input.group;
       if (input.cwd) body.cwd = input.cwd;
       if (input.repoPath) body.repoPath = input.repoPath;
+      if (input.cloneFrom) body.cloneFrom = input.cloneFrom;
+      if (typeof input.cloneChats === 'boolean') body.cloneChats = input.cloneChats;
       const response = await requestJson<any>(
         options,
         '/api/drones',
@@ -291,6 +293,8 @@ export function hubTransport(options: HubTransportOptions): DroneTransport {
               ...(item.group ? { group: item.group } : {}),
               ...(item.cwd ? { cwd: item.cwd } : {}),
               ...(item.repoPath ? { repoPath: item.repoPath } : {}),
+              ...(item.cloneFrom ? { cloneFrom: item.cloneFrom } : {}),
+              ...(typeof item.cloneChats === 'boolean' ? { cloneChats: item.cloneChats } : {}),
             })),
           }),
         },

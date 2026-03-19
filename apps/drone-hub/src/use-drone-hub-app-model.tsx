@@ -911,6 +911,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     selectedDrone,
     selectedDroneIds,
     selectedChat,
+    kanbanBoardOpen,
     draftChat,
     drones,
     dronesFilteredByRepo,

@@ -31,11 +31,14 @@ export type {
 export type {
   BroadcastAPI,
   ChatBroadcast,
+  CloneDroneInput,
+  CloneSource,
   Drone,
   DroneBroadcast,
   DroneChat,
   DroneCollection,
   DroneGroup,
+  GroupCloneOptions,
   GroupCollection,
   Run,
 } from './core';

@@ -5659,33 +5659,36 @@ async function restoreArchivedDroneById(opts: { id: string }): Promise<{
   }
 
   const containerName = String(archivedEntry?.containerName ?? archivedEntry?.name ?? `drone-${droneId}`).trim() || `drone-${droneId}`;
+  const runtime = droneRuntime(archivedEntry);
   const archiveRuntimePolicy = normalizeArchiveRuntimePolicy(archivedEntry?.archiveRuntimePolicy);
-  const containerExists = await dvmContainerExists(containerName);
-  if (!containerExists) {
-    return {
-      hadEntry: true,
-      restored: false,
-      id: droneId,
-      name: String(archivedEntry?.name ?? '').trim() || droneId,
-      renamed: false,
-      error: `container "${containerName}" no longer exists`,
-    };
-  }
+  if (runtime !== 'host') {
+    const containerExists = await dvmContainerExists(containerName);
+    if (!containerExists) {
+      return {
+        hadEntry: true,
+        restored: false,
+        id: droneId,
+        name: String(archivedEntry?.name ?? '').trim() || droneId,
+        renamed: false,
+        error: `container "${containerName}" no longer exists`,
+      };
+    }
 
-  if (archiveRuntimePolicy === 'stop') {
-    try {
-      await dvmStart(containerName);
-    } catch (e: any) {
-      const msg = e?.message ?? String(e);
-      if (!looksLikeContainerAlreadyRunningError(msg)) {
-        return {
-          hadEntry: true,
-          restored: false,
-          id: droneId,
-          name: String(archivedEntry?.name ?? '').trim() || droneId,
-          renamed: false,
-          error: `failed to start archived drone container "${containerName}": ${msg}`,
-        };
+    if (archiveRuntimePolicy === 'stop') {
+      try {
+        await dvmStart(containerName);
+      } catch (e: any) {
+        const msg = e?.message ?? String(e);
+        if (!looksLikeContainerAlreadyRunningError(msg)) {
+          return {
+            hadEntry: true,
+            restored: false,
+            id: droneId,
+            name: String(archivedEntry?.name ?? '').trim() || droneId,
+            renamed: false,
+            error: `failed to start archived drone container "${containerName}": ${msg}`,
+          };
+        }
       }
     }
   }

@@ -36,6 +36,8 @@ export type SubscribeMessagesInput = StreamOptions & {
 export type CreateDroneInput = {
   agent?: CreateDroneAgentInput;
   model?: string;
+  cloneFrom?: string;
+  cloneChats?: boolean;
   group?: string;
   runtime?: DroneRuntime;
   cwd?: string;
