@@ -3,23 +3,13 @@ import { stripAnsi, timeAgo } from '../../domain';
 import type { PendingPrompt, TranscriptItem } from '../types';
 import { CollapsibleMarkdown } from './CollapsibleMarkdown';
 import type { MarkdownFileReference } from './MarkdownMessage';
+import { fillMissingPromptLoopRunRows, type PromptLoopRunRow } from './prompt-loop-run-rows';
 
 const PROMPT_PREVIEW_MAX_CHARS = 220;
 
 type PromptLoopPromptLike = {
   prompt?: string;
   automation?: TranscriptItem['automation'] | PendingPrompt['automation'];
-};
-
-type PromptLoopTranscriptRow = {
-  rowKey: string;
-  runIndex: number;
-  atIso: string;
-  status: 'done' | 'failed' | 'pending';
-  statusLabel: string;
-  output: string;
-  outputClassName?: string;
-  fadeTo: string;
 };
 
 type PromptLoopSummaryEntry = {
@@ -152,7 +142,7 @@ export const PromptLoopTranscriptGroup = React.memo(function PromptLoopTranscrip
     () =>
       runs
         .filter((item) => !isFinalMessageStage(item.automation))
-        .map((item, idx): PromptLoopTranscriptRow => {
+        .map((item, idx): PromptLoopRunRow => {
         const rowNumber = idx + 1;
         const runIndex = normalizeRunIndex(item, rowNumber);
         const rowKey = rowKeyForRun(item, rowNumber);
@@ -174,7 +164,7 @@ export const PromptLoopTranscriptGroup = React.memo(function PromptLoopTranscrip
     () =>
       pendingRuns
         .filter((item) => !isFinalMessageStage(item.automation))
-        .map((item, idx): PromptLoopTranscriptRow => {
+        .map((item, idx): PromptLoopRunRow => {
         const fallback = completedRows.length + idx + 1;
         const rowIndex = normalizeRunIndex(item, fallback);
         const rowKey = rowKeyForPendingRun(item, fallback);
@@ -194,7 +184,7 @@ export const PromptLoopTranscriptGroup = React.memo(function PromptLoopTranscrip
   const runRows = React.useMemo(() => {
     const combined = [...completedRows, ...pendingRows].map((row, idx) => ({ row, idx }));
     combined.sort((a, b) => (a.row.runIndex - b.row.runIndex) || (a.idx - b.idx));
-    return combined.map((x) => x.row);
+    return fillMissingPromptLoopRunRows(combined.map((x) => x.row));
   }, [completedRows, pendingRows]);
   const summaryCompletedEntries = React.useMemo(
     () =>
@@ -330,8 +320,11 @@ export const PromptLoopTranscriptGroup = React.memo(function PromptLoopTranscrip
                           </div>
                         ) : null}
                       </td>
-                      <td className="px-3 py-2 text-[11px] text-[var(--muted-dim)]" title={new Date(row.atIso).toLocaleString()}>
-                        {timeAgo(row.atIso, nowMs)}
+                      <td
+                        className="px-3 py-2 text-[11px] text-[var(--muted-dim)]"
+                        title={row.atIso ? new Date(row.atIso).toLocaleString() : undefined}
+                      >
+                        {row.atIso ? timeAgo(row.atIso, nowMs) : 'Not recorded'}
                       </td>
                       <td className="px-3 py-2">
                         <button
