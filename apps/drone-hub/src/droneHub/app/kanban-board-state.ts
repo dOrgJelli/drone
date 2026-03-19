@@ -15,6 +15,7 @@ export type KanbanBoardState = {
 };
 
 const DEFAULT_KANBAN_LANE_TITLES = ['To do', 'In progress', 'Review', 'Done'] as const;
+const PASTED_TEXT_INLINE_TITLE_MAX_CHARS = 24;
 
 function defaultKanbanLaneTitle(index: number): string {
   return DEFAULT_KANBAN_LANE_TITLES[index] ?? `Lane ${index + 1}`;
@@ -76,27 +77,51 @@ export function sanitizeKanbanBoardState(value: unknown): KanbanBoardState {
   return lanes.length > 0 ? { lanes } : createDefaultKanbanBoardState();
 }
 
-export function parsePastedKanbanCard(textRaw: string): Pick<KanbanCard, 'title' | 'description'> | null {
+function fallbackTitleFromText(textRaw: string): string {
+  const [firstLine = ''] = String(textRaw ?? '').split('\n');
+  const title = firstLine.trim() || String(textRaw ?? '').trim();
+  if (!title) return 'Untitled task';
+  return title.length > 72 ? `${title.slice(0, 69).trimEnd()}...` : title;
+}
+
+function normalizePastedText(textRaw: string): string {
   const normalized = String(textRaw ?? '').replace(/\r\n?/g, '\n').trim();
-  if (!normalized) return null;
-  const [firstLine = '', ...rest] = normalized.split('\n');
-  const title = firstLine.trim();
-  const nonEmptyRest = rest.filter((line) => line.trim().length > 0);
-  const sharedIndent = nonEmptyRest.reduce<number>((min, line) => {
+  if (!normalized) return '';
+  const lines = normalized.split('\n');
+  const trailingLines = lines.slice(1);
+  const nonEmptyLinesForIndent = (trailingLines.some((line) => line.trim().length > 0) ? trailingLines : lines).filter(
+    (line) => line.trim().length > 0,
+  );
+  const sharedIndent = nonEmptyLinesForIndent.reduce<number>((min, line) => {
     const match = line.match(/^\s*/);
     const indent = match ? match[0].length : 0;
     return Math.min(min, indent);
   }, Number.POSITIVE_INFINITY);
-  const description = rest
-    .map((line) => {
-      if (!Number.isFinite(sharedIndent) || sharedIndent <= 0) return line;
+  const [firstLine = '', ...restLines] = lines;
+  return [firstLine, ...restLines]
+    .map((line, index) => {
+      if (index === 0 || !Number.isFinite(sharedIndent) || sharedIndent <= 0) return line;
       return line.slice(Math.min(sharedIndent, line.length));
     })
     .join('\n')
     .trim();
-  if (!title && !description) return null;
+}
+
+export function parsePastedKanbanCard(
+  textRaw: string,
+): (Pick<KanbanCard, 'title' | 'description'> & { needsGeneratedTitle: boolean }) | null {
+  const normalized = normalizePastedText(textRaw);
+  if (!normalized) return null;
+  if (normalized.length <= PASTED_TEXT_INLINE_TITLE_MAX_CHARS) {
+    return {
+      title: normalized,
+      description: '',
+      needsGeneratedTitle: false,
+    };
+  }
   return {
-    title,
-    description,
+    title: fallbackTitleFromText(normalized),
+    description: normalized,
+    needsGeneratedTitle: true,
   };
 }

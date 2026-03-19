@@ -42,6 +42,12 @@ describe('kanban board state helpers', () => {
   });
 
   test('parses pasted text into title and description', () => {
+    expect(parsePastedKanbanCard('Fix flaky test')).toEqual({
+      title: 'Fix flaky test',
+      description: '',
+      needsGeneratedTitle: false,
+    });
+
     expect(
       parsePastedKanbanCard(`
         Refactor task board header
@@ -51,7 +57,8 @@ describe('kanban board state helpers', () => {
       `),
     ).toEqual({
       title: 'Refactor task board header',
-      description: 'Reuse the agent and repo controls from draft chat.\nKeep the model override inline.',
+      description: 'Refactor task board header\n\nReuse the agent and repo controls from draft chat.\nKeep the model override inline.',
+      needsGeneratedTitle: true,
     });
 
     expect(parsePastedKanbanCard('')).toBeNull();

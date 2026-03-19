@@ -426,6 +426,26 @@ export function useDroneHubAppModel(): DroneHubAppModel {
   const deleteActionSettingsState = useDeleteActionSettings(requestJson);
   const filesystemSettingsState = useFilesystemSettings(requestJson);
   const { llmSettings } = llmSettingsState;
+  const suggestKanbanCardTitleFromPaste = React.useCallback(
+    async (descriptionRaw: string): Promise<string | null> => {
+      const description = String(descriptionRaw ?? '').trim();
+      if (!description) return null;
+      const selectedProvider = llmSettings?.provider?.selected ?? 'openai';
+      const selectedSettings = selectedProvider === 'gemini' ? llmSettings?.gemini : llmSettings?.openai;
+      if (!selectedSettings?.hasKey) return null;
+      const data = await requestJson<{ ok: true; title: string }>('/api/tasks/title-from-message', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          message: description,
+          source: 'kanban-paste-title',
+        }),
+      });
+      const title = String((data as any)?.title ?? '').trim();
+      return title || null;
+    },
+    [llmSettings, requestJson],
+  );
   const hubLogsState = useHubLogs({
     appView,
     requestJson,
@@ -2226,6 +2246,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     boardError,
     boardUpdatedAt,
     reloadBoard,
+    suggestKanbanCardTitleFromPaste,
     nowMs,
     createRuntime,
     setCreateRuntime,

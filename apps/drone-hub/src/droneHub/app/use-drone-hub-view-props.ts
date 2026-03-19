@@ -398,6 +398,7 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
     boardError,
     boardUpdatedAt,
     reloadBoard,
+    suggestKanbanCardTitleFromPaste,
     nowMs,
     createRuntime,
     setCreateRuntime,
@@ -619,6 +620,7 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
           boardUpdatedAt,
           onReloadBoard: reloadBoard,
           onOpenCustomAgentModal: () => setCustomAgentModalOpen(true),
+          onSuggestCardTitleFromPaste: suggestKanbanCardTitleFromPaste,
           onBoardChange: setKanbanBoard,
           onClose: () => setKanbanBoardOpen(false),
         }

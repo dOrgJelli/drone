@@ -1,7 +1,7 @@
 import { cloneDefaultShortcutBindings } from '../src/droneHub/app/shortcuts';
 
 describe('shortcut defaults', () => {
-  test('uses Tab for create draft drone, Z for the task board, and Enter for focusing the primary chat input', () => {
+  test('uses Tab for create draft drone, Y for the task board, and Enter for focusing the primary chat input', () => {
     const defaults = cloneDefaultShortcutBindings();
     expect(defaults.createDraftDrone).toEqual({
       key: 'tab',
@@ -12,7 +12,7 @@ describe('shortcut defaults', () => {
       shift: false,
     });
     expect(defaults.openKanbanBoard).toEqual({
-      key: 'z',
+      key: 'y',
       mod: false,
       ctrl: false,
       meta: false,

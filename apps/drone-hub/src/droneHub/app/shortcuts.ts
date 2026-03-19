@@ -106,7 +106,7 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
 
 const DEFAULT_SHORTCUT_BINDINGS: ShortcutBindingMap = {
   createDraftDrone: { key: 'tab', mod: false, ctrl: false, meta: false, alt: false, shift: false },
-  openKanbanBoard: { key: 'z', mod: false, ctrl: false, meta: false, alt: false, shift: false },
+  openKanbanBoard: { key: 'y', mod: false, ctrl: false, meta: false, alt: false, shift: false },
   focusPrimaryChatInput: { key: 'enter', mod: false, ctrl: false, meta: false, alt: false, shift: false },
   markSelectedDronesUnread: { key: 'q', mod: false, ctrl: false, meta: false, alt: false, shift: false },
   toggleSidebarCollapsed: { key: 'a', mod: false, ctrl: false, meta: false, alt: false, shift: false },
