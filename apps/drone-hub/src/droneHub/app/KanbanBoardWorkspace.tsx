@@ -27,6 +27,16 @@ type KanbanBoardWorkspaceProps = {
   onClose: () => void;
 };
 
+type KanbanCardRef = {
+  laneId: string;
+  cardId: string;
+};
+
+type KanbanDropTarget = {
+  laneId: string;
+  index: number;
+};
+
 const LANE_ACCENTS = ['#D6D06B', '#75B3FF', '#F0B447', '#39D59C'] as const;
 
 function isEditablePasteTarget(target: EventTarget | null): boolean {
@@ -58,9 +68,36 @@ function descriptionSnippet(textRaw: string): string {
   return normalized.length > 92 ? `${normalized.slice(0, 89).trimEnd()}...` : normalized;
 }
 
-function cardDropIndex(event: React.DragEvent<HTMLElement>, cardIndex: number): number {
-  const bounds = event.currentTarget.getBoundingClientRect();
-  return event.clientY < bounds.top + bounds.height / 2 ? cardIndex : cardIndex + 1;
+function resolveDropTargetFromPoint(
+  rootEl: HTMLDivElement | null,
+  clientX: number,
+  clientY: number,
+): KanbanDropTarget | null {
+  if (!rootEl) return null;
+  const hit = document.elementFromPoint(clientX, clientY);
+  if (!(hit instanceof HTMLElement) || !rootEl.contains(hit)) return null;
+
+  const cardEl = hit.closest('[data-kanban-card-id]');
+  if (cardEl instanceof HTMLElement && rootEl.contains(cardEl)) {
+    const laneId = String(cardEl.dataset.kanbanLaneId ?? '').trim();
+    const cardIndex = Number(cardEl.dataset.kanbanCardIndex);
+    if (!laneId || !Number.isFinite(cardIndex)) return null;
+    const bounds = cardEl.getBoundingClientRect();
+    return {
+      laneId,
+      index: clientY < bounds.top + bounds.height / 2 ? cardIndex : cardIndex + 1,
+    };
+  }
+
+  const laneEl = hit.closest('[data-kanban-lane-body]');
+  if (laneEl instanceof HTMLElement && rootEl.contains(laneEl)) {
+    const laneId = String(laneEl.dataset.kanbanLaneBody ?? '').trim();
+    const cardCount = Number(laneEl.dataset.kanbanLaneCardCount);
+    if (!laneId || !Number.isFinite(cardCount)) return null;
+    return { laneId, index: cardCount };
+  }
+
+  return null;
 }
 
 export function KanbanBoardWorkspace({
@@ -79,10 +116,14 @@ export function KanbanBoardWorkspace({
   onClose,
 }: KanbanBoardWorkspaceProps) {
   const rootRef = React.useRef<HTMLDivElement | null>(null);
+  const dragCandidateRef = React.useRef<null | (KanbanCardRef & { startX: number; startY: number })>(null);
+  const dragActiveRef = React.useRef(false);
+  const suppressClickRef = React.useRef(false);
+  const dropTargetStateRef = React.useRef<KanbanDropTarget | null>(null);
   const controlsLocked = boardLoading;
-  const [selectedCardRef, setSelectedCardRef] = React.useState<{ laneId: string; cardId: string } | null>(null);
-  const [draggedCardRef, setDraggedCardRef] = React.useState<{ laneId: string; cardId: string } | null>(null);
-  const [dropTargetRef, setDropTargetRef] = React.useState<{ laneId: string; index: number } | null>(null);
+  const [selectedCardRef, setSelectedCardRef] = React.useState<KanbanCardRef | null>(null);
+  const [draggedCardRef, setDraggedCardRef] = React.useState<KanbanCardRef | null>(null);
+  const [dropTargetRef, setDropTargetRef] = React.useState<KanbanDropTarget | null>(null);
   const laneCount = board.lanes.length;
   const cardCount = React.useMemo(
     () => board.lanes.reduce((sum, lane) => sum + lane.cards.length, 0),
@@ -100,6 +141,10 @@ export function KanbanBoardWorkspace({
   React.useEffect(() => {
     if (selectedCardRef && !selectedCardEntry) setSelectedCardRef(null);
   }, [selectedCardEntry, selectedCardRef]);
+
+  React.useEffect(() => {
+    dropTargetStateRef.current = dropTargetRef;
+  }, [dropTargetRef]);
 
   const selectCard = React.useCallback((laneIdRaw: string, cardIdRaw: string) => {
     const laneId = String(laneIdRaw ?? '').trim();
@@ -236,18 +281,86 @@ export function KanbanBoardWorkspace({
     [onBoardChange],
   );
 
-  const handleDropAt = React.useCallback(
-    (laneIdRaw: string, indexRaw: number) => {
-      const laneId = String(laneIdRaw ?? '').trim();
-      const index = Number(indexRaw);
-      if (!laneId || !Number.isFinite(index) || !draggedCardRef) return;
-      onBoardChange((prev) => moveKanbanCard(prev, { ...draggedCardRef, toLaneId: laneId, toIndex: index }));
-      setSelectedCardRef({ laneId, cardId: draggedCardRef.cardId });
-      setDraggedCardRef(null);
-      setDropTargetRef(null);
+  const commitDrop = React.useCallback(
+    (dragRef: KanbanCardRef, target: KanbanDropTarget) => {
+      const laneId = String(target.laneId ?? '').trim();
+      const index = Number(target.index);
+      if (!laneId || !Number.isFinite(index)) return;
+      onBoardChange((prev) => moveKanbanCard(prev, { ...dragRef, toLaneId: laneId, toIndex: index }));
+      setSelectedCardRef({ laneId, cardId: dragRef.cardId });
     },
-    [draggedCardRef, onBoardChange],
+    [onBoardChange],
   );
+
+  const clearPointerDrag = React.useCallback(() => {
+    dragCandidateRef.current = null;
+    dragActiveRef.current = false;
+    setDraggedCardRef(null);
+    setDropTargetRef(null);
+    document.body.style.removeProperty('user-select');
+  }, []);
+
+  const updateDropTargetFromPoint = React.useCallback((clientX: number, clientY: number) => {
+    const nextTarget = resolveDropTargetFromPoint(rootRef.current, clientX, clientY);
+    setDropTargetRef((prev) =>
+      prev?.laneId === nextTarget?.laneId && prev?.index === nextTarget?.index ? prev : nextTarget
+    );
+  }, []);
+
+  React.useEffect(() => {
+    const handlePointerMove = (event: PointerEvent) => {
+      const candidate = dragCandidateRef.current;
+      if (!candidate || controlsLocked) return;
+      const movedEnough = Math.hypot(event.clientX - candidate.startX, event.clientY - candidate.startY) >= 6;
+      if (!dragActiveRef.current && !movedEnough) return;
+      if (!dragActiveRef.current) {
+        dragActiveRef.current = true;
+        suppressClickRef.current = true;
+        setDraggedCardRef({ laneId: candidate.laneId, cardId: candidate.cardId });
+        document.body.style.setProperty('user-select', 'none');
+      }
+      updateDropTargetFromPoint(event.clientX, event.clientY);
+    };
+
+    const finishPointerDrag = (clientX: number, clientY: number) => {
+      const candidate = dragCandidateRef.current;
+      const didDrag = dragActiveRef.current;
+      const target = resolveDropTargetFromPoint(rootRef.current, clientX, clientY) ?? dropTargetStateRef.current;
+      clearPointerDrag();
+      if (candidate && didDrag && target) {
+        commitDrop(candidate, target);
+      }
+      if (didDrag) {
+        window.setTimeout(() => {
+          suppressClickRef.current = false;
+        }, 0);
+      }
+    };
+
+    const handlePointerUp = (event: PointerEvent) => {
+      if (!dragCandidateRef.current) return;
+      finishPointerDrag(event.clientX, event.clientY);
+    };
+
+    const handlePointerCancel = () => {
+      if (!dragCandidateRef.current) return;
+      clearPointerDrag();
+      window.setTimeout(() => {
+        suppressClickRef.current = false;
+      }, 0);
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+    window.addEventListener('pointercancel', handlePointerCancel);
+    window.addEventListener('blur', handlePointerCancel);
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointercancel', handlePointerCancel);
+      window.removeEventListener('blur', handlePointerCancel);
+    };
+  }, [clearPointerDrag, commitDrop, controlsLocked, updateDropTargetFromPoint]);
 
   const handlePasteCapture = React.useCallback(
     (event: React.ClipboardEvent<HTMLDivElement>) => {
@@ -359,8 +472,19 @@ export function KanbanBoardWorkspace({
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-3 px-6 pb-4">
+          <SpawnContextToolbar
+            agentMenuEntries={spawnAgentMenuEntries}
+            spawnAgentConfig={spawnAgentConfig}
+            createRepoMenuEntries={createRepoMenuEntries}
+            onOpenCustomAgentModal={onOpenCustomAgentModal}
+            agentTitle="Choose default agent context for tasks on this board."
+            modelTitle="Set default model context for this board."
+            customButtonTitle="Manage custom agents"
+            controlsLocked={controlsLocked}
+            repoContainerClassName="min-w-0"
+          />
           {(boardLoading || boardSaving || boardUpdatedAt || boardError) && (
-            <div className="text-[10px] text-[var(--muted-dim)]">
+            <div className="ml-auto text-[10px] text-[var(--muted-dim)]">
               {boardLoading ? (
                 <span>Loading saved board…</span>
               ) : boardSaving ? (
@@ -374,17 +498,6 @@ export function KanbanBoardWorkspace({
               ) : null}
             </div>
           )}
-          <SpawnContextToolbar
-            agentMenuEntries={spawnAgentMenuEntries}
-            spawnAgentConfig={spawnAgentConfig}
-            createRepoMenuEntries={createRepoMenuEntries}
-            onOpenCustomAgentModal={onOpenCustomAgentModal}
-            agentTitle="Choose default agent context for tasks on this board."
-            modelTitle="Set default model context for this board."
-            customButtonTitle="Manage custom agents"
-            controlsLocked={controlsLocked}
-            repoContainerClassName="min-w-0"
-          />
         </div>
       </div>
 
@@ -434,39 +547,16 @@ export function KanbanBoardWorkspace({
 
                 <div className="flex-1 min-h-0 overflow-y-auto pr-1">
                   <div
+                    data-kanban-lane-body={lane.id}
+                    data-kanban-lane-card-count={lane.cards.length}
                     className={`space-y-2 rounded-[18px] p-1 transition-all ${
                       dropTargetRef?.laneId === lane.id && dropTargetRef.index === lane.cards.length
                         ? 'bg-[rgba(157,202,255,.05)]'
                         : ''
                     }`}
-                    onDragOver={(event) => {
-                      if (!draggedCardRef) return;
-                      event.preventDefault();
-                      if (event.target === event.currentTarget) {
-                        setDropTargetRef({ laneId: lane.id, index: lane.cards.length });
-                      }
-                      if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
-                    }}
-                    onDrop={(event) => {
-                      if (!draggedCardRef) return;
-                      event.preventDefault();
-                      if (event.target === event.currentTarget) {
-                        handleDropAt(lane.id, lane.cards.length);
-                      }
-                    }}
                   >
                     {lane.cards.length === 0 ? (
                       <div
-                        onDragOver={(event) => {
-                          if (!draggedCardRef) return;
-                          event.preventDefault();
-                          setDropTargetRef({ laneId: lane.id, index: 0 });
-                          if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
-                        }}
-                        onDrop={(event) => {
-                          event.preventDefault();
-                          handleDropAt(lane.id, 0);
-                        }}
                         className={`rounded-[14px] border px-3 py-5 text-[11px] text-[var(--muted-dim)] transition-all ${
                           dropTargetRef?.laneId === lane.id && dropTargetRef.index === 0
                             ? 'border-[rgba(157,202,255,.5)] bg-[rgba(157,202,255,.08)]'
@@ -488,35 +578,20 @@ export function KanbanBoardWorkspace({
                             <div className="pointer-events-none absolute -top-1 left-3 right-3 z-10 h-0.5 rounded-full bg-[rgba(157,202,255,.9)]" />
                           ) : null}
                           <article
-                            draggable={!controlsLocked}
-                            onDragStart={(event) => {
-                              if (controlsLocked) {
-                                event.preventDefault();
-                                return;
-                              }
-                              setDraggedCardRef({ laneId: lane.id, cardId: card.id });
-                              setDropTargetRef({ laneId: lane.id, index: cardIdx + 1 });
-                              if (event.dataTransfer) {
-                                event.dataTransfer.effectAllowed = 'move';
-                                event.dataTransfer.setData('text/plain', card.id);
-                              }
-                            }}
-                            onDragEnd={() => {
-                              setDraggedCardRef(null);
-                              setDropTargetRef(null);
-                            }}
-                            onDragOver={(event) => {
-                              if (!draggedCardRef) return;
-                              event.preventDefault();
-                              setDropTargetRef({ laneId: lane.id, index: cardDropIndex(event, cardIdx) });
-                              if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
-                            }}
-                            onDrop={(event) => {
-                              if (!draggedCardRef) return;
-                              event.preventDefault();
-                              handleDropAt(lane.id, cardDropIndex(event, cardIdx));
+                            data-kanban-card-id={card.id}
+                            data-kanban-card-index={cardIdx}
+                            data-kanban-lane-id={lane.id}
+                            onPointerDown={(event) => {
+                              if (controlsLocked || event.button !== 0 || isCardControlTarget(event.target)) return;
+                              dragCandidateRef.current = {
+                                laneId: lane.id,
+                                cardId: card.id,
+                                startX: event.clientX,
+                                startY: event.clientY,
+                              };
                             }}
                             onClick={(event) => {
+                              if (suppressClickRef.current) return;
                               if (isCardControlTarget(event.target)) return;
                               toggleCard(lane.id, card.id);
                             }}
@@ -524,7 +599,7 @@ export function KanbanBoardWorkspace({
                               selected
                                 ? 'border-[rgba(255,255,255,.16)] bg-[rgba(255,255,255,.08)]'
                                 : 'border-[rgba(255,255,255,.05)] bg-[rgba(255,255,255,.03)] hover:bg-[rgba(255,255,255,.05)]'
-                            } ${draggedCardRef?.cardId === card.id ? 'opacity-50' : ''}`}
+                            } ${draggedCardRef?.cardId === card.id ? 'cursor-grabbing opacity-50' : controlsLocked ? '' : 'cursor-grab'}`}
                           >
                             <div className="flex items-start gap-2">
                               <div className="min-w-0 flex-1">
