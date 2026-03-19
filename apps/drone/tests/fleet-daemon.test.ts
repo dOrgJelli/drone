@@ -15,6 +15,7 @@ if (!listenSupport.ok) {
 }
 
 const describeSocketSuite = listenSupport.ok ? describe : describe.skip;
+const daemonEntry = path.resolve(__dirname, '..', 'src', 'daemon.ts');
 
 async function allocatePort(): Promise<number> {
   return await new Promise<number>((resolve, reject) => {
@@ -75,7 +76,7 @@ describeSocketSuite('fleet daemon', () => {
     const dataDir = path.join(tempRoot, `daemon-${port}`);
     fs.mkdirSync(dataDir, { recursive: true });
     const token = 'daemon-token';
-    const daemon = Bun.spawn([process.execPath, 'apps/drone/src/daemon.ts', '--host', '127.0.0.1', '--port', String(port), '--data-dir', dataDir, '--token', token], {
+    const daemon = Bun.spawn([process.execPath, daemonEntry, '--host', '127.0.0.1', '--port', String(port), '--data-dir', dataDir, '--token', token], {
       cwd: process.cwd(),
       stdout: 'ignore',
       stderr: 'pipe',
@@ -106,7 +107,7 @@ describeSocketSuite('fleet daemon', () => {
     const dataDir = path.join(tempRoot, `daemon-${port}`);
     fs.mkdirSync(dataDir, { recursive: true });
     const token = 'daemon-token';
-    const daemon = Bun.spawn([process.execPath, 'apps/drone/src/daemon.ts', '--host', '127.0.0.1', '--port', String(port), '--data-dir', dataDir, '--token', token], {
+    const daemon = Bun.spawn([process.execPath, daemonEntry, '--host', '127.0.0.1', '--port', String(port), '--data-dir', dataDir, '--token', token], {
       cwd: process.cwd(),
       stdout: 'ignore',
       stderr: 'pipe',

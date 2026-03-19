@@ -27,7 +27,6 @@ import {
   run as runHostCommand,
   dvmRemove,
   dvmRename,
-  dvmScript,
   dvmStart,
   dvmStop,
   dvmSessionRead,
@@ -5506,35 +5505,22 @@ function resolveDroneDaemonJsPath(): string {
   return path.resolve(__dirname, '..', 'daemon.js');
 }
 
+function resolveDroneDaemonRuntimeDir(): string {
+  return path.dirname(resolveDroneDaemonJsPath());
+}
+
 function isNotFoundErrorMessage(msg: string): boolean {
   const s = String(msg ?? '').trim().toLowerCase();
   return s.startsWith('404') || s === 'not found' || s.includes('not found');
 }
 
 async function upgradeDroneDaemonInContainer(opts: { containerName: string; containerPort: number }) {
-  // Install latest daemon.js into /dvm-data/drone/daemon.js and restart the tmux session.
-  const daemonPath = resolveDroneDaemonJsPath();
-  const daemonJs = await fs.readFile(daemonPath, 'utf8');
-  const delimiter = `DRONE_DAEMON_${crypto.randomBytes(8).toString('hex')}`;
-  const installScript = `#!/usr/bin/env bash
-set -euo pipefail
-mkdir -p /dvm-data/drone
-cat > /dvm-data/drone/daemon.js <<'${delimiter}'
-${daemonJs}
-${delimiter}
-chmod +x /dvm-data/drone/daemon.js
-`;
-  const tmpPath = `/tmp/drone-hub-install-daemon-${process.pid}-${crypto.randomBytes(4).toString('hex')}.sh`;
-  await fs.writeFile(tmpPath, installScript, { mode: 0o700 });
-  try {
-    await dvmScript(opts.containerName, tmpPath);
-  } finally {
-    try {
-      await fs.rm(tmpPath, { force: true });
-    } catch {
-      // ignore
-    }
+  // Install the built daemon runtime tree so relative requires continue to resolve.
+  const clearDaemonRuntime = await dvmExec(opts.containerName, 'bash', ['-lc', 'mkdir -p /dvm-data/drone && rm -rf /dvm-data/drone/dist']);
+  if (clearDaemonRuntime.code !== 0) {
+    throw new Error(clearDaemonRuntime.stderr || clearDaemonRuntime.stdout || 'failed clearing daemon runtime in container');
   }
+  await dvmCopyToContainer(opts.containerName, resolveDroneDaemonRuntimeDir(), '/dvm-data/drone', { clean: false });
 
   // Restart daemon session so new code is loaded.
   await dvmExec(opts.containerName, 'bash', ['-lc', 'tmux kill-session -t drone-daemon 2>/dev/null || true']);
@@ -5542,7 +5528,7 @@ chmod +x /dvm-data/drone/daemon.js
     opts.containerName,
     'drone-daemon',
     'bash',
-    ['-lc', `node /dvm-data/drone/daemon.js --host 0.0.0.0 --port ${opts.containerPort} --data-dir /dvm-data/drone --token-file /dvm-data/drone/token`],
+    ['-lc', `node /dvm-data/drone/dist/daemon.js --host 0.0.0.0 --port ${opts.containerPort} --data-dir /dvm-data/drone --token-file /dvm-data/drone/token`],
     true
   );
 }

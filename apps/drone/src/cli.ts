@@ -8,7 +8,7 @@ import net from 'node:net';
 import path from 'node:path';
 
 import { health, procStart, procStop, readOutput, sendInput, sendKeys, status } from './host/api';
-import { dvmClone, dvmCreate, dvmExec, dvmLs, dvmPorts, dvmRemove, dvmScript, dvmSessionStart } from './host/dvm';
+import { dvmClone, dvmCopyToContainer, dvmCreate, dvmExec, dvmLs, dvmPorts, dvmRemove, dvmSessionStart } from './host/dvm';
 import { droneRootPath } from './host/paths';
 import { loadRegistry, updateRegistry } from './host/registry';
 import {
@@ -664,6 +664,10 @@ function resolveDroneDaemonJsPath(): string {
   return candidates[0]!;
 }
 
+function resolveDroneDaemonRuntimeDir(): string {
+  return path.dirname(resolveDroneDaemonJsPath());
+}
+
 async function resolveHostPort(container: string, containerPort: number): Promise<number> {
   const ports = await dvmPorts(container);
   const match = ports.find((p) => p.containerPort === containerPort);
@@ -802,7 +806,7 @@ async function isDroneContainer(containerName: string): Promise<boolean> {
   // If exec fails (container not running), treat as unknown (false).
   const r = await dvmExec(containerName, 'bash', [
     '-lc',
-    'test -f /dvm-data/drone/token -a -f /dvm-data/drone/daemon.js && echo yes || echo no',
+    'test -f /dvm-data/drone/token -a \\( -f /dvm-data/drone/dist/daemon.js -o -f /dvm-data/drone/daemon.js \\) && echo yes || echo no',
   ]);
   return String(r.stdout ?? '').trim().split('\n').pop() === 'yes';
 }
@@ -970,34 +974,18 @@ createCommand
     const wr = await dvmExec(containerName, 'bash', ['-lc', writeTokenCmd]);
     if (wr.code !== 0) throw new Error(wr.stderr || wr.stdout || 'failed writing token in container');
 
-    // Install daemon JS into the container persistence volume (no bind mount required).
-    const daemonPath = resolveDroneDaemonJsPath();
-    const daemonJs = await fs.readFile(daemonPath, 'utf8');
-    const delimiter = `DRONE_DAEMON_${crypto.randomBytes(8).toString('hex')}`;
-    const installScript = `#!/usr/bin/env bash
-set -euo pipefail
-mkdir -p /dvm-data/drone
-cat > /dvm-data/drone/daemon.js <<'${delimiter}'
-${daemonJs}
-${delimiter}
-chmod +x /dvm-data/drone/daemon.js
-`;
-
-    const tmpDir = droneRootPath('tmp');
-    await fs.mkdir(tmpDir, { recursive: true });
-    const tmpScriptPath = path.join(tmpDir, `install-daemon-${stableId}-${Date.now()}.sh`);
-    await fs.writeFile(tmpScriptPath, installScript, { mode: 0o700 });
-    try {
-      await dvmScript(containerName, tmpScriptPath);
-    } finally {
-      await fs.rm(tmpScriptPath, { force: true });
+    // Copy the built daemon runtime tree so relative requires continue to work in-container.
+    const clearDaemonRuntime = await dvmExec(containerName, 'bash', ['-lc', 'mkdir -p /dvm-data/drone && rm -rf /dvm-data/drone/dist']);
+    if (clearDaemonRuntime.code !== 0) {
+      throw new Error(clearDaemonRuntime.stderr || clearDaemonRuntime.stdout || 'failed clearing daemon runtime in container');
     }
+    await dvmCopyToContainer(containerName, resolveDroneDaemonRuntimeDir(), '/dvm-data/drone', { clean: false });
 
     await dvmSessionStart(
       containerName,
       'drone-daemon',
       'bash',
-      ['-lc', `node /dvm-data/drone/daemon.js --host 0.0.0.0 --port ${containerPort} --data-dir /dvm-data/drone --token-file /dvm-data/drone/token`],
+      ['-lc', `node /dvm-data/drone/dist/daemon.js --host 0.0.0.0 --port ${containerPort} --data-dir /dvm-data/drone --token-file /dvm-data/drone/token`],
       true
     );
 
