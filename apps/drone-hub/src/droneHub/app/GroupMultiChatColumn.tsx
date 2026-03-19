@@ -76,6 +76,7 @@ export function GroupMultiChatColumn({
   const [promptError, setPromptError] = React.useState<string | null>(null);
   const [sendingPromptCount, setSendingPromptCount] = React.useState(0);
   const sendingPrompt = sendingPromptCount > 0;
+  const [stoppingResponse, setStoppingResponse] = React.useState(false);
   const [localWaitingStartedAtMs, setLocalWaitingStartedAtMs] = React.useState<number | null>(null);
   const [optimisticPendingPrompts, setOptimisticPendingPrompts] = React.useState<PendingPrompt[]>([]);
   const [quickActionBusy, setQuickActionBusy] = React.useState<null | 'ssh' | 'pull' | 'push'>(null);
@@ -187,6 +188,11 @@ export function GroupMultiChatColumn({
     return visiblePendingPrompts.some((p) => p.state !== 'failed');
   }, [sendingPrompt, visiblePendingPrompts]);
 
+  const canStopResponse = React.useMemo(
+    () => visiblePendingPrompts.some((item) => !item.automation && (item.state === 'queued' || item.state === 'sending' || item.state === 'sent')),
+    [visiblePendingPrompts],
+  );
+
   const waitingSinceMs = React.useMemo(() => {
     let earliestPendingMs: number | null = null;
     for (const pending of visiblePendingPrompts) {
@@ -297,6 +303,41 @@ export function GroupMultiChatColumn({
     },
     [chatName, drone.hubPhase, drone.id, scrollColumnToBottom, shownName],
   );
+
+  const stopResponse = React.useCallback(async (): Promise<void> => {
+    if (!canStopResponse || stoppingResponse) return;
+    setStoppingResponse(true);
+    setPromptError(null);
+    try {
+      const data = await requestJson<{ ok: true; stoppedPromptIds?: string[]; clearedPromptIds?: string[] }>(
+        `/api/drones/${encodeURIComponent(drone.id)}/chats/${encodeURIComponent(chatName)}/stop`,
+        { method: 'POST' },
+      );
+      const stoppedSet = new Set((Array.isArray(data.stoppedPromptIds) ? data.stoppedPromptIds : []).map((id) => String(id).trim()).filter(Boolean));
+      const clearedSet = new Set((Array.isArray(data.clearedPromptIds) ? data.clearedPromptIds : []).map((id) => String(id).trim()).filter(Boolean));
+      if (stoppedSet.size > 0 || clearedSet.size > 0) {
+        setOptimisticPendingPrompts((prev) =>
+          prev.flatMap((item) => {
+            if (!item?.id) return [];
+            if (clearedSet.has(item.id)) return [];
+            if (!stoppedSet.has(item.id)) return [item];
+            return [
+              {
+                ...item,
+                state: 'failed',
+                error: item.state === 'queued' ? 'Stopped before submission.' : 'Stopped by user.',
+                updatedAt: new Date().toISOString(),
+              },
+            ];
+          }),
+        );
+      }
+    } catch (err: any) {
+      setPromptError(err?.message ?? String(err));
+    } finally {
+      setStoppingResponse(false);
+    }
+  }, [canStopResponse, chatName, drone.id, stoppingResponse]);
 
   const openSshTerminal = React.useCallback(async () => {
     if (disabledByProvisioning || quickActionBusy) return;
@@ -613,6 +654,8 @@ export function GroupMultiChatColumn({
         disabled={sendingPrompt || isDroneStartingOrSeeding(drone.hubPhase)}
         autoFocus={false}
         modeHint=""
+        onStop={canStopResponse ? stopResponse : undefined}
+        stopping={stoppingResponse}
         onSend={sendPrompt}
       />
     </section>

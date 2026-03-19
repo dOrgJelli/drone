@@ -19,7 +19,7 @@ type DroneState = {
   };
 };
 
-type PromptJobState = 'queued' | 'running' | 'done' | 'failed';
+type PromptJobState = 'queued' | 'running' | 'done' | 'failed' | 'canceled';
 
 type PromptJob = {
   id: string;
@@ -228,6 +228,59 @@ async function finalizePromptJob(job: PromptJob): Promise<PromptJob> {
     stderr,
     state: ok ? 'done' : 'failed',
     error: ok ? undefined : (stderr.trim() || stdout.trim() || job.error || 'failed'),
+  };
+}
+
+async function cancelPromptJob(job: PromptJob): Promise<PromptJob> {
+  if (job.state === 'done' || job.state === 'failed' || job.state === 'canceled') return job;
+
+  const finishedAt = nowIso();
+  if (job.state === 'queued') {
+    return {
+      ...job,
+      state: 'canceled',
+      updatedAt: finishedAt,
+      finishedAt,
+      error: 'stopped by user',
+    };
+  }
+
+  if (!(await sessionExists(job.session))) {
+    return await finalizePromptJob(job);
+  }
+
+  try {
+    await tmux(['send-keys', '-t', `${job.session}:0.0`, 'C-c']);
+  } catch {
+    // ignore and fall back to killing the session below
+  }
+
+  const deadline = Date.now() + 1500;
+  while (Date.now() < deadline) {
+    if (!(await sessionExists(job.session))) break;
+    await sleep(100);
+  }
+
+  if (await sessionExists(job.session)) {
+    try {
+      await killSession(job.session);
+    } catch {
+      // ignore
+    }
+  }
+
+  const exitCode = await readIntSafe(job.exitPath);
+  const stdout = await readTextSafe(job.stdoutPath);
+  const stderr = await readTextSafe(job.stderrPath);
+  return {
+    ...job,
+    updatedAt: finishedAt,
+    finishedAt,
+    exitCode: exitCode ?? undefined,
+    stdout,
+    stderr,
+    state: 'canceled',
+    error: 'stopped by user',
   };
 }
 
@@ -643,6 +696,21 @@ async function main() {
           }
         }
         json(res, 200, { ok: true, job });
+        return;
+      }
+
+      const promptCancelMatch = pathname.match(/^\/v1\/prompts\/([^/]+)\/cancel$/);
+      if (method === 'POST' && promptCancelMatch) {
+        const id = decodeURIComponent(promptCancelMatch[1] ?? '');
+        const job = await loadPromptJob(promptsDir, id);
+        if (!job) {
+          json(res, 404, { error: 'not found' });
+          return;
+        }
+        const next = await cancelPromptJob(job);
+        await savePromptJob(promptsDir, next);
+        void pumpPrompts();
+        json(res, 200, { ok: true, job: next });
         return;
       }
 

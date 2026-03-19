@@ -37,6 +37,7 @@ import {
 import {
   procStart,
   promptEnqueue as dronePromptEnqueue,
+  promptCancel as dronePromptCancel,
   promptGet as dronePromptGet,
   status as droneStatus,
   terminalInput as droneTerminalInput,
@@ -2427,6 +2428,11 @@ type PendingStartupPrompt = {
   updatedAt?: string;
 };
 
+const STOPPED_BY_USER_ERROR = 'Stopped by user.';
+const STOPPED_BEFORE_SUBMISSION_ERROR = 'Stopped before submission.';
+const STOPPED_BY_ARCHIVE_ERROR = 'Stopped because the drone was archived.';
+const STOPPED_BY_DELETE_ERROR = 'Stopped because the drone was deleted.';
+
 // NOTE: Pending prompts are executed in the drone daemon (tmux-backed) and are restart-resumable.
 
 function normalizePendingPromptState(raw: unknown): PendingPromptState {
@@ -2813,6 +2819,379 @@ async function cancelQueuedPendingPrompt(opts: {
     return { status: 'already-submitted', pendingState: 'sent' };
   }
   return { status: 'not-found', pendingState: null };
+}
+
+type StopChatResponseResult = {
+  mode: 'transcript' | 'cli';
+  stopped: boolean;
+  stoppedPromptIds: string[];
+  clearedPromptIds: string[];
+  sessionName?: string | null;
+};
+
+type DroneChatStopReason = 'archive' | 'delete';
+type DroneChatStopPlan = {
+  chatNames: string[];
+  builtinChatNames: string[];
+  promptIds: string[];
+  sessionNames: string[];
+};
+
+function droneChatStopError(reason: DroneChatStopReason): string {
+  return reason === 'archive' ? STOPPED_BY_ARCHIVE_ERROR : STOPPED_BY_DELETE_ERROR;
+}
+
+function listStoppablePromptIdsFromChatEntry(entry: any): string[] {
+  const turns = Array.isArray(entry?.turns) ? entry.turns : [];
+  const transcriptIds = new Set(turns.map((turn: any) => String(turn?.id ?? '').trim()).filter(Boolean));
+  return (Array.isArray(entry?.pendingPrompts) ? entry.pendingPrompts : [])
+    .map((item: any) => ({
+      id: String(item?.id ?? '').trim(),
+      state: String(item?.state ?? '').trim(),
+    }))
+    .filter((item: { id: string; state: string }) => {
+      if (!item.id || transcriptIds.has(item.id)) return false;
+      return item.state === 'queued' || item.state === 'sending' || item.state === 'sent';
+    })
+    .map((item: { id: string; state: string }) => item.id);
+}
+
+function buildDroneChatStopPlan(opts: {
+  droneId: string;
+  droneEntry: any;
+}): DroneChatStopPlan {
+  const droneId = normalizeDroneIdentity(opts.droneId);
+  if (!droneId || !opts.droneEntry || typeof opts.droneEntry !== 'object') {
+    return { chatNames: [], builtinChatNames: [], promptIds: [], sessionNames: [] };
+  }
+
+  const runtime = droneRuntime(opts.droneEntry);
+  const chats = opts.droneEntry?.chats && typeof opts.droneEntry.chats === 'object' ? Object.entries(opts.droneEntry.chats) : [];
+  const chatNames = new Set<string>();
+  const builtinChatNames = new Set<string>();
+  const promptIds = new Set<string>();
+  const sessionNames = new Set<string>();
+
+  for (const [chatNameRaw, entry] of chats as Array<[string, any]>) {
+    const chatName = normalizeChatName(chatNameRaw);
+    if (!chatName) continue;
+    chatNames.add(chatName);
+
+    const agent = inferChatAgent(entry);
+    if (agent.kind === 'custom') {
+      if (runtime !== 'host') sessionNames.add(hubChatSessionName(chatName));
+      continue;
+    }
+    builtinChatNames.add(chatName);
+
+    for (const id of listStoppablePromptIdsFromChatEntry(entry)) {
+      promptIds.add(id);
+      if (runtime !== 'host') sessionNames.add(promptJobTmuxSessionName(id));
+    }
+  }
+
+  return {
+    chatNames: [...chatNames],
+    builtinChatNames: [...builtinChatNames],
+    promptIds: [...promptIds],
+    sessionNames: [...sessionNames],
+  };
+}
+
+function markChatPendingPromptsStopped(entry: any, opts: {
+  runtime: ReturnType<typeof droneRuntime>;
+  stopError: string;
+}): { promptIds: string[]; sessionNames: string[] } {
+  const promptIds = listStoppablePromptIdsFromChatEntry(entry);
+  if (promptIds.length === 0) return { promptIds: [], sessionNames: [] };
+
+  const stoppableIds = new Set(promptIds);
+  entry.pendingPrompts = (Array.isArray(entry?.pendingPrompts) ? entry.pendingPrompts : []).map((item: any) => {
+    const id = String(item?.id ?? '').trim();
+    if (!stoppableIds.has(id)) return item;
+    return {
+      ...item,
+      state: 'failed',
+      error: opts.stopError,
+      updatedAt: nowIso(),
+    };
+  });
+
+  return {
+    promptIds,
+    sessionNames: opts.runtime === 'host' ? [] : promptIds.map((promptId) => promptJobTmuxSessionName(promptId)),
+  };
+}
+
+async function markDronePendingPromptsStopped(opts: {
+  droneId: string;
+  reason: DroneChatStopReason;
+}): Promise<{ promptIds: string[]; sessionNames: string[] }> {
+  const droneId = normalizeDroneIdentity(opts.droneId);
+  if (!droneId) return { promptIds: [], sessionNames: [] };
+  const stopError = droneChatStopError(opts.reason);
+
+  return await updateRegistry((regAny: any) => {
+    const d = regAny?.drones?.[droneId] ?? null;
+    if (!d) return { promptIds: [] as string[], sessionNames: [] as string[] };
+
+    const promptIds = new Set<string>();
+    const sessionNames = new Set<string>();
+    const runtime = droneRuntime(d);
+    const chats = d?.chats && typeof d.chats === 'object' ? Object.entries(d.chats) : [];
+
+    for (const [chatName, entry] of chats as Array<[string, any]>) {
+      const agent = inferChatAgent(entry);
+      if (agent.kind !== 'builtin') continue;
+      const stopped = markChatPendingPromptsStopped(entry, { runtime, stopError });
+      for (const promptId of stopped.promptIds) promptIds.add(promptId);
+      for (const sessionName of stopped.sessionNames) sessionNames.add(sessionName);
+      d.chats = d.chats ?? {};
+      d.chats[chatName] = entry;
+    }
+
+    regAny.drones = regAny.drones ?? {};
+    regAny.drones[droneId] = d;
+    return { promptIds: [...promptIds], sessionNames: [...sessionNames] };
+  });
+}
+
+async function cancelDronePromptJobsBestEffort(opts: { droneEntry: any; promptIds: string[] }): Promise<void> {
+  const promptIds = Array.from(new Set((opts.promptIds ?? []).map((id) => String(id ?? '').trim()).filter(Boolean)));
+  if (promptIds.length === 0) return;
+
+  const daemon = await resolveDroneDaemonClientForEntry(opts.droneEntry).catch(() => null);
+  if (!daemon) return;
+
+  for (const promptId of promptIds) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      await dronePromptCancel(daemon.client, promptId);
+    } catch (e: any) {
+      const msg = e?.message ?? String(e);
+      if (!isNotFoundErrorMessage(msg)) throw e;
+    }
+  }
+}
+
+async function killDroneTmuxSessionsBestEffort(opts: {
+  droneId: string;
+  droneEntry: any;
+  sessionNames: string[];
+}): Promise<void> {
+  const droneId = normalizeDroneIdentity(opts.droneId);
+  if (!droneId || droneRuntime(opts.droneEntry) === 'host') return;
+
+  const sessionNames = Array.from(new Set((opts.sessionNames ?? []).map((name) => String(name ?? '').trim()).filter(Boolean)));
+  if (sessionNames.length === 0) return;
+
+  const requestedDroneName = String(opts.droneEntry?.name ?? droneId).trim() || droneId;
+  try {
+    await withLockedDroneContainer({ requestedDroneName, droneEntry: opts.droneEntry }, async ({ containerName }) => {
+      const script = [
+        'set -euo pipefail',
+        ...sessionNames.map((sessionName) => `tmux kill-session -t ${bashQuote(sessionName)} 2>/dev/null || true`),
+      ].join('\n');
+      await dvmExec(containerName, 'bash', ['-lc', script]);
+    });
+  } catch (e: any) {
+    const msg = e?.message ?? String(e);
+    if (!looksLikeMissingContainerError(msg) && !looksLikeContainerNotRunningError(msg)) throw e;
+  }
+}
+
+async function stopAllDroneChatActivity(opts: {
+  droneId: string;
+  droneEntry: any;
+  reason: DroneChatStopReason;
+  updateLiveRegistry?: boolean;
+}): Promise<void> {
+  const droneId = normalizeDroneIdentity(opts.droneId);
+  if (!droneId || !opts.droneEntry || typeof opts.droneEntry !== 'object') return;
+
+  const plan = buildDroneChatStopPlan({ droneId, droneEntry: opts.droneEntry });
+  if (plan.chatNames.length === 0 && plan.promptIds.length === 0 && plan.sessionNames.length === 0) return;
+
+  const promptIds = new Set(plan.promptIds);
+  const sessionNames = new Set(plan.sessionNames);
+
+  for (const chatName of plan.builtinChatNames) {
+    stopPromptAutomationJob({ droneId, chatName, stopMode: 'all', clearQueued: true });
+  }
+  for (const chatName of plan.chatNames) {
+    clearInMemoryChatStateForDelete({ droneId, chatName });
+  }
+
+  if (opts.updateLiveRegistry !== false) {
+    for (let pass = 0; pass < 2; pass += 1) {
+      const marked = await markDronePendingPromptsStopped({ droneId, reason: opts.reason });
+      for (const promptId of marked.promptIds) promptIds.add(promptId);
+      for (const sessionName of marked.sessionNames) sessionNames.add(sessionName);
+    }
+  }
+
+  await cancelDronePromptJobsBestEffort({ droneEntry: opts.droneEntry, promptIds: [...promptIds] });
+  await killDroneTmuxSessionsBestEffort({ droneId, droneEntry: opts.droneEntry, sessionNames: [...sessionNames] });
+}
+
+async function stopTranscriptChatResponse(opts: {
+  droneId: string;
+  chatName: string;
+  droneEntry: any;
+}): Promise<StopChatResponseResult> {
+  const droneId = normalizeDroneIdentity(opts.droneId);
+  const chatName = normalizeChatName(opts.chatName);
+  if (!droneId) throw new Error('missing droneId');
+
+  await ensureChatEntry({ droneId, chatName });
+  await reconcileChatFromDaemon({ droneId, chatName });
+
+  const pending = await readPendingPrompts({ droneId, chatName });
+  const cancelable = pending.filter((item) => {
+    if (!item?.id || item.automation) return false;
+    return item.state === 'queued' || item.state === 'sending' || item.state === 'sent';
+  });
+  if (cancelable.length === 0) {
+    return { mode: 'transcript', stopped: false, stoppedPromptIds: [], clearedPromptIds: [] };
+  }
+
+  const queuedIds = cancelable.filter((item) => item.state === 'queued').map((item) => item.id);
+  const activeIds = cancelable
+    .filter((item) => item.state === 'sending' || item.state === 'sent')
+    .map((item) => item.id);
+
+  if (activeIds.length > 0) {
+    const token = typeof opts.droneEntry?.token === 'string' ? String(opts.droneEntry.token).trim() : '';
+    const containerName = String(opts.droneEntry?.containerName ?? opts.droneEntry?.name ?? droneId).trim() || droneId;
+    const hostPort =
+      typeof opts.droneEntry?.hostPort === 'number' && Number.isFinite(opts.droneEntry.hostPort)
+        ? opts.droneEntry.hostPort
+        : await resolveHostPort(containerName, opts.droneEntry?.containerPort);
+    if (!token || !hostPort) throw new Error('drone daemon not reachable (missing hostPort/token)');
+
+    const client = makeClient(hostPort, token);
+    for (const promptId of activeIds) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await dronePromptCancel(client, promptId);
+      } catch (e: any) {
+        const msg = e?.message ?? String(e);
+        if (!isNotFoundErrorMessage(msg)) throw e;
+      }
+    }
+  }
+
+  const result = await updateRegistry((regAny: any) => {
+    const d = regAny?.drones?.[droneId] ?? null;
+    const entry = d?.chats?.[chatName] ?? null;
+    if (!d || !entry) {
+      return {
+        stoppedPromptIds: [] as string[],
+        clearedPromptIds: [] as string[],
+      };
+    }
+    const turns = Array.isArray(entry.turns) ? entry.turns : [];
+    const transcriptIds = new Set(turns.map((turn: any) => String(turn?.id ?? '').trim()).filter(Boolean));
+    const queuedSet = new Set(queuedIds);
+    const activeSet = new Set(activeIds);
+    const nextPending: any[] = [];
+    const stoppedPromptIds: string[] = [];
+    const clearedPromptIds: string[] = [];
+
+    for (const item of Array.isArray(entry.pendingPrompts) ? entry.pendingPrompts : []) {
+      const id = String(item?.id ?? '').trim();
+      if (!id || transcriptIds.has(id)) {
+        nextPending.push(item);
+        continue;
+      }
+      if (queuedSet.has(id) && !item?.automation && String(item?.state ?? '').trim() === 'queued') {
+        clearedPromptIds.push(id);
+        continue;
+      }
+      if (activeSet.has(id) && !item?.automation) {
+        const state = String(item?.state ?? '').trim();
+        if (state === 'sending' || state === 'sent' || state === 'queued') {
+          nextPending.push({
+            ...item,
+            state: 'failed',
+            error: state === 'queued' ? STOPPED_BEFORE_SUBMISSION_ERROR : STOPPED_BY_USER_ERROR,
+            updatedAt: nowIso(),
+          });
+          stoppedPromptIds.push(id);
+          continue;
+        }
+      }
+      nextPending.push(item);
+    }
+
+    entry.pendingPrompts = nextPending;
+    d.chats = d.chats ?? {};
+    d.chats[chatName] = entry;
+    regAny.drones = regAny.drones ?? {};
+    regAny.drones[droneId] = d;
+    return { stoppedPromptIds, clearedPromptIds };
+  });
+
+  enqueuePendingPromptPump(droneId, chatName);
+  return {
+    mode: 'transcript',
+    stopped: result.stoppedPromptIds.length > 0 || result.clearedPromptIds.length > 0,
+    stoppedPromptIds: result.stoppedPromptIds,
+    clearedPromptIds: result.clearedPromptIds,
+  };
+}
+
+async function stopCliChatResponse(opts: {
+  droneId: string;
+  chatName: string;
+  droneEntry: any;
+}): Promise<StopChatResponseResult> {
+  const droneId = normalizeDroneIdentity(opts.droneId);
+  const chatName = normalizeChatName(opts.chatName);
+  if (!droneId) throw new Error('missing droneId');
+  if (droneRuntime(opts.droneEntry) === 'host') throw unsupportedHostCustomAgentError();
+
+  const requestedDroneName = String(opts.droneEntry?.name ?? droneId).trim() || droneId;
+  const sessionName = hubChatSessionName(chatName);
+  let stopped = false;
+  await withLockedDroneContainer({ requestedDroneName, droneEntry: opts.droneEntry }, async ({ containerName }) => {
+    const script = [
+      'set -euo pipefail',
+      `session=${bashQuote(sessionName)}`,
+      'tmux has-session -t "$session" 2>/dev/null || exit 3',
+      'tmux send-keys -t "$session:0.0" C-c',
+    ].join('\n');
+    const result = await dvmExec(containerName, 'bash', ['-lc', script]);
+    if (result.code === 0) {
+      stopped = true;
+      return;
+    }
+    if (result.code === 3) return;
+    const msg = `${String(result.stderr ?? '')}\n${String(result.stdout ?? '')}`.trim() || `failed to stop session ${sessionName}`;
+    throw new Error(msg);
+  });
+
+  return {
+    mode: 'cli',
+    stopped,
+    stoppedPromptIds: [],
+    clearedPromptIds: [],
+    sessionName,
+  };
+}
+
+async function stopChatResponse(opts: {
+  droneId: string;
+  chatName: string;
+  droneEntry: any;
+}): Promise<StopChatResponseResult> {
+  await ensureChatEntry({ droneId: opts.droneId, chatName: opts.chatName });
+  const { chat } = await getChatEntry({ droneId: opts.droneId, chatName: opts.chatName });
+  const agent = inferChatAgent(chat);
+  if (agent.kind === 'builtin') {
+    return await stopTranscriptChatResponse(opts);
+  }
+  return await stopCliChatResponse(opts);
 }
 
 const PROMPT_AUTOMATION_LANES = new Map<string, PromptAutomationLaneState>();
@@ -3800,6 +4179,7 @@ function clearInMemoryChatStateForDelete(opts: { droneId: string; chatName: stri
   }
 
   PENDING_PROMPT_PUMP_QUEUED.delete(key);
+  PENDING_PROMPT_PUMP_RETRY.delete(key);
   for (let i = PENDING_PROMPT_PUMP_QUEUE.length - 1; i >= 0; i -= 1) {
     const item = PENDING_PROMPT_PUMP_QUEUE[i];
     if (droneChatMapKey(String(item?.droneId ?? ''), String(item?.chatName ?? '')) !== key) continue;
@@ -4137,6 +4517,12 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
         errText = `${errText} (exit ${exitCode})`;
       }
       pendingList[i] = { ...p, state: 'failed', error: errText, updatedAt: nowIso() };
+      changed = true;
+      continue;
+    }
+
+    if (jobState === 'canceled') {
+      pendingList[i] = { ...p, state: 'failed', error: STOPPED_BY_USER_ERROR, updatedAt: nowIso() };
       changed = true;
       continue;
     }
@@ -5059,6 +5445,33 @@ async function removeDroneContainerAndCleanup(opts: {
   return { containerGone, removeErr };
 }
 
+async function removeDroneRuntimeArtifacts(opts: {
+  droneId: string;
+  droneEntry: any;
+  keepVolume: boolean;
+  updateLiveRegistry: boolean;
+}): Promise<{ containerGone: boolean; removeErr: string | null }> {
+  const droneId = normalizeDroneIdentity(opts.droneId);
+  if (!droneId) return { containerGone: false, removeErr: `invalid drone id: ${String(opts.droneId ?? '')}` };
+
+  const repoPathRaw = String(opts.droneEntry?.repoPath ?? '').trim();
+  const containerName = String(opts.droneEntry?.containerName ?? opts.droneEntry?.name ?? `drone-${droneId}`).trim() || `drone-${droneId}`;
+
+  await stopAllDroneChatActivity({
+    droneId,
+    droneEntry: opts.droneEntry,
+    reason: 'delete',
+    updateLiveRegistry: opts.updateLiveRegistry,
+  });
+
+  return await removeDroneContainerAndCleanup({
+    droneId,
+    containerName,
+    repoPathRaw,
+    keepVolume: opts.keepVolume,
+  });
+}
+
 async function removeDroneById(opts: { id: string; keepVolume: boolean; forget: boolean }) {
   const droneId = normalizeDroneIdentity(opts.id);
   if (!droneId) return { hadEntry: false, removedRegistry: false, removeErr: `invalid drone id: ${String(opts.id ?? '')}` };
@@ -5066,15 +5479,14 @@ async function removeDroneById(opts: { id: string; keepVolume: boolean; forget: 
   const regSnapshot: any = await loadRegistry();
   const droneEntry = regSnapshot?.drones?.[droneId] ?? null;
   const hadEntry = Boolean(droneEntry);
-  const repoPathRaw = String(droneEntry?.repoPath ?? '').trim();
-  const containerName = String(droneEntry?.containerName ?? droneEntry?.name ?? `drone-${droneId}`).trim() || `drone-${droneId}`;
-
-  const { containerGone, removeErr } = await removeDroneContainerAndCleanup({
-    droneId,
-    containerName,
-    repoPathRaw,
-    keepVolume: opts.keepVolume,
-  });
+  const { containerGone, removeErr } = droneEntry
+    ? await removeDroneRuntimeArtifacts({
+      droneId,
+      droneEntry,
+      keepVolume: opts.keepVolume,
+      updateLiveRegistry: true,
+    })
+    : { containerGone: false, removeErr: `unknown drone: ${droneId}` };
 
   let removedRegistry = false;
   // Only forget registry metadata once the container is actually gone.
@@ -5351,13 +5763,11 @@ async function removeArchivedDroneById(opts: { id: string; keepVolume: boolean }
     };
   }
 
-  const repoPathRaw = String(archivedEntry?.repoPath ?? '').trim();
-  const containerName = String(archivedEntry?.containerName ?? archivedEntry?.name ?? `drone-${droneId}`).trim() || `drone-${droneId}`;
-  const { containerGone, removeErr } = await removeDroneContainerAndCleanup({
+  const { containerGone, removeErr } = await removeDroneRuntimeArtifacts({
     droneId,
-    containerName,
-    repoPathRaw,
+    droneEntry: archivedEntry,
     keepVolume: opts.keepVolume,
+    updateLiveRegistry: false,
   });
 
   let removedArchive = false;
@@ -11216,7 +11626,9 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           return;
         }
 
-        if (archiveRuntimePolicy === 'stop') {
+        await stopAllDroneChatActivity({ droneId, droneEntry: snapshotDrone, reason: 'archive', updateLiveRegistry: true });
+
+        if (archiveRuntimePolicy === 'stop' && droneRuntime(snapshotDrone) !== 'host') {
           const containerName = String(snapshotDrone?.containerName ?? snapshotDrone?.name ?? `drone-${droneId}`).trim() || `drone-${droneId}`;
           try {
             await dvmStop(containerName);
@@ -12424,6 +12836,50 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         } catch (e: any) {
           const msg = e?.message ?? String(e);
           const code = /still starting/i.test(msg) ? 409 : /unknown drone/i.test(msg) ? 404 : /invalid promptId/i.test(msg) ? 400 : 500;
+          json(res, code, { ok: false, error: msg });
+          return;
+        }
+      }
+
+      // POST /api/drones/:id/chats/:chat/stop
+      // Interrupt the active response for the current chat.
+      if (
+        method === 'POST' &&
+        parts.length === 6 &&
+        parts[0] === 'api' &&
+        parts[1] === 'drones' &&
+        parts[3] === 'chats' &&
+        parts[5] === 'stop'
+      ) {
+        const droneRef = decodeURIComponent(parts[2]);
+        const chatName = normalizeChatName(decodeURIComponent(parts[4]));
+        try {
+          const resolved = await resolveDroneOrRespond(res, droneRef);
+          if (!resolved) return;
+          const droneId = resolved.id;
+          const drone = resolved.drone;
+          const droneName = String(drone?.name ?? droneRef).trim() || droneRef;
+          const result = await stopChatResponse({ droneId, chatName, droneEntry: drone });
+          json(res, 200, {
+            ok: true,
+            id: droneId,
+            name: droneName,
+            chat: chatName,
+            mode: result.mode,
+            stopped: result.stopped,
+            stoppedPromptIds: result.stoppedPromptIds,
+            clearedPromptIds: result.clearedPromptIds,
+            ...(result.sessionName ? { sessionName: result.sessionName } : {}),
+          });
+          return;
+        } catch (e: any) {
+          const msg = e?.message ?? String(e);
+          const code =
+            /still starting/i.test(msg) ? 409
+            : /unknown drone/i.test(msg) ? 404
+            : /unknown chat/i.test(msg) ? 404
+            : /drone daemon not reachable/i.test(msg) ? 409
+            : 500;
           json(res, code, { ok: false, error: msg });
           return;
         }

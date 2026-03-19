@@ -12,6 +12,9 @@ import type { QueuedPrompt } from './use-queued-prompts-state';
 
 type RequestJson = <T>(url: string, init?: RequestInit) => Promise<T>;
 
+const STOPPED_BY_USER_ERROR = 'Stopped by user.';
+const STOPPED_BEFORE_SUBMISSION_ERROR = 'Stopped before submission.';
+
 function optimisticAttachmentRefsFromPayload(raw: unknown): Array<{ name: string; mime: string; size: number; previewDataUrl?: string }> {
   const list = Array.isArray(raw) ? raw : [];
   const out: Array<{ name: string; mime: string; size: number; previewDataUrl?: string }> = [];
@@ -70,6 +73,11 @@ function chatUiModeForAgent(agent: ChatAgentConfig | null | undefined): 'transcr
   return agent.kind === 'builtin' ? 'transcript' : 'cli';
 }
 
+function isStoppableTranscriptPendingPrompt(item: PendingPrompt | null | undefined): boolean {
+  if (!item || item.automation) return false;
+  return item.state === 'queued' || item.state === 'sending' || item.state === 'sent';
+}
+
 export function useChatRuntimeOrchestration({
   chatInfo,
   currentDrone,
@@ -104,6 +112,8 @@ export function useChatRuntimeOrchestration({
   const [unstickPendingPromptErrorById, setUnstickPendingPromptErrorById] = React.useState<Record<string, string>>({});
   const [cancellingPendingPromptById, setCancellingPendingPromptById] = React.useState<Record<string, true>>({});
   const [cancelPendingPromptErrorById, setCancelPendingPromptErrorById] = React.useState<Record<string, string>>({});
+  const [stoppingResponse, setStoppingResponse] = React.useState(false);
+  const [stopResponseError, setStopResponseError] = React.useState<string | null>(null);
   const [cliTyping, setCliTyping] = React.useState(false);
   const cliTypingTimerRef = React.useRef<any>(null);
   const sessionOffsetRef = React.useRef<number | null>(null);
@@ -166,6 +176,8 @@ export function useChatRuntimeOrchestration({
     setUnstickPendingPromptErrorById({});
     setCancellingPendingPromptById({});
     setCancelPendingPromptErrorById({});
+    setStoppingResponse(false);
+    setStopResponseError(null);
   }, [selectedDrone, selectedChat, setOptimisticPendingPrompts]);
 
   const selectedDroneSummary = React.useMemo(
@@ -238,6 +250,7 @@ export function useChatRuntimeOrchestration({
 
       setSendingPromptCount((c) => c + 1);
       setPromptError(null);
+      setStopResponseError(null);
       try {
         const data = await requestJson<{
           ok: true;
@@ -517,6 +530,11 @@ export function useChatRuntimeOrchestration({
     return extra.length > 0 ? [...base, ...extra] : base;
   }, [chatUiMode, localQueuedPromptsForSelected, startupPendingPrompt, visiblePendingPrompts]);
 
+  const canStopTranscriptResponse = React.useMemo(() => {
+    if (chatUiMode !== 'transcript') return false;
+    return visiblePendingPrompts.some((item) => isStoppableTranscriptPendingPrompt(item));
+  }, [chatUiMode, visiblePendingPrompts]);
+
   const selectedIsResponding = React.useMemo(() => {
     if (selectedDrone) {
       if (sendingPrompt) return true; // request in flight
@@ -524,6 +542,57 @@ export function useChatRuntimeOrchestration({
     }
     return visiblePendingPromptsWithStartup.some((p) => p.state !== 'failed');
   }, [chatUiMode, cliTyping, sendingPrompt, selectedDrone, visiblePendingPromptsWithStartup]);
+
+  const canStopResponse = React.useMemo(() => {
+    if (!selectedDrone || !selectedChat) return false;
+    if (chatUiMode === 'cli') return selectedIsResponding && !sendingPrompt;
+    return canStopTranscriptResponse;
+  }, [canStopTranscriptResponse, chatUiMode, selectedChat, selectedDrone, selectedIsResponding, sendingPrompt]);
+
+  const requestStopResponse = React.useCallback(async (): Promise<void> => {
+    if (!selectedDrone || !selectedChat || !canStopResponse) return;
+    if (stoppingResponse) return;
+    setStoppingResponse(true);
+    setStopResponseError(null);
+    try {
+      const data = await requestJson<{
+        ok: true;
+        mode: 'transcript' | 'cli';
+        stopped: boolean;
+        stoppedPromptIds?: string[];
+        clearedPromptIds?: string[];
+      }>(`/api/drones/${encodeURIComponent(selectedDrone)}/chats/${encodeURIComponent(selectedChat || 'default')}/stop`, {
+        method: 'POST',
+      });
+      if (data.mode === 'cli') {
+        setCliTyping(false);
+      }
+      const stoppedSet = new Set((Array.isArray(data.stoppedPromptIds) ? data.stoppedPromptIds : []).map((id) => String(id).trim()).filter(Boolean));
+      const clearedSet = new Set((Array.isArray(data.clearedPromptIds) ? data.clearedPromptIds : []).map((id) => String(id).trim()).filter(Boolean));
+      if (stoppedSet.size > 0 || clearedSet.size > 0) {
+        setOptimisticPendingPrompts((prev) =>
+          prev.flatMap((item) => {
+            if (!item?.id) return [];
+            if (clearedSet.has(item.id)) return [];
+            if (!stoppedSet.has(item.id)) return [item];
+            const nextState = item.state === 'queued' ? 'failed' : 'failed';
+            return [
+              {
+                ...item,
+                state: nextState,
+                error: item.state === 'queued' ? STOPPED_BEFORE_SUBMISSION_ERROR : STOPPED_BY_USER_ERROR,
+                updatedAt: new Date().toISOString(),
+              },
+            ];
+          }),
+        );
+      }
+    } catch (e: any) {
+      setStopResponseError(e?.message ?? String(e));
+    } finally {
+      setStoppingResponse(false);
+    }
+  }, [canStopResponse, requestJson, selectedChat, selectedDrone, setOptimisticPendingPrompts, stoppingResponse]);
 
   React.useEffect(() => {
     if (chatUiMode !== 'transcript') return;
@@ -676,14 +745,18 @@ export function useChatRuntimeOrchestration({
   return {
     cancelPendingPromptErrorById,
     cancellingPendingPromptById,
+    canStopResponse,
     chatUiMode,
     nowMs,
     promptError,
     requestCancelPendingPrompt,
+    requestStopResponse,
     requestUnstickPendingPrompt,
     selectedIsResponding,
     sendPromptText,
     sendingPrompt,
+    stopResponseError,
+    stoppingResponse,
     unstickingPendingPromptById,
     unstickPendingPromptErrorById,
     visiblePendingPromptsWithStartup,
