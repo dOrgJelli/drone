@@ -13,6 +13,7 @@ import { RawData, WebSocket, WebSocketServer } from 'ws';
 import { droneRootPath } from '../host/paths';
 import { loadRegistry, updateRegistry } from '../host/registry';
 import { installFleetCliScript, normalizeDroneRuntime, type DroneRuntime } from '../host/runtime';
+import { resolveContainerTerminalShellCommand, resolveHostTerminalShellCommand } from '../host/shell';
 import {
   dvmBaseSet,
   dvmCopyFromContainer,
@@ -6668,9 +6669,7 @@ function resolveBuiltinTmuxCommand(agent: ChatAgentConfig['id']): string {
 }
 
 function resolveHubTerminalShellCommand(): string {
-  // Keep the in-app shell minimal by default (no login banner / host-heavy prompt).
-  // Users can override this via DRONE_HUB_SHELL_CMD.
-  return String(process.env.DRONE_HUB_SHELL_CMD ?? '').trim() || 'bash --noprofile --rcfile /tmp/.drone-hub-shell-rc -i';
+  return resolveContainerTerminalShellCommand(process.env);
 }
 
 function hubChatSessionName(chatName: string): string {
@@ -6717,23 +6716,18 @@ function isHubWebTerminalSessionName(raw: string): boolean {
 }
 
 function buildHubSessionShell(opts: { command: string; cwd: string }): string {
-  const cmd = String(opts.command || '').trim() || 'bash --noprofile --rcfile /tmp/.drone-hub-shell-rc -i';
+  const cmd = String(opts.command || '').trim() || resolveContainerTerminalShellCommand(process.env);
   const cwd = normalizeContainerPath(String(opts.cwd ?? '').trim() || '/dvm-data');
   const env = [
     'export TERM=xterm-256color',
     'export COLORTERM=truecolor',
-    // Compact prompt so we avoid "root@<container-id>:/path#" noise in the dock.
-    "export PS1='\\w $ '",
-    'export PROMPT_COMMAND=',
   ].join('; ');
   return [
     'set -e',
     env,
-    "printf \"%s\\n\" \"PS1='\\\\w $ '\" \"PROMPT_COMMAND=\" > /tmp/.drone-hub-shell-rc",
-    'chmod 600 /tmp/.drone-hub-shell-rc 2>/dev/null || true',
     `mkdir -p ${bashQuote(cwd)} 2>/dev/null || true`,
     `cd ${bashQuote(cwd)} 2>/dev/null || cd /dvm-data`,
-    `exec ${cmd}`,
+    cmd,
   ].join('; ');
 }
 
@@ -13132,7 +13126,10 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             await waitForDroneDaemonReady(daemon.client, defaultDaemonReadyTimeoutMs());
             const sessionName = mode === 'agent' ? hubChatSessionName(chatName) : hubShellSessionName();
             if (mode === 'agent') await ensureChatEntry({ droneId, chatName });
-            const agentCmd = mode === 'agent' ? await resolveChatTmuxCommand({ droneId, chatName }) : resolveHubTerminalShellCommand();
+            const agentCmd =
+              mode === 'agent'
+                ? await resolveChatTmuxCommand({ droneId, chatName })
+                : resolveHostTerminalShellCommand(process.env);
             const launchScript = [
               'set -euo pipefail',
               `mkdir -p ${bashQuote(cwd)} 2>/dev/null || true`,
