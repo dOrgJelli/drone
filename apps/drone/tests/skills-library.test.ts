@@ -203,4 +203,33 @@ describe('skills library projection', () => {
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }
   });
+
+  test('cleanup-only targets remove old managed skill directories without leaving a manifest behind', async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'drone-skill-cleanup-only-'));
+    try {
+      const cleanupRoot = path.join(tempRoot, '.claude', 'skills');
+      const managedRoot = path.join(cleanupRoot, 'repo-review');
+      const unmanagedRoot = path.join(cleanupRoot, 'unmanaged');
+      fs.mkdirSync(managedRoot, { recursive: true });
+      fs.mkdirSync(unmanagedRoot, { recursive: true });
+      fs.writeFileSync(path.join(managedRoot, 'SKILL.md'), 'old\n', 'utf8');
+      fs.writeFileSync(path.join(unmanagedRoot, 'keep.txt'), 'keep\n', 'utf8');
+      fs.writeFileSync(
+        path.join(cleanupRoot, '.drone-managed-skills.json'),
+        `${JSON.stringify({ managedSlugs: ['repo-review'] }, null, 2)}\n`,
+        'utf8',
+      );
+
+      await syncSkillLibraryToHostTargets({
+        targets: [{ agent: 'claude', rootPath: cleanupRoot, cleanupOnly: true }],
+        skills: [sampleSkill()],
+      });
+
+      expect(fs.existsSync(managedRoot)).toBe(false);
+      expect(fs.existsSync(path.join(cleanupRoot, '.drone-managed-skills.json'))).toBe(false);
+      expect(fs.existsSync(path.join(unmanagedRoot, 'keep.txt'))).toBe(true);
+    } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
 });

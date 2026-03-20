@@ -63,6 +63,7 @@ export type SkillProjectionAgent = 'portable' | 'codex' | 'claude' | 'cursor' | 
 export type SkillProjectionTarget = {
   rootPath: string;
   agent: SkillProjectionAgent;
+  cleanupOnly?: boolean;
 };
 
 type StoredSkillRecord = SkillRecord;
@@ -521,6 +522,15 @@ async function writeRenderedPackagesToHost(rootPath: string, packages: RenderedS
   await fs.writeFile(manifestPathForTarget(targetRoot), `${JSON.stringify(next, null, 2)}\n`, 'utf8');
 }
 
+async function removeManagedPackagesFromHost(rootPath: string): Promise<void> {
+  const targetRoot = path.resolve(rootPath);
+  const previous = await readManagedManifestFromHost(targetRoot);
+  for (const slug of previous.managedSlugs) {
+    await fs.rm(path.join(targetRoot, slug), { recursive: true, force: true });
+  }
+  await fs.rm(manifestPathForTarget(targetRoot), { force: true }).catch(() => {});
+}
+
 async function writeRenderedPackagesToContainer(containerName: string, rootPath: string, packages: RenderedSkillPackage[]): Promise<void> {
   const { dvmCopyToContainer, dvmExec } = await loadDvmHelpers();
   const targetRoot = path.posix.normalize(rootPath);
@@ -558,11 +568,28 @@ async function writeRenderedPackagesToContainer(containerName: string, rootPath:
   }
 }
 
+async function removeManagedPackagesFromContainer(containerName: string, rootPath: string): Promise<void> {
+  const { dvmExec } = await loadDvmHelpers();
+  const targetRoot = path.posix.normalize(rootPath);
+  const previous = await readManagedManifestFromContainer(containerName, targetRoot);
+  const cleanupScript = [
+    'set -euo pipefail',
+    `root=${bashQuote(targetRoot)}`,
+    ...previous.managedSlugs.map((slug) => `rm -rf "$root/${slug}"`),
+    `rm -f ${bashQuote(manifestPathForTargetPosix(targetRoot))}`,
+  ].join('\n');
+  await dvmExec(containerName, 'bash', ['-lc', cleanupScript]);
+}
+
 export async function syncSkillLibraryToHostTargets(opts: { targets: SkillProjectionTarget[]; skills?: SkillRecord[] }): Promise<void> {
   const skills = Array.isArray(opts.skills) ? opts.skills : await listSkills();
   for (const target of opts.targets) {
     const rootPath = String(target.rootPath ?? '').trim();
     if (!rootPath) continue;
+    if (target.cleanupOnly) {
+      await removeManagedPackagesFromHost(rootPath);
+      continue;
+    }
     const packages = renderSkillPackages(skills, target.agent);
     await writeRenderedPackagesToHost(rootPath, packages);
   }
@@ -579,6 +606,10 @@ export async function syncSkillLibraryToContainerTargets(opts: {
   for (const target of opts.targets) {
     const rootPath = String(target.rootPath ?? '').trim();
     if (!rootPath) continue;
+    if (target.cleanupOnly) {
+      await removeManagedPackagesFromContainer(containerName, rootPath);
+      continue;
+    }
     const packages = renderSkillPackages(skills, target.agent);
     await writeRenderedPackagesToContainer(containerName, rootPath, packages);
   }
