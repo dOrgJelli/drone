@@ -257,6 +257,38 @@ Updated body.
       'Refreshed description.',
     );
   });
+
+  test('skips stale marketplace entries that are missing SKILL.md in the repo tree', async () => {
+    const mockFetch = createMockFetch({
+      'https://raw.githubusercontent.com/anthropics/skills/main/.claude-plugin/marketplace.json': {
+        body: JSON.stringify({
+          metadata: {},
+          plugins: [
+            {
+              name: 'example-skills',
+              source: './',
+              skills: ['./skills/missing-review', './skills/portable-review'],
+            },
+          ],
+        }),
+        contentType: 'application/json',
+      },
+      'https://api.github.com/repos/anthropics/skills/git/trees/main?recursive=1': {
+        body: JSON.stringify({
+          sha: 'commit-sha-1',
+          tree: [{ path: 'skills/portable-review/SKILL.md', mode: '100644', type: 'blob' }],
+        }),
+        contentType: 'application/json',
+      },
+      'https://raw.githubusercontent.com/anthropics/skills/commit-sha-1/skills/portable-review/SKILL.md': {
+        body: portableSkillMarkdown,
+        contentType: 'text/plain',
+      },
+    });
+
+    const candidates = await listSkillSourceCandidates('anthropic-skills', mockFetch);
+    expect(candidates.map((candidate) => candidate.path)).toEqual(['skills/portable-review']);
+  });
 });
 
 describe('skill source import', () => {
