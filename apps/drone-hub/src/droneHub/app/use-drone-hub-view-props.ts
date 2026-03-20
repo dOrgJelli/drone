@@ -381,6 +381,7 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
   const {
     appView,
     llmSettingsState,
+    skillLibraryState,
     deleteActionSettingsState,
     filesystemSettingsState,
     hubLogsState,
@@ -564,6 +565,7 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
     appView,
     settingsViewProps: {
       llm: llmSettingsState,
+      skillLibrary: skillLibraryState,
       deleteAction: deleteActionSettingsState,
       filesystem: filesystemSettingsState,
       hubLogsState,
