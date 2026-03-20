@@ -54,6 +54,8 @@ import {
   parseGithubPullRequestHref,
 } from './selected-drone-workspace-utils';
 
+const EMPTY_SIDEBAR_CHAT_ORDER: string[] = [];
+
 type LaunchHint =
   | {
       context: 'terminal' | 'code' | 'cursor';
@@ -360,7 +362,9 @@ export function SelectedDroneWorkspace({
   const chatDraftValue = useDroneHubUiStore((s) => s.chatInputDrafts[chatDraftKey] ?? '');
   const setChatInputDraft = useDroneHubUiStore((s) => s.setChatInputDraft);
   const automations = useDroneHubUiStore((s) => s.automations);
-  const sidebarChatOrder = useDroneHubUiStore((s) => s.sidebarChatOrderByDrone[currentDrone.id] ?? []);
+  const sidebarChatOrder = useDroneHubUiStore(
+    (s) => s.sidebarChatOrderByDrone[currentDrone.id] ?? EMPTY_SIDEBAR_CHAT_ORDER,
+  );
   const {
     promptAutomationJob,
     cancelQueuedAutomationErrorById,
