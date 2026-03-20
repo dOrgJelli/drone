@@ -549,7 +549,7 @@ let FLEET_RECONCILE_BUSY = false;
 async function appendFleetAuditEvent(event: {
   actor: string;
   actorName: string;
-  action: 'create_child' | 'send_message' | 'read_messages';
+  action: 'create_child' | 'send_message' | 'read_messages' | 'stop_chat';
   status: 'accepted' | 'rejected';
   target?: string | null;
   targetName?: string | null;
@@ -622,7 +622,7 @@ async function processFleetRequest(actorId: string, actorEntry: any, request: an
   const actorConfig = fleetActorConfig(actorEntry);
   const limits = effectiveFleetLimits(actorEntry);
   const regAny: any = await loadRegistry();
-  const action = String(request?.type ?? '').trim() as 'create_child' | 'send_message' | 'read_messages';
+  const action = String(request?.type ?? '').trim() as 'create_child' | 'send_message' | 'read_messages' | 'stop_chat';
   const reject = async (message: string, status: number = 400, target?: { id: string; name: string } | null): Promise<never> => {
     await appendFleetAuditEvent({
       actor: actorId,
@@ -745,6 +745,53 @@ async function processFleetRequest(actorId: string, actorEntry: any, request: an
       chat: chatName,
       promptId: enqueuedResult.id,
       pendingState: enqueuedResult.pendingState,
+    };
+  }
+
+  if (action === 'stop_chat') {
+    if (!actorConfig.capabilities.includes(FLEET_CAPABILITY_SEND)) await reject('missing capability: drone:message:send', 403);
+    const targetRef = String((request?.payload as any)?.to ?? '').trim();
+    const targetFound = findDroneIdByRef(regAny, targetRef);
+    if (!targetFound) await reject(`unknown drone: ${targetRef}`, 404);
+    const targetResolved = targetFound!;
+    const targetEntry = regAny?.drones?.[targetResolved.id] ?? regAny?.pending?.[targetResolved.id] ?? null;
+    const target = { id: targetResolved.id, name: String(targetEntry?.name ?? targetResolved.id) };
+    const childIds = new Set(fleetChildrenForActor(regAny, actorId).map((item) => item.id));
+    if (!(targetResolved.id === actorId || childIds.has(targetResolved.id) || fleetTargetAllowedForSend(actorEntry, actorId, targetResolved.id))) {
+      await reject(`target not allowed: ${target.name}`, 403, target);
+    }
+    const liveTarget = regAny?.drones?.[targetResolved.id] ?? null;
+    if (!liveTarget) await reject(`drone "${target.name}" is still starting`, 409, target);
+    const chatName = normalizeChatName((request?.payload as any)?.chat ?? 'default');
+    const result = await stopChatResponse({
+      droneId: targetResolved.id,
+      chatName,
+      droneEntry: liveTarget,
+    });
+    await appendFleetAuditEvent({
+      actor: actorId,
+      actorName,
+      action: 'stop_chat',
+      status: 'accepted',
+      target: target.id,
+      targetName: target.name,
+      meta: {
+        requestId: String(request?.id ?? ''),
+        chat: chatName,
+        mode: result.mode,
+        stopped: result.stopped,
+        stoppedCount: result.stoppedPromptIds.length,
+        clearedCount: result.clearedPromptIds.length,
+      },
+    });
+    return {
+      target,
+      chat: chatName,
+      mode: result.mode,
+      stopped: result.stopped,
+      stoppedPromptIds: result.stoppedPromptIds,
+      clearedPromptIds: result.clearedPromptIds,
+      ...(result.sessionName ? { sessionName: result.sessionName } : {}),
     };
   }
 

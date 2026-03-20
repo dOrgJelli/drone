@@ -15,7 +15,7 @@ export const FLEET_DEFAULT_LIMITS = {
 };
 
 export type FleetRequestState = 'queued' | 'running' | 'done' | 'failed';
-export type FleetRequestType = 'create_child' | 'send_message' | 'read_messages';
+export type FleetRequestType = 'create_child' | 'send_message' | 'read_messages' | 'stop_chat';
 
 export type FleetRequestRecord = {
   id: string;
