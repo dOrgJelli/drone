@@ -153,4 +153,40 @@ describeSocketSuite('fleet daemon', () => {
     expect(done?.request?.result).toEqual({ ok: true });
     expect(done?.request?.error).toBeUndefined();
   });
+
+  test('accepts stop_chat requests and advertises the stop command in help', async () => {
+    const port = await allocatePort();
+    const dataDir = path.join(tempRoot, `daemon-${port}`);
+    fs.mkdirSync(dataDir, { recursive: true });
+    const token = 'daemon-token';
+    const daemon = Bun.spawn([process.execPath, daemonEntry, '--host', '127.0.0.1', '--port', String(port), '--data-dir', dataDir, '--token', token], {
+      cwd: process.cwd(),
+      stdout: 'ignore',
+      stderr: 'pipe',
+    });
+    processes.push(daemon);
+    const baseUrl = `http://127.0.0.1:${port}`;
+    await waitForHealth(baseUrl, token, daemon);
+
+    const helpResponse = await fetch(`${baseUrl}/v1/fleet/help`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    const helpData: any = await helpResponse.json();
+    expect(helpResponse.status).toBe(200);
+    expect(Array.isArray(helpData?.commands)).toBe(true);
+    expect((helpData?.commands ?? []).includes('fleet stop --to <drone> --chat <chat>')).toBe(true);
+
+    const stopResponse = await fetch(`${baseUrl}/v1/fleet/requests`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ type: 'stop_chat', payload: { to: 'child-one', chat: 'default' } }),
+    });
+    const stopData: any = await stopResponse.json();
+    expect(stopResponse.status).toBe(202);
+    expect(stopData?.request?.type).toBe('stop_chat');
+    expect(stopData?.request?.state).toBe('queued');
+  });
 });

@@ -188,6 +188,32 @@ program
   );
 
 program
+  .command('stop')
+  .description('Interrupt the active response in another drone chat')
+  .requiredOption('--to <drone>', 'Target drone id or name')
+  .option('--chat <chat>', 'Target chat name', 'default')
+  .option('--idempotency-key <key>', 'Stable idempotency key')
+  .option('--wait', 'Wait for the hub reconciler result', false)
+  .option('--timeout-ms <n>', 'Wait timeout in milliseconds', '60000')
+  .option('--poll-ms <n>', 'Status poll interval in milliseconds', '500')
+  .action(async (options: { to: string; chat?: string; idempotencyKey?: string; wait?: boolean; timeoutMs: string; pollMs: string }) => {
+    const client = await createClient();
+    printJson(
+      await createFleetRequestAndMaybeWait(client, {
+        idempotencyKey: options.idempotencyKey,
+        wait: options.wait,
+        timeoutMs: options.timeoutMs,
+        pollMs: options.pollMs,
+        type: 'stop_chat',
+        payload: {
+          to: String(options.to),
+          chat: String(options.chat || 'default'),
+        },
+      }),
+    );
+  });
+
+program
   .command('read')
   .description('Read paginated messages from a child or assigned drone')
   .requiredOption('--from <drone>', 'Source drone id or name')

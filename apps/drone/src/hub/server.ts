@@ -50,6 +50,7 @@ import {
 } from '../host/api';
 import { jobsPlanFromAgentMessage, suggestDroneNameFromMessage, suggestTaskTitleFromMessage } from './jobs-from-message';
 import { tldrFromAgentMessage } from './tldr-from-message';
+import { resolveTranscriptPromptAt } from './transcript-order';
 import { cloneChatEntryForDroneClone, maybeBootstrapPromptFromTranscript } from './chat-clone';
 import {
   buildEnvExportLines,
@@ -549,7 +550,7 @@ const PROMPT_SKILL_SYNC_WARNINGS = new Set<string>();
 async function appendFleetAuditEvent(event: {
   actor: string;
   actorName: string;
-  action: 'create_child' | 'send_message' | 'read_messages';
+  action: 'create_child' | 'send_message' | 'read_messages' | 'stop_chat';
   status: 'accepted' | 'rejected';
   target?: string | null;
   targetName?: string | null;
@@ -622,7 +623,7 @@ async function processFleetRequest(actorId: string, actorEntry: any, request: an
   const actorConfig = fleetActorConfig(actorEntry);
   const limits = effectiveFleetLimits(actorEntry);
   const regAny: any = await loadRegistry();
-  const action = String(request?.type ?? '').trim() as 'create_child' | 'send_message' | 'read_messages';
+  const action = String(request?.type ?? '').trim() as 'create_child' | 'send_message' | 'read_messages' | 'stop_chat';
   const reject = async (message: string, status: number = 400, target?: { id: string; name: string } | null): Promise<never> => {
     await appendFleetAuditEvent({
       actor: actorId,
@@ -745,6 +746,53 @@ async function processFleetRequest(actorId: string, actorEntry: any, request: an
       chat: chatName,
       promptId: enqueuedResult.id,
       pendingState: enqueuedResult.pendingState,
+    };
+  }
+
+  if (action === 'stop_chat') {
+    if (!actorConfig.capabilities.includes(FLEET_CAPABILITY_SEND)) await reject('missing capability: drone:message:send', 403);
+    const targetRef = String((request?.payload as any)?.to ?? '').trim();
+    const targetFound = findDroneIdByRef(regAny, targetRef);
+    if (!targetFound) await reject(`unknown drone: ${targetRef}`, 404);
+    const targetResolved = targetFound!;
+    const targetEntry = regAny?.drones?.[targetResolved.id] ?? regAny?.pending?.[targetResolved.id] ?? null;
+    const target = { id: targetResolved.id, name: String(targetEntry?.name ?? targetResolved.id) };
+    const childIds = new Set(fleetChildrenForActor(regAny, actorId).map((item) => item.id));
+    if (!(targetResolved.id === actorId || childIds.has(targetResolved.id) || fleetTargetAllowedForSend(actorEntry, actorId, targetResolved.id))) {
+      await reject(`target not allowed: ${target.name}`, 403, target);
+    }
+    const liveTarget = regAny?.drones?.[targetResolved.id] ?? null;
+    if (!liveTarget) await reject(`drone "${target.name}" is still starting`, 409, target);
+    const chatName = normalizeChatName((request?.payload as any)?.chat ?? 'default');
+    const result = await stopChatResponse({
+      droneId: targetResolved.id,
+      chatName,
+      droneEntry: liveTarget,
+    });
+    await appendFleetAuditEvent({
+      actor: actorId,
+      actorName,
+      action: 'stop_chat',
+      status: 'accepted',
+      target: target.id,
+      targetName: target.name,
+      meta: {
+        requestId: String(request?.id ?? ''),
+        chat: chatName,
+        mode: result.mode,
+        stopped: result.stopped,
+        stoppedCount: result.stoppedPromptIds.length,
+        clearedCount: result.clearedPromptIds.length,
+      },
+    });
+    return {
+      target,
+      chat: chatName,
+      mode: result.mode,
+      stopped: result.stopped,
+      stoppedPromptIds: result.stoppedPromptIds,
+      clearedPromptIds: result.clearedPromptIds,
+      ...(result.sessionName ? { sessionName: result.sessionName } : {}),
     };
   }
 
@@ -4955,12 +5003,11 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
       const stdout = typeof job?.stdout === 'string' ? job.stdout : '';
       const stderr = typeof job?.stderr === 'string' ? job.stderr : '';
       const finishedAt = typeof job?.finishedAt === 'string' ? job.finishedAt : nowIso();
-      const promptAt =
-        typeof p?.at === 'string' && String(p.at).trim()
-          ? String(p.at).trim()
-          : typeof job?.startedAt === 'string' && String(job.startedAt).trim()
-            ? String(job.startedAt).trim()
-            : finishedAt;
+      const promptAt = resolveTranscriptPromptAt({
+        pendingAt: p?.at,
+        jobStartedAt: job?.startedAt,
+        finishedAt,
+      });
       if (agent.id === 'codex') {
         const parsed = parseCodexJsonl(stdout || '');
         const threadId = parsed.threadId;
@@ -5038,12 +5085,11 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
         const parsed = parseCodexJsonl(stdout);
         const output = String(parsed.message ?? '').trimEnd();
         const finishedAt = typeof job?.finishedAt === 'string' ? job.finishedAt : nowIso();
-        const promptAt =
-          typeof p?.at === 'string' && String(p.at).trim()
-            ? String(p.at).trim()
-            : typeof job?.startedAt === 'string' && String(job.startedAt).trim()
-              ? String(job.startedAt).trim()
-              : finishedAt;
+        const promptAt = resolveTranscriptPromptAt({
+          pendingAt: p?.at,
+          jobStartedAt: job?.startedAt,
+          finishedAt,
+        });
         if (parsed.threadId) {
           entry.codexThreadId = parsed.threadId;
           changed = true;

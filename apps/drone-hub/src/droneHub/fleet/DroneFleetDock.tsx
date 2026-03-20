@@ -82,6 +82,7 @@ function formatActionLabel(actionRaw: string): string {
   const action = String(actionRaw ?? '').trim();
   if (action === 'create_child') return 'Create child';
   if (action === 'send_message') return 'Send message';
+  if (action === 'stop_chat') return 'Stop chat';
   if (action === 'read_messages') return 'Read messages';
   return action.replace(/_/g, ' ') || 'Activity';
 }
