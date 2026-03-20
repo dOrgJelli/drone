@@ -1,21 +1,23 @@
 import React from 'react';
+import { useDndMonitor, useDroppable, type DragEndEvent, type DragMoveEvent, type DragOverEvent } from '@dnd-kit/core';
 import { useShallow } from 'zustand/react/shallow';
 import type { ChatAgentConfig } from '../../domain';
 import { UiMenuSelect, type UiMenuSelectEntry } from '../../ui/menuSelect';
 import type { DroneSummary } from '../types';
 import {
-  DRONE_CHAT_DND_MIME,
-  DRONE_DND_MIME,
   createCanvasChatNodeId,
   parseCanvasChatNodeId,
 } from '../app/app-config';
+import {
+  draggedCanvasChatNodeIdsFromData,
+  parseDroneHubDragData,
+} from '../app/drone-hub-dnd';
 import { isShortcutMatch } from '../app/shortcuts';
 import { useDroneHubUiStore } from '../app/use-drone-hub-ui-store';
 import { TypingDots } from '../overview/icons';
 import { CanvasMessageBar } from './CanvasMessageBar';
 import {
   collectUniqueChatTargets,
-  resolveDraggedCanvasChatNodeIds,
   sortChatNodeIdsForDestructiveDelete,
 } from './chat-node-utils';
 import {
@@ -113,13 +115,6 @@ function areCanvasRectMapsEqual(a: Record<string, CanvasRect>, b: Record<string,
     }
   }
   return true;
-}
-
-function hasChatDragPayload(event: React.DragEvent<HTMLElement>): boolean {
-  const transfer = event.dataTransfer;
-  if (!transfer) return false;
-  const types = Array.from(transfer.types ?? []);
-  return types.includes(DRONE_CHAT_DND_MIME) || types.includes(DRONE_DND_MIME);
 }
 
 function screenToWorldPoint(
@@ -1470,34 +1465,43 @@ export function DroneCanvasDock({
     },
     [applyZoomAt, scale],
   );
-
-  const onDragOver = React.useCallback(
-    (event: React.DragEvent<HTMLDivElement>) => {
-      if (!hasChatDragPayload(event)) return;
-      event.preventDefault();
-      event.dataTransfer.dropEffect = 'move';
-      if (!dragOverCanvas) setDragOverCanvas(true);
+  const { setNodeRef: setCanvasDropNodeRef } = useDroppable({
+    id: 'canvas-drop',
+    data: { type: 'canvas-drop' },
+  });
+  const setViewportNodeRef = React.useCallback(
+    (node: HTMLDivElement | null) => {
+      viewportRef.current = node;
+      setCanvasDropNodeRef(node);
     },
-    [dragOverCanvas],
+    [setCanvasDropNodeRef],
   );
 
-  const onDragLeave = React.useCallback((event: React.DragEvent<HTMLDivElement>) => {
-    const related = event.relatedTarget;
-    if (related instanceof Node && event.currentTarget.contains(related)) return;
-    setDragOverCanvas(false);
-  }, []);
+  const updateCanvasDragState = React.useCallback(
+    (event: DragMoveEvent | DragOverEvent) => {
+      const activeData = parseDroneHubDragData(event.active.data.current);
+      const overType = String(event.over?.data.current?.type ?? '').trim();
+      const acceptsCanvasDrop = activeData?.type === 'sidebar-drone' || activeData?.type === 'sidebar-chat';
+      setDragOverCanvas(Boolean(acceptsCanvasDrop && overType === 'canvas-drop'));
+    },
+    [],
+  );
 
-  const onDrop = React.useCallback(
-    (event: React.DragEvent<HTMLDivElement>) => {
-      if (!hasChatDragPayload(event)) return;
-      event.preventDefault();
+  const placeSidebarDragOnCanvas = React.useCallback(
+    (event: DragEndEvent) => {
+      const activeData = parseDroneHubDragData(event.active.data.current);
+      const overType = String(event.over?.data.current?.type ?? '').trim();
       setDragOverCanvas(false);
-      const ids = resolveDraggedCanvasChatNodeIds(event.dataTransfer, sidebarOrderedChatNodeIds);
+      if (overType !== 'canvas-drop') return;
+      const ids = draggedCanvasChatNodeIdsFromData(activeData, sidebarOrderedChatNodeIds);
       if (ids.length === 0) return;
       const viewport = viewportRef.current;
       if (!viewport) return;
       const rect = viewport.getBoundingClientRect();
-      const origin = screenToWorldPoint(event.clientX, event.clientY, rect, panX, panY, scale);
+      const activeRect = event.active.rect.current.translated ?? event.active.rect.current.initial;
+      const clientX = activeRect.left + activeRect.width / 2;
+      const clientY = activeRect.top + activeRect.height / 2;
+      const origin = screenToWorldPoint(clientX, clientY, rect, panX, panY, scale);
       upsertNodes(
         ids.map((nodeId, idx) => {
           const chatRef = parseCanvasChatNodeId(nodeId);
@@ -1506,7 +1510,6 @@ export function DroneCanvasDock({
           return {
             droneId: nodeId,
             label,
-            // Keep the cursor at the center of the first dropped card.
             x: origin.x - width / 2,
             y: origin.y - NODE_HEIGHT_PX / 2 + idx * DROP_STACK_SPACING_Y_PX,
           };
@@ -1516,6 +1519,13 @@ export function DroneCanvasDock({
     },
     [panX, panY, scale, setSelectedDroneIds, sidebarOrderedChatNodeIds, upsertNodes],
   );
+
+  useDndMonitor({
+    onDragMove: updateCanvasDragState,
+    onDragOver: updateCanvasDragState,
+    onDragCancel: () => setDragOverCanvas(false),
+    onDragEnd: placeSidebarDragOnCanvas,
+  });
 
   const onMessageInputBlur = React.useCallback(
     (event: React.FocusEvent<HTMLElement>) => {
@@ -1849,7 +1859,7 @@ export function DroneCanvasDock({
       </div>
 
       <div
-        ref={viewportRef}
+        ref={setViewportNodeRef}
         tabIndex={0}
         data-shortcut-capture="true"
         data-drone-canvas-viewport="1"
@@ -1859,9 +1869,6 @@ export function DroneCanvasDock({
         onDoubleClick={onCanvasDoubleClick}
         onContextMenu={(event) => event.preventDefault()}
         onWheel={onWheel}
-        onDragOver={onDragOver}
-        onDragLeave={onDragLeave}
-        onDrop={onDrop}
       >
         <div
           className="absolute inset-0 pointer-events-none"

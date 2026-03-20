@@ -1,14 +1,13 @@
 import React from 'react';
+import { useDndMonitor, useDraggable, useDroppable, type DragEndEvent, type DragMoveEvent, type DragOverEvent } from '@dnd-kit/core';
 import { isUngroupedGroupName } from '../../domain';
 import type { DroneSummary, RepoSummary } from '../types';
-import { DRONE_DND_MIME } from './app-config';
 import { compareDronesByNewestFirst } from './helpers';
 import { IconAutoMinimize, IconBoard, IconChevron, IconColumns, IconEye, IconEyeOff, IconFolder, IconList, IconPencil, IconPlus, IconPlusDouble, IconSettings, IconSidebarCollapse, IconSidebarExpand, IconSpinner, IconTrash, SkeletonLine } from './icons';
 import { SidebarDroneTreeList, sidebarInlineSectionKey, type SidebarInlineSectionKind } from './SidebarDroneTreeList';
 import {
-  sidebarDropPlacementFromClientY,
+  sidebarDropPlacementFromRects,
   SidebarReorderDropIndicator,
-  SidebarReorderHandle,
 } from './sidebar-reorder-ui';
 import { buildSidebarDroneTree } from './sidebar-drone-tree';
 import { useDroneSidebarUiState } from './use-drone-hub-ui-store';
@@ -19,15 +18,21 @@ import {
   type SidebarGroupDropPlacement,
   type SidebarGroupOrderKind,
 } from './sidebar-group-order';
+import {
+  draggedDroneIdsFromData,
+  parseDroneHubDragData,
+  useDroneHubActiveDrag,
+  type SidebarDragGroupRef,
+  type SidebarGroupDragData,
+} from './drone-hub-dnd';
 import { SIDEBAR_VISIBLE_MULTI_CHAT_GROUP, type SidebarGroup } from './use-sidebar-view-model';
+import type { MoveDronesToGroupResult } from './use-group-management';
 
 const SIDEBAR_EXPANDED_WIDTH_PX = 280;
 const SIDEBAR_COLLAPSED_RAIL_WIDTH_PX = 40;
 const AUTO_MINIMIZE_COLLAPSE_DELAY_MS = 90;
 const AUTO_MINIMIZE_EXPAND_DELAY_MS = 120;
 const AUTO_MINIMIZE_REOPEN_GUARD_MS = 220;
-const SIDEBAR_GROUP_DND_MIME = 'application/x-dronehub-sidebar-group';
-
 type SidebarIconButtonProps = {
   title: string;
   ariaLabel?: string;
@@ -71,11 +76,6 @@ type DraftSidebarPlaceholder = {
   group: string | null;
 };
 
-type SidebarDragGroupRef = {
-  group: string;
-  kind: SidebarGroupOrderKind;
-};
-
 const DRAFT_SIDEBAR_PLACEHOLDER_ID = '__draft-sidebar-placeholder__';
 
 function repoPathToLabel(repoPathRaw: string): string {
@@ -83,6 +83,299 @@ function repoPathToLabel(repoPathRaw: string): string {
   if (!repoPath) return 'Ungrouped';
   const parts = repoPath.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] || repoPath;
+}
+
+type SidebarGroupSectionProps = {
+  groupRef: SidebarDragGroupRef;
+  groupLabel: string;
+  groupToken: string;
+  kind: SidebarGroupOrderKind;
+  actualItems: DroneSummary[];
+  placeholderOnly: boolean;
+  isVirtualGroup: boolean;
+  hoveredRepoPath: string;
+  hoveredGroupName: string;
+  collapsed: boolean;
+  isDeletingGroup: boolean;
+  isRenamingGroup: boolean;
+  isDropTarget: boolean;
+  isReorderTarget: boolean;
+  isReorderDragging: boolean;
+  isHiddenGroup: boolean;
+  canRenameGroup: boolean;
+  pinGroupActionsVisible: boolean;
+  selectedGroupMultiChat: string | null;
+  dragOverSidebarGroup: { token: string; placement: SidebarGroupDropPlacement } | null;
+  showMoveDropZone: boolean;
+  sharedDroneTreeListProps: Omit<React.ComponentProps<typeof SidebarDroneTreeList>, 'tree'>;
+  groupTree: ReturnType<typeof buildSidebarDroneTree>;
+  onToggleGroupCollapsed: (group: string) => void;
+  onRenameGroup: (group: string) => void;
+  toggleSidebarGroupHidden: (target: SidebarDragGroupRef) => void;
+  onOpenGroupMultiChat: (group: string) => void;
+  onDeleteGroup: (
+    group: string,
+    count: number,
+    opts?: { kind?: 'group' | 'repo'; label?: string; repoPath?: string | null },
+  ) => void;
+};
+
+function stopGroupHeaderActionInteraction(event: React.SyntheticEvent) {
+  event.stopPropagation();
+}
+
+function SidebarGroupSection({
+  groupRef,
+  groupLabel,
+  groupToken,
+  kind,
+  actualItems,
+  placeholderOnly,
+  isVirtualGroup,
+  hoveredRepoPath,
+  hoveredGroupName,
+  collapsed,
+  isDeletingGroup,
+  isRenamingGroup,
+  isDropTarget,
+  isReorderTarget,
+  isReorderDragging,
+  isHiddenGroup,
+  canRenameGroup,
+  pinGroupActionsVisible,
+  selectedGroupMultiChat,
+  dragOverSidebarGroup,
+  showMoveDropZone,
+  sharedDroneTreeListProps,
+  groupTree,
+  onToggleGroupCollapsed,
+  onRenameGroup,
+  toggleSidebarGroupHidden,
+  onOpenGroupMultiChat,
+  onDeleteGroup,
+}: SidebarGroupSectionProps) {
+  const groupDragData = React.useMemo<SidebarGroupDragData | null>(() => {
+    const droneIds = Array.from(
+      new Set(
+        actualItems
+          .map((item) => String(item?.id ?? '').trim())
+          .filter(Boolean),
+      ),
+    );
+    if (droneIds.length === 0) return null;
+    return {
+      type: 'sidebar-group',
+      groupRef,
+      groupLabel,
+      droneIds,
+    };
+  }, [actualItems, groupLabel, groupRef]);
+  const { attributes, listeners, setNodeRef: setDraggableNodeRef } = useDraggable({
+    id: `sidebar-group:${groupToken}`,
+    data: groupDragData,
+    disabled: !groupDragData,
+  });
+  const { setNodeRef: setReorderDropNodeRef } = useDroppable({
+    id: `sidebar-group-reorder:${groupToken}`,
+    data: {
+      type: 'sidebar-group-reorder',
+      groupRef,
+    },
+    disabled: !groupDragData,
+  });
+  const { setNodeRef: setMoveDropNodeRef } = useDroppable({
+    id: `sidebar-group-move:${groupToken}`,
+    data: {
+      type: 'sidebar-group-move',
+      group: groupRef.group,
+      kind: groupRef.kind,
+    },
+    disabled: isVirtualGroup,
+  });
+  const setHeaderNodeRef = React.useCallback(
+    (node: HTMLDivElement | null) => {
+      setDraggableNodeRef(node);
+      setReorderDropNodeRef(node);
+    },
+    [setDraggableNodeRef, setReorderDropNodeRef],
+  );
+  const actionsVisibleClass = pinGroupActionsVisible
+    ? 'opacity-100 pointer-events-auto'
+    : 'opacity-0 pointer-events-none group-hover/group-header:opacity-100 group-hover/group-header:pointer-events-auto';
+  const countVisibleClass = pinGroupActionsVisible
+    ? 'opacity-0 pointer-events-none'
+    : 'opacity-100 group-hover/group-header:opacity-0 group-hover/group-header:pointer-events-none';
+
+  return (
+    <div
+      data-drone-sidebar-group={groupRef.group}
+      data-drone-sidebar-group-kind={kind}
+      data-drone-sidebar-group-name={hoveredGroupName || undefined}
+      data-drone-sidebar-repo-path={hoveredRepoPath || undefined}
+      className={`relative rounded-md border bg-[rgba(0,0,0,.15)] overflow-hidden transition-colors ${
+        isDropTarget ? 'border-[var(--accent-muted)] ring-1 ring-[var(--accent-muted)]' : 'border-[var(--border-subtle)]'
+      } ${isReorderDragging ? 'opacity-70' : isHiddenGroup ? 'opacity-75' : ''}`}
+    >
+      {isReorderTarget && dragOverSidebarGroup ? (
+        <SidebarReorderDropIndicator placement={dragOverSidebarGroup.placement} />
+      ) : null}
+      <div
+        ref={setHeaderNodeRef}
+        className={`group/group-header w-full px-3 py-2 flex items-center justify-between gap-2 border-b border-[var(--border-subtle)] transition-colors ${
+          isDropTarget ? 'bg-[var(--accent-subtle)]' : 'hover:bg-[var(--hover)]'
+        } ${groupDragData ? 'cursor-grab touch-none active:cursor-grabbing' : ''}`}
+        {...(attributes as Record<string, unknown>)}
+        {...(listeners as Record<string, unknown>)}
+      >
+        <button
+          type="button"
+          onClick={() => onToggleGroupCollapsed(groupRef.group)}
+          className="flex items-center gap-2 min-w-0 text-left flex-1"
+          title={collapsed ? 'Expand group' : 'Collapse group'}
+        >
+          <IconChevron down={!collapsed} className="text-[var(--muted-dim)]" />
+          <IconFolder className="text-[var(--muted-dim)] opacity-50" />
+          <span
+            className="text-[11px] font-semibold text-[var(--fg-secondary)] truncate tracking-wide uppercase"
+            style={{ fontFamily: 'var(--display)' }}
+          >
+            {groupLabel}
+          </span>
+        </button>
+        <div
+          data-group-drag-block="true"
+          className={`flex items-center justify-end flex-shrink-0 transition-[min-width] duration-150 ${
+            pinGroupActionsVisible
+              ? canRenameGroup
+                ? 'min-w-[184px]'
+                : 'min-w-[154px]'
+              : canRenameGroup
+                ? 'min-w-[92px] group-hover/group-header:min-w-[184px]'
+                : 'min-w-[72px] group-hover/group-header:min-w-[154px]'
+          }`}
+          onPointerDown={stopGroupHeaderActionInteraction}
+          onMouseDown={stopGroupHeaderActionInteraction}
+        >
+          <div className="w-full flex items-center justify-end gap-2">
+            <div
+              className={`text-[10px] font-mono text-[var(--muted-dim)] transition-opacity duration-150 ${countVisibleClass}`}
+            >
+              {actualItems.length} drone{actualItems.length !== 1 ? 's' : ''}
+            </div>
+            <div className={`flex items-center justify-end gap-1 ${actionsVisibleClass}`}>
+              {canRenameGroup ? (
+                <button
+                  type="button"
+                  onClick={() => onRenameGroup(groupRef.group)}
+                  disabled={isDeletingGroup || isRenamingGroup}
+                  aria-busy={isRenamingGroup}
+                  className={`inline-flex items-center justify-center w-7 h-7 rounded border transition-all ${
+                    isDeletingGroup || isRenamingGroup
+                      ? 'opacity-50 cursor-not-allowed bg-[var(--panel-raised)] border-[var(--border-subtle)] text-[var(--muted)]'
+                      : 'bg-[rgba(167,139,250,.08)] border-[rgba(167,139,250,.18)] text-[var(--accent)] hover:bg-[rgba(167,139,250,.12)]'
+                  }`}
+                  title={isRenamingGroup ? `Renaming group "${groupLabel}"…` : `Rename group "${groupLabel}"`}
+                  aria-label={isRenamingGroup ? `Renaming group "${groupLabel}"` : `Rename group "${groupLabel}"`}
+                >
+                  {isRenamingGroup ? <IconSpinner className="opacity-90" /> : <IconPencil className="opacity-90" />}
+                </button>
+              ) : null}
+              {!placeholderOnly ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => toggleSidebarGroupHidden(groupRef)}
+                    disabled={isDeletingGroup || isRenamingGroup}
+                    className={`inline-flex items-center justify-center w-7 h-7 rounded border transition-all ${
+                      isDeletingGroup || isRenamingGroup
+                        ? 'opacity-50 cursor-not-allowed bg-[var(--panel-raised)] border-[var(--border-subtle)] text-[var(--muted)]'
+                        : isHiddenGroup
+                          ? 'bg-[var(--accent-subtle)] border-[var(--accent-muted)] text-[var(--accent)] hover:bg-[rgba(167,139,250,.18)]'
+                          : 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)] hover:text-[var(--muted)] hover:border-[var(--border)] hover:bg-[var(--hover)]'
+                    }`}
+                    title={isHiddenGroup ? `Unhide "${groupLabel}"` : `Hide "${groupLabel}"`}
+                    aria-label={isHiddenGroup ? `Unhide "${groupLabel}"` : `Hide "${groupLabel}"`}
+                  >
+                    {isHiddenGroup ? <IconEye className="opacity-90" /> : <IconEyeOff className="opacity-90" />}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onOpenGroupMultiChat(groupRef.group)}
+                    disabled={isDeletingGroup}
+                    className={`inline-flex items-center justify-center w-7 h-7 rounded border transition-all ${
+                      isDeletingGroup
+                        ? 'opacity-50 cursor-not-allowed bg-[var(--panel-raised)] border-[var(--border-subtle)] text-[var(--muted)]'
+                        : selectedGroupMultiChat === groupRef.group
+                          ? 'opacity-100 pointer-events-auto bg-[var(--accent-subtle)] border-[var(--accent-muted)] text-[var(--accent)]'
+                          : 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)] hover:text-[var(--accent)] hover:border-[var(--accent-muted)] hover:bg-[var(--accent-subtle)]'
+                    }`}
+                    title={`Open "${groupLabel}" multi-chat`}
+                    aria-label={`Open "${groupLabel}" multi-chat`}
+                  >
+                    <IconColumns className="opacity-90" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onDeleteGroup(groupRef.group, actualItems.length, {
+                        kind,
+                        label: groupLabel,
+                        repoPath: isVirtualGroup ? hoveredRepoPath || null : null,
+                      })
+                    }
+                    disabled={isDeletingGroup || isRenamingGroup}
+                    aria-busy={isDeletingGroup}
+                    className={`inline-flex items-center justify-center w-7 h-7 rounded border transition-all ${
+                      isDeletingGroup || isRenamingGroup
+                        ? 'opacity-50 cursor-not-allowed bg-[var(--panel-raised)] border-[var(--border-subtle)] text-[var(--muted)]'
+                        : 'bg-[var(--red-subtle)] border-[rgba(255,90,90,.2)] text-[var(--red)] hover:bg-[rgba(255,90,90,.15)]'
+                    }`}
+                    title={
+                      isDeletingGroup
+                        ? `Deleting group "${groupLabel}"…`
+                        : isVirtualGroup
+                          ? `Delete all drones in "${groupLabel}"`
+                          : `Delete group "${groupLabel}" (and all drones inside)`
+                    }
+                    aria-label={
+                      isDeletingGroup
+                        ? `Deleting group "${groupLabel}"`
+                        : isVirtualGroup
+                          ? `Delete all drones in "${groupLabel}"`
+                          : `Delete group "${groupLabel}" (and all drones inside)`
+                    }
+                  >
+                    {isDeletingGroup ? <IconSpinner className="opacity-90" /> : <IconTrash className="opacity-90" />}
+                  </button>
+                </>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </div>
+      {!collapsed ? (
+        <div ref={setMoveDropNodeRef} className="px-1.5 py-1.5 flex flex-col gap-0.5">
+          <SidebarDroneTreeList
+            {...sharedDroneTreeListProps}
+            tree={groupTree}
+            showGroup={false}
+            groupOrderKey={groupToken}
+            groupName={groupRef.group}
+          />
+        </div>
+      ) : showMoveDropZone && !isVirtualGroup ? (
+        <div
+          ref={setMoveDropNodeRef}
+          className={`px-3 py-2 text-[10px] font-semibold tracking-wide uppercase transition-colors ${
+            isDropTarget ? 'bg-[var(--accent-subtle)] text-[var(--accent)]' : 'text-[var(--muted-dim)]'
+          }`}
+          style={{ fontFamily: 'var(--display)' }}
+        >
+          Drop here to move into {groupLabel}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 export type DroneSidebarProps = {
@@ -105,10 +398,7 @@ export type DroneSidebarProps = {
   collapsedGroups: Record<string, boolean>;
   deletingGroups: Record<string, boolean>;
   renamingGroups: Record<string, boolean>;
-  dragOverGroup: string | null;
   sidebarHasUngroupedGroup: boolean;
-  draggingDroneNames: string[] | null;
-  dragOverUngrouped: boolean;
   repos: RepoSummary[];
   reposLoading: boolean;
   reposError: string | null | undefined;
@@ -130,12 +420,7 @@ export type DroneSidebarProps = {
   onSetDroneBaseImage: (droneId: string) => void;
   onDeleteDrone: (droneId: string) => void;
   onOpenDroneErrorModal: (drone: DroneSummary, message: string) => void;
-  onUngroupedDragOver: (event: React.DragEvent<HTMLDivElement>) => void;
-  onUngroupedDragLeave: (event: React.DragEvent<HTMLDivElement>) => void;
-  onUngroupedDrop: (event: React.DragEvent<HTMLDivElement>) => void;
-  onGroupDragOver: (group: string, event: React.DragEvent<HTMLDivElement>) => void;
-  onGroupDragLeave: (group: string, event: React.DragEvent<HTMLDivElement>) => void;
-  onGroupDrop: (group: string, event: React.DragEvent<HTMLDivElement>) => void;
+  onMoveDronesToGroup: (group: string, droneIds: string[]) => Promise<MoveDronesToGroupResult>;
   onCreateGroupAndMove: (
     group: string,
     droneIds: string[],
@@ -149,8 +434,7 @@ export type DroneSidebarProps = {
     count: number,
     opts?: { kind?: 'group' | 'repo'; label?: string; repoPath?: string | null },
   ) => void;
-  onDroneDragStart: (droneId: string, event: React.DragEvent<HTMLDivElement>) => void;
-  onDroneDragEnd: () => void;
+  onPrepareDroneDragStart: (droneId: string) => void;
   onOpenReposModal: () => void;
 };
 
@@ -174,10 +458,7 @@ export function DroneSidebar({
   collapsedGroups,
   deletingGroups,
   renamingGroups,
-  dragOverGroup,
   sidebarHasUngroupedGroup,
-  draggingDroneNames,
-  dragOverUngrouped,
   repos,
   reposLoading,
   reposError,
@@ -196,20 +477,14 @@ export function DroneSidebar({
   onSetDroneBaseImage,
   onDeleteDrone,
   onOpenDroneErrorModal,
-  onUngroupedDragOver,
-  onUngroupedDragLeave,
-  onUngroupedDrop,
-  onGroupDragOver,
-  onGroupDragLeave,
-  onGroupDrop,
+  onMoveDronesToGroup,
   onCreateGroupAndMove,
   onToggleGroupCollapsed,
   onRenameGroup,
   onOpenGroupMultiChat,
   onOpenVisibleMultiChat,
   onDeleteGroup,
-  onDroneDragStart,
-  onDroneDragEnd,
+  onPrepareDroneDragStart,
   onOpenReposModal,
 }: DroneSidebarProps) {
   const {
@@ -242,13 +517,15 @@ export function DroneSidebar({
     setAutoDelete,
     setSidebarCollapsed,
   } = useDroneSidebarUiState();
+  const activeDrag = useDroneHubActiveDrag();
   const [dragOverCreateGroup, setDragOverCreateGroup] = React.useState(false);
   const [createGroupTargetDroneIds, setCreateGroupTargetDroneIds] = React.useState<string[] | null>(null);
   const [createGroupName, setCreateGroupName] = React.useState('');
   const [createGroupInlineError, setCreateGroupInlineError] = React.useState<string | null>(null);
   const [creatingGroupMove, setCreatingGroupMove] = React.useState(false);
   const [collapsedDroneSections, setCollapsedDroneSections] = React.useState<Record<string, boolean>>({});
-  const [draggingSidebarGroup, setDraggingSidebarGroup] = React.useState<string | null>(null);
+  const [dragOverGroup, setDragOverGroup] = React.useState<string | null>(null);
+  const [dragOverUngrouped, setDragOverUngrouped] = React.useState(false);
   const [dragOverSidebarGroup, setDragOverSidebarGroup] = React.useState<{
     token: string;
     placement: SidebarGroupDropPlacement;
@@ -295,80 +572,12 @@ export function DroneSidebar({
     return () => window.cancelAnimationFrame(id);
   }, [createGroupTargetDroneIds]);
 
-  const parseDraggedDroneIds = React.useCallback(
-    (event: React.DragEvent<HTMLDivElement>): string[] => {
-      const out: string[] = [];
-      const add = (raw: unknown) => {
-        const id = String(raw ?? '').trim();
-        if (!id || out.includes(id)) return;
-        out.push(id);
-      };
-
-      try {
-        const jsonRaw = event.dataTransfer.getData(DRONE_DND_MIME);
-        if (jsonRaw) {
-          const parsed = JSON.parse(jsonRaw);
-          if (Array.isArray(parsed)) {
-            for (const id of parsed) add(id);
-          }
-        }
-      } catch {
-        // Ignore malformed drag payload.
-      }
-
-      if (out.length === 0) {
-        const plain = String(event.dataTransfer.getData('text/plain') ?? '');
-        if (plain) {
-          for (const line of plain.split('\n')) add(line);
-        }
-      }
-
-      if (out.length === 0 && Array.isArray(draggingDroneNames)) {
-        for (const id of draggingDroneNames) add(id);
-      }
-
-      return out;
-    },
-    [draggingDroneNames],
-  );
-
   const closeCreateGroupInline = React.useCallback(() => {
     if (creatingGroupMove) return;
     setCreateGroupTargetDroneIds(null);
     setCreateGroupName('');
     setCreateGroupInlineError(null);
   }, [creatingGroupMove]);
-
-  const onCreateGroupDragOver = React.useCallback(
-    (event: React.DragEvent<HTMLDivElement>) => {
-      const ids = parseDraggedDroneIds(event);
-      if (ids.length === 0) return;
-      event.preventDefault();
-      event.stopPropagation();
-      event.dataTransfer.dropEffect = 'move';
-      if (!dragOverCreateGroup) setDragOverCreateGroup(true);
-    },
-    [dragOverCreateGroup, parseDraggedDroneIds],
-  );
-
-  const onCreateGroupDragLeave = React.useCallback((event: React.DragEvent<HTMLDivElement>) => {
-    const related = event.relatedTarget;
-    if (related instanceof Node && event.currentTarget.contains(related)) return;
-    setDragOverCreateGroup(false);
-  }, []);
-
-  const onCreateGroupDrop = React.useCallback(
-    (event: React.DragEvent<HTMLDivElement>) => {
-      event.preventDefault();
-      event.stopPropagation();
-      setDragOverCreateGroup(false);
-      const ids = parseDraggedDroneIds(event);
-      if (ids.length === 0) return;
-      setCreateGroupTargetDroneIds(ids);
-      setCreateGroupInlineError(null);
-    },
-    [parseDraggedDroneIds],
-  );
 
   const onSubmitCreateGroupInline = React.useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
@@ -459,150 +668,151 @@ export function DroneSidebar({
     [clearExpandTimer],
   );
 
-  const onGroupHeaderDragStart = React.useCallback(
-    (droneIds: string[], event: React.DragEvent<HTMLDivElement>) => {
-      const target = event.target;
-      if (target instanceof Element && target.closest('[data-group-drag-block="true"]')) {
-        event.preventDefault();
-        return;
-      }
-      const ids = Array.from(
-        new Set(
-          droneIds
-            .map((raw) => String(raw ?? '').trim())
-            .filter(Boolean),
-        ),
-      );
-      if (ids.length === 0) {
-        event.preventDefault();
-        return;
-      }
-      event.dataTransfer.effectAllowed = 'copyMove';
-      try {
-        event.dataTransfer.setData(DRONE_DND_MIME, JSON.stringify(ids));
-      } catch {
-        // Ignore drag payload assignment errors.
-      }
-      try {
-        event.dataTransfer.setData('text/plain', ids.join('\n'));
-      } catch {
-        // Ignore drag payload assignment errors.
-      }
-    },
-    [],
-  );
+  const isRepoGroupingMode = sidebarGroupingMode === 'repos';
+  const activeDraggedDroneIds = React.useMemo(() => draggedDroneIdsFromData(activeDrag), [activeDrag]);
+  const draggingSidebarGroup =
+    activeDrag?.type === 'sidebar-group' ? sidebarGroupOrderToken(activeDrag.groupRef) : null;
 
-  const parseDraggedSidebarGroup = React.useCallback((event: React.DragEvent<HTMLElement>): SidebarDragGroupRef | null => {
-    try {
-      const raw = event.dataTransfer.getData(SIDEBAR_GROUP_DND_MIME);
-      if (!raw) return null;
-      const parsed = JSON.parse(raw);
-      const group = String(parsed?.group ?? '').trim();
-      const kind = parsed?.kind === 'repo' ? 'repo' : parsed?.kind === 'group' ? 'group' : null;
-      if (!group || !kind) return null;
-      return { group, kind };
-    } catch {
-      return null;
-    }
-  }, []);
-
-  const clearSidebarGroupReorderState = React.useCallback(() => {
-    setDraggingSidebarGroup(null);
+  const clearSidebarDragState = React.useCallback(() => {
     setDragOverSidebarGroup(null);
+    setDragOverGroup(null);
+    setDragOverUngrouped(false);
+    setDragOverCreateGroup(false);
   }, []);
 
-  const onSidebarGroupReorderDragStart = React.useCallback(
-    (target: SidebarDragGroupRef, event: React.DragEvent<HTMLButtonElement>) => {
-      const token = sidebarGroupOrderToken(target);
-      setDraggingSidebarGroup(token);
-      setDragOverSidebarGroup(null);
-      event.stopPropagation();
-      event.dataTransfer.effectAllowed = 'move';
-      try {
-        event.dataTransfer.setData(SIDEBAR_GROUP_DND_MIME, JSON.stringify(target));
-      } catch {
-        // Ignore drag payload assignment errors.
-      }
-      try {
-        event.dataTransfer.setData('text/plain', token);
-      } catch {
-        // Ignore drag payload assignment errors.
-      }
-    },
+  const currentPlacementFromEvent = React.useCallback(
+    (event: DragMoveEvent | DragOverEvent | DragEndEvent): SidebarGroupDropPlacement =>
+      sidebarDropPlacementFromRects(
+        event.active.rect.current.translated ?? event.active.rect.current.initial,
+        event.over?.rect ?? null,
+      ),
     [],
   );
 
-  const onSidebarGroupReorderDragEnd = React.useCallback(() => {
-    clearSidebarGroupReorderState();
-  }, [clearSidebarGroupReorderState]);
+  const resolveMoveTargetGroupFromOverData = React.useCallback((overData: Record<string, unknown> | undefined): string | null => {
+    if (!overData) return null;
+    if (overData.type === 'sidebar-group-move') {
+      return String(overData.group ?? '').trim() || null;
+    }
+    if (overData.type === 'sidebar-drone-reorder') {
+      return String(overData.groupName ?? '').trim() || null;
+    }
+    return null;
+  }, []);
 
-  const updateSidebarGroupDragTarget = React.useCallback(
-    (target: SidebarDragGroupRef, event: React.DragEvent<HTMLDivElement>): boolean => {
-      const draggedGroup = parseDraggedSidebarGroup(event);
-      if (!draggedGroup) return false;
-      const draggedToken = sidebarGroupOrderToken(draggedGroup);
-      const targetToken = sidebarGroupOrderToken(target);
-      if (!draggedToken || !targetToken || draggedToken === targetToken) return false;
-      event.preventDefault();
-      event.stopPropagation();
-      event.dataTransfer.dropEffect = 'move';
-      const placement = sidebarDropPlacementFromClientY(event.clientY, event.currentTarget);
-      setDragOverSidebarGroup((prev) =>
-        prev?.token === targetToken && prev.placement === placement ? prev : { token: targetToken, placement },
-      );
-      return true;
-    },
-    [parseDraggedSidebarGroup],
-  );
-
-  const commitSidebarGroupReorder = React.useCallback(
-    (target: SidebarDragGroupRef, event: React.DragEvent<HTMLDivElement>): boolean => {
-      const draggedGroup = parseDraggedSidebarGroup(event);
-      if (!draggedGroup) return false;
-      const draggedToken = sidebarGroupOrderToken(draggedGroup);
-      const targetToken = sidebarGroupOrderToken(target);
-      if (!draggedToken || !targetToken || draggedToken === targetToken) {
-        clearSidebarGroupReorderState();
-        return false;
+  const updateSidebarDragState = React.useCallback(
+    (event: DragMoveEvent | DragOverEvent) => {
+      const activeData = parseDroneHubDragData(event.active.data.current);
+      const overData = event.over?.data.current as Record<string, unknown> | undefined;
+      const draggedDroneIds = draggedDroneIdsFromData(activeData);
+      if (
+        activeData?.type === 'sidebar-group' &&
+        overData?.type === 'sidebar-group-reorder' &&
+        overData.groupRef &&
+        typeof overData.groupRef === 'object'
+      ) {
+        const target = overData.groupRef as SidebarDragGroupRef;
+        const draggedToken = sidebarGroupOrderToken(activeData.groupRef);
+        const targetToken = sidebarGroupOrderToken(target);
+        if (draggedToken && targetToken && draggedToken !== targetToken) {
+          setDragOverGroup(null);
+          setDragOverUngrouped(false);
+          setDragOverCreateGroup(false);
+          setDragOverSidebarGroup({
+            token: targetToken,
+            placement: currentPlacementFromEvent(event),
+          });
+          return;
+        }
       }
-      event.preventDefault();
-      event.stopPropagation();
-      const placement = dragOverSidebarGroup?.token === targetToken ? dragOverSidebarGroup.placement : 'after';
-      setSidebarGroupOrder((prev) =>
-        reorderSidebarGroupOrder(prev, sidebarGroups, draggedGroup, target, placement),
-      );
-      clearSidebarGroupReorderState();
-      return true;
+
+      if (!isRepoGroupingMode && draggedDroneIds.length > 0) {
+        const moveTargetGroup = resolveMoveTargetGroupFromOverData(overData);
+        if (moveTargetGroup) {
+          if (activeData?.type === 'sidebar-group' && activeData.groupRef.kind === 'group' && activeData.groupRef.group === moveTargetGroup) {
+            clearSidebarDragState();
+            return;
+          }
+          setDragOverSidebarGroup(null);
+          setDragOverUngrouped(false);
+          setDragOverCreateGroup(false);
+          setDragOverGroup(moveTargetGroup);
+          return;
+        }
+        if (overData?.type === 'sidebar-ungrouped-drop' && !sidebarHasUngroupedGroup) {
+          setDragOverSidebarGroup(null);
+          setDragOverGroup(null);
+          setDragOverCreateGroup(false);
+          setDragOverUngrouped(true);
+          return;
+        }
+        if (overData?.type === 'sidebar-create-group-drop') {
+          setDragOverSidebarGroup(null);
+          setDragOverGroup(null);
+          setDragOverUngrouped(false);
+          setDragOverCreateGroup(true);
+          return;
+        }
+      }
+
+      clearSidebarDragState();
     },
-    [clearSidebarGroupReorderState, dragOverSidebarGroup, parseDraggedSidebarGroup, setSidebarGroupOrder, sidebarGroups],
+    [clearSidebarDragState, currentPlacementFromEvent, isRepoGroupingMode, resolveMoveTargetGroupFromOverData, sidebarHasUngroupedGroup],
   );
 
-  const onSidebarGroupContainerDragOver = React.useCallback(
-    (target: SidebarDragGroupRef, isVirtualGroup: boolean, event: React.DragEvent<HTMLDivElement>) => {
-      if (updateSidebarGroupDragTarget(target, event)) return;
-      if (!isVirtualGroup) onGroupDragOver(target.group, event);
-    },
-    [onGroupDragOver, updateSidebarGroupDragTarget],
-  );
+  useDndMonitor({
+    onDragMove: updateSidebarDragState,
+    onDragOver: updateSidebarDragState,
+    onDragCancel: clearSidebarDragState,
+    onDragEnd: (event) => {
+      const activeData = parseDroneHubDragData(event.active.data.current);
+      const overData = event.over?.data.current as Record<string, unknown> | undefined;
+      const draggedDroneIds = draggedDroneIdsFromData(activeData);
 
-  const onSidebarGroupContainerDragLeave = React.useCallback(
-    (target: SidebarDragGroupRef, isVirtualGroup: boolean, event: React.DragEvent<HTMLDivElement>) => {
-      const related = event.relatedTarget;
-      if (related instanceof Node && event.currentTarget.contains(related)) return;
-      const targetToken = sidebarGroupOrderToken(target);
-      setDragOverSidebarGroup((prev) => (prev?.token === targetToken ? null : prev));
-      if (!isVirtualGroup) onGroupDragLeave(target.group, event);
-    },
-    [onGroupDragLeave],
-  );
+      if (
+        activeData?.type === 'sidebar-group' &&
+        overData?.type === 'sidebar-group-reorder' &&
+        overData.groupRef &&
+        typeof overData.groupRef === 'object'
+      ) {
+        const target = overData.groupRef as SidebarDragGroupRef;
+        const targetToken = sidebarGroupOrderToken(target);
+        if (targetToken && targetToken !== sidebarGroupOrderToken(activeData.groupRef)) {
+          const placement =
+            dragOverSidebarGroup?.token === targetToken
+              ? dragOverSidebarGroup.placement
+              : currentPlacementFromEvent(event);
+          setSidebarGroupOrder((prev) =>
+            reorderSidebarGroupOrder(prev, sidebarGroups, activeData.groupRef, target, placement),
+          );
+          clearSidebarDragState();
+          return;
+        }
+      }
 
-  const onSidebarGroupContainerDrop = React.useCallback(
-    (target: SidebarDragGroupRef, isVirtualGroup: boolean, event: React.DragEvent<HTMLDivElement>) => {
-      if (commitSidebarGroupReorder(target, event)) return;
-      if (!isVirtualGroup) onGroupDrop(target.group, event);
+      if (!isRepoGroupingMode && draggedDroneIds.length > 0) {
+        const moveTargetGroup = resolveMoveTargetGroupFromOverData(overData);
+        if (moveTargetGroup) {
+          void onMoveDronesToGroup(moveTargetGroup, draggedDroneIds);
+          clearSidebarDragState();
+          return;
+        }
+        if (overData?.type === 'sidebar-ungrouped-drop' && !sidebarHasUngroupedGroup) {
+          void onMoveDronesToGroup('Ungrouped', draggedDroneIds);
+          clearSidebarDragState();
+          return;
+        }
+        if (overData?.type === 'sidebar-create-group-drop') {
+          setCreateGroupTargetDroneIds(draggedDroneIds);
+          setCreateGroupInlineError(null);
+          clearSidebarDragState();
+          return;
+        }
+      }
+
+      clearSidebarDragState();
     },
-    [commitSidebarGroupReorder, onGroupDrop],
-  );
+  });
 
   const toggleSidebarGroupHidden = React.useCallback(
     (target: SidebarDragGroupRef) => {
@@ -615,9 +825,18 @@ export function DroneSidebar({
     },
     [setHiddenSidebarGroups],
   );
-
   const collapsedRailInteractive = sidebarCollapsed;
-  const isRepoGroupingMode = sidebarGroupingMode === 'repos';
+  const showExternalMoveTargets = !isRepoGroupingMode && activeDraggedDroneIds.length > 0;
+  const { setNodeRef: setUngroupedDropNodeRef } = useDroppable({
+    id: 'sidebar-ungrouped-drop',
+    data: { type: 'sidebar-ungrouped-drop' },
+    disabled: !showExternalMoveTargets || sidebarHasUngroupedGroup,
+  });
+  const { setNodeRef: setCreateGroupDropNodeRef } = useDroppable({
+    id: 'sidebar-create-group-drop',
+    data: { type: 'sidebar-create-group-drop' },
+    disabled: isRepoGroupingMode,
+  });
   const sidebarVisibleDroneCount = sidebarVisibleDrones.length;
   const sidebarVisibleMultiChatActive = selectedGroupMultiChat === SIDEBAR_VISIBLE_MULTI_CHAT_GROUP;
   const activeChatName = String(selectedChat ?? '').trim() || 'default';
@@ -745,6 +964,7 @@ export function DroneSidebar({
   const sharedDroneTreeListProps = {
     droneById: sidebarDroneById,
     draftSidebarPlaceholderId: DRAFT_SIDEBAR_PLACEHOLDER_ID,
+    selectedDroneIds,
     selectedDroneSet,
     selectedDrone,
     activeChatName,
@@ -766,8 +986,7 @@ export function DroneSidebar({
     onSetDroneBaseImage,
     onDeleteDrone,
     onOpenDroneErrorModal,
-    onDroneDragStart,
-    onDroneDragEnd,
+    onPrepareDroneDragStart,
   } satisfies Omit<React.ComponentProps<typeof SidebarDroneTreeList>, 'tree'>;
 
   return (
@@ -970,12 +1189,7 @@ export function DroneSidebar({
               <SidebarDroneTreeList {...sharedDroneTreeListProps} tree={flatSidebarTree} />
             ) : (
               <>
-                <div
-                  className="flex flex-col gap-1.5"
-                  onDragOver={isRepoGroupingMode ? undefined : onUngroupedDragOver}
-                  onDragLeave={isRepoGroupingMode ? undefined : onUngroupedDragLeave}
-                  onDrop={isRepoGroupingMode ? undefined : onUngroupedDrop}
-                >
+                <div className="flex flex-col gap-1.5">
                 {renderSidebarGroups.map(({ group, label, kind, items }) => {
                   const groupRef = { group, kind };
                   const groupToken = sidebarGroupOrderToken(groupRef);
@@ -1007,195 +1221,43 @@ export function DroneSidebar({
                   const isHiddenGroup = hiddenSidebarGroupTokenSet.has(groupToken);
                   const canRenameGroup = !placeholderOnly && !isVirtualGroup && !isUngroupedGroupName(groupLabel);
                   const pinGroupActionsVisible = isDeletingGroup || isRenamingGroup || selectedGroupMultiChat === group;
-                  const actionsVisibleClass = pinGroupActionsVisible
-                    ? 'opacity-100 pointer-events-auto'
-                    : 'opacity-0 pointer-events-none group-hover/group-header:opacity-100 group-hover/group-header:pointer-events-auto';
-                  const countVisibleClass = pinGroupActionsVisible
-                    ? 'opacity-0 pointer-events-none'
-                    : 'opacity-100 group-hover/group-header:opacity-0 group-hover/group-header:pointer-events-none';
                   return (
-                    <div
+                    <SidebarGroupSection
                       key={group}
-                      data-drone-sidebar-group={group}
-                      data-drone-sidebar-group-kind={kind}
-                      data-drone-sidebar-group-name={hoveredGroupName || undefined}
-                      data-drone-sidebar-repo-path={hoveredRepoPath || undefined}
-                      className={`relative rounded-md border bg-[rgba(0,0,0,.15)] overflow-hidden transition-colors ${
-                        isDropTarget ? 'border-[var(--accent-muted)] ring-1 ring-[var(--accent-muted)]' : 'border-[var(--border-subtle)]'
-                      } ${isReorderDragging ? 'opacity-70' : isHiddenGroup ? 'opacity-75' : ''}`}
-                      onDragOver={(event) => onSidebarGroupContainerDragOver(groupRef, isVirtualGroup, event)}
-                      onDragLeave={(event) => onSidebarGroupContainerDragLeave(groupRef, isVirtualGroup, event)}
-                      onDrop={(event) => onSidebarGroupContainerDrop(groupRef, isVirtualGroup, event)}
-                    >
-                      {isReorderTarget && dragOverSidebarGroup ? (
-                        <SidebarReorderDropIndicator placement={dragOverSidebarGroup.placement} />
-                      ) : null}
-                      <div
-                        className={`group/group-header w-full px-3 py-2 flex items-center justify-between gap-2 border-b border-[var(--border-subtle)] transition-colors ${
-                          isDropTarget ? 'bg-[var(--accent-subtle)]' : 'hover:bg-[var(--hover)]'
-                        } ${actualItems.length > 0 ? 'cursor-grab active:cursor-grabbing' : ''}`}
-                        draggable={actualItems.length > 0}
-                        onDragStart={(event) => onGroupHeaderDragStart(actualItems.map((item) => item.id), event)}
-                      >
-                        <SidebarReorderHandle
-                          draggable={!placeholderOnly}
-                          onDragStart={(event) => onSidebarGroupReorderDragStart(groupRef, event)}
-                          onDragEnd={onSidebarGroupReorderDragEnd}
-                          data-group-drag-block="true"
-                          disabled={placeholderOnly}
-                          className={`inline-flex items-center justify-center w-6 h-6 rounded border transition-all flex-shrink-0 ${
-                            placeholderOnly
-                              ? 'opacity-40 cursor-default border-[var(--border-subtle)] text-[var(--muted-dim)]'
-                              : 'cursor-grab active:cursor-grabbing border-[var(--border-subtle)] text-[var(--muted-dim)] hover:text-[var(--muted)] hover:border-[var(--accent-muted)] hover:bg-[var(--hover)]'
-                          }`}
-                          title={`Drag to reorder "${groupLabel}"`}
-                          aria-label={`Drag to reorder "${groupLabel}"`}
-                        />
-                        <button
-                          onClick={() => onToggleGroupCollapsed(group)}
-                          className="flex items-center gap-2 min-w-0 text-left flex-1"
-                          title={collapsed ? 'Expand group' : 'Collapse group'}
-                        >
-                          <IconChevron down={!collapsed} className="text-[var(--muted-dim)]" />
-                          <IconFolder className="text-[var(--muted-dim)] opacity-50" />
-                          <span
-                            className="text-[11px] font-semibold text-[var(--fg-secondary)] truncate tracking-wide uppercase"
-                            style={{ fontFamily: 'var(--display)' }}
-                          >
-                            {groupLabel}
-                          </span>
-                        </button>
-                        <div
-                          data-group-drag-block="true"
-                          className={`flex items-center justify-end flex-shrink-0 transition-[min-width] duration-150 ${
-                            pinGroupActionsVisible
-                              ? canRenameGroup
-                                ? 'min-w-[184px]'
-                                : 'min-w-[154px]'
-                              : canRenameGroup
-                                ? 'min-w-[92px] group-hover/group-header:min-w-[184px]'
-                                : 'min-w-[72px] group-hover/group-header:min-w-[154px]'
-                          }`}
-                        >
-                          <div className="w-full flex items-center justify-end gap-2">
-                            <div
-                              className={`text-[10px] font-mono text-[var(--muted-dim)] transition-opacity duration-150 ${countVisibleClass}`}
-                            >
-                              {actualItems.length} drone{actualItems.length !== 1 ? 's' : ''}
-                            </div>
-                            <div className={`flex items-center justify-end gap-1 ${actionsVisibleClass}`}>
-                              {canRenameGroup && (
-                                <button
-                                  onClick={() => onRenameGroup(group)}
-                                  disabled={isDeletingGroup || isRenamingGroup}
-                                  aria-busy={isRenamingGroup}
-                                  className={`inline-flex items-center justify-center w-7 h-7 rounded border transition-all ${
-                                    isDeletingGroup || isRenamingGroup
-                                      ? 'opacity-50 cursor-not-allowed bg-[var(--panel-raised)] border-[var(--border-subtle)] text-[var(--muted)]'
-                                      : 'bg-[rgba(167,139,250,.08)] border-[rgba(167,139,250,.18)] text-[var(--accent)] hover:bg-[rgba(167,139,250,.12)]'
-                                  }`}
-                                  title={isRenamingGroup ? `Renaming group "${groupLabel}"…` : `Rename group "${groupLabel}"`}
-                                  aria-label={isRenamingGroup ? `Renaming group "${groupLabel}"` : `Rename group "${groupLabel}"`}
-                                >
-                                  {isRenamingGroup ? <IconSpinner className="opacity-90" /> : <IconPencil className="opacity-90" />}
-                                </button>
-                              )}
-                              {!placeholderOnly && (
-                                <>
-                                  <button
-                                    type="button"
-                                    onClick={() => toggleSidebarGroupHidden(groupRef)}
-                                    disabled={isDeletingGroup || isRenamingGroup}
-                                    className={`inline-flex items-center justify-center w-7 h-7 rounded border transition-all ${
-                                      isDeletingGroup || isRenamingGroup
-                                        ? 'opacity-50 cursor-not-allowed bg-[var(--panel-raised)] border-[var(--border-subtle)] text-[var(--muted)]'
-                                        : isHiddenGroup
-                                          ? 'bg-[var(--accent-subtle)] border-[var(--accent-muted)] text-[var(--accent)] hover:bg-[rgba(167,139,250,.18)]'
-                                          : 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)] hover:text-[var(--muted)] hover:border-[var(--border)] hover:bg-[var(--hover)]'
-                                    }`}
-                                    title={
-                                      isHiddenGroup
-                                        ? `Unhide "${groupLabel}"`
-                                        : `Hide "${groupLabel}"`
-                                    }
-                                    aria-label={
-                                      isHiddenGroup
-                                        ? `Unhide "${groupLabel}"`
-                                        : `Hide "${groupLabel}"`
-                                    }
-                                  >
-                                    {isHiddenGroup ? <IconEye className="opacity-90" /> : <IconEyeOff className="opacity-90" />}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => onOpenGroupMultiChat(group)}
-                                    disabled={isDeletingGroup}
-                                    className={`inline-flex items-center justify-center w-7 h-7 rounded border transition-all ${
-                                      isDeletingGroup
-                                        ? 'opacity-50 cursor-not-allowed bg-[var(--panel-raised)] border-[var(--border-subtle)] text-[var(--muted)]'
-                                        : selectedGroupMultiChat === group
-                                          ? 'opacity-100 pointer-events-auto bg-[var(--accent-subtle)] border-[var(--accent-muted)] text-[var(--accent)]'
-                                          : 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)] hover:text-[var(--accent)] hover:border-[var(--accent-muted)] hover:bg-[var(--accent-subtle)]'
-                                    }`}
-                                    title={`Open "${groupLabel}" multi-chat`}
-                                    aria-label={`Open "${groupLabel}" multi-chat`}
-                                  >
-                                    <IconColumns className="opacity-90" />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      onDeleteGroup(group, actualItems.length, {
-                                        kind,
-                                        label: groupLabel,
-                                        repoPath: isVirtualGroup ? hoveredRepoPath || null : null,
-                                      })
-                                    }
-                                    disabled={isDeletingGroup || isRenamingGroup}
-                                    aria-busy={isDeletingGroup}
-                                    className={`inline-flex items-center justify-center w-7 h-7 rounded border transition-all ${
-                                      isDeletingGroup || isRenamingGroup
-                                        ? 'opacity-50 cursor-not-allowed bg-[var(--panel-raised)] border-[var(--border-subtle)] text-[var(--muted)]'
-                                        : 'bg-[var(--red-subtle)] border-[rgba(255,90,90,.2)] text-[var(--red)] hover:bg-[rgba(255,90,90,.15)]'
-                                    }`}
-                                    title={
-                                      isDeletingGroup
-                                        ? `Deleting group "${groupLabel}"…`
-                                        : isVirtualGroup
-                                          ? `Delete all drones in "${groupLabel}"`
-                                          : `Delete group "${groupLabel}" (and all drones inside)`
-                                    }
-                                    aria-label={
-                                      isDeletingGroup
-                                        ? `Deleting group "${groupLabel}"`
-                                        : isVirtualGroup
-                                          ? `Delete all drones in "${groupLabel}"`
-                                          : `Delete group "${groupLabel}" (and all drones inside)`
-                                    }
-                                  >
-                                    {isDeletingGroup ? <IconSpinner className="opacity-90" /> : <IconTrash className="opacity-90" />}
-                                  </button>
-                                </>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                      {!collapsed && (
-                        <div className="px-1.5 py-1.5 flex flex-col gap-0.5">
-                          <SidebarDroneTreeList
-                            {...sharedDroneTreeListProps}
-                            tree={groupTree}
-                            showGroup={false}
-                            groupOrderKey={groupToken}
-                          />
-                        </div>
-                      )}
-                    </div>
+                      groupRef={groupRef}
+                      groupLabel={groupLabel}
+                      groupToken={groupToken}
+                      kind={kind}
+                      actualItems={actualItems}
+                      placeholderOnly={placeholderOnly}
+                      isVirtualGroup={isVirtualGroup}
+                      hoveredRepoPath={hoveredRepoPath}
+                      hoveredGroupName={hoveredGroupName}
+                      collapsed={collapsed}
+                      isDeletingGroup={isDeletingGroup}
+                      isRenamingGroup={isRenamingGroup}
+                      isDropTarget={isDropTarget}
+                      isReorderTarget={isReorderTarget}
+                      isReorderDragging={isReorderDragging}
+                      isHiddenGroup={isHiddenGroup}
+                      canRenameGroup={canRenameGroup}
+                      pinGroupActionsVisible={pinGroupActionsVisible}
+                      selectedGroupMultiChat={selectedGroupMultiChat}
+                      dragOverSidebarGroup={dragOverSidebarGroup}
+                      showMoveDropZone={showExternalMoveTargets}
+                      sharedDroneTreeListProps={sharedDroneTreeListProps}
+                      groupTree={groupTree}
+                      onToggleGroupCollapsed={onToggleGroupCollapsed}
+                      onRenameGroup={onRenameGroup}
+                      toggleSidebarGroupHidden={toggleSidebarGroupHidden}
+                      onOpenGroupMultiChat={onOpenGroupMultiChat}
+                      onDeleteGroup={onDeleteGroup}
+                    />
                   );
                 })}
-                {!isRepoGroupingMode && !sidebarHasUngroupedGroup && draggingDroneNames && draggingDroneNames.length > 0 && (
+                {!isRepoGroupingMode && !sidebarHasUngroupedGroup && showExternalMoveTargets && (
                   <div
+                    ref={setUngroupedDropNodeRef}
                     className={`rounded-md border border-dashed px-3 py-2 text-[10px] font-semibold tracking-wide uppercase transition-colors ${
                       dragOverUngrouped
                         ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
@@ -1208,17 +1270,15 @@ export function DroneSidebar({
                 )}
                 </div>
                 {!isRepoGroupingMode &&
-                  ((draggingDroneNames && draggingDroneNames.length > 0) ||
+                  (showExternalMoveTargets ||
                     (createGroupTargetDroneIds && createGroupTargetDroneIds.length > 0)) && (
                   <div
+                    ref={setCreateGroupDropNodeRef}
                     className={`mt-1 rounded-md border border-dashed px-3 py-2 transition-colors ${
                       dragOverCreateGroup || (createGroupTargetDroneIds && createGroupTargetDroneIds.length > 0)
                         ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)]'
                         : 'border-[var(--border-subtle)] bg-[rgba(0,0,0,.12)]'
                     }`}
-                    onDragOver={onCreateGroupDragOver}
-                    onDragLeave={onCreateGroupDragLeave}
-                    onDrop={onCreateGroupDrop}
                   >
                     <div
                       className="text-[10px] font-semibold tracking-wide uppercase text-[var(--muted-dim)]"

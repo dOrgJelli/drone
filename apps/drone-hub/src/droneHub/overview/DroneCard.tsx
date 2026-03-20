@@ -10,9 +10,10 @@ export function DroneCard({
   selected,
   busy,
   onClick,
-  onDragStart,
-  onDragEnd,
+  dragAttributes,
+  dragListeners,
   draggable,
+  dragging,
   onClone,
   onRename,
   onSetBaseImage,
@@ -33,9 +34,10 @@ export function DroneCard({
   selected: boolean;
   busy?: boolean;
   onClick: (opts?: { toggle?: boolean; range?: boolean }) => void;
-  onDragStart?: (event: React.DragEvent<HTMLDivElement>) => void;
-  onDragEnd?: () => void;
+  dragAttributes?: Record<string, any>;
+  dragListeners?: Record<string, any>;
   draggable?: boolean;
+  dragging?: boolean;
   onClone?: () => void;
   onRename?: () => void;
   onSetBaseImage?: () => void;
@@ -96,9 +98,8 @@ export function DroneCard({
       data-onboarding-id="sidebar.droneCard"
       role="button"
       tabIndex={0}
-      draggable={Boolean(draggable)}
-      onDragStart={(e) => onDragStart?.(e)}
-      onDragEnd={() => onDragEnd?.()}
+      {...dragAttributes}
+      {...dragListeners}
       onClick={(e) => onClick({ toggle: e.metaKey || e.ctrlKey, range: e.shiftKey })}
       onKeyDown={(e) => {
         if (e.key === ' ') {
@@ -110,6 +111,8 @@ export function DroneCard({
         selected
           ? 'bg-[var(--selected)] border-[var(--accent-muted)]'
           : 'border-transparent hover:bg-[var(--hover)] hover:border-[var(--border-subtle)]'
+      } ${draggable ? 'cursor-grab touch-none active:cursor-grabbing' : ''} ${
+        dragging ? 'opacity-35' : ''
       } focus:outline-none focus-visible:outline-none`}
     >
       {/* Accent edge for selected state */}
