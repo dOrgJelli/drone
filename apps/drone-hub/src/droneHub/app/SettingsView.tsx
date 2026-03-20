@@ -8,6 +8,8 @@ import type { UseHubLogsResult } from './use-hub-logs';
 import type { UseDeleteActionSettingsResult } from './use-delete-action-settings';
 import type { UseFilesystemSettingsResult } from './use-filesystem-settings';
 import type { UseLlmSettingsResult } from './use-llm-settings';
+import type { UseSkillLibraryResult } from './use-skill-library';
+import { SkillLibrarySection } from './SkillLibrarySection';
 
 const ARCHIVE_RETENTION_OPTIONS: Array<{ value: '1h' | '8h' | '1d' | '1w'; label: string }> = [
   { value: '1h', label: '1 hour' },
@@ -23,6 +25,7 @@ const ARCHIVE_RUNTIME_POLICY_OPTIONS: Array<{ value: 'keep-running' | 'stop'; la
 
 type SettingsViewProps = {
   llm: UseLlmSettingsResult;
+  skillLibrary: UseSkillLibraryResult;
   deleteAction: UseDeleteActionSettingsResult;
   filesystem: UseFilesystemSettingsResult;
   hubLogsState: UseHubLogsResult;
@@ -35,6 +38,7 @@ type SettingsViewProps = {
 
 export function SettingsView({
   llm,
+  skillLibrary,
   deleteAction,
   filesystem,
   hubLogsState,
@@ -68,6 +72,17 @@ export function SettingsView({
     saveLlmProviderSettings,
     mutateApiKeySettings,
   } = llm;
+  const {
+    skillsLoading,
+    skillSourcesLoading,
+    sourceSkillsLoading,
+    sourceSkillPreviewLoading,
+    skillsSaving,
+    skillsDeleting,
+    draftDirty: skillDraftDirty,
+    loadSkills,
+    loadSkillSources,
+  } = skillLibrary;
   const {
     deleteSettings,
     deleteSettingsLoading,
@@ -138,6 +153,12 @@ export function SettingsView({
     savingGeminiSettings ||
     clearingGeminiSettings ||
     savingLlmProvider ||
+    skillsLoading ||
+    skillSourcesLoading ||
+    sourceSkillsLoading ||
+    sourceSkillPreviewLoading ||
+    skillsSaving ||
+    skillsDeleting ||
     savingDeleteSettings ||
     savingFilesystemSettings;
   const activeDeleteMode = deleteSettings?.deleteAction.mode ?? 'permanent';
@@ -179,12 +200,18 @@ export function SettingsView({
             <button
               type="button"
               onClick={() => {
+                if (skillDraftDirty) {
+                  const ok = window.confirm('Discard unsaved skill edits and refresh all settings?');
+                  if (!ok) return;
+                }
                 void loadLlmSettings();
                 void loadDeleteSettings();
                 void loadFilesystemSettings();
                 void loadArchivedDrones();
                 void loadArchivedChats();
                 void loadHubLogs();
+                void loadSkills();
+                void loadSkillSources();
               }}
               disabled={settingsBusy}
               className={`h-8 px-3 rounded text-[11px] font-semibold tracking-wide uppercase border transition-all ${
@@ -890,6 +917,7 @@ export function SettingsView({
 
             <ShortcutSettingsSection />
             <AutomationSettingsSection />
+            <SkillLibrarySection skillLibrary={skillLibrary} />
 
             <div className="rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.12)] px-3 py-3 flex flex-col gap-3">
               <div className="text-[10px] font-semibold text-[var(--muted-dim)] tracking-[0.08em] uppercase" style={{ fontFamily: 'var(--display)' }}>

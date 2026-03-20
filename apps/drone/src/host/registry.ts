@@ -84,6 +84,13 @@ type DroneRegistryV1 = {
     };
   };
   /**
+   * Hub-managed shared skills library.
+   *
+   * This field is intentionally host-side and independent from any single drone.
+   * The Hub projects these skills into drone runtimes on demand.
+   */
+  skills?: Record<string, unknown>;
+  /**
    * Host-side list of repositories the user has "registered" with `drone repo`.
    * This is stored in the same registry file so the Hub UI can render it.
    */
@@ -225,6 +232,7 @@ export type DroneRegistry = {
    * Hub/user settings persisted on the host machine.
    */
   settings?: DroneRegistryV1['settings'];
+  skills?: Record<string, unknown>;
   repos?: DroneRegistryV1['repos'];
   groups?: DroneRegistryV1['groups'];
   archived?: Record<string, DroneRegistryArchivedEntry>;
@@ -410,6 +418,7 @@ function hasMeaningfulRegistryData(reg: DroneRegistry): boolean {
   if (countRecordEntries(reg.drones) > 0) return true;
   if (countRecordEntries(reg.pending) > 0) return true;
   if (countRecordEntries(reg.archived) > 0) return true;
+  if (countRecordEntries(reg.skills) > 0) return true;
   if (countRecordEntries(reg.repos) > 0) return true;
   if (countRecordEntries(reg.groups) > 0) return true;
   if (countRecordEntries(reg.settings) > 0) return true;
@@ -475,6 +484,7 @@ function migrateV1ToV2(v1: DroneRegistryV1): DroneRegistry {
   const out: DroneRegistry = {
     version: 2,
     settings: v1.settings,
+    skills: v1.skills,
     repos: v1.repos,
     groups: v1.groups,
     archived: {},
