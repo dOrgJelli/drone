@@ -138,6 +138,17 @@ import {
   type LlmProviderId,
 } from './hub-settings';
 import {
+  createSkill,
+  deleteSkillRecord,
+  getSkillById,
+  listSkills,
+  syncSkillLibraryToContainerTargets,
+  syncSkillLibraryToHostTargets,
+  type SkillProjectionTarget,
+  updateSkillRecord,
+} from './skills';
+import { importSkillFromSource, listSkillSourceCandidates, listSkillSources, previewSkillFromSource } from './skill-sources';
+import {
   decodeFleetCursor,
   effectiveFleetLimits,
   encodeFleetCursor,
@@ -1185,6 +1196,65 @@ async function resolveDroneDaemonClientForEntry(
 function droneRepoPathInContainer(drone: any): string {
   const raw = String(drone?.repo?.dest ?? '/work/repo').trim();
   return normalizeContainerPath(raw || '/work/repo');
+}
+
+function buildHostSkillProjectionTargets(drone: any): SkillProjectionTarget[] {
+  const repoAttached = isRepoAttachedDrone(drone);
+  const repoRootRaw = String((drone as any)?.repoPath ?? '').trim();
+  const repoRoot = repoAttached && repoRootRaw ? path.resolve(repoRootRaw) : '';
+  const homeRoot = path.resolve(os.homedir());
+  const portableBase = repoRoot || homeRoot;
+  const targets: SkillProjectionTarget[] = [
+    { agent: 'codex', rootPath: path.join(portableBase, '.agents', 'skills') },
+  ];
+  if (repoRoot) {
+    targets.push({ agent: 'claude', rootPath: path.join(repoRoot, '.claude', 'skills') });
+    targets.push({ agent: 'cursor', rootPath: path.join(repoRoot, '.cursor', 'skills') });
+    targets.push({ agent: 'opencode', rootPath: path.join(repoRoot, '.opencode', 'skills') });
+  } else {
+    targets.push({ agent: 'claude', rootPath: path.join(homeRoot, '.claude', 'skills') });
+    targets.push({ agent: 'cursor', rootPath: path.join(homeRoot, '.cursor', 'skills') });
+    targets.push({ agent: 'opencode', rootPath: path.join(homeRoot, '.config', 'opencode', 'skills') });
+  }
+  return targets;
+}
+
+function buildContainerSkillProjectionTargets(drone: any): SkillProjectionTarget[] {
+  const repoAttached = isRepoAttachedDrone(drone);
+  const projectRoot = repoAttached ? droneRepoPathInContainer(drone) : '';
+  const homeRoot = NON_REPO_HOME_CWD;
+  const portableBase = projectRoot || homeRoot;
+  const targets: SkillProjectionTarget[] = [
+    { agent: 'codex', rootPath: path.posix.join(portableBase, '.agents', 'skills') },
+  ];
+  if (projectRoot) {
+    targets.push({ agent: 'claude', rootPath: path.posix.join(projectRoot, '.claude', 'skills') });
+    targets.push({ agent: 'cursor', rootPath: path.posix.join(projectRoot, '.cursor', 'skills') });
+    targets.push({ agent: 'opencode', rootPath: path.posix.join(projectRoot, '.opencode', 'skills') });
+  } else {
+    targets.push({ agent: 'claude', rootPath: path.posix.join(homeRoot, '.claude', 'skills') });
+    targets.push({ agent: 'cursor', rootPath: path.posix.join(homeRoot, '.cursor', 'skills') });
+    targets.push({ agent: 'opencode', rootPath: path.posix.join(homeRoot, '.config', 'opencode', 'skills') });
+  }
+  return targets;
+}
+
+async function syncSkillLibraryForDrone(opts: { droneId: string; droneEntry: any }): Promise<void> {
+  const droneId = normalizeDroneIdentity(opts.droneId);
+  const droneEntry = opts.droneEntry;
+  if (!droneId || !droneEntry) return;
+  const runtime = droneRuntime(droneEntry);
+  if (runtime === 'host') {
+    await syncSkillLibraryToHostTargets({ targets: buildHostSkillProjectionTargets(droneEntry) });
+    return;
+  }
+  const requestedDroneName = String((droneEntry as any)?.name ?? droneId).trim() || droneId;
+  await withLockedDroneContainer({ requestedDroneName, droneEntry }, async ({ containerName }) => {
+    await syncSkillLibraryToContainerTargets({
+      containerName,
+      targets: buildContainerSkillProjectionTargets(droneEntry),
+    });
+  });
 }
 
 function buildDockerExecShellCommand(containerName: string, cwdRaw: string): string {
@@ -5188,6 +5258,15 @@ async function createOrEnqueuePromptUnified(opts: {
 
   const regSnap: any = await loadRegistry();
   if (regSnap?.drones?.[droneId]) {
+    try {
+      await syncSkillLibraryForDrone({ droneId, droneEntry: regSnap.drones[droneId] });
+    } catch (e: any) {
+      return {
+        kind: 'error',
+        status: 500,
+        error: `failed to sync skill library: ${e?.message ?? String(e)}`,
+      };
+    }
     const r = await enqueuePrompt({
       id: fallbackId,
       droneId,
@@ -7909,6 +7988,35 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         }
       }
 
+      if (pathname === '/api/skills') {
+        if (method === 'GET') {
+          json(res, 200, { ok: true, skills: await listSkills() });
+          return;
+        }
+        if (method === 'POST') {
+          let body: any = null;
+          try {
+            body = await readJsonBody(req);
+          } catch (e: any) {
+            json(res, 400, { ok: false, error: e?.message ?? String(e) });
+            return;
+          }
+          try {
+            json(res, 201, { ok: true, skill: await createSkill(body) });
+          } catch (e: any) {
+            const msg = e?.message ?? String(e);
+            const code = /already exists|duplicate/i.test(msg) ? 409 : /missing |invalid /i.test(msg) ? 400 : 500;
+            json(res, code, { ok: false, error: msg });
+          }
+          return;
+        }
+      }
+
+      if (pathname === '/api/skill-sources' && method === 'GET') {
+        json(res, 200, { ok: true, sources: listSkillSources() });
+        return;
+      }
+
       // POST /api/tldr/from-message
       // Summarizes an agent response in chat context (short Markdown TLDR).
       if (method === 'POST' && pathname === '/api/tldr/from-message') {
@@ -8133,6 +8241,122 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
       }
 
       const parts = pathname.split('/').filter(Boolean);
+
+      if (parts.length === 3 && parts[0] === 'api' && parts[1] === 'skills') {
+        const skillId = decodeURIComponent(parts[2]);
+        if (method === 'GET') {
+          const skill = await getSkillById(skillId);
+          if (!skill) {
+            json(res, 404, { ok: false, error: `unknown skill: ${skillId}` });
+            return;
+          }
+          json(res, 200, { ok: true, skill });
+          return;
+        }
+        if (method === 'PUT') {
+          let body: any = null;
+          try {
+            body = await readJsonBody(req);
+          } catch (e: any) {
+            json(res, 400, { ok: false, error: e?.message ?? String(e) });
+            return;
+          }
+          try {
+            json(res, 200, { ok: true, skill: await updateSkillRecord(skillId, body) });
+          } catch (e: any) {
+            const msg = e?.message ?? String(e);
+            const code = /unknown skill/i.test(msg) ? 404 : /already exists|duplicate/i.test(msg) ? 409 : /missing |invalid /i.test(msg) ? 400 : 500;
+            json(res, code, { ok: false, error: msg });
+          }
+          return;
+        }
+        if (method === 'DELETE') {
+          const deleted = await deleteSkillRecord(skillId);
+          if (!deleted) {
+            json(res, 404, { ok: false, error: `unknown skill: ${skillId}` });
+            return;
+          }
+          json(res, 200, { ok: true, deleted: true, id: skillId });
+          return;
+        }
+      }
+
+      if (parts.length === 4 && parts[0] === 'api' && parts[1] === 'skill-sources' && parts[3] === 'skills') {
+        const sourceId = decodeURIComponent(parts[2]);
+        if (method === 'GET') {
+          const forceRefresh = parseBoolParam(u.searchParams.get('refresh'), false);
+          try {
+            json(res, 200, { ok: true, sourceId, skills: await listSkillSourceCandidates(sourceId, fetch, { forceRefresh }) });
+          } catch (e: any) {
+            const msg = e?.message ?? String(e);
+            const code = /unknown skill source/i.test(msg) ? 404 : /invalid /i.test(msg) ? 400 : 502;
+            json(res, code, { ok: false, error: msg });
+          }
+          return;
+        }
+      }
+
+      if (parts.length === 4 && parts[0] === 'api' && parts[1] === 'skill-sources' && parts[3] === 'preview') {
+        const sourceId = decodeURIComponent(parts[2]);
+        if (method === 'GET') {
+          const sourcePath = String(u.searchParams.get('path') ?? '').trim();
+          try {
+            json(res, 200, {
+              ok: true,
+              preview: await previewSkillFromSource({
+                sourceId,
+                path: sourcePath,
+              }),
+            });
+          } catch (e: any) {
+            const msg = e?.message ?? String(e);
+            const code =
+              /unknown skill source|unknown source skill path/i.test(msg)
+                ? 404
+                : /missing |invalid /i.test(msg)
+                  ? 400
+                  : 502;
+            json(res, code, { ok: false, error: msg });
+          }
+          return;
+        }
+      }
+
+      if (parts.length === 4 && parts[0] === 'api' && parts[1] === 'skill-sources' && parts[3] === 'import') {
+        const sourceId = decodeURIComponent(parts[2]);
+        if (method === 'POST') {
+          let body: any = null;
+          try {
+            body = await readJsonBody(req);
+          } catch (e: any) {
+            json(res, 400, { ok: false, error: e?.message ?? String(e) });
+            return;
+          }
+          try {
+            json(res, 201, {
+              ok: true,
+              skill: await importSkillFromSource({
+                sourceId,
+                path: body?.path,
+              }),
+            });
+          } catch (e: any) {
+            const msg = e?.message ?? String(e);
+            const code =
+              /unknown skill source|unknown source skill path/i.test(msg)
+                ? 404
+                : /missing |invalid /i.test(msg)
+                  ? 400
+                  : /already exists|duplicate/i.test(msg)
+                    ? 409
+                    : /not importable/i.test(msg)
+                      ? 422
+                      : 502;
+            json(res, code, { ok: false, error: msg });
+          }
+          return;
+        }
+      }
 
       // GET /api/repos
       // Lists repositories registered via `drone repo`.
@@ -13139,6 +13363,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         const cwd = normalizeDroneUiCwdForRuntime(d, u.searchParams.get('cwd') ?? null);
 
         try {
+          await syncSkillLibraryForDrone({ droneId, droneEntry: d });
           if (runtime === 'host') {
             const daemon = await resolveDroneDaemonClientForEntry(d);
             if (!daemon) {
@@ -13392,6 +13617,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         if (mode === 'agent') {
           await ensureChatEntry({ droneId, chatName });
         }
+        await syncSkillLibraryForDrone({ droneId, droneEntry: drone });
 
         // CLI-agnostic "continuation": keep one tmux session per chat.
         // This avoids relying on any CLI-specific resume flag.

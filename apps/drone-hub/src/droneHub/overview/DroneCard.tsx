@@ -10,6 +10,7 @@ export function DroneCard({
   selected,
   busy,
   onClick,
+  dragNodeRef,
   dragAttributes,
   dragListeners,
   draggable,
@@ -34,6 +35,7 @@ export function DroneCard({
   selected: boolean;
   busy?: boolean;
   onClick: (opts?: { toggle?: boolean; range?: boolean }) => void;
+  dragNodeRef?: React.Ref<HTMLDivElement>;
   dragAttributes?: Record<string, any>;
   dragListeners?: Record<string, any>;
   draggable?: boolean;
@@ -95,6 +97,7 @@ export function DroneCard({
   };
   return (
     <div
+      ref={dragNodeRef}
       data-onboarding-id="sidebar.droneCard"
       role="button"
       tabIndex={0}

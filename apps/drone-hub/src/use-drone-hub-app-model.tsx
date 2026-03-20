@@ -40,6 +40,7 @@ import { useKanbanBoardSettings } from './droneHub/app/use-kanban-board-settings
 import { useUiPreferencesSettings } from './droneHub/app/use-ui-preferences-settings';
 import { useDeleteActionSettings } from './droneHub/app/use-delete-action-settings';
 import { useFilesystemSettings } from './droneHub/app/use-filesystem-settings';
+import { useSkillLibrary } from './droneHub/app/use-skill-library';
 import { useQueuedPromptsState } from './droneHub/app/use-queued-prompts-state';
 import { useRightPanelLayout } from './droneHub/app/use-right-panel-layout';
 import { useDroneSelectionState } from './droneHub/app/use-drone-selection-state';
@@ -451,6 +452,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
   useUiPreferencesSettings({ requestJson });
   const deleteActionSettingsState = useDeleteActionSettings(requestJson);
   const filesystemSettingsState = useFilesystemSettings(requestJson);
+  const skillLibraryState = useSkillLibrary(requestJson);
   const { llmSettings } = llmSettingsState;
   const suggestKanbanCardTitleFromPaste = React.useCallback(
     async (descriptionRaw: string): Promise<string | null> => {
@@ -2308,6 +2310,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
   const workspaceContentProps: DroneHubWorkspaceContentProps = useDroneHubWorkspaceContentProps({
     appView,
     llmSettingsState,
+    skillLibraryState,
     deleteActionSettingsState,
     filesystemSettingsState,
     hubLogsState,
