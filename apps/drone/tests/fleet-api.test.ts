@@ -38,6 +38,7 @@ async function startStubDaemon(token: string, opts?: { failClaims?: boolean }) {
   const requests = new Map<string, any>();
   const order: string[] = [];
   const promptEnqueues: any[] = [];
+  const promptCancels: string[] = [];
   let policy: any = null;
 
   const server = http.createServer(async (req, res) => {
@@ -62,6 +63,13 @@ async function startStubDaemon(token: string, opts?: { failClaims?: boolean }) {
       const body = await readJson(req);
       promptEnqueues.push(body);
       json(res, 202, { ok: true, id: String(body?.id ?? ''), state: 'queued' });
+      return;
+    }
+    const cancelMatch = pathname.match(/^\/v1\/prompts\/([^/]+)\/cancel$/);
+    if (method === 'POST' && cancelMatch) {
+      const id = decodeURIComponent(cancelMatch[1] ?? '');
+      promptCancels.push(id);
+      json(res, 200, { ok: true, id, state: 'canceled' });
       return;
     }
     if (method === 'POST' && pathname === '/v1/fleet/policy') {
@@ -156,6 +164,9 @@ async function startStubDaemon(token: string, opts?: { failClaims?: boolean }) {
     },
     get promptEnqueues() {
       return promptEnqueues;
+    },
+    get promptCancels() {
+      return promptCancels;
     },
   };
 }
@@ -387,6 +398,93 @@ describeSocketSuite('fleet api', () => {
       expect(audit.r.status).toBe(200);
       expect((audit.data?.items ?? []).some((item: any) => item.action === 'send_message' && item.status === 'accepted')).toBe(true);
       expect((audit.data?.items ?? []).some((item: any) => item.action === 'read_messages' && item.status === 'accepted')).toBe(true);
+    } finally {
+      await parentDaemon.close();
+      await childDaemon.close();
+    }
+  });
+
+  test('reconciles stop requests for a child drone chat', async () => {
+    const parentDaemon = await startStubDaemon('parent-stop-token');
+    const childDaemon = await startStubDaemon('child-stop-token');
+    try {
+      const now = new Date().toISOString();
+      await updateRegistry((reg: any) => {
+        reg.drones = {
+          'parent-stop': {
+            id: 'parent-stop',
+            name: 'parent-stop',
+            hostPort: parentDaemon.port,
+            token: 'parent-stop-token',
+            containerPort: 7777,
+            repoPath: '',
+            createdAt: now,
+            fleet: {
+              enabled: true,
+              capabilities: ['drone:message:send'],
+              readScopes: ['children'],
+              assigned: [],
+            },
+            chats: { default: { createdAt: now, agent: { kind: 'builtin', id: 'cursor' }, turns: [], pendingPrompts: [] } },
+          },
+          'child-stop': {
+            id: 'child-stop',
+            name: 'child-stop',
+            hostPort: childDaemon.port,
+            token: 'child-stop-token',
+            containerPort: 7777,
+            repoPath: '',
+            createdAt: now,
+            fleet: {
+              createdBy: 'parent-stop',
+              createdAt: now,
+              enabled: false,
+              capabilities: [],
+              readScopes: ['children'],
+              assigned: [],
+            },
+            chats: {
+              default: {
+                createdAt: now,
+                agent: { kind: 'builtin', id: 'cursor' },
+                turns: [],
+                pendingPrompts: [{ id: 'prompt-stop-1', at: now, prompt: 'still running', state: 'sent', updatedAt: now }],
+              },
+            },
+          },
+        };
+      });
+
+      const stopResp = await fetch(`http://127.0.0.1:${parentDaemon.port}/v1/fleet/requests`, {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer parent-stop-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          type: 'stop_chat',
+          payload: { to: 'child-stop', chat: 'default' },
+        }),
+      });
+      const stopData: any = await stopResp.json();
+      const stopRequest = await waitForRequest(parentDaemon, 'parent-stop-token', String(stopData?.request?.id ?? ''));
+      expect(stopRequest.state).toBe('done');
+      expect(stopRequest.result?.target?.id).toBe('child-stop');
+      expect(stopRequest.result?.chat).toBe('default');
+      expect(stopRequest.result?.stopped).toBe(true);
+      expect(stopRequest.result?.stoppedPromptIds).toEqual(['prompt-stop-1']);
+      expect(childDaemon.promptCancels).toEqual(['prompt-stop-1']);
+
+      const regAny: any = await loadRegistry();
+      const pending = regAny?.drones?.['child-stop']?.chats?.default?.pendingPrompts ?? [];
+      expect(pending).toHaveLength(1);
+      expect(pending[0]?.id).toBe('prompt-stop-1');
+      expect(pending[0]?.state).toBe('failed');
+      expect(String(pending[0]?.error ?? '')).toContain('Stopped by user');
+
+      const audit = await apiFetch('/api/fleet/audit?actor=parent-stop');
+      expect(audit.r.status).toBe(200);
+      expect((audit.data?.items ?? []).some((item: any) => item.action === 'stop_chat' && item.status === 'accepted')).toBe(true);
     } finally {
       await parentDaemon.close();
       await childDaemon.close();

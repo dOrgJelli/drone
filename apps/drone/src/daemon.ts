@@ -215,7 +215,7 @@ function normalizeFleetRequestState(raw: unknown): FleetRequestState | null {
 
 function normalizeFleetRequestType(raw: unknown): FleetRequestType | null {
   const value = String(raw ?? '').trim().toLowerCase();
-  if (value === 'create_child' || value === 'send_message' || value === 'read_messages') return value;
+  if (value === 'create_child' || value === 'send_message' || value === 'read_messages' || value === 'stop_chat') return value;
   return null;
 }
 
@@ -765,6 +765,7 @@ async function main() {
           commands: [
             'fleet create --name <child> --group <group> [--idempotency-key <key>]',
             'fleet send --to <drone> --chat <chat> --message "<text>"',
+            'fleet stop --to <drone> --chat <chat>',
             'fleet read --from <drone> --chat <chat> --limit 20 [--cursor <cursor>]',
             'fleet request status --id <requestId>',
             'fleet capabilities',
@@ -804,7 +805,7 @@ async function main() {
         const body = await readJson(req);
         const type = normalizeFleetRequestType(body?.type);
         if (!type) {
-          json(res, 400, { error: 'invalid type (expected create_child|send_message|read_messages)' });
+          json(res, 400, { error: 'invalid type (expected create_child|send_message|read_messages|stop_chat)' });
           return;
         }
         const payload =
