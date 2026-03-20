@@ -1134,6 +1134,24 @@ function normalizeDroneCwdForRuntime(drone: any, cwdRaw: unknown): string {
   return normalizeContainerPath(raw || fallback || NON_REPO_HOME_CWD);
 }
 
+function isContainerOnlyCwd(raw: string): boolean {
+  const pathText = String(raw ?? '').trim();
+  if (!pathText) return false;
+  return (
+    pathText === '/dvm-data' ||
+    pathText.startsWith('/dvm-data/') ||
+    pathText === '/work/repo' ||
+    pathText.startsWith('/work/repo/')
+  );
+}
+
+function normalizeDroneUiCwdForRuntime(drone: any, cwdRaw: unknown): string {
+  const normalized = normalizeDroneCwdForRuntime(drone, cwdRaw);
+  if (droneRuntime(drone) !== 'host') return normalized;
+  if (!isContainerOnlyCwd(normalized)) return normalized;
+  return normalizeDroneCwdForRuntime(drone, null);
+}
+
 async function resolveDroneDaemonClientForEntry(
   drone: any,
 ): Promise<{ client: ReturnType<typeof makeClient>; hostPort: number; token: string } | null> {
@@ -13102,7 +13120,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           .toLowerCase();
         const mode: 'shell' | 'agent' = modeRaw === 'agent' ? 'agent' : 'shell';
         const chatName = normalizeChatName(u.searchParams.get('chat') ?? 'default');
-        const cwd = normalizeDroneCwdForRuntime(d, u.searchParams.get('cwd') ?? null);
+        const cwd = normalizeDroneUiCwdForRuntime(d, u.searchParams.get('cwd') ?? null);
 
         try {
           if (runtime === 'host') {
@@ -13127,11 +13145,12 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
                 cmd: 'bash',
                 args: ['-lc', launchScript],
                 cwd,
-                force: false,
+                force: mode !== 'agent',
+                terminal: true,
               });
             } catch (e: any) {
               const msg = String(e?.message ?? e ?? '').trim().toLowerCase();
-              if (msg.includes('already exists') || msg.includes('process already exists')) {
+              if (mode === 'agent' && (msg.includes('already exists') || msg.includes('process already exists'))) {
                 // Reuse the existing session instead of restarting it and dropping user state.
               } else {
                 throw e;
@@ -13369,7 +13388,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           'export TERM=xterm-256color',
           'export COLORTERM=truecolor',
         ].join('; ');
-        const cwd = normalizeDroneCwdForRuntime(drone, u.searchParams.get('cwd') ?? null);
+        const cwd = normalizeDroneUiCwdForRuntime(drone, u.searchParams.get('cwd') ?? null);
 
         if (runtime === 'host') {
           const manualSshCmd = `cd ${shellQuoteIfNeeded(cwd)} && exec bash -i`;
@@ -13522,7 +13541,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         const runtime = droneRuntime(drone);
         const droneName = String(drone?.name ?? droneRef).trim() || droneRef;
 
-        const cwd = normalizeDroneCwdForRuntime(drone, u.searchParams.get('cwd') ?? null);
+        const cwd = normalizeDroneUiCwdForRuntime(drone, u.searchParams.get('cwd') ?? null);
         if (runtime === 'host') {
           const uri = `file://${encodeRemotePath(cwd)}`;
           const manualCommand = `${editor} ${shellQuoteIfNeeded(cwd)}`;

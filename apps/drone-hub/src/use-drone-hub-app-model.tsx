@@ -551,6 +551,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
   const rememberStartupSeed = React.useCallback((
     drones: Array<{ id: string; name: string }>,
     opts: {
+      runtime?: 'container' | 'host';
       agent: ChatAgentConfig | null;
       model?: string | null;
       prompt: string;
@@ -569,6 +570,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     if (unique.size === 0) return;
     const prompt = String(opts.prompt ?? '').trim();
     const chatName = String(opts.chatName ?? 'default').trim() || 'default';
+    const runtime = opts.runtime === 'host' ? 'host' : 'container';
     const model = String(opts.model ?? '').trim() || null;
     const group = String(opts.group ?? '').trim() || null;
     const repoPath = String(opts.repoPath ?? '').trim() || null;
@@ -579,6 +581,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
       for (const [id, droneName] of unique.entries()) {
         next[id] = {
           droneName,
+          runtime,
           chatName,
           agent: opts.agent ?? null,
           model,
@@ -1702,6 +1705,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
         if (!droneId) return { ok: false, error: 'Failed creating drone: missing id.' };
 
         rememberStartupSeed([{ id: droneId, name: droneName }], {
+          runtime: 'container',
           agent: seedAgent,
           model: seedModel,
           prompt,

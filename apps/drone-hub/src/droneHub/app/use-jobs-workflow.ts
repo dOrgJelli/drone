@@ -43,6 +43,7 @@ type UseJobsWorkflowArgs = {
   rememberStartupSeed: (
     drones: Array<{ id: string; name: string }>,
     opts: {
+      runtime?: 'container' | 'host';
       agent: ChatAgentConfig | null;
       model?: string | null;
       prompt: string;
@@ -181,6 +182,7 @@ export function useJobsWorkflow({
         }
 
         rememberStartupSeed([{ id: String(acceptedEntry.id), name }], {
+          runtime: 'container',
           agent: seedAgent,
           model: seedModel,
           prompt: seedPrompt,
@@ -309,6 +311,7 @@ export function useJobsWorkflow({
           const id = idByName.get(name) ?? '';
           if (!id) continue;
           rememberStartupSeed([{ id, name }], {
+            runtime: 'container',
             agent: seedAgent,
             model: seedModel,
             prompt: nameToSeedPrompt.get(name) || '',

@@ -256,6 +256,29 @@ export type DroneRegistry = {
   drones: Record<string, DroneRegistryDroneEntry>;
 };
 
+export function registryHasDisplayName(
+  reg: Pick<DroneRegistry, 'drones' | 'pending'> | null | undefined,
+  nameRaw: string,
+  opts?: { excludeId?: string | null }
+): boolean {
+  const name = String(nameRaw ?? '').trim();
+  if (!name) return false;
+  const excludeId = typeof opts?.excludeId === 'string' ? opts.excludeId.trim() : '';
+  for (const entryAny of Object.values(reg?.drones ?? {})) {
+    const entry = entryAny as any;
+    if (String(entry?.name ?? '').trim() !== name) continue;
+    if (excludeId && String(entry?.id ?? '').trim() === excludeId) continue;
+    return true;
+  }
+  for (const entryAny of Object.values(reg?.pending ?? {})) {
+    const entry = entryAny as any;
+    if (String(entry?.name ?? '').trim() !== name) continue;
+    if (excludeId && String(entry?.id ?? '').trim() === excludeId) continue;
+    return true;
+  }
+  return false;
+}
+
 type DroneRegistryDroneEntry = Omit<DroneRegistryV1['drones'][string], 'id' | 'name'> & {
   id: string;
   /**

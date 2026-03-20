@@ -3,6 +3,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
+import { formatDroneRuntimeError } from '../app/chat-startup-errors';
 import { requestJson } from '../http';
 import { provisioningLabel, usePaneReadiness } from '../panes/usePaneReadiness';
 
@@ -47,10 +48,8 @@ type TerminalStreamServerMessage =
   | { type: 'error'; error?: string }
   | { type: 'pong' };
 
-function normalizeContainerPathInput(raw: string): string {
-  const trimmed = String(raw ?? '').trim();
-  if (!trimmed) return '/';
-  return trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+function normalizeTerminalCwdInput(raw: string): string {
+  return String(raw ?? '').trim();
 }
 
 export function DroneTerminalDock({
@@ -70,7 +69,7 @@ export function DroneTerminalDock({
   hubPhase?: 'creating' | 'starting' | 'seeding' | 'error' | null;
   hubMessage?: string | null;
 }) {
-  const normalizedCwd = React.useMemo(() => normalizeContainerPathInput(defaultCwd), [defaultCwd]);
+  const normalizedCwd = React.useMemo(() => normalizeTerminalCwdInput(defaultCwd), [defaultCwd]);
   const [sessionName, setSessionName] = React.useState<string>('');
   const [error, setError] = React.useState<string | null>(null);
   const [streamMode, setStreamMode] = React.useState<'ws' | 'poll'>(() =>
@@ -145,7 +144,7 @@ export function DroneTerminalDock({
         errorStreakRef.current = 0;
         setError(null);
       } catch (e: any) {
-        setError(e?.message ?? String(e));
+        setError(formatDroneRuntimeError(e));
       } finally {
         if (inputBufferRef.current) void flushInputBuffer();
       }
@@ -177,7 +176,7 @@ export function DroneTerminalDock({
         pollNowRef.current?.();
       }, 80);
     } catch (e: any) {
-      setError(e?.message ?? String(e));
+      setError(formatDroneRuntimeError(e));
     } finally {
       flushingInputRef.current = false;
       if (inputBufferRef.current) {
@@ -381,7 +380,7 @@ export function DroneTerminalDock({
         if (cancelled) return;
         setSessionName('');
         activeTargetRef.current = null;
-        setError(e?.message ?? String(e));
+        setError(formatDroneRuntimeError(e));
       });
 
     return () => {
@@ -459,7 +458,7 @@ export function DroneTerminalDock({
         if (!msg) return;
 
         if (msg.type === 'error') {
-          setError(msg.error ?? 'terminal stream error');
+          setError(formatDroneRuntimeError(msg.error ?? 'terminal stream error'));
           errorStreakRef.current = Math.min(20, errorStreakRef.current + 1);
           return;
         }
@@ -589,7 +588,7 @@ export function DroneTerminalDock({
         applyServerOutput(nextText);
       } catch (e: any) {
         if (!mounted) return;
-        setError(e?.message ?? String(e));
+        setError(formatDroneRuntimeError(e));
         errorStreakRef.current = Math.min(20, errorStreakRef.current + 1);
       } finally {
         busy = false;

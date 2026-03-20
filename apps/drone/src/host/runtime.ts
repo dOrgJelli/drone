@@ -3,6 +3,12 @@ import { droneRootPath } from './paths';
 
 export type DroneRuntime = 'container' | 'host';
 
+export function missingHostDependencyMessage(binary: string, contextRaw?: string): string {
+  const tool = String(binary ?? '').trim() || 'required tool';
+  const context = String(contextRaw ?? '').trim() || 'this operation';
+  return `${context} require ${tool} on the host PATH`;
+}
+
 function shellQuote(raw: string): string {
   return `'${String(raw ?? '').replace(/'/g, `'\\''`)}'`;
 }

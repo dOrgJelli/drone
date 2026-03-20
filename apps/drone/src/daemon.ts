@@ -13,6 +13,8 @@ import {
   type FleetRequestState,
   type FleetRequestType,
 } from './fleet/contracts';
+import { preferredTerminalSessionLogsRoot } from './host/session-logs';
+import { missingHostDependencyMessage } from './host/runtime';
 
 const execFileAsync = promisify(execFile);
 
@@ -403,9 +405,20 @@ async function readJson(req: http.IncomingMessage): Promise<any> {
   return JSON.parse(raw);
 }
 
+function wrapTmuxError(error: any): Error {
+  if (String(error?.code ?? '') === 'ENOENT') {
+    return new Error(missingHostDependencyMessage('tmux', 'host runtime sessions'));
+  }
+  return error instanceof Error ? error : new Error(error?.message ?? String(error));
+}
+
 async function tmux(args: string[]): Promise<{ stdout: string; stderr: string }> {
-  const { stdout, stderr } = await execFileAsync('tmux', args, { encoding: 'utf8' });
-  return { stdout, stderr };
+  try {
+    const { stdout, stderr } = await execFileAsync('tmux', args, { encoding: 'utf8' });
+    return { stdout, stderr };
+  } catch (error: any) {
+    throw wrapTmuxError(error);
+  }
 }
 
 async function sessionExists(session: string): Promise<boolean> {
@@ -500,7 +513,7 @@ async function tmuxLoadBufferFromStdin(bufferName: string, text: string): Promis
     const child = spawn('tmux', ['load-buffer', '-b', bufferName, '-'], { stdio: ['pipe', 'pipe', 'pipe'] });
     let stderr = '';
     child.stderr.on('data', (d) => (stderr += d.toString('utf8')));
-    child.once('error', (err) => reject(err));
+    child.once('error', (err) => reject(wrapTmuxError(err)));
     child.once('close', (code) => {
       if (code === 0) {
         resolve();
@@ -557,20 +570,37 @@ function isSafeSessionName(raw: string): boolean {
 }
 
 let cachedDvmSessionsRoot: string | null = null;
+let cachedDvmSessionsRootKey: string | null = null;
+let configuredDataDir = '';
 async function resolveDvmSessionsRoot(): Promise<string> {
-  if (cachedDvmSessionsRoot) return cachedDvmSessionsRoot;
+  const cacheKey = configuredDataDir;
+  if (cachedDvmSessionsRoot && cachedDvmSessionsRootKey === cacheKey) return cachedDvmSessionsRoot;
+  const preferred = preferredTerminalSessionLogsRoot(configuredDataDir);
   const dvm = '/dvm-data/dvm-sessions';
   const tmp = '/tmp/dvm-sessions';
-  if (await fileExists(dvm)) {
+  if (preferred === dvm) {
     cachedDvmSessionsRoot = dvm;
+    cachedDvmSessionsRootKey = cacheKey;
     return dvm;
+  }
+  if (await fileExists(preferred)) {
+    cachedDvmSessionsRoot = preferred;
+    cachedDvmSessionsRootKey = cacheKey;
+    return preferred;
   }
   if (await fileExists(tmp)) {
     cachedDvmSessionsRoot = tmp;
+    cachedDvmSessionsRootKey = cacheKey;
     return tmp;
   }
-  cachedDvmSessionsRoot = dvm;
-  return dvm;
+  if (await fileExists(dvm)) {
+    cachedDvmSessionsRoot = dvm;
+    cachedDvmSessionsRootKey = cacheKey;
+    return dvm;
+  }
+  cachedDvmSessionsRoot = preferred;
+  cachedDvmSessionsRootKey = cacheKey;
+  return preferred;
 }
 
 async function sessionLogPathFor(session: string): Promise<string> {
@@ -613,6 +643,7 @@ async function main() {
   const host = parseArg(process.argv, '--host') ?? '0.0.0.0';
   const portRaw = parseArg(process.argv, '--port') ?? '7777';
   const dataDir = parseArg(process.argv, '--data-dir') ?? '/dvm-data/drone';
+  configuredDataDir = dataDir;
   const token = parseArg(process.argv, '--token');
   const tokenFile = parseArg(process.argv, '--token-file') ?? path.join(dataDir, 'token');
 
@@ -1009,6 +1040,7 @@ async function main() {
             ? (Object.fromEntries(Object.entries(body.env).filter(([, v]) => typeof v === 'string')) as Record<string, string>)
             : undefined;
         const force = body?.force === true;
+        const terminal = body?.terminal === true;
 
         const state = await readState();
         if (state.process && !force) {
@@ -1025,7 +1057,8 @@ async function main() {
           await killSession(session);
         }
 
-        const logPath = path.join(logsDir, `${session}.log`);
+        const logPath = terminal ? await sessionLogPathFor(session) : path.join(logsDir, `${session}.log`);
+        await fs.mkdir(path.dirname(logPath), { recursive: true });
         await fs.writeFile(logPath, '', 'utf8');
 
         await startSession({ session, cmd, args, cwd, env });

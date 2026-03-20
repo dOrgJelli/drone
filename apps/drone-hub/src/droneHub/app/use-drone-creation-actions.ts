@@ -60,6 +60,7 @@ type UseDroneCreationActionsArgs = {
   rememberStartupSeed: (
     drones: Array<{ id: string; name: string }>,
     opts: {
+      runtime?: 'container' | 'host';
       agent: ChatAgentConfig | null;
       model?: string | null;
       prompt: string;
@@ -284,6 +285,7 @@ export function useDroneCreationActions({
 
       if (acceptedByName.size > 0) {
         rememberStartupSeed(Array.from(acceptedByName.values()), {
+          runtime,
           agent: seedAgent,
           model: seedModel,
           prompt: seedPrompt,
@@ -472,6 +474,7 @@ export function useDroneCreationActions({
 
         if (shouldSeedPromptViaCreate) {
           rememberStartupSeed([{ id: droneId, name: createdName }], {
+            runtime,
             agent: seedAgent,
             model: seedModel,
             prompt,

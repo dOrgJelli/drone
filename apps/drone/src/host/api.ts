@@ -60,7 +60,7 @@ export async function status(client: DroneClient) {
 
 export async function procStart(
   client: DroneClient,
-  payload: { cmd: string; args?: string[]; cwd?: string; env?: Record<string, string>; session?: string; force?: boolean }
+  payload: { cmd: string; args?: string[]; cwd?: string; env?: Record<string, string>; session?: string; force?: boolean; terminal?: boolean }
 ) {
   return await req(client, 'POST', '/v1/process/start', payload);
 }

@@ -10,7 +10,7 @@ import path from 'node:path';
 import { health, procStart, procStop, readOutput, sendInput, sendKeys, status } from './host/api';
 import { dvmClone, dvmCopyToContainer, dvmCreate, dvmExec, dvmLs, dvmPorts, dvmRemove, dvmSessionStart } from './host/dvm';
 import { droneRootPath } from './host/paths';
-import { loadRegistry, updateRegistry } from './host/registry';
+import { loadRegistry, registryHasDisplayName, updateRegistry } from './host/registry';
 import {
   hostDroneDaemonDataPath,
   hostDroneDaemonLogPath,
@@ -18,6 +18,7 @@ import {
   hostDroneRootPath,
   hostDroneWorkspacePath,
   installFleetCliScript,
+  missingHostDependencyMessage,
   normalizeDroneRuntime,
   type DroneRuntime,
 } from './host/runtime';
@@ -187,18 +188,6 @@ function normalizeDroneDisplayName(raw: any): string {
   if (/[\r\n]/.test(s)) throw new Error('invalid drone name (no newlines)');
   return s;
 }
-function registryHasDisplayName(reg: Awaited<ReturnType<typeof loadRegistry>>, nameRaw: string): boolean {
-  const name = String(nameRaw ?? '').trim();
-  if (!name) return false;
-  for (const d of Object.values((reg as any)?.drones ?? {}) as any[]) {
-    if (String(d?.name ?? '').trim() === name) return true;
-  }
-  for (const d of Object.values((reg as any)?.pending ?? {}) as any[]) {
-    if (String(d?.name ?? '').trim() === name) return true;
-  }
-  return false;
-}
-
 async function readAllStdin(): Promise<string> {
   const chunks: string[] = [];
   process.stdin.setEncoding('utf8');
@@ -763,6 +752,16 @@ function makeClient(hostPort: number, token: string) {
   return { baseUrl: `http://127.0.0.1:${hostPort}`, token };
 }
 
+async function hostCommandExists(command: string): Promise<boolean> {
+  const name = String(command ?? '').trim();
+  if (!name) return false;
+  return await new Promise<boolean>((resolve) => {
+    const child = spawn('bash', ['-lc', `command -v ${bashQuote(name)} >/dev/null 2>&1`], { stdio: 'ignore' });
+    child.once('error', () => resolve(false));
+    child.once('close', (code) => resolve(code === 0));
+  });
+}
+
 type DroneRegistryEntry = Awaited<ReturnType<typeof loadRegistry>>['drones'][string];
 type DroneClient = ReturnType<typeof makeClient>;
 
@@ -838,6 +837,9 @@ createCommand
 
     if (runtime === 'host') {
       if (cloneContainer) throw new Error('--clone-container is only supported for container runtime');
+      if (!(await hostCommandExists('tmux'))) {
+        throw new Error(missingHostDependencyMessage('tmux', 'host runtime drones'));
+      }
       const hostPort = await getFreeTcpPort();
       const hostPid = await launchHostDroneDaemon({ droneId: stableId, hostPort, token });
       const workspaceDir = hostDroneWorkspacePath(stableId);
@@ -867,7 +869,7 @@ createCommand
       try {
         await updateRegistry((reg) => {
           const at = new Date().toISOString();
-          if (registryHasDisplayName(reg, displayName)) throw new Error(`drone already exists: ${displayName}`);
+          if (registryHasDisplayName(reg, displayName, { excludeId: stableId })) throw new Error(`drone already exists: ${displayName}`);
           if (group) {
             (reg as any).groups = (reg as any).groups ?? {};
             if (!(reg as any).groups[group]) (reg as any).groups[group] = { name: group, createdAt: at, updatedAt: at };
@@ -998,7 +1000,7 @@ createCommand
 
     await updateRegistry((reg) => {
       const at = new Date().toISOString();
-      if (registryHasDisplayName(reg, displayName)) throw new Error(`drone already exists: ${displayName}`);
+      if (registryHasDisplayName(reg, displayName, { excludeId: stableId })) throw new Error(`drone already exists: ${displayName}`);
       if (group) {
         (reg as any).groups = (reg as any).groups ?? {};
         if (!(reg as any).groups[group]) (reg as any).groups[group] = { name: group, createdAt: at, updatedAt: at };

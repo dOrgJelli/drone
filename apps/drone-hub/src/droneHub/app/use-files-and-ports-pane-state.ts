@@ -18,6 +18,7 @@ import {
 } from './app-config';
 import {
   droneHomePath,
+  isHostRuntimeDrone,
   isDroneStartingOrSeeding,
   normalizeContainerPathInput,
   normalizePortRows,
@@ -47,29 +48,34 @@ export function useFilesAndPortsPaneState({ currentDrone, requestJson }: UseFile
   const [fsRefreshNonce, setFsRefreshNonce] = React.useState(0);
 
   const defaultFsPathForCurrentDrone = React.useMemo(() => {
-    if (!currentDrone) return '/dvm-data/home';
+    if (!currentDrone) return '/';
     const homePath = droneHomePath(currentDrone);
     return homePath || '/';
   }, [currentDrone?.name, currentDrone?.repoAttached, currentDrone?.repoPath, currentDrone?.runtime]);
 
   const currentFsPath = React.useMemo(() => {
     const droneId = String(currentDrone?.id ?? '').trim();
-    if (!droneId) return '/dvm-data/home';
+    if (!droneId) return '/';
     const saved = fsPathByDrone[droneId];
+    if (isHostRuntimeDrone(currentDrone)) {
+      return String(saved || defaultFsPathForCurrentDrone).trim() || '/';
+    }
     return normalizeContainerPathInput(saved || defaultFsPathForCurrentDrone);
-  }, [currentDrone?.id, defaultFsPathForCurrentDrone, fsPathByDrone]);
+  }, [currentDrone, defaultFsPathForCurrentDrone, fsPathByDrone]);
 
   const setCurrentFsPath = React.useCallback(
     (nextPath: string) => {
       const droneId = String(currentDrone?.id ?? '').trim();
       if (!droneId) return;
-      const normalized = normalizeContainerPathInput(nextPath);
+      const normalized = isHostRuntimeDrone(currentDrone)
+        ? String(nextPath ?? '').trim() || '/'
+        : normalizeContainerPathInput(nextPath);
       setFsPathByDrone((prev) => {
         if ((prev[droneId] ?? '') === normalized) return prev;
         return { ...prev, [droneId]: normalized };
       });
     },
-    [currentDrone?.id],
+    [currentDrone],
   );
 
   const refreshFsList = React.useCallback(() => {

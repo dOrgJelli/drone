@@ -20,6 +20,7 @@ export type AppView = 'workspace' | 'settings';
 
 export type StartupSeedState = {
   droneName: string;
+  runtime?: 'container' | 'host';
   chatName: string;
   agent: ChatAgentConfig | null;
   model: string | null;

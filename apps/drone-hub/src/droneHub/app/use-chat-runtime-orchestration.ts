@@ -4,7 +4,7 @@ import { stripAnsi } from '../../domain';
 import type { ChatSendPayload } from '../chat';
 import type { DroneSummary, PendingPrompt, TranscriptItem } from '../types';
 import type { StartupSeedState } from './app-types';
-import { isTransientDroneStartupError } from './chat-startup-errors';
+import { formatDroneRuntimeError, isTransientDroneStartupError } from './chat-startup-errors';
 import { droneChatQueueKey, isDroneStartingOrSeeding, parseDroneChatQueueKey } from './helpers';
 import { fetchJson, isNotFoundError, useNowMs, usePoll } from './hooks';
 import { beginRecordBusyKey, removeRecordKey } from './keyed-record-state';
@@ -276,7 +276,7 @@ export function useChatRuntimeOrchestration({
         }
         return true;
       } catch (e: any) {
-        setPromptError(e?.message ?? String(e));
+        setPromptError(formatDroneRuntimeError(e));
         return false;
       } finally {
         setSendingPromptCount((c) => Math.max(0, c - 1));
@@ -727,7 +727,7 @@ export function useChatRuntimeOrchestration({
           keepLoading = true;
           setSessionError(null);
         } else {
-          setSessionError(e?.message ?? String(e));
+          setSessionError(formatDroneRuntimeError(e));
         }
       } finally {
         if (mounted && !keepLoading) setLoadingSession(false);
