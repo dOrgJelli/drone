@@ -516,6 +516,7 @@ async function getCachedSourceAnalysis(sourceIdRaw: string, fetchImpl: FetchLike
   const tree = Array.isArray(treeResponse?.tree)
     ? treeResponse.tree.filter((entry): entry is GitTreeEntry => Boolean(entry?.path) && entry.type === 'blob')
     : [];
+  const treePaths = new Set(tree.map((entry) => entry.path));
   const sourceCommit = String(treeResponse?.sha ?? source.branch).trim() || source.branch;
 
   const pluginRoot = normalizeRepoRelativePath('.', String(marketplaceJson?.metadata?.pluginRoot ?? '.'));
@@ -544,7 +545,9 @@ async function getCachedSourceAnalysis(sourceIdRaw: string, fetchImpl: FetchLike
   const analyses: CandidateAnalysis[] = [];
   const sortedRoots = Array.from(skillRoots.entries()).sort(([a], [b]) => a.localeCompare(b));
   for (const [rootPath, pluginMeta] of sortedRoots) {
-    const skillMarkdown = await fetchRawGithubText(source, `${rootPath}/SKILL.md`, sourceCommit, fetchImpl);
+    const skillMarkdownPath = `${rootPath}/SKILL.md`;
+    if (!treePaths.has(skillMarkdownPath)) continue;
+    const skillMarkdown = await fetchRawGithubText(source, skillMarkdownPath, sourceCommit, fetchImpl);
     const parsed = parseSkillMarkdown(skillMarkdown);
     const frontmatterName = typeof parsed.frontmatter.name === 'string' ? parsed.frontmatter.name.trim() : '';
     const fallbackName = path.posix.basename(rootPath);

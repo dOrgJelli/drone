@@ -257,7 +257,7 @@ export function useSkillLibrary(requestJson: RequestJsonFn): UseSkillLibraryResu
       return nextSelectedSourceId;
     } catch (e: any) {
       setSkillsError(e?.message ?? String(e));
-      return selectedSourceIdRef.current;
+      return null;
     } finally {
       setSkillSourcesLoading(false);
     }
