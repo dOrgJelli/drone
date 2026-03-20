@@ -1198,43 +1198,41 @@ function droneRepoPathInContainer(drone: any): string {
   return normalizeContainerPath(raw || '/work/repo');
 }
 
-function buildHostSkillProjectionTargets(drone: any): SkillProjectionTarget[] {
+export function buildHostSkillProjectionTargets(drone: any): SkillProjectionTarget[] {
   const repoAttached = isRepoAttachedDrone(drone);
   const repoRootRaw = String((drone as any)?.repoPath ?? '').trim();
   const repoRoot = repoAttached && repoRootRaw ? path.resolve(repoRootRaw) : '';
   const homeRoot = path.resolve(os.homedir());
-  const portableBase = repoRoot || homeRoot;
   const targets: SkillProjectionTarget[] = [
-    { agent: 'codex', rootPath: path.join(portableBase, '.agents', 'skills') },
+    { agent: 'codex', rootPath: path.join(homeRoot, '.agents', 'skills') },
+    { agent: 'claude', rootPath: path.join(homeRoot, '.claude', 'skills') },
+    { agent: 'cursor', rootPath: path.join(homeRoot, '.cursor', 'skills') },
+    { agent: 'opencode', rootPath: path.join(homeRoot, '.config', 'opencode', 'skills') },
   ];
   if (repoRoot) {
-    targets.push({ agent: 'claude', rootPath: path.join(repoRoot, '.claude', 'skills') });
-    targets.push({ agent: 'cursor', rootPath: path.join(repoRoot, '.cursor', 'skills') });
-    targets.push({ agent: 'opencode', rootPath: path.join(repoRoot, '.opencode', 'skills') });
-  } else {
-    targets.push({ agent: 'claude', rootPath: path.join(homeRoot, '.claude', 'skills') });
-    targets.push({ agent: 'cursor', rootPath: path.join(homeRoot, '.cursor', 'skills') });
-    targets.push({ agent: 'opencode', rootPath: path.join(homeRoot, '.config', 'opencode', 'skills') });
+    targets.push({ agent: 'codex', rootPath: path.join(repoRoot, '.agents', 'skills'), cleanupOnly: true });
+    targets.push({ agent: 'claude', rootPath: path.join(repoRoot, '.claude', 'skills'), cleanupOnly: true });
+    targets.push({ agent: 'cursor', rootPath: path.join(repoRoot, '.cursor', 'skills'), cleanupOnly: true });
+    targets.push({ agent: 'opencode', rootPath: path.join(repoRoot, '.opencode', 'skills'), cleanupOnly: true });
   }
   return targets;
 }
 
-function buildContainerSkillProjectionTargets(drone: any): SkillProjectionTarget[] {
+export function buildContainerSkillProjectionTargets(drone: any): SkillProjectionTarget[] {
   const repoAttached = isRepoAttachedDrone(drone);
   const projectRoot = repoAttached ? droneRepoPathInContainer(drone) : '';
   const homeRoot = NON_REPO_HOME_CWD;
-  const portableBase = projectRoot || homeRoot;
   const targets: SkillProjectionTarget[] = [
-    { agent: 'codex', rootPath: path.posix.join(portableBase, '.agents', 'skills') },
+    { agent: 'codex', rootPath: path.posix.join(homeRoot, '.agents', 'skills') },
+    { agent: 'claude', rootPath: path.posix.join(homeRoot, '.claude', 'skills') },
+    { agent: 'cursor', rootPath: path.posix.join(homeRoot, '.cursor', 'skills') },
+    { agent: 'opencode', rootPath: path.posix.join(homeRoot, '.config', 'opencode', 'skills') },
   ];
   if (projectRoot) {
-    targets.push({ agent: 'claude', rootPath: path.posix.join(projectRoot, '.claude', 'skills') });
-    targets.push({ agent: 'cursor', rootPath: path.posix.join(projectRoot, '.cursor', 'skills') });
-    targets.push({ agent: 'opencode', rootPath: path.posix.join(projectRoot, '.opencode', 'skills') });
-  } else {
-    targets.push({ agent: 'claude', rootPath: path.posix.join(homeRoot, '.claude', 'skills') });
-    targets.push({ agent: 'cursor', rootPath: path.posix.join(homeRoot, '.cursor', 'skills') });
-    targets.push({ agent: 'opencode', rootPath: path.posix.join(homeRoot, '.config', 'opencode', 'skills') });
+    targets.push({ agent: 'codex', rootPath: path.posix.join(projectRoot, '.agents', 'skills'), cleanupOnly: true });
+    targets.push({ agent: 'claude', rootPath: path.posix.join(projectRoot, '.claude', 'skills'), cleanupOnly: true });
+    targets.push({ agent: 'cursor', rootPath: path.posix.join(projectRoot, '.cursor', 'skills'), cleanupOnly: true });
+    targets.push({ agent: 'opencode', rootPath: path.posix.join(projectRoot, '.opencode', 'skills'), cleanupOnly: true });
   }
   return targets;
 }
