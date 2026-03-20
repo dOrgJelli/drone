@@ -179,6 +179,14 @@ type DroneHubUiPersistedState = Pick<
   | 'shortcutBindings'
 >;
 
+export function migrateDroneHubUiPersistedState(
+  persistedState: unknown,
+  _version?: number,
+): Partial<DroneHubUiPersistedState> {
+  if (!persistedState || typeof persistedState !== 'object' || Array.isArray(persistedState)) return {};
+  return { ...(persistedState as Partial<DroneHubUiPersistedState>) };
+}
+
 function sanitizeCustomAgents(value: unknown): CustomAgentProfile[] {
   try {
     const parsed = typeof value === 'string' ? (value ? (JSON.parse(value) as any) : []) : value;
@@ -533,6 +541,7 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
       name: 'droneHub.ui',
       version: 7,
       storage: createJSONStorage(() => localStorage),
+      migrate: (persistedState, version) => migrateDroneHubUiPersistedState(persistedState, version),
       partialize: (state): DroneHubUiPersistedState => ({
         activeRepoPath: state.activeRepoPath,
         chatHeaderRepoPath: state.chatHeaderRepoPath,

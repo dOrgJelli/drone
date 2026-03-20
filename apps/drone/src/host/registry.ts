@@ -82,6 +82,26 @@ type DroneRegistryV1 = {
       }>;
       updatedAt?: string;
     };
+    uiPreferences?: {
+      sidebarGroupingMode?: 'groups' | 'repos';
+      sidebarGroupOrder?: string[];
+      sidebarDroneOrderByGroup?: Record<string, string[]>;
+      sidebarChatOrderByDrone?: Record<string, string[]>;
+      hiddenSidebarGroups?: string[];
+      autoDelete?: boolean;
+      automations?: Array<{
+        id?: string;
+        label?: string;
+        prompt?: string;
+        onFailurePrompt?: string;
+        runs?: number;
+        sleepAmount?: number;
+        sleepUnit?: 'seconds' | 'minutes' | 'hours' | 'days';
+        stopPhrase?: string;
+        stopPhraseCaseSensitive?: boolean;
+      }>;
+      updatedAt?: string;
+    };
   };
   /**
    * Host-side list of repositories the user has "registered" with `drone repo`.

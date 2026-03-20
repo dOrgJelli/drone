@@ -38,6 +38,7 @@ import { useGroupManagement } from './droneHub/app/use-group-management';
 import { useJobsWorkflow } from './droneHub/app/use-jobs-workflow';
 import { useLlmSettings } from './droneHub/app/use-llm-settings';
 import { useKanbanBoardSettings } from './droneHub/app/use-kanban-board-settings';
+import { useUiPreferencesSettings } from './droneHub/app/use-ui-preferences-settings';
 import { useDeleteActionSettings } from './droneHub/app/use-delete-action-settings';
 import { useFilesystemSettings } from './droneHub/app/use-filesystem-settings';
 import { useQueuedPromptsState } from './droneHub/app/use-queued-prompts-state';
@@ -448,6 +449,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setBoard: setKanbanBoard,
     requestJson,
   });
+  useUiPreferencesSettings({ requestJson });
   const deleteActionSettingsState = useDeleteActionSettings(requestJson);
   const filesystemSettingsState = useFilesystemSettings(requestJson);
   const { llmSettings } = llmSettingsState;

@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import path from 'node:path';
 
 import dotenv from 'dotenv';
@@ -62,6 +63,7 @@ export type EffectiveLlmProvider = {
 export type DroneDeleteMode = 'permanent' | 'archive';
 export type ArchiveRetentionId = '1h' | '8h' | '1d' | '1w';
 export type ArchiveRuntimePolicy = 'keep-running' | 'stop';
+export type SidebarGroupingMode = 'groups' | 'repos';
 export type DeleteActionSettingsSource = 'settings' | 'default';
 export type EffectiveDeleteActionSettings = {
   mode: DroneDeleteMode;
@@ -89,6 +91,27 @@ export type KanbanBoardLane = {
 export type KanbanBoardSettings = {
   lanes: KanbanBoardLane[];
 };
+export type UiAutomationSleepUnit = 'seconds' | 'minutes' | 'hours' | 'days';
+export type UiAutomationConfig = {
+  id: string;
+  label: string;
+  prompt: string;
+  onFailurePrompt: string;
+  runs: number;
+  sleepAmount: number;
+  sleepUnit: UiAutomationSleepUnit;
+  stopPhrase: string;
+  stopPhraseCaseSensitive: boolean;
+};
+export type UiPreferencesSettings = {
+  sidebarGroupingMode: SidebarGroupingMode;
+  sidebarGroupOrder: string[];
+  sidebarDroneOrderByGroup: Record<string, string[]>;
+  sidebarChatOrderByDrone: Record<string, string[]>;
+  hiddenSidebarGroups: string[];
+  autoDelete: boolean;
+  automations: UiAutomationConfig[];
+};
 
 const ARCHIVE_RETENTION_MS_MAP: Record<ArchiveRetentionId, number> = {
   '1h': 60 * 60 * 1000,
@@ -99,10 +122,22 @@ const ARCHIVE_RETENTION_MS_MAP: Record<ArchiveRetentionId, number> = {
 const DEFAULT_DRONE_DELETE_MODE: DroneDeleteMode = 'permanent';
 const DEFAULT_ARCHIVE_RETENTION: ArchiveRetentionId = '1d';
 const DEFAULT_ARCHIVE_RUNTIME_POLICY: ArchiveRuntimePolicy = 'keep-running';
+const DEFAULT_SIDEBAR_GROUPING_MODE: SidebarGroupingMode = 'groups';
 export const FILESYSTEM_UPLOAD_MAX_BYTES_MIN = 1 * 1024 * 1024;
 export const FILESYSTEM_UPLOAD_MAX_BYTES_MAX = 8 * 1024 * 1024 * 1024;
 export const FILESYSTEM_UPLOAD_MAX_BYTES_DEFAULT = 2 * 1024 * 1024 * 1024;
 const DEFAULT_KANBAN_LANE_TITLES = ['To do', 'In progress', 'Review', 'Done'] as const;
+const UI_AUTOMATION_RUNS_MIN = 1;
+const UI_AUTOMATION_RUNS_MAX = 20;
+const UI_AUTOMATION_RUNS_DEFAULT = 5;
+const UI_AUTOMATION_SLEEP_AMOUNT_MIN = 0;
+const UI_AUTOMATION_SLEEP_AMOUNT_MAX = 1_000_000;
+const UI_AUTOMATION_SLEEP_AMOUNT_DEFAULT = 0;
+const UI_AUTOMATION_STOP_PHRASE_MAX_CHARS = 320;
+const UI_AUTOMATION_LABEL_MAX_CHARS = 72;
+const UI_AUTOMATION_PROMPT_MAX_CHARS = 8_000;
+const UI_AUTOMATION_ON_FAILURE_PROMPT_MAX_CHARS = 8_000;
+const UI_AUTOMATION_MAX_ITEMS = 40;
 
 function defaultKanbanLaneTitle(index: number): string {
   return DEFAULT_KANBAN_LANE_TITLES[index] ?? `Lane ${index + 1}`;
@@ -182,6 +217,14 @@ export function parseArchiveRuntimePolicy(raw: unknown): ArchiveRuntimePolicy | 
   return null;
 }
 
+export function parseSidebarGroupingMode(raw: unknown): SidebarGroupingMode | null {
+  const s = String(raw ?? '')
+    .trim()
+    .toLowerCase();
+  if (s === 'groups' || s === 'repos') return s;
+  return null;
+}
+
 export function archiveRetentionMs(retention: ArchiveRetentionId): number {
   return ARCHIVE_RETENTION_MS_MAP[retention];
 }
@@ -196,6 +239,112 @@ export function parseFilesystemUploadMaxBytes(raw: unknown): number | null {
 
 function normalizeApiKey(raw: unknown): string {
   return typeof raw === 'string' ? raw.trim() : '';
+}
+
+function normalizeOrderedStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    const entry = String(item ?? '').trim();
+    if (!entry || seen.has(entry)) continue;
+    seen.add(entry);
+    out.push(entry);
+  }
+  return out;
+}
+
+function normalizeOrderedStringMap(value: unknown): Record<string, string[]> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const out: Record<string, string[]> = {};
+  for (const [keyRaw, listRaw] of Object.entries(value as Record<string, unknown>)) {
+    const key = String(keyRaw ?? '').trim();
+    if (!key) continue;
+    const list = normalizeOrderedStringList(listRaw);
+    if (list.length === 0) continue;
+    out[key] = list;
+  }
+  return out;
+}
+
+function createUiAutomationId(): string {
+  return crypto.randomUUID();
+}
+
+function normalizeUiAutomationLabel(value: unknown): string {
+  return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, UI_AUTOMATION_LABEL_MAX_CHARS);
+}
+
+function normalizeUiAutomationPrompt(value: unknown): string {
+  return String(value ?? '').slice(0, UI_AUTOMATION_PROMPT_MAX_CHARS);
+}
+
+function normalizeUiAutomationOnFailurePrompt(value: unknown): string {
+  return String(value ?? '').slice(0, UI_AUTOMATION_ON_FAILURE_PROMPT_MAX_CHARS);
+}
+
+function normalizeUiAutomationRuns(value: unknown): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return UI_AUTOMATION_RUNS_DEFAULT;
+  return Math.max(UI_AUTOMATION_RUNS_MIN, Math.min(UI_AUTOMATION_RUNS_MAX, Math.round(n)));
+}
+
+function normalizeUiAutomationSleepAmount(value: unknown): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return UI_AUTOMATION_SLEEP_AMOUNT_DEFAULT;
+  return Math.max(UI_AUTOMATION_SLEEP_AMOUNT_MIN, Math.min(UI_AUTOMATION_SLEEP_AMOUNT_MAX, Math.round(n)));
+}
+
+function normalizeUiAutomationSleepUnit(value: unknown): UiAutomationSleepUnit {
+  const s = String(value ?? '').trim().toLowerCase();
+  if (s === 'minutes' || s === 'hours' || s === 'days') return s;
+  return 'seconds';
+}
+
+function normalizeUiAutomationStopPhrase(value: unknown): string {
+  return String(value ?? '').trim().slice(0, UI_AUTOMATION_STOP_PHRASE_MAX_CHARS);
+}
+
+function normalizeUiAutomationStopPhraseCaseSensitive(value: unknown): boolean {
+  return value === true;
+}
+
+function normalizeUiAutomationConfigs(value: unknown): UiAutomationConfig[] {
+  const list = Array.isArray(value) ? value : [];
+  const out: UiAutomationConfig[] = [];
+  const seen = new Set<string>();
+  for (const item of list) {
+    const raw = item && typeof item === 'object' && !Array.isArray(item) ? (item as Record<string, unknown>) : {};
+    const id = String(raw.id ?? '').trim() || createUiAutomationId();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push({
+      id,
+      label: normalizeUiAutomationLabel(raw.label),
+      prompt: normalizeUiAutomationPrompt(raw.prompt),
+      onFailurePrompt: normalizeUiAutomationOnFailurePrompt(raw.onFailurePrompt),
+      runs: normalizeUiAutomationRuns(raw.runs),
+      sleepAmount: normalizeUiAutomationSleepAmount(raw.sleepAmount),
+      sleepUnit: normalizeUiAutomationSleepUnit(raw.sleepUnit),
+      stopPhrase: normalizeUiAutomationStopPhrase(raw.stopPhrase),
+      stopPhraseCaseSensitive: normalizeUiAutomationStopPhraseCaseSensitive(raw.stopPhraseCaseSensitive),
+    });
+    if (out.length >= UI_AUTOMATION_MAX_ITEMS) break;
+  }
+  return out;
+}
+
+function sanitizeUiPreferencesSettings(value: unknown): UiPreferencesSettings {
+  const raw = value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  return {
+    sidebarGroupingMode: parseSidebarGroupingMode(raw.sidebarGroupingMode) ?? DEFAULT_SIDEBAR_GROUPING_MODE,
+    sidebarGroupOrder: normalizeOrderedStringList(raw.sidebarGroupOrder),
+    sidebarDroneOrderByGroup: normalizeOrderedStringMap(raw.sidebarDroneOrderByGroup),
+    sidebarChatOrderByDrone: normalizeOrderedStringMap(raw.sidebarChatOrderByDrone),
+    hiddenSidebarGroups: normalizeOrderedStringList(raw.hiddenSidebarGroups),
+    autoDelete: raw.autoDelete === true,
+    automations: normalizeUiAutomationConfigs(raw.automations),
+  };
 }
 
 function apiKeyHint(apiKey: string | null): string | null {
@@ -509,6 +658,61 @@ export async function resolveKanbanBoardSettingsResponse(): Promise<{
   return {
     ok: true,
     kanbanBoard: stored.board,
+    updatedAt: stored.updatedAt,
+  };
+}
+
+async function getStoredUiPreferencesSettings(): Promise<{ uiPreferences: UiPreferencesSettings; updatedAt: string | null }> {
+  const reg = await loadRegistry();
+  const raw = reg.settings?.uiPreferences;
+  const updatedAtRaw = raw?.updatedAt;
+  return {
+    uiPreferences: sanitizeUiPreferencesSettings(raw),
+    updatedAt: typeof updatedAtRaw === 'string' && updatedAtRaw.trim() ? updatedAtRaw : null,
+  };
+}
+
+export async function upsertStoredUiPreferencesSettings(valueRaw: unknown): Promise<void> {
+  const uiPreferences = sanitizeUiPreferencesSettings(valueRaw);
+  const updatedAt = new Date().toISOString();
+  await updateRegistry((reg) => {
+    reg.settings ??= {};
+    reg.settings.uiPreferences = {
+      sidebarGroupingMode: uiPreferences.sidebarGroupingMode,
+      sidebarGroupOrder: uiPreferences.sidebarGroupOrder.slice(),
+      sidebarDroneOrderByGroup: Object.fromEntries(
+        Object.entries(uiPreferences.sidebarDroneOrderByGroup).map(([key, value]) => [key, value.slice()]),
+      ),
+      sidebarChatOrderByDrone: Object.fromEntries(
+        Object.entries(uiPreferences.sidebarChatOrderByDrone).map(([key, value]) => [key, value.slice()]),
+      ),
+      hiddenSidebarGroups: uiPreferences.hiddenSidebarGroups.slice(),
+      autoDelete: uiPreferences.autoDelete,
+      automations: uiPreferences.automations.map((automation) => ({
+        id: automation.id,
+        label: automation.label,
+        prompt: automation.prompt,
+        onFailurePrompt: automation.onFailurePrompt,
+        runs: automation.runs,
+        sleepAmount: automation.sleepAmount,
+        sleepUnit: automation.sleepUnit,
+        stopPhrase: automation.stopPhrase,
+        stopPhraseCaseSensitive: automation.stopPhraseCaseSensitive,
+      })),
+      updatedAt,
+    };
+  });
+}
+
+export async function resolveUiPreferencesSettingsResponse(): Promise<{
+  ok: true;
+  uiPreferences: UiPreferencesSettings;
+  updatedAt: string | null;
+}> {
+  const stored = await getStoredUiPreferencesSettings();
+  return {
+    ok: true,
+    uiPreferences: stored.uiPreferences,
     updatedAt: stored.updatedAt,
   };
 }

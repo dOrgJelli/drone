@@ -126,11 +126,13 @@ import {
   resolveFilesystemSettingsResponse,
   resolveEffectiveProviderApiKeySettings,
   resolveLlmSettingsResponse,
+  resolveUiPreferencesSettingsResponse,
   upsertStoredDeleteActionSettings,
   upsertStoredFilesystemSettings,
   upsertStoredKanbanBoardSettings,
   upsertStoredLlmProvider,
   upsertStoredProviderApiKey,
+  upsertStoredUiPreferencesSettings,
   type ArchiveRetentionId,
   type ArchiveRuntimePolicy,
   type LlmProviderId,
@@ -7839,6 +7841,26 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           }
           await upsertStoredFilesystemSettings({ uploadMaxBytes });
           json(res, 200, await resolveFilesystemSettingsResponse());
+          return;
+        }
+      }
+
+      if (pathname === '/api/settings/ui-preferences') {
+        if (method === 'GET') {
+          json(res, 200, await resolveUiPreferencesSettingsResponse());
+          return;
+        }
+
+        if (method === 'POST') {
+          let body: any = null;
+          try {
+            body = await readJsonBody(req);
+          } catch (e: any) {
+            json(res, 400, { ok: false, error: e?.message ?? String(e) });
+            return;
+          }
+          await upsertStoredUiPreferencesSettings(body?.uiPreferences);
+          json(res, 200, await resolveUiPreferencesSettingsResponse());
           return;
         }
       }

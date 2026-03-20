@@ -1,9 +1,11 @@
+import type { AutomationConfig } from './automation-config';
 import type { KanbanBoardState } from './kanban-board-state';
 
 export type LlmProviderId = 'openai' | 'gemini';
 export type DroneDeleteMode = 'permanent' | 'archive';
 export type ArchiveRetentionId = '1h' | '8h' | '1d' | '1w';
 export type ArchiveRuntimePolicy = 'keep-running' | 'stop';
+export type SidebarGroupingMode = 'groups' | 'repos';
 
 export type ApiKeySettingsResponse = {
   ok: true;
@@ -62,6 +64,20 @@ export type FilesystemSettingsResponse = {
 export type KanbanBoardSettingsResponse = {
   ok: true;
   kanbanBoard: KanbanBoardState;
+  updatedAt: string | null;
+};
+
+export type UiPreferencesSettingsResponse = {
+  ok: true;
+  uiPreferences: {
+    sidebarGroupingMode: SidebarGroupingMode;
+    sidebarGroupOrder: string[];
+    sidebarDroneOrderByGroup: Record<string, string[]>;
+    sidebarChatOrderByDrone: Record<string, string[]>;
+    hiddenSidebarGroups: string[];
+    autoDelete: boolean;
+    automations: AutomationConfig[];
+  };
   updatedAt: string | null;
 };
 
