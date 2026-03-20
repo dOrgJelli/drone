@@ -224,7 +224,7 @@ function SidebarDroneRow({
     }),
     [drone.id, drone.name, groupOrderKey, selectedDragDroneIds, uiDroneName],
   );
-  const { attributes, listeners, isDragging } = useDraggable({
+  const { attributes, listeners, isDragging, setNodeRef: setDragNodeRef } = useDraggable({
     id: `sidebar-drone:${drone.id}`,
     data: dragData,
     disabled: dragDisabled,
@@ -255,6 +255,7 @@ function SidebarDroneRow({
           unreadAgentMessage={unread}
           showGroup={showGroup}
           onClick={(rowOpts) => onSelectDroneCard(drone.id, rowOpts)}
+          dragNodeRef={setDragNodeRef}
           draggable={!dragDisabled}
           dragging={isDragging}
           dragAttributes={attributes as Record<string, unknown>}
@@ -320,7 +321,7 @@ function SidebarChatRow({
     () => createSidebarChatDragData(drone.id, chatName, `${uiDroneName(drone.name)} / ${chatName}`),
     [chatName, drone.id, drone.name, uiDroneName],
   );
-  const { attributes, listeners, isDragging } = useDraggable({
+  const { attributes, listeners, isDragging, setNodeRef: setDragNodeRef } = useDraggable({
     id: `sidebar-chat:${chatKey}`,
     data: chatDragData,
     disabled: !chatDragData || movingDroneGroups || isOptimistic,
@@ -339,6 +340,7 @@ function SidebarChatRow({
     <div key={chatKey} ref={setNodeRef} className="relative flex items-stretch gap-1 group/chat-row">
       {dragOverPlacement ? <SidebarReorderDropIndicator placement={dragOverPlacement} /> : null}
       <button
+        ref={setDragNodeRef}
         type="button"
         {...(attributes as Record<string, unknown>)}
         {...(listeners as Record<string, unknown>)}
