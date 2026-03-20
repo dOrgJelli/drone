@@ -133,6 +133,7 @@ export function useSidebarViewModel({
           g.items,
           sidebarDroneOrderByGroup[sidebarGroupOrderToken({ group: g.group, kind: g.kind })] ?? [],
           (item) => item.id,
+          { unorderedPlacement: 'start' },
         );
       }
       out.sort((a, b) => {
@@ -166,7 +167,9 @@ export function useSidebarViewModel({
         group,
         label: group,
         kind: 'group',
-        items: orderSidebarEntries(items, sidebarDroneOrderByGroup[groupOrderKey] ?? [], (item) => item.id),
+        items: orderSidebarEntries(items, sidebarDroneOrderByGroup[groupOrderKey] ?? [], (item) => item.id, {
+          unorderedPlacement: 'start',
+        }),
       };
     });
     out.sort((a, b) => {
