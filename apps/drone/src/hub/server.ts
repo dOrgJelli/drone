@@ -544,6 +544,7 @@ const FLEET_RECONCILE_INTERVAL_MS = 1500;
 
 let FLEET_RECONCILE_INTERVAL: ReturnType<typeof setInterval> | null = null;
 let FLEET_RECONCILE_BUSY = false;
+const PROMPT_SKILL_SYNC_WARNINGS = new Set<string>();
 
 async function appendFleetAuditEvent(event: {
   actor: string;
@@ -5351,11 +5352,16 @@ async function createOrEnqueuePromptUnified(opts: {
     try {
       await syncSkillLibraryForDrone({ droneId, droneEntry: regSnap.drones[droneId] });
     } catch (e: any) {
-      return {
-        kind: 'error',
-        status: 500,
-        error: `failed to sync skill library: ${e?.message ?? String(e)}`,
-      };
+      const error = String(e?.message ?? String(e));
+      const warningKey = `${droneId}\u0000${error}`;
+      if (!PROMPT_SKILL_SYNC_WARNINGS.has(warningKey)) {
+        PROMPT_SKILL_SYNC_WARNINGS.add(warningKey);
+        hubLog('warn', 'skill sync failed before prompt enqueue; continuing', {
+          droneId,
+          chatName,
+          error,
+        });
+      }
     }
     const r = await enqueuePrompt({
       id: fallbackId,
