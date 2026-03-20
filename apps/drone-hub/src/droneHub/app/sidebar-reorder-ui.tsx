@@ -1,13 +1,21 @@
 import React from 'react';
-import { IconGrip } from './icons';
 import type { SidebarGroupDropPlacement } from './sidebar-group-order';
 
-export function sidebarDropPlacementFromClientY(
-  clientY: number,
-  currentTarget: Pick<HTMLElement, 'getBoundingClientRect'>,
+export function sidebarDropPlacementFromRects(
+  activeRect:
+    | Pick<DOMRect, 'top' | 'height'>
+    | Pick<ClientRect, 'top' | 'height'>
+    | null
+    | undefined,
+  overRect:
+    | Pick<DOMRect, 'top' | 'height'>
+    | Pick<ClientRect, 'top' | 'height'>
+    | null
+    | undefined,
 ): SidebarGroupDropPlacement {
-  const rect = currentTarget.getBoundingClientRect();
-  return clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+  if (!activeRect || !overRect) return 'after';
+  const activeCenterY = activeRect.top + activeRect.height / 2;
+  return activeCenterY < overRect.top + overRect.height / 2 ? 'before' : 'after';
 }
 
 export function SidebarReorderDropIndicator({
@@ -21,28 +29,5 @@ export function SidebarReorderDropIndicator({
         placement === 'before' ? 'top-0' : 'bottom-0'
       }`}
     />
-  );
-}
-
-export function SidebarReorderHandle({
-  title,
-  ariaLabel,
-  className,
-  ...buttonProps
-}: {
-  title: string;
-  ariaLabel?: string;
-  className: string;
-} & Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, 'type' | 'title' | 'aria-label'>) {
-  return (
-    <button
-      type="button"
-      {...buttonProps}
-      className={className}
-      title={title}
-      aria-label={ariaLabel ?? title}
-    >
-      <IconGrip className="opacity-80" />
-    </button>
   );
 }

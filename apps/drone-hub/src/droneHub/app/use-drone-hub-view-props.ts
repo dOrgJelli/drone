@@ -23,10 +23,7 @@ export function useDroneHubSidebarProps(args: any): DroneSidebarProps {
     collapsedGroups,
     deletingGroups,
     renamingGroups,
-    dragOverGroup,
     sidebarHasUngroupedGroup,
-    draggingDroneNames,
-    dragOverUngrouped,
     repos,
     reposLoading,
     reposError,
@@ -45,20 +42,14 @@ export function useDroneHubSidebarProps(args: any): DroneSidebarProps {
     setDroneBaseImage,
     deleteDrone,
     openDroneErrorModal,
-    onUngroupedDragOver,
-    onUngroupedDragLeave,
-    onUngroupedDrop,
-    onGroupDragOver,
-    onGroupDragLeave,
-    onGroupDrop,
+    moveDronesToGroup,
     createGroupAndMove,
     setCollapsedGroups,
     renameGroup,
     openGroupMultiChat,
     openSidebarVisibleMultiChat,
     deleteGroup,
-    onDroneDragStart,
-    onDroneDragEnd,
+    prepareSidebarDroneDragStart,
     setReposModalOpen,
   } = args;
 
@@ -82,10 +73,7 @@ export function useDroneHubSidebarProps(args: any): DroneSidebarProps {
     collapsedGroups,
     deletingGroups,
     renamingGroups,
-    dragOverGroup,
     sidebarHasUngroupedGroup,
-    draggingDroneNames,
-    dragOverUngrouped,
     repos,
     reposLoading,
     reposError,
@@ -108,12 +96,7 @@ export function useDroneHubSidebarProps(args: any): DroneSidebarProps {
     },
     onDeleteDrone: deleteDrone,
     onOpenDroneErrorModal: openDroneErrorModal,
-    onUngroupedDragOver,
-    onUngroupedDragLeave,
-    onUngroupedDrop,
-    onGroupDragOver,
-    onGroupDragLeave,
-    onGroupDrop,
+    onMoveDronesToGroup: moveDronesToGroup,
     onCreateGroupAndMove: createGroupAndMove,
     onToggleGroupCollapsed: (group) =>
       setCollapsedGroups((prev: Record<string, boolean>) => ({
@@ -132,8 +115,7 @@ export function useDroneHubSidebarProps(args: any): DroneSidebarProps {
     onDeleteGroup: (group, count, opts) => {
       void deleteGroup(group, count, opts);
     },
-    onDroneDragStart,
-    onDroneDragEnd,
+    onPrepareDroneDragStart: prepareSidebarDroneDragStart,
     onOpenReposModal: () => setReposModalOpen(true),
   };
 }

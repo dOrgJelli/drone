@@ -28,7 +28,6 @@ import { useCreateDroneRowsState } from './droneHub/app/use-create-drone-rows-st
 import { useCreateDraftWorkflowState } from './droneHub/app/use-create-draft-workflow-store';
 import { useDroneCreationActions } from './droneHub/app/use-drone-creation-actions';
 import { useChatRuntimeOrchestration } from './droneHub/app/use-chat-runtime-orchestration';
-import { useDroneGroupDnd } from './droneHub/app/use-drone-group-dnd';
 import { useDroneErrorModalActions } from './droneHub/app/use-drone-error-modal-actions';
 import { useDroneMutationActions } from './droneHub/app/use-drone-mutation-actions';
 import { useFilesAndPortsPaneState } from './droneHub/app/use-files-and-ports-pane-state';
@@ -958,35 +957,20 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     attempt();
   }, [updatePinned]);
 
-  const {
-    draggingDroneNames,
-    dragOverGroup,
-    dragOverUngrouped,
-    onDroneDragStart,
-    onDroneDragEnd,
-    onGroupDragOver,
-    onGroupDragLeave,
-    onGroupDrop,
-    onUngroupedDragOver,
-    onUngroupedDragLeave,
-    onUngroupedDrop,
-    resetGroupDndState,
-  } = useDroneGroupDnd({
-    movingDroneGroups,
-    hasUngroupedGroup: sidebarHasUngroupedGroup,
-    selectedDroneIds,
-    selectedDroneSet,
-    selectionAnchorRef,
-    setSelectedDrone,
-    setSelectedDroneIds,
-    onPrepareDragStart: () => {
+  const resetGroupDndState = React.useCallback(() => {}, []);
+  const prepareSidebarDroneDragStart = React.useCallback(
+    (droneIdRaw: string) => {
+      if (movingDroneGroups) return;
+      const droneId = String(droneIdRaw ?? '').trim();
+      if (!droneId) return;
       setDraftChat(null);
-    },
-    onClearGroupMoveError: () => {
       setGroupMoveError(null);
+      setSelectedDrone(droneId);
+      if (!selectedDroneSet.has(droneId)) setSelectedDroneIds([droneId]);
+      selectionAnchorRef.current = droneId;
     },
-    moveDronesToGroup,
-  });
+    [movingDroneGroups, selectedDroneSet, selectionAnchorRef, setDraftChat, setGroupMoveError, setSelectedDrone, setSelectedDroneIds],
+  );
   const { selectDroneCard: selectDroneCardBase, selectDroneChat: selectDroneChatBase } = useDroneSelectionState({
     orderedDroneIds,
     selectedDrone,
@@ -2187,10 +2171,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     collapsedGroups,
     deletingGroups,
     renamingGroups,
-    dragOverGroup,
     sidebarHasUngroupedGroup,
-    draggingDroneNames,
-    dragOverUngrouped,
     repos,
     reposLoading,
     reposError,
@@ -2209,20 +2190,14 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setDroneBaseImage,
     deleteDrone,
     openDroneErrorModal,
-    onUngroupedDragOver,
-    onUngroupedDragLeave,
-    onUngroupedDrop,
-    onGroupDragOver,
-    onGroupDragLeave,
-    onGroupDrop,
+    moveDronesToGroup,
     createGroupAndMove,
     setCollapsedGroups,
     renameGroup,
     openGroupMultiChat,
     openSidebarVisibleMultiChat,
     deleteGroup,
-    onDroneDragStart,
-    onDroneDragEnd,
+    prepareSidebarDroneDragStart,
     setReposModalOpen,
   });
 

@@ -1,72 +1,8 @@
 import {
-  DRONE_CHAT_DND_MIME,
-  DRONE_DND_MIME,
   createCanvasChatNodeId,
   parseCanvasChatNodeId,
   type CanvasChatRef,
 } from '../app/app-config';
-
-type DraggedChatPayloadEntry =
-  | string
-  | {
-      nodeId?: unknown;
-      droneId?: unknown;
-      chatName?: unknown;
-    };
-
-export function parseDraggedChatPayload(jsonRaw: string): string[] {
-  const out: string[] = [];
-  const add = (raw: unknown) => {
-    const nodeId = String(raw ?? '').trim();
-    if (!nodeId || out.includes(nodeId)) return;
-    if (!parseCanvasChatNodeId(nodeId)) return;
-    out.push(nodeId);
-  };
-
-  try {
-    if (!jsonRaw) return out;
-    const parsed = JSON.parse(jsonRaw);
-    if (!Array.isArray(parsed)) return out;
-    for (const value of parsed as DraggedChatPayloadEntry[]) {
-      if (typeof value === 'string') {
-        add(value);
-        continue;
-      }
-      const nodeId = String(value?.nodeId ?? '').trim();
-      if (nodeId) {
-        add(nodeId);
-        continue;
-      }
-      const droneId = String(value?.droneId ?? '').trim();
-      const chatName = String(value?.chatName ?? '').trim() || 'default';
-      if (!droneId) continue;
-      add(createCanvasChatNodeId(droneId, chatName));
-    }
-  } catch {
-    // Ignore malformed drag payload.
-  }
-  return out;
-}
-
-export function parseDraggedDronePayload(jsonRaw: string): string[] {
-  const out: string[] = [];
-  const add = (raw: unknown) => {
-    const droneId = String(raw ?? '').trim();
-    if (!droneId || out.includes(droneId)) return;
-    out.push(droneId);
-  };
-
-  try {
-    if (!jsonRaw) return out;
-    const parsed = JSON.parse(jsonRaw);
-    if (!Array.isArray(parsed)) return out;
-    for (const value of parsed) add(value);
-  } catch {
-    // Ignore malformed drag payload.
-  }
-
-  return out;
-}
 
 export function expandDroneIdsToChatNodeIds(
   droneIds: string[],
@@ -99,21 +35,6 @@ export function expandDroneIdsToChatNodeIds(
   }
 
   return out;
-}
-
-export function resolveDraggedCanvasChatNodeIds(
-  transfer: Pick<DataTransfer, 'getData'>,
-  sidebarOrderedChatNodeIds: string[],
-): string[] {
-  const explicitChatNodeIds = parseDraggedChatPayload(transfer.getData(DRONE_CHAT_DND_MIME));
-  const droneNodeIds = expandDroneIdsToChatNodeIds(
-    parseDraggedDronePayload(transfer.getData(DRONE_DND_MIME)),
-    sidebarOrderedChatNodeIds,
-  );
-  return orderChatNodeIdsBySidebar(
-    Array.from(new Set([...explicitChatNodeIds, ...droneNodeIds])),
-    sidebarOrderedChatNodeIds,
-  );
 }
 
 export function orderChatNodeIdsBySidebar(ids: string[], sidebarOrderedChatNodeIds: string[]): string[] {
