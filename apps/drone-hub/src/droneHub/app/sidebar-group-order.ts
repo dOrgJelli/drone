@@ -43,8 +43,12 @@ export function orderSidebarEntries<T>(
   entries: T[],
   order: string[],
   getKey: (entry: T) => string,
+  options?: {
+    unorderedPlacement?: 'start' | 'end';
+  },
 ): T[] {
   if (entries.length < 2) return entries.slice();
+  const unorderedPlacement = options?.unorderedPlacement === 'start' ? 'start' : 'end';
   const orderIndex = new Map<string, number>();
   for (const token of order) {
     if (orderIndex.has(token)) continue;
@@ -54,7 +58,9 @@ export function orderSidebarEntries<T>(
     .map((entry, index) => ({
       entry,
       index,
-      orderIndex: orderIndex.get(String(getKey(entry) ?? '').trim()) ?? Number.POSITIVE_INFINITY,
+      orderIndex:
+        orderIndex.get(String(getKey(entry) ?? '').trim()) ??
+        (unorderedPlacement === 'start' ? Number.NEGATIVE_INFINITY : Number.POSITIVE_INFINITY),
     }))
     .sort((a, b) => a.orderIndex - b.orderIndex || a.index - b.index)
     .map((item) => item.entry);
@@ -71,7 +77,7 @@ export function reorderSidebarEntryOrder(
   const overKey = String(over ?? '').trim();
   if (!activeKey || !overKey || activeKey === overKey) return normalizeSidebarGroupOrder(order);
 
-  const visibleEntries = orderSidebarEntries(entries, order, (entry) => entry);
+  const visibleEntries = normalizeSidebarGroupOrder(entries);
   if (!visibleEntries.includes(activeKey) || !visibleEntries.includes(overKey)) {
     return normalizeSidebarGroupOrder(order);
   }

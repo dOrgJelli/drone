@@ -85,9 +85,23 @@ describe('sidebar-group-order', () => {
     ]);
   });
 
+  test('can keep new unordered entries ahead of persisted ordered ones', () => {
+    expect(
+      orderSidebarEntries(['drone-c', 'drone-b', 'drone-a'], ['drone-b', 'drone-a'], (entry) => entry, {
+        unorderedPlacement: 'start',
+      }),
+    ).toEqual(['drone-c', 'drone-b', 'drone-a']);
+  });
+
   test('reorders arbitrary entries while preserving hidden entries at the end', () => {
     expect(
       reorderSidebarEntryOrder(['chat-z'], ['chat-a', 'chat-b', 'chat-c'], 'chat-a', 'chat-c', 'after'),
     ).toEqual(['chat-b', 'chat-c', 'chat-a', 'chat-z']);
+  });
+
+  test('reorders entries from the visible input order when new entries are not yet persisted', () => {
+    expect(
+      reorderSidebarEntryOrder(['drone-b', 'drone-a'], ['drone-c', 'drone-b', 'drone-a'], 'drone-c', 'drone-b', 'after'),
+    ).toEqual(['drone-b', 'drone-c', 'drone-a']);
   });
 });
