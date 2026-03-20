@@ -74,10 +74,14 @@ export function SettingsView({
   } = llm;
   const {
     skillsLoading,
+    skillSourcesLoading,
+    sourceSkillsLoading,
+    sourceSkillPreviewLoading,
     skillsSaving,
     skillsDeleting,
     draftDirty: skillDraftDirty,
     loadSkills,
+    loadSkillSources,
   } = skillLibrary;
   const {
     deleteSettings,
@@ -150,6 +154,9 @@ export function SettingsView({
     clearingGeminiSettings ||
     savingLlmProvider ||
     skillsLoading ||
+    skillSourcesLoading ||
+    sourceSkillsLoading ||
+    sourceSkillPreviewLoading ||
     skillsSaving ||
     skillsDeleting ||
     savingDeleteSettings ||
@@ -204,6 +211,7 @@ export function SettingsView({
                 void loadArchivedChats();
                 void loadHubLogs();
                 void loadSkills();
+                void loadSkillSources();
               }}
               disabled={settingsBusy}
               className={`h-8 px-3 rounded text-[11px] font-semibold tracking-wide uppercase border transition-all ${

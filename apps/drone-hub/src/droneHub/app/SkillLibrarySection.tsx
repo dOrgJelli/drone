@@ -1,27 +1,8 @@
 import React from 'react';
 import { SKILL_FILE_KIND_OPTIONS, type SkillFileDraft, type SkillFileKind } from './skill-library-model';
+import { SkillSourceImportSection } from './SkillSourceImportSection';
+import { buttonClassName, inputClassName, textareaClassName } from './skill-library-ui';
 import type { UseSkillLibraryResult } from './use-skill-library';
-
-function inputClassName() {
-  return 'h-9 rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.15)] px-3 text-[13px] text-[var(--fg)] placeholder:text-[var(--muted-dim)] focus:outline-none focus:border-[var(--accent-muted)] transition-colors';
-}
-
-function textareaClassName() {
-  return 'w-full rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.18)] px-3 py-2 text-[12px] leading-relaxed text-[var(--fg)] placeholder:text-[var(--muted-dim)] focus:outline-none focus:border-[var(--accent-muted)] transition-colors font-mono';
-}
-
-function buttonClassName(kind: 'primary' | 'secondary' | 'danger' = 'secondary', disabled = false): string {
-  if (disabled) {
-    return 'h-8 px-3 rounded text-[10px] font-semibold tracking-wide uppercase border transition-all opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]';
-  }
-  if (kind === 'primary') {
-    return 'h-8 px-3 rounded text-[10px] font-semibold tracking-wide uppercase border transition-all bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-fg)] hover:shadow-[var(--glow-accent)] hover:brightness-110';
-  }
-  if (kind === 'danger') {
-    return 'h-8 px-3 rounded text-[10px] font-semibold tracking-wide uppercase border transition-all bg-[var(--red-subtle)] border-[rgba(255,90,90,.28)] text-[var(--red)] hover:bg-[rgba(255,90,90,.18)]';
-  }
-  return 'h-8 px-3 rounded text-[10px] font-semibold tracking-wide uppercase border transition-all bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]';
-}
 
 export function SkillLibrarySection({ skillLibrary }: { skillLibrary: UseSkillLibraryResult }) {
   const {
@@ -40,6 +21,7 @@ export function SkillLibrarySection({ skillLibrary }: { skillLibrary: UseSkillLi
     updateDraftFile,
     removeDraftFile,
     loadSkills,
+    refreshSkillSources,
     startNewSkill,
     saveDraft,
     deleteSelectedSkill,
@@ -75,8 +57,11 @@ export function SkillLibrarySection({ skillLibrary }: { skillLibrary: UseSkillLi
       const ok = window.confirm('Discard unsaved skill edits and reload the library?');
       if (!ok) return;
     }
-    void loadSkills();
-  }, [draftDirty, loadSkills]);
+    void (async () => {
+      await loadSkills();
+      await refreshSkillSources();
+    })();
+  }, [draftDirty, loadSkills, refreshSkillSources]);
 
   const handleReset = React.useCallback(() => {
     if (!draftDirty) return;
@@ -137,6 +122,29 @@ export function SkillLibrarySection({ skillLibrary }: { skillLibrary: UseSkillLi
           )}
         </div>
       )}
+
+      <SkillSourceImportSection
+        skillSources={skillLibrary.skillSources}
+        filteredSourceSkills={skillLibrary.filteredSourceSkills}
+        skillSourcesLoading={skillLibrary.skillSourcesLoading}
+        sourceSkillsLoading={skillLibrary.sourceSkillsLoading}
+        sourceSkillPreview={skillLibrary.sourceSkillPreview}
+        sourceSkillPreviewLoading={skillLibrary.sourceSkillPreviewLoading}
+        sourceSkillSearch={skillLibrary.sourceSkillSearch}
+        selectedSourceId={skillLibrary.selectedSourceId}
+        selectedSourcePreviewPath={skillLibrary.selectedSourcePreviewPath}
+        selectedSourcePreviewFile={skillLibrary.selectedSourcePreviewFile}
+        importingSourceSkillId={skillLibrary.importingSourceSkillId}
+        skillsSaving={skillLibrary.skillsSaving}
+        skillsDeleting={skillLibrary.skillsDeleting}
+        draftDirty={draftDirty}
+        selectSource={skillLibrary.selectSource}
+        previewSourceSkill={skillLibrary.previewSourceSkill}
+        selectSourcePreviewFile={skillLibrary.selectSourcePreviewFile}
+        refreshSkillSources={skillLibrary.refreshSkillSources}
+        setSourceSkillSearch={skillLibrary.setSourceSkillSearch}
+        importSourceSkill={skillLibrary.importSourceSkill}
+      />
 
       <div className="grid grid-cols-1 xl:grid-cols-[240px_minmax(0,1fr)] gap-3 min-w-0">
         <div className="rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] p-2 flex flex-col gap-2 min-w-0">

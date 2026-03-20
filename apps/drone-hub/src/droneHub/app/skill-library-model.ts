@@ -67,6 +67,60 @@ export type SkillRecord = {
   updatedAt: string;
 };
 
+export type SkillImportStatus = 'importable' | 'importable_with_loss' | 'not_importable';
+
+export type SkillSourceRecord = {
+  id: string;
+  name: string;
+  description: string;
+  owner: string;
+  repo: string;
+  branch: string;
+  repoUrl: string;
+};
+
+export type SkillSourceCandidate = {
+  id: string;
+  sourceId: string;
+  path: string;
+  slug: string;
+  name: string;
+  description: string;
+  license?: string;
+  importStatus: SkillImportStatus;
+  importReason?: string;
+  pluginName?: string;
+};
+
+export type SkillSourcePreviewFile = {
+  path: string;
+  content: string;
+  kind: SkillFileKind | 'managed';
+};
+
+export type SkillSourceCandidatePreview = {
+  candidate: SkillSourceCandidate;
+  sourceId: string;
+  sourceCommit: string;
+  skillMarkdown: string;
+  files: SkillSourcePreviewFile[];
+  normalized: {
+    name: string;
+    slug: string;
+    description: string;
+    license?: string;
+    compatibility: string;
+    metadata?: Record<string, string>;
+    markdownBody: string;
+    files: Array<{
+      path: string;
+      content: string;
+      kind: SkillFileKind;
+    }>;
+    overlays?: SkillRecord['overlays'];
+  };
+};
+
 export const SKILL_FILE_KIND_OPTIONS: Array<{ value: SkillFileKind; label: string; pathHint: string }> = [
   { value: 'script', label: 'Script', pathHint: 'scripts/run.sh' },
   { value: 'reference', label: 'Reference', pathHint: 'references/guide.md' },
@@ -155,6 +209,24 @@ export function createEmptyDraft(): SkillDraft {
 
 export function sortSkills(skills: SkillRecord[]): SkillRecord[] {
   return [...skills].sort((a, b) => a.slug.localeCompare(b.slug));
+}
+
+export function filterSkillSourceCandidates(candidates: SkillSourceCandidate[], query: string): SkillSourceCandidate[] {
+  const trimmed = String(query ?? '').trim().toLowerCase();
+  if (!trimmed) return [...candidates];
+  return candidates.filter((candidate) => {
+    const haystack = [
+      candidate.name,
+      candidate.slug,
+      candidate.description,
+      candidate.path,
+      candidate.pluginName ?? '',
+      candidate.importReason ?? '',
+    ]
+      .join('\n')
+      .toLowerCase();
+    return haystack.includes(trimmed);
+  });
 }
 
 export function sanitizeDraftForComparison(draft: SkillDraft): string {

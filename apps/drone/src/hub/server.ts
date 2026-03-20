@@ -144,6 +144,7 @@ import {
   type SkillProjectionTarget,
   updateSkillRecord,
 } from './skills';
+import { importSkillFromSource, listSkillSourceCandidates, listSkillSources, previewSkillFromSource } from './skill-sources';
 import {
   decodeFleetCursor,
   effectiveFleetLimits,
@@ -7977,6 +7978,11 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         }
       }
 
+      if (pathname === '/api/skill-sources' && method === 'GET') {
+        json(res, 200, { ok: true, sources: listSkillSources() });
+        return;
+      }
+
       // POST /api/tldr/from-message
       // Summarizes an agent response in chat context (short Markdown TLDR).
       if (method === 'POST' && pathname === '/api/tldr/from-message') {
@@ -8237,6 +8243,83 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             return;
           }
           json(res, 200, { ok: true, deleted: true, id: skillId });
+          return;
+        }
+      }
+
+      if (parts.length === 4 && parts[0] === 'api' && parts[1] === 'skill-sources' && parts[3] === 'skills') {
+        const sourceId = decodeURIComponent(parts[2]);
+        if (method === 'GET') {
+          const forceRefresh = parseBoolParam(u.searchParams.get('refresh'), false);
+          try {
+            json(res, 200, { ok: true, sourceId, skills: await listSkillSourceCandidates(sourceId, fetch, { forceRefresh }) });
+          } catch (e: any) {
+            const msg = e?.message ?? String(e);
+            const code = /unknown skill source/i.test(msg) ? 404 : /invalid /i.test(msg) ? 400 : 502;
+            json(res, code, { ok: false, error: msg });
+          }
+          return;
+        }
+      }
+
+      if (parts.length === 4 && parts[0] === 'api' && parts[1] === 'skill-sources' && parts[3] === 'preview') {
+        const sourceId = decodeURIComponent(parts[2]);
+        if (method === 'GET') {
+          const sourcePath = String(u.searchParams.get('path') ?? '').trim();
+          try {
+            json(res, 200, {
+              ok: true,
+              preview: await previewSkillFromSource({
+                sourceId,
+                path: sourcePath,
+              }),
+            });
+          } catch (e: any) {
+            const msg = e?.message ?? String(e);
+            const code =
+              /unknown skill source|unknown source skill path/i.test(msg)
+                ? 404
+                : /missing |invalid /i.test(msg)
+                  ? 400
+                  : 502;
+            json(res, code, { ok: false, error: msg });
+          }
+          return;
+        }
+      }
+
+      if (parts.length === 4 && parts[0] === 'api' && parts[1] === 'skill-sources' && parts[3] === 'import') {
+        const sourceId = decodeURIComponent(parts[2]);
+        if (method === 'POST') {
+          let body: any = null;
+          try {
+            body = await readJsonBody(req);
+          } catch (e: any) {
+            json(res, 400, { ok: false, error: e?.message ?? String(e) });
+            return;
+          }
+          try {
+            json(res, 201, {
+              ok: true,
+              skill: await importSkillFromSource({
+                sourceId,
+                path: body?.path,
+              }),
+            });
+          } catch (e: any) {
+            const msg = e?.message ?? String(e);
+            const code =
+              /unknown skill source|unknown source skill path/i.test(msg)
+                ? 404
+                : /missing |invalid /i.test(msg)
+                  ? 400
+                  : /already exists|duplicate/i.test(msg)
+                    ? 409
+                    : /not importable/i.test(msg)
+                      ? 422
+                      : 502;
+            json(res, code, { ok: false, error: msg });
+          }
           return;
         }
       }
