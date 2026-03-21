@@ -73,7 +73,9 @@ type RightPanelTabContentProps = {
     droneId: string,
     chatName: string,
   ) => Promise<{ ok: boolean; deletedDrone?: boolean; error?: string | null }>;
-  onCloneCanvasDrone: (drone: DroneSummary) => Promise<boolean> | boolean;
+  onCloneCanvasDrone: (
+    drone: DroneSummary,
+  ) => Promise<{ ok: boolean; droneId?: string; droneName?: string }> | { ok: boolean; droneId?: string; droneName?: string };
   canvasSpawnAgentMenuEntries: UiMenuSelectEntry[];
   canvasSpawnAgentKey: string;
   onCanvasSpawnAgentKeyChange: (next: string) => void;

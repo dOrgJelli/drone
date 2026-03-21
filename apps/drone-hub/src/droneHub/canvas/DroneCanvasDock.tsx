@@ -21,8 +21,9 @@ import {
   sortChatNodeIdsForDestructiveDelete,
 } from './chat-node-utils';
 import {
-  cloneCanvasDronesById,
+  buildOptimisticCloneCanvasNodes,
   collectCloneableDroneIdsFromCanvasSelection,
+  collectCloneSourceNodeIdByDroneId,
 } from './clone-shortcuts';
 import {
   DRAFT_CANVAS_NODE_PREFIX,
@@ -55,6 +56,8 @@ const MIN_DRAFT_SPAWN_COUNT = 1;
 const MAX_DRAFT_SPAWN_COUNT = 24;
 const SPAWN_COLLISION_MARGIN_PX = 12;
 const SPAWN_OFFSET_RINGS = 7;
+const CLONE_OFFSET_X_PX = 44;
+const CLONE_OFFSET_Y_PX = 34;
 
 type SelectionBox = {
   left: number;
@@ -329,7 +332,9 @@ export function DroneCanvasDock({
     droneId: string,
     chatName: string,
   ) => Promise<{ ok: boolean; deletedDrone?: boolean; error?: string | null }>;
-  onCloneDrone?: (drone: DroneSummary) => Promise<boolean> | boolean;
+  onCloneDrone?: (
+    drone: DroneSummary,
+  ) => Promise<{ ok: boolean; droneId?: string; droneName?: string }> | { ok: boolean; droneId?: string; droneName?: string };
   spawnAgentMenuEntries: UiMenuSelectEntry[];
   spawnAgentKey: string;
   onSpawnAgentKeyChange: (next: string) => void;
@@ -402,6 +407,7 @@ export function DroneCanvasDock({
   const lastSyncedSidebarSelectionRef = React.useRef<string>('');
   const inlineRenameInputRef = React.useRef<HTMLInputElement | null>(null);
   const copiedDroneIdsRef = React.useRef<string[]>([]);
+  const copiedSourceNodeIdByDroneIdRef = React.useRef<Record<string, string>>({});
   const suppressNodeClickRef = React.useRef(false);
   const [dragOverCanvas, setDragOverCanvas] = React.useState(false);
   const [draggingNodeId, setDraggingNodeId] = React.useState<string | null>(null);
@@ -417,9 +423,14 @@ export function DroneCanvasDock({
   const [messageError, setMessageError] = React.useState<string | null>(null);
   const [messagePendingCount, setMessagePendingCount] = React.useState(0);
   const [renderedNodeBoundsById, setRenderedNodeBoundsById] = React.useState<Record<string, CanvasRect>>({});
+  const [optimisticDroneNameById, setOptimisticDroneNameById] = React.useState<Record<string, string>>({});
   const messageInputRef = React.useRef<HTMLTextAreaElement | null>(null);
   const draftCreateInFlightRef = React.useRef<Set<string>>(new Set());
   const messageSending = messagePendingCount > 0;
+  const effectiveDroneNameById = React.useMemo(
+    () => ({ ...optimisticDroneNameById, ...droneNameById }),
+    [droneNameById, optimisticDroneNameById],
+  );
 
   const nodes = React.useMemo(
     () => nodeOrder.map((droneId) => nodesByDroneId[droneId]).filter(Boolean),
@@ -434,12 +445,12 @@ export function DroneCanvasDock({
       }
       const chatRef = parseCanvasChatNodeId(node.droneId);
       const chatDroneLabel = chatRef
-        ? String(droneNameById[chatRef.droneId] ?? '').trim() || chatRef.droneId
+        ? String(effectiveDroneNameById[chatRef.droneId] ?? '').trim() || chatRef.droneId
         : '';
       out[node.droneId] = getNodeWidthPx(node.label, chatDroneLabel);
     }
     return out;
-  }, [droneNameById, nodes]);
+  }, [effectiveDroneNameById, nodes]);
   const fallbackNodeBoundsById = React.useMemo(() => {
     const out: Record<string, CanvasRect> = {};
     for (const node of nodes) {
@@ -505,9 +516,9 @@ export function DroneCanvasDock({
     }
     const chatRef = parseCanvasChatNodeId(selectedNodeId);
     if (!chatRef) return null;
-    const droneLabel = String(droneNameById[chatRef.droneId] ?? '').trim() || chatRef.droneId;
+    const droneLabel = String(effectiveDroneNameById[chatRef.droneId] ?? '').trim() || chatRef.droneId;
     return `${droneLabel} / ${chatRef.chatName}`;
-  }, [droneNameById, nodesByDroneId, selectedDroneIds]);
+  }, [effectiveDroneNameById, nodesByDroneId, selectedDroneIds]);
   const controlsDisabled = messageSending;
   const normalizedSpawnAgentKey = String(spawnAgentKey ?? '').trim();
   const normalizedSpawnModel = String(spawnModel ?? '');
@@ -853,6 +864,21 @@ export function DroneCanvasDock({
   React.useEffect(() => {
     syncNodeLabels(droneNameById);
   }, [droneNameById, syncNodeLabels]);
+
+  React.useEffect(() => {
+    setOptimisticDroneNameById((prev) => {
+      const next: Record<string, string> = {};
+      let changed = false;
+      for (const [droneId, droneName] of Object.entries(prev)) {
+        if (String(droneNameById[droneId] ?? '').trim()) {
+          changed = true;
+          continue;
+        }
+        next[droneId] = droneName;
+      }
+      return changed ? next : prev;
+    });
+  }, [droneNameById]);
 
   React.useEffect(() => {
     const sidebarId = String(sidebarSelectedChatNodeId ?? '').trim();
@@ -1508,6 +1534,7 @@ export function DroneCanvasDock({
       if (!viewport) return;
       const rect = viewport.getBoundingClientRect();
       const activeRect = event.active.rect.current.translated ?? event.active.rect.current.initial;
+      if (!activeRect) return;
       const clientX = activeRect.left + activeRect.width / 2;
       const clientY = activeRect.top + activeRect.height / 2;
       const origin = screenToWorldPoint(clientX, clientY, rect, panX, panY, scale);
@@ -1575,7 +1602,9 @@ export function DroneCanvasDock({
 
   const copySelectedDronesForClone = React.useCallback((): string[] => {
     const copiedDroneIds = collectCloneableDroneIdsFromCanvasSelection(selectedDroneIds);
+    const sourceNodeIdByDroneId = collectCloneSourceNodeIdByDroneId(selectedDroneIds);
     copiedDroneIdsRef.current = copiedDroneIds;
+    copiedSourceNodeIdByDroneIdRef.current = sourceNodeIdByDroneId;
     return copiedDroneIds;
   }, [selectedDroneIds]);
 
@@ -1583,8 +1612,36 @@ export function DroneCanvasDock({
     if (!onCloneDrone) return;
     const copiedDroneIds = copiedDroneIdsRef.current.slice();
     if (copiedDroneIds.length === 0) return;
-    void cloneCanvasDronesById(copiedDroneIds, droneById, onCloneDrone);
-  }, [droneById, onCloneDrone]);
+    const sourceNodeIdByDroneId = { ...copiedSourceNodeIdByDroneIdRef.current };
+    void (async () => {
+      const cloneResults: Array<{ sourceDroneId: string; cloneDroneId?: string | null; cloneDroneName?: string | null }> = [];
+      for (const raw of copiedDroneIds) {
+        const sourceDroneId = String(raw ?? '').trim();
+        if (!sourceDroneId) continue;
+        const drone = droneById[sourceDroneId];
+        if (!drone) continue;
+        const result = await onCloneDrone(drone);
+        if (!result?.ok) continue;
+        cloneResults.push({
+          sourceDroneId,
+          cloneDroneId: result.droneId ?? null,
+          cloneDroneName: result.droneName ?? null,
+        });
+      }
+      const optimistic = buildOptimisticCloneCanvasNodes({
+        copiedDroneIdsRaw: copiedDroneIds,
+        cloneResultsRaw: cloneResults,
+        sourceNodeIdByDroneId,
+        nodesById: nodesByDroneId,
+        cloneOffsetXPx: CLONE_OFFSET_X_PX,
+        cloneOffsetYPx: CLONE_OFFSET_Y_PX,
+      });
+      if (Object.keys(optimistic.optimisticDroneNameById).length > 0) {
+        setOptimisticDroneNameById((prev) => ({ ...prev, ...optimistic.optimisticDroneNameById }));
+      }
+      if (optimistic.nodes.length > 0) upsertNodes(optimistic.nodes);
+    })();
+  }, [droneById, nodesByDroneId, onCloneDrone, upsertNodes]);
 
   const onViewportKeyDown = React.useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
@@ -1981,7 +2038,7 @@ export function DroneCanvasDock({
                 ? String(droneRepoById[chatDroneId] ?? '').trim()
                 : '';
             const chatDroneLabel = chatDroneId
-              ? String(droneNameById[chatDroneId] ?? '').trim() || chatDroneId
+              ? String(effectiveDroneNameById[chatDroneId] ?? '').trim() || chatDroneId
               : '';
             return (
               <button

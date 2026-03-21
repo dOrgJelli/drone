@@ -68,6 +68,13 @@ describe('dvm clone persistence behavior', () => {
     expect(dockerMock.importVolumeFromTarGz).toHaveBeenCalledWith('dvm-clone-data', expect.stringMatching(/volume\.tar\.gz$/));
     expect(dockerMock.startContainer).toHaveBeenCalledWith('clone');
     expect(dockerMock.connectNetwork).toHaveBeenCalledWith('secondary-net', 'clone');
+    expect(createSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ports: [{ containerPort: 7777 }],
+      }),
+      false,
+      { skipProvisioning: true }
+    );
   });
 
   test('can skip persistence volume copy', async () => {
@@ -114,6 +121,66 @@ describe('dvm clone persistence behavior', () => {
     expect(dockerMock.exportVolumeToTarGz).not.toHaveBeenCalled();
     expect(dockerMock.importVolumeFromTarGz).not.toHaveBeenCalled();
     expect(dockerMock.startContainer).not.toHaveBeenCalled();
+  });
+
+  test('uses explicit clone port mappings when provided', async () => {
+    const manager = new ContainerManager();
+
+    const sourceInspect: any = {
+      Config: {
+        Labels: {
+          'me.drone.dvm.persistence.volume': 'dvm-source-data',
+          'me.drone.dvm.persistence.path': '/dvm-data',
+        },
+      },
+      Mounts: [{ Type: 'volume', Name: 'dvm-source-data', Destination: '/dvm-data' }],
+    };
+
+    const sourceContainer = { inspect: jest.fn(async () => sourceInspect) } as any;
+
+    const dockerMock = {
+      containerExists: jest.fn(async (name: string) => name === 'source'),
+      getContainer: jest.fn(async (name: string) => {
+        if (name === 'source') return sourceContainer;
+        return null;
+      }),
+      getContainerDetails: jest.fn(async () => ({
+        ports: [{ containerPort: 7777, hostPort: 31000 }],
+      })),
+      getContainerNetworkNames: jest.fn(async () => ['primary-net']),
+      commitContainer: jest.fn(async () => 'dvm-clone-source:clone-tag'),
+      volumeExists: jest.fn(async () => false),
+      exportVolumeToTarGz: jest.fn(async () => {}),
+      importVolumeFromTarGz: jest.fn(async () => {}),
+      startContainer: jest.fn(async () => {}),
+      connectNetwork: jest.fn(async () => {}),
+      removeContainer: jest.fn(async () => {}),
+      removeVolume: jest.fn(async () => {}),
+    };
+
+    (manager as any).docker = dockerMock;
+    const createSpy = jest.spyOn(manager, 'createContainer').mockResolvedValue();
+
+    await manager.cloneContainer('source', 'clone', {
+      ports: [
+        { containerPort: 7777, hostPort: 41000 },
+        { containerPort: 3389, hostPort: 41001 },
+        { containerPort: 6080, hostPort: 41002 },
+      ],
+    });
+
+    expect(createSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'clone',
+        ports: [
+          { containerPort: 7777, hostPort: 41000 },
+          { containerPort: 3389, hostPort: 41001 },
+          { containerPort: 6080, hostPort: 41002 },
+        ],
+      }),
+      false,
+      { skipProvisioning: true }
+    );
   });
 
   test('copies persistence for legacy source containers without persistence labels', async () => {

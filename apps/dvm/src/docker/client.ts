@@ -1,6 +1,7 @@
 import Docker from 'dockerode';
 import { ContainerInfo } from 'dockerode';
 import { spawn } from 'child_process';
+import net from 'node:net';
 import { PassThrough } from 'stream';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -537,12 +538,21 @@ export class DockerClient {
         }
       }
     }
-    return true;
+
+    return await new Promise<boolean>((resolve) => {
+      const server = net.createServer();
+      server.unref();
+      server.once('error', () => resolve(false));
+      server.listen({ port, host: '0.0.0.0', exclusive: true }, () => {
+        server.close(() => resolve(true));
+      });
+    });
   }
 
-  async findAvailablePort(startPort: number, maxAttempts = 100): Promise<number> {
+  async findAvailablePort(startPort: number, maxAttempts = 100, reservedPorts?: Set<number>): Promise<number> {
     for (let i = 0; i < maxAttempts; i++) {
       const port = startPort + i;
+      if (reservedPorts?.has(port)) continue;
       if (await this.checkPortAvailable(port)) {
         return port;
       }

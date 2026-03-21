@@ -1020,7 +1020,15 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     },
     [selectDroneChatBase],
   );
-  const { cloneDrone, createDrone, createDroneFromDraft, queueDraftPromptDuringCreate, startDraftPrompt, startDraftAutomation } =
+  const {
+    cloneDrone,
+    cloneDroneWithoutSelection,
+    createDrone,
+    createDroneFromDraft,
+    queueDraftPromptDuringCreate,
+    startDraftPrompt,
+    startDraftAutomation,
+  } =
     useDroneCreationActions({
       drones,
       creating,
@@ -2003,7 +2011,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
           onCreateCanvasDroneFromDraft={createCanvasDroneFromDraft}
           onRenameCanvasChat={renameCanvasChat}
           onDeleteCanvasChat={deleteCanvasChat}
-          onCloneCanvasDrone={cloneDrone}
+          onCloneCanvasDrone={cloneDroneWithoutSelection}
           canvasSpawnAgentMenuEntries={spawnAgentMenuEntries}
           canvasSpawnAgentKey={spawnAgentKey}
           onCanvasSpawnAgentKeyChange={setSpawnAgentKey}

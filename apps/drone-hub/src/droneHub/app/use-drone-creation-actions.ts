@@ -17,6 +17,12 @@ type QueueDronesResponse = {
   total: number;
 };
 
+export type CloneDroneResult = {
+  ok: boolean;
+  droneId?: string;
+  droneName?: string;
+};
+
 export type DraftAutomationStartInput = {
   automationId: string;
   automationLabel?: string;
@@ -212,14 +218,17 @@ export function useDroneCreationActions({
     },
     [setDraftChat],
   );
-  const cloneDrone = React.useCallback(
-    async (source: DroneSummary): Promise<boolean> => {
+  const queueCloneDrone = React.useCallback(
+    async (
+      source: DroneSummary,
+      opts?: { selectOnSuccess?: boolean },
+    ): Promise<CloneDroneResult> => {
       const sourceId = String(source?.id ?? '').trim();
-      if (!sourceId || creating || cloneDronePendingRef.current) return false;
+      if (!sourceId || creating || cloneDronePendingRef.current) return { ok: false };
       const sourceRuntime = String(source?.runtime ?? 'container').trim().toLowerCase();
       if (sourceRuntime === 'host') {
         showTransientToast('Host runtime drones cannot be cloned.', 'Clone failed');
-        return false;
+        return { ok: false };
       }
       const name = suggestCloneName(String(source?.name ?? '').trim());
       const group = String(source?.group ?? '').trim();
@@ -252,23 +261,27 @@ export function useDroneCreationActions({
         const acceptedList = Array.isArray(resp?.accepted) ? resp.accepted : [];
         const firstAccepted = acceptedList.length > 0 ? acceptedList[0] : null;
         const firstAcceptedId = String((firstAccepted as any)?.id ?? '').trim();
+        const firstAcceptedName =
+          String((firstAccepted as any)?.name ?? '').trim() || name || firstAcceptedId;
         if (firstAcceptedId) {
-          preferredSelectedDroneRef.current = firstAcceptedId;
-          preferredSelectedDroneHoldUntilRef.current = Date.now() + startupSeedMissingGraceMs;
-          setSelectedDrone(firstAcceptedId);
-          setSelectedDroneIds([firstAcceptedId]);
-          selectionAnchorRef.current = firstAcceptedId;
-          return true;
+          if (opts?.selectOnSuccess !== false) {
+            preferredSelectedDroneRef.current = firstAcceptedId;
+            preferredSelectedDroneHoldUntilRef.current = Date.now() + startupSeedMissingGraceMs;
+            setSelectedDrone(firstAcceptedId);
+            setSelectedDroneIds([firstAcceptedId]);
+            selectionAnchorRef.current = firstAcceptedId;
+          }
+          return { ok: true, droneId: firstAcceptedId, droneName: firstAcceptedName };
         }
 
         const rejected = Array.isArray(resp?.rejected) ? resp.rejected : [];
         const firstRejected = rejected.length > 0 ? rejected[0] : null;
         const rejectedMessage = String((firstRejected as any)?.error ?? '').trim();
         showTransientToast(rejectedMessage || `Failed to clone ${source.name}.`, 'Clone failed');
-        return false;
+        return { ok: false };
       } catch (e: any) {
         showTransientToast(e?.message ?? `Failed to clone ${source.name}.`, 'Clone failed');
-        return false;
+        return { ok: false };
       } finally {
         cloneDronePendingRef.current = false;
         setCreating(false);
@@ -288,6 +301,18 @@ export function useDroneCreationActions({
       startupSeedMissingGraceMs,
       suggestCloneName,
     ],
+  );
+  const cloneDrone = React.useCallback(
+    async (source: DroneSummary): Promise<boolean> => {
+      return (await queueCloneDrone(source, { selectOnSuccess: true })).ok;
+    },
+    [queueCloneDrone],
+  );
+  const cloneDroneWithoutSelection = React.useCallback(
+    async (source: DroneSummary): Promise<CloneDroneResult> => {
+      return await queueCloneDrone(source, { selectOnSuccess: false });
+    },
+    [queueCloneDrone],
   );
 
   const createDrone = React.useCallback(async () => {
@@ -873,6 +898,7 @@ export function useDroneCreationActions({
 
   return {
     cloneDrone,
+    cloneDroneWithoutSelection,
     createDrone,
     createDroneFromDraft,
     queueDraftPromptDuringCreate,

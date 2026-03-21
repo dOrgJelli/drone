@@ -155,6 +155,8 @@ export class ContainerManager {
     options?: {
       /** Start the new container. Defaults to true. */
       start?: boolean;
+      /** Explicit host/container port mappings for the clone. Defaults to source mappings. */
+      ports?: ContainerConfig['ports'];
       /**
        * If true, also reuse named volumes from the source container (besides the dvm persistence volume).
        * Default: false (bind mounts are preserved; named volumes are not copied or reused).
@@ -196,6 +198,7 @@ export class ContainerManager {
     // Preserve network attachments (best-effort). If multiple networks exist,
     // we will create the container on the first one, and then connect the rest.
     const sourceNetworks = await this.docker.getContainerNetworkNames(sourceName);
+    const sourcePorts = details.ports ?? [];
 
     // Commit the container to an image (filesystem state).
     const now = Date.now().toString(36);
@@ -229,7 +232,10 @@ export class ContainerManager {
       name: newName,
       image: committedImage,
       network: sourceNetworks[0],
-      ports: details.ports ?? [],
+      ports:
+        Array.isArray(options?.ports) && options.ports.length > 0
+          ? options.ports
+          : sourcePorts.map((port) => ({ containerPort: port.containerPort })),
       environment: inspect.Config?.Env,
       volumes: volumes.length > 0 ? volumes : undefined,
       // Always create a fresh persistence volume for the clone.
@@ -1420,17 +1426,20 @@ export class ContainerManager {
 
   private async resolvePorts(ports: ContainerConfig['ports']): Promise<ContainerConfig['ports']> {
     const resolved: ContainerConfig['ports'] = [];
+    const reservedHostPorts = new Set<number>();
 
     for (const port of ports) {
       if (port.hostPort) {
         // Check if port is available
-        const available = await this.docker.checkPortAvailable(port.hostPort);
+        const available = !reservedHostPorts.has(port.hostPort) && await this.docker.checkPortAvailable(port.hostPort);
         if (!available) {
           // Try to find an available port nearby
-          const newPort = await this.docker.findAvailablePort(port.hostPort);
+          const newPort = await this.docker.findAvailablePort(port.hostPort, 100, reservedHostPorts);
           console.warn(`Port ${port.hostPort} is in use, using ${newPort} instead`);
+          reservedHostPorts.add(newPort);
           resolved.push({ ...port, hostPort: newPort });
         } else {
+          reservedHostPorts.add(port.hostPort);
           resolved.push(port);
         }
       } else {
@@ -1440,7 +1449,8 @@ export class ContainerManager {
           port.containerPort === 3389 ? 3389 :
           port.containerPort === 6080 ? 6080 :
           3000;
-        const allocatedPort = await this.docker.findAvailablePort(startPort);
+        const allocatedPort = await this.docker.findAvailablePort(startPort, 100, reservedHostPorts);
+        reservedHostPorts.add(allocatedPort);
         resolved.push({ ...port, hostPort: allocatedPort });
       }
     }

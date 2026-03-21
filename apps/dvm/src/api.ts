@@ -27,6 +27,7 @@ export type DvmCloneContainerOptions = {
   start?: boolean;
   reuseNamedVolumes?: boolean;
   copyPersistenceVolume?: boolean;
+  ports?: PortMapping[];
 };
 
 export type DvmRenameContainerOptions = {
@@ -307,6 +308,7 @@ export class DvmApi {
       start: options.start,
       copyPersistenceVolume: options.copyPersistenceVolume,
       reuseNamedVolumes: options.reuseNamedVolumes,
+      ports: options.ports,
     });
   }
 

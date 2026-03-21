@@ -924,11 +924,36 @@ createCommand
 
     let hostPort = 0;
     if (cloneContainer) {
-      await dvmClone(cloneContainer, containerName, {
-        start: true,
-        copyPersistenceVolume: true,
-      });
-      hostPort = await resolveHostPort(containerName, containerPort);
+      const cloneAttempts = 5;
+      for (let attempt = 1; attempt <= cloneAttempts; attempt++) {
+        try {
+          const [hostPortDaemon, hostPortRdp, hostPortNoVnc, hostPort3000, hostPort3001, hostPort5173, hostPort5174] =
+            await getUniqueFreeTcpPorts(7);
+          await dvmClone(cloneContainer, containerName, {
+            start: true,
+            copyPersistenceVolume: true,
+            ports: [
+              { hostPort: hostPortDaemon, containerPort },
+              { hostPort: hostPortRdp, containerPort: 3389 },
+              { hostPort: hostPortNoVnc, containerPort: 6080 },
+              { hostPort: hostPort3000, containerPort: 3000 },
+              { hostPort: hostPort3001, containerPort: 3001 },
+              { hostPort: hostPort5173, containerPort: 5173 },
+              { hostPort: hostPort5174, containerPort: 5174 },
+            ],
+          });
+          hostPort = await resolveHostPort(containerName, containerPort);
+          break;
+        } catch (err) {
+          if (!isPortAllocationConflictError(err) || attempt === cloneAttempts) throw err;
+          try {
+            await dvmRemove(containerName);
+          } catch {
+            // ignore best-effort cleanup between retries
+          }
+          await sleep(125 * attempt);
+        }
+      }
     } else {
       const createAttempts = 5;
       for (let attempt = 1; attempt <= createAttempts; attempt++) {

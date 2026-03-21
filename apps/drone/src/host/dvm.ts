@@ -100,7 +100,12 @@ export async function dvmCreate(container: string, opts: DvmCreateContainerOptio
 export async function dvmClone(
   source: string,
   container: string,
-  opts?: { start?: boolean; reuseNamedVolumes?: boolean; copyPersistenceVolume?: boolean }
+  opts?: {
+    start?: boolean;
+    reuseNamedVolumes?: boolean;
+    copyPersistenceVolume?: boolean;
+    ports?: Array<{ hostPort: number; containerPort: number }>;
+  }
 ): Promise<void> {
   await dvm.cloneContainer(source, container, opts);
 }
