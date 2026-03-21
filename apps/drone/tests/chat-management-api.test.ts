@@ -141,6 +141,43 @@ describeSocketSuite('chat management api', () => {
     expect((listed.data?.chats ?? []).includes('review')).toBe(true);
   });
 
+  test('defaults fleet-created drones to codex when materializing chats', async () => {
+    const droneId = 'drone-chat-fleet-default';
+    const now = new Date().toISOString();
+    await updateRegistry((reg: any) => {
+      reg.drones = reg.drones ?? {};
+      reg.drones[droneId] = {
+        id: droneId,
+        name: droneId,
+        hostPort: 1,
+        token: 'mock-token',
+        containerPort: 7777,
+        repoPath: '',
+        createdAt: now,
+        fleet: {
+          createdBy: 'parent-fleet-drone',
+          createdAt: now,
+          enabled: false,
+          capabilities: [],
+          readScopes: ['children'],
+          assigned: [],
+        },
+      };
+    });
+
+    const created = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'review', copyFromChat: 'default' }),
+    });
+    expect(created.r.status).toBe(201);
+    expect(created.data?.ok).toBe(true);
+
+    const regAny: any = await loadRegistry();
+    expect(regAny?.drones?.[droneId]?.chats?.default?.agent).toEqual({ kind: 'builtin', id: 'codex' });
+    expect(regAny?.drones?.[droneId]?.chats?.review?.agent).toEqual({ kind: 'builtin', id: 'codex' });
+  });
+
   test('renames and deletes chats with default protections', async () => {
     const droneId = 'drone-chat-rename-delete';
     await seedDrone(droneId);

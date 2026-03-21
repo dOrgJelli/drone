@@ -2634,8 +2634,8 @@ async function sendPromptToChat(opts: {
     const normalizedChat = opts.chatName || 'default';
     await ensureChatEntry({ droneId, chatName: normalizedChat });
 
-    const { chat } = await getChatEntry({ droneId, chatName: normalizedChat });
-    const agent = inferChatAgent(chat);
+    const { d: dWithChat, chat } = await getChatEntry({ droneId, chatName: normalizedChat });
+    const agent = inferChatAgent(chat, dWithChat);
     const chatModel = normalizeChatModel((chat as any)?.model);
     const managedEnv = resolveDroneEnvironmentConfig(regLatest, d).resolvedVars;
     const managedEnvLines = buildEnvExportLines(managedEnv);
@@ -3467,7 +3467,7 @@ function buildDroneChatStopPlan(opts: {
     if (!chatName) continue;
     chatNames.add(chatName);
 
-    const agent = inferChatAgent(entry);
+    const agent = inferChatAgent(entry, opts.droneEntry);
     if (agent.kind === 'custom') {
       if (runtime !== 'host') sessionNames.add(hubChatSessionName(chatName));
       continue;
@@ -3531,7 +3531,7 @@ async function markDronePendingPromptsStopped(opts: {
     const chats = d?.chats && typeof d.chats === 'object' ? Object.entries(d.chats) : [];
 
     for (const [chatName, entry] of chats as Array<[string, any]>) {
-      const agent = inferChatAgent(entry);
+      const agent = inferChatAgent(entry, d);
       if (agent.kind !== 'builtin') continue;
       const stopped = markChatPendingPromptsStopped(entry, { runtime, stopError });
       for (const promptId of stopped.promptIds) promptIds.add(promptId);
@@ -3806,7 +3806,7 @@ async function stopChatResponse(opts: {
 }): Promise<StopChatResponseResult> {
   await ensureChatEntry({ droneId: opts.droneId, chatName: opts.chatName });
   const { chat } = await getChatEntry({ droneId: opts.droneId, chatName: opts.chatName });
-  const agent = inferChatAgent(chat);
+  const agent = inferChatAgent(chat, opts.droneEntry);
   if (agent.kind === 'builtin') {
     return await stopTranscriptChatResponse(opts);
   }
@@ -4517,8 +4517,8 @@ async function startPromptAutomationJob(opts: {
   if (!automationId) throw new Error('missing automation id');
 
   await ensureChatEntry({ droneId, chatName });
-  const { chat } = await getChatEntry({ droneId, chatName });
-  const agent = inferChatAgent(chat);
+  const { d, chat } = await getChatEntry({ droneId, chatName });
+  const agent = inferChatAgent(chat, d);
   if (!(agent.kind === 'builtin')) {
     throw new Error('automation requires a builtin transcript agent');
   }
@@ -4630,7 +4630,7 @@ async function pumpQueuedPendingPromptsForChat(opts: { droneId: string; chatName
   // Avoid unbounded loops if state keeps changing due to concurrent requests.
   for (let attempts = 0; attempts < 50; attempts++) {
     const { d, chat } = await getChatEntry({ droneId, chatName });
-    const agent = inferChatAgent(chat);
+    const agent = inferChatAgent(chat, d);
     if (!agent || agent.kind !== 'builtin') return;
 
     const entry: any = chat;
@@ -4902,7 +4902,7 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
 
   const entry = d?.chats?.[opts.chatName];
   if (!entry) return;
-  const agent = inferChatAgent(entry);
+  const agent = inferChatAgent(entry, d);
   if (!agent || agent.kind !== 'builtin') return;
 
   const pendingList: any[] = Array.isArray(entry?.pendingPrompts) ? entry.pendingPrompts : [];
@@ -5203,7 +5203,7 @@ async function enqueuePrompt(opts: {
   await ensureChatEntry({ droneId, chatName });
   const { d, chat } = await getChatEntry({ droneId, chatName });
   const runtime = droneRuntime(d);
-  const agent = inferChatAgent(chat);
+  const agent = inferChatAgent(chat, d);
   const turns: any[] = Array.isArray((chat as any)?.turns) ? (chat as any).turns : [];
   const transcriptDoneIds = new Set(turns.map((t: any) => String(t?.id ?? '').trim()).filter(Boolean));
   const priorPending: any[] = Array.isArray((chat as any)?.pendingPrompts) ? (chat as any).pendingPrompts : [];
@@ -5677,7 +5677,7 @@ async function provisionDroneFromPending(name: string) {
         const cloned: any = {};
         for (const [chatName, entryRaw] of Object.entries(srcChats)) {
           const entry = cloneChatEntryForDroneClone(entryRaw);
-          const agent = inferChatAgent(entry);
+          const agent = inferChatAgent(entry, dst);
           const model = normalizeChatModel(entry?.model);
           const createdAt = typeof entry?.createdAt === 'string' && entry.createdAt.trim() ? String(entry.createdAt) : nowIso();
           entry.createdAt = createdAt;
@@ -6297,7 +6297,7 @@ async function archiveChatById(opts: {
     };
     delete droneEntry.chats[chatName];
     if (Object.keys(droneEntry.chats).length === 0) {
-      droneEntry.chats.default = { createdAt: nowIso(), agent: { kind: 'builtin', id: 'cursor' } };
+      droneEntry.chats.default = { createdAt: nowIso(), agent: defaultChatAgentConfigForDrone(droneEntry) };
     }
     regAny.drones = regAny.drones ?? {};
     regAny.drones[droneId] = droneEntry;
@@ -6903,6 +6903,14 @@ function resolveHubTerminalShellCommand(): string {
   return resolveContainerTerminalShellCommand(process.env);
 }
 
+function defaultBuiltinChatAgentIdForDrone(droneEntry: any): BuiltinAgentId {
+  return String(droneEntry?.fleet?.createdBy ?? '').trim() ? 'codex' : 'cursor';
+}
+
+function defaultChatAgentConfigForDrone(droneEntry: any): ChatAgentConfig {
+  return { kind: 'builtin', id: defaultBuiltinChatAgentIdForDrone(droneEntry) };
+}
+
 function hubChatSessionName(chatName: string): string {
   return `drone-hub-chat-${sanitizeTmuxSessionName(chatName || 'default')}`;
 }
@@ -7012,16 +7020,16 @@ async function ensureChatEntry(opts: { droneId: string; chatName: string }): Pro
     if (!d) throw new Error(`unknown drone: ${opts.droneId}`);
     d.chats = d.chats ?? {};
     if (!d.chats[opts.chatName]) {
-      // Default new chats to builtin Cursor transcript mode (chat bubbles).
+      // Fleet-created drones default to Codex; other drones keep Cursor.
       // NOTE: chatId is intentionally omitted (it is created lazily on first prompt).
-      d.chats[opts.chatName] = { createdAt: new Date().toISOString(), agent: { kind: 'builtin', id: 'cursor' } } as any;
+      d.chats[opts.chatName] = { createdAt: new Date().toISOString(), agent: defaultChatAgentConfigForDrone(d) } as any;
       reg.drones = reg.drones ?? {};
       reg.drones[droneId] = d;
     }
   });
 }
 
-function inferChatAgent(entry: any): ChatAgentConfig {
+function inferChatAgent(entry: any, droneEntry?: any): ChatAgentConfig {
   const agent = entry?.agent as ChatAgentConfig | undefined;
   if (agent && agent.kind === 'builtin') {
     const builtinId = normalizeBuiltinAgentId(agent.id);
@@ -7033,7 +7041,7 @@ function inferChatAgent(entry: any): ChatAgentConfig {
     const command = String((agent as any).command ?? '').trim() || resolveHubAgentCommand();
     return { kind: 'custom', id: id || 'custom', label, command };
   }
-  return { kind: 'builtin', id: 'cursor' };
+  return defaultChatAgentConfigForDrone(droneEntry);
 }
 
 async function getChatEntry(opts: { droneId: string; chatName: string }) {
@@ -7075,8 +7083,8 @@ async function setChatAgentConfig(opts: {
 }
 
 async function resolveChatTmuxCommand(opts: { droneId: string; chatName: string }): Promise<string> {
-  const { chat } = await getChatEntry(opts);
-  const agent = inferChatAgent(chat);
+  const { d, chat } = await getChatEntry(opts);
+  const agent = inferChatAgent(chat, d);
   if (agent.kind === 'builtin') return resolveBuiltinTmuxCommand(agent.id);
   return agent.command || resolveHubAgentCommand();
 }
@@ -15326,7 +15334,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           const droneName = String(resolved.drone?.name ?? droneRef).trim() || droneRef;
           await ensureChatEntry({ droneId, chatName });
           const { d, chat } = await getChatEntry({ droneId, chatName });
-          const agent = inferChatAgent(chat);
+          const agent = inferChatAgent(chat, d);
           if (agent.kind !== 'builtin') {
             json(res, 200, {
               ok: true,
@@ -15411,7 +15419,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               if (copyFrom === 'default' && Object.keys(d.chats).length === 0) {
                 d.chats.default = {
                   createdAt,
-                  agent: { kind: 'builtin', id: 'cursor' },
+                  agent: defaultChatAgentConfigForDrone(d),
                 };
               } else {
                 throw new Error(`unknown chat: ${copyFrom}`);
@@ -15419,14 +15427,14 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             }
             let entry: any = {
               createdAt,
-              agent: { kind: 'builtin', id: 'cursor' },
+              agent: defaultChatAgentConfigForDrone(d),
             };
             if (copyFrom) {
               const source = d.chats?.[copyFrom];
               if (!source) throw new Error(`unknown chat: ${copyFrom}`);
               entry = {
                 createdAt,
-                agent: inferChatAgent(source),
+                agent: inferChatAgent(source, d),
                 ...(normalizeChatModel(source?.model) ? { model: normalizeChatModel(source?.model) } : {}),
               };
             }
@@ -15637,7 +15645,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             if (!d.chats?.[chatName]) throw new Error(`unknown chat: ${chatName}`);
             delete d.chats[chatName];
             if (Object.keys(d.chats).length === 0) {
-              d.chats.default = { createdAt: nowIso(), agent: { kind: 'builtin', id: 'cursor' } };
+              d.chats.default = { createdAt: nowIso(), agent: defaultChatAgentConfigForDrone(d) };
             }
             regAny.drones = regAny.drones ?? {};
             regAny.drones[droneId] = d;
@@ -15685,7 +15693,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           json(res, 404, { ok: false, error: `unknown chat: ${chatName}` });
           return;
         }
-        const agent = inferChatAgent(c as any);
+        const agent = inferChatAgent(c as any, resolved.drone);
         json(res, 200, {
           ok: true,
           id: droneId,
@@ -15819,7 +15827,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             json(res, 404, { ok: false, error: `unknown chat: ${chatName}` });
             return;
           }
-          const agent = inferChatAgent(c as any);
+          const agent = inferChatAgent(c as any, d);
           if (agent.kind === 'custom') {
             json(res, 410, {
               ok: false,
