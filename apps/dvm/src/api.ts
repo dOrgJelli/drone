@@ -528,15 +528,17 @@ export class DvmApi {
     options: DvmCopyToContainerOptions = {}
   ): Promise<void> {
     const absSrc = path.resolve(String(srcPath));
-    const target = String(destPath);
+    const target = this.normalizeContainerPath(String(destPath));
+    const srcStat = await fs.promises.stat(absSrc);
+    const targetParent = srcStat.isDirectory() ? target : path.posix.dirname(target) || '/';
 
     await this.manager.docker.execCommand(containerName, ['bash', '-lc', 'true']);
-    await this.manager.docker.execCommand(containerName, ['bash', '-lc', `mkdir -p ${JSON.stringify(target)}`]);
 
     if (options.clean) {
       await this.manager.docker.execCommand(containerName, ['bash', '-lc', `rm -rf ${JSON.stringify(target)}`]);
-      await this.manager.docker.execCommand(containerName, ['bash', '-lc', `mkdir -p ${JSON.stringify(target)}`]);
     }
+
+    await this.manager.docker.execCommand(containerName, ['bash', '-lc', `mkdir -p ${JSON.stringify(targetParent)}`]);
 
     await this.manager.docker.copyToContainer(containerName, absSrc, target);
   }

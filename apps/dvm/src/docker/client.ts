@@ -599,7 +599,10 @@ export class DockerClient {
       throw new Error(`Local path not found: ${localPath}`);
     }
 
-    const source = stat.isDirectory() ? path.join(localPath, '.') : localPath;
+    // `path.join(dir, '.')` normalizes back to `dir`, which makes `docker cp`
+    // nest the directory under the target. Preserve the trailing `/.` explicitly
+    // so directory copies transfer contents into the destination.
+    const source = stat.isDirectory() ? `${path.resolve(localPath)}${path.sep}.` : localPath;
     const dest = `${containerName}:${containerPath}`;
 
     await new Promise<void>((resolve, reject) => {

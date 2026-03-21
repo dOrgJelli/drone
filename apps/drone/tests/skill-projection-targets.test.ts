@@ -34,10 +34,10 @@ describe('skill projection targets', () => {
     });
 
     expect(targets.filter((target) => !target.cleanupOnly)).toEqual([
-      { agent: 'codex', rootPath: '/dvm-data/home/.agents/skills' },
-      { agent: 'claude', rootPath: '/dvm-data/home/.claude/skills' },
-      { agent: 'cursor', rootPath: '/dvm-data/home/.cursor/skills' },
-      { agent: 'opencode', rootPath: '/dvm-data/home/.config/opencode/skills' },
+      { agent: 'codex', rootPath: '/root/.agents/skills' },
+      { agent: 'claude', rootPath: '/root/.claude/skills' },
+      { agent: 'cursor', rootPath: '/root/.cursor/skills' },
+      { agent: 'opencode', rootPath: '/root/.config/opencode/skills' },
     ]);
     expect(targets.filter((target) => target.cleanupOnly)).toEqual([
       { agent: 'codex', rootPath: '/work/repo/.agents/skills', cleanupOnly: true },

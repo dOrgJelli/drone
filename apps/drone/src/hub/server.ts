@@ -1251,6 +1251,37 @@ async function importBundleHeadToDroneRef(opts: {
 }
 
 const NON_REPO_HOME_CWD = '/dvm-data/home';
+const CONTAINER_MANAGED_HOME_DIR = '/root';
+
+function containerManagedHomeDir(drone: any): string {
+  void drone;
+  return CONTAINER_MANAGED_HOME_DIR;
+}
+
+export function resolveContainerManagedEnvVars(
+  drone: any,
+  envVars?: Record<string, string> | null,
+): Record<string, string> | null {
+  const merged = envVars ? { ...envVars } : {};
+  if (droneRuntime(drone) !== 'container') {
+    return Object.keys(merged).length > 0 ? merged : null;
+  }
+  const home = containerManagedHomeDir(drone);
+  merged.HOME = home;
+  merged.XDG_CONFIG_HOME = path.posix.join(home, '.config');
+  return merged;
+}
+
+function buildContainerManagedEnvLines(drone: any): string[] {
+  const env = resolveContainerManagedEnvVars(drone);
+  if (!env) return [];
+  const home = String(env.HOME ?? '').trim() || CONTAINER_MANAGED_HOME_DIR;
+  const xdgConfigHome = String(env.XDG_CONFIG_HOME ?? '').trim() || path.posix.join(CONTAINER_MANAGED_HOME_DIR, '.config');
+  return [
+    ...buildEnvExportLines(env),
+    `mkdir -p ${bashQuote(home)} ${bashQuote(xdgConfigHome)} 2>/dev/null || true`,
+  ];
+}
 
 function droneRuntime(drone: any): DroneRuntime {
   return normalizeDroneRuntime((drone as any)?.runtime);
@@ -1352,7 +1383,7 @@ export function buildHostSkillProjectionTargets(drone: any): SkillProjectionTarg
 export function buildContainerSkillProjectionTargets(drone: any): SkillProjectionTarget[] {
   const repoAttached = isRepoAttachedDrone(drone);
   const projectRoot = repoAttached ? droneRepoPathInContainer(drone) : '';
-  const homeRoot = NON_REPO_HOME_CWD;
+  const homeRoot = CONTAINER_MANAGED_HOME_DIR;
   const targets: SkillProjectionTarget[] = [
     { agent: 'codex', rootPath: path.posix.join(homeRoot, '.agents', 'skills') },
     { agent: 'claude', rootPath: path.posix.join(homeRoot, '.claude', 'skills') },
@@ -1388,8 +1419,13 @@ async function syncSkillLibraryForDrone(opts: { droneId: string; droneEntry: any
 
 function buildDockerExecShellCommand(containerName: string, cwdRaw: string): string {
   const cwd = normalizeContainerPath(cwdRaw);
+  const home = containerManagedHomeDir({ runtime: 'container', cwd });
+  const xdgConfigHome = path.posix.join(home, '.config');
   const shellBody = [
     `target=${bashQuote(cwd)}`,
+    `export HOME=${bashQuote(home)}`,
+    `export XDG_CONFIG_HOME=${bashQuote(xdgConfigHome)}`,
+    'mkdir -p "$HOME" "$XDG_CONFIG_HOME" 2>/dev/null || true',
     'mkdir -p "$target" 2>/dev/null || true',
     'cd "$target" 2>/dev/null || cd /',
     // Some images export ENV/BASH_ENV startup files with bashisms (`source`).
@@ -2691,6 +2727,7 @@ async function sendPromptToChat(opts: {
       const modelArg = chatModel ? ` --model ${bashQuote(chatModel)}` : '';
       const script = [
         'set -euo pipefail',
+        ...buildContainerManagedEnvLines(d),
         ...managedEnvLines,
         `mkdir -p ${bashQuote(cwd)} 2>/dev/null || true`,
         cdCommand,
@@ -2707,6 +2744,7 @@ async function sendPromptToChat(opts: {
       if (!existingThreadId) {
         const script = [
           'set -euo pipefail',
+          ...buildContainerManagedEnvLines(d),
           ...managedEnvLines,
           `mkdir -p ${bashQuote(cwd)} 2>/dev/null || true`,
           cdCommand,
@@ -2718,6 +2756,7 @@ async function sendPromptToChat(opts: {
 
       const script = [
         'set -euo pipefail',
+        ...buildContainerManagedEnvLines(d),
         ...managedEnvLines,
         `mkdir -p ${bashQuote(cwd)} 2>/dev/null || true`,
         cdCommand,
@@ -2740,6 +2779,7 @@ async function sendPromptToChat(opts: {
       const modelArg = chatModel && supportsModel ? ` --model ${bashQuote(chatModel)}` : '';
       const script = [
         'set -euo pipefail',
+        ...buildContainerManagedEnvLines(d),
         ...managedEnvLines,
         `mkdir -p ${bashQuote(cwd)} 2>/dev/null || true`,
         cdCommand,
@@ -2765,6 +2805,7 @@ async function sendPromptToChat(opts: {
       const resumeArg = openCodeSessionId ? ` --session ${bashQuote(openCodeSessionId)}` : '';
       const script = [
         'set -euo pipefail',
+        ...buildContainerManagedEnvLines(d),
         ...managedEnvLines,
         `mkdir -p ${bashQuote(cwd)} 2>/dev/null || true`,
         cdCommand,
@@ -5750,6 +5791,19 @@ async function provisionDroneFromPending(name: string) {
     }
   }
 
+  try {
+    const regAfterCreate: any = await loadRegistry();
+    const createdDrone = findDroneEntryByIdentity(regAfterCreate, pendingDroneId)?.entry ?? null;
+    if (createdDrone) {
+      await syncSkillLibraryForDrone({ droneId: pendingDroneId, droneEntry: createdDrone });
+    }
+  } catch (e: any) {
+    hubLog('warn', 'skill sync failed after drone creation', {
+      droneId: pendingDroneId,
+      error: String(e?.message ?? String(e)),
+    });
+  }
+
   if (!seed) return;
 
   const chatName = normalizeChatName(seed.chatName);
@@ -5833,7 +5887,7 @@ async function upgradeDroneDaemonInContainer(opts: { containerName: string; cont
   if (clearDaemonRuntime.code !== 0) {
     throw new Error(clearDaemonRuntime.stderr || clearDaemonRuntime.stdout || 'failed clearing daemon runtime in container');
   }
-  await dvmCopyToContainer(opts.containerName, resolveDroneDaemonRuntimeDir(), '/dvm-data/drone', { clean: false });
+  await dvmCopyToContainer(opts.containerName, resolveDroneDaemonRuntimeDir(), '/dvm-data/drone/dist', { clean: false });
   const installFleetCli = await dvmExec(opts.containerName, 'bash', ['-lc', installFleetCliScript()]);
   if (installFleetCli.code !== 0) {
     throw new Error(installFleetCli.stderr || installFleetCli.stdout || 'failed installing fleet CLI in container');
@@ -7181,9 +7235,17 @@ async function ensureCursorChatId(opts: {
           cwd: String(opts.cwd ?? '').trim() || undefined,
           timeoutMs: defaultSeedBootstrapTimeoutMs(),
         })
-      : await dvmExec(opts.containerName, 'bash', ['-lc', 'agent create-chat'], {
-          timeoutMs: defaultSeedBootstrapTimeoutMs(),
-        });
+      : await dvmExec(
+          opts.containerName,
+          'bash',
+          [
+            '-lc',
+            [...buildContainerManagedEnvLines({ runtime: 'container', cwd: opts.cwd ?? null }), 'agent create-chat'].join('\n'),
+          ],
+          {
+            timeoutMs: defaultSeedBootstrapTimeoutMs(),
+          },
+        );
   if (r.code !== 0) throw new Error((r.stderr || r.stdout || 'agent create-chat failed').trim());
   const id = parseUuid(`${r.stdout}\n${r.stderr}`);
   if (!id) throw new Error(`failed to parse chatId from agent create-chat output: ${r.stdout || r.stderr || '(empty)'}`);
@@ -14116,6 +14178,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         const cwd = normalizeDroneUiCwdForRuntime(d, u.searchParams.get('cwd') ?? null);
         const regAny: any = await loadRegistry();
         const managedEnv = resolveDroneEnvironmentConfig(regAny, d).resolvedVars;
+        const runtimeEnv = resolveContainerManagedEnvVars(d, managedEnv);
         const managedEnvLines = buildEnvExportLines(managedEnv);
 
         try {
@@ -14180,7 +14243,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
                 chatName,
                 command: tmuxCmd,
                 cwd,
-                envVars: managedEnv,
+                envVars: runtimeEnv,
               });
               json(res, 200, { ok: true, id: idForOps, name: droneName, mode, chat: chatName, cwd, sessionName });
               return;
@@ -14192,7 +14255,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               sessionName,
               command: resolveHubTerminalShellCommand(),
               cwd,
-              envVars: managedEnv,
+              envVars: runtimeEnv,
             });
             json(res, 200, { ok: true, id: idForOps, name: droneName, mode, chat: null, cwd, sessionName });
           });
@@ -14393,6 +14456,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           'export TERM=xterm-256color',
           'export COLORTERM=truecolor',
         ].join('; ');
+        const containerSessionEnv = buildContainerManagedEnvLines(drone).join('; ');
         const cwd = normalizeDroneUiCwdForRuntime(drone, u.searchParams.get('cwd') ?? null);
 
         if (runtime === 'host') {
@@ -14445,7 +14509,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         const agentAttachCmd = buildDockerExecTmuxAttachCommand(containerName, sessionName);
         let agentPrepError: string | null = null;
         if (mode === 'agent') {
-          const agentShell = `set -e; ${agentSessionEnv}; mkdir -p ${bashQuote(cwd)} 2>/dev/null || true; cd ${bashQuote(cwd)} 2>/dev/null || cd /dvm-data; exec ${agentCmd}`;
+          const agentShell = `set -e; ${containerSessionEnv}; ${agentSessionEnv}; mkdir -p ${bashQuote(cwd)} 2>/dev/null || true; cd ${bashQuote(cwd)} 2>/dev/null || cd /dvm-data; exec ${agentCmd}`;
           try {
             await dvmSessionStart(containerName, sessionName, 'bash', ['-lc', agentShell], true);
             const tmuxTuneCommands = [
