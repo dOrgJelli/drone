@@ -261,7 +261,7 @@ describeSocketSuite('prompt automation api', () => {
         chats: {
           default: {
             createdAt: now,
-            agent: { kind: 'builtin', id: 'cursor' },
+            agent: { kind: 'builtin', id: 'claude' },
             turns: [],
             pendingPrompts: [],
           },
