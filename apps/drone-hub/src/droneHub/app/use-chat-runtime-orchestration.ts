@@ -121,6 +121,16 @@ export function useChatRuntimeOrchestration({
   const transcriptsRef = React.useRef<TranscriptItem[] | null>(transcripts);
   const transcriptErrorRef = React.useRef<string | null>(transcriptError);
   const sessionTextRef = React.useRef<string>('');
+  const selectedDroneRef = React.useRef(selectedDrone);
+  const selectedChatRef = React.useRef(selectedChat);
+
+  React.useEffect(() => {
+    selectedDroneRef.current = selectedDrone;
+  }, [selectedDrone]);
+
+  React.useEffect(() => {
+    selectedChatRef.current = selectedChat;
+  }, [selectedChat]);
 
   React.useEffect(() => {
     transcriptsRef.current = transcripts;
@@ -248,6 +258,9 @@ export function useChatRuntimeOrchestration({
         return true;
       }
 
+      const originDroneId = currentDrone.id;
+      const originChat = selectedChat || 'default';
+
       setSendingPromptCount((c) => c + 1);
       setPromptError(null);
       setStopResponseError(null);
@@ -266,17 +279,27 @@ export function useChatRuntimeOrchestration({
             body: JSON.stringify({ prompt, attachments }),
           },
         );
-        if (chatUiMode === 'cli') bumpCliTyping();
-        const id = String((data as any)?.promptId ?? '').trim();
-        if (chatUiMode === 'transcript') {
-          addOptimisticPendingPrompt(id, optimisticPrompt, attachments, {
-            state: data?.pendingState,
-            blockedByAutomation: data?.blockedByAutomation === true,
-          });
+        const stillOnSameChat =
+          selectedDroneRef.current === originDroneId &&
+          (selectedChatRef.current || 'default') === originChat;
+        if (stillOnSameChat) {
+          if (chatUiMode === 'cli') bumpCliTyping();
+          const id = String((data as any)?.promptId ?? '').trim();
+          if (chatUiMode === 'transcript') {
+            addOptimisticPendingPrompt(id, optimisticPrompt, attachments, {
+              state: data?.pendingState,
+              blockedByAutomation: data?.blockedByAutomation === true,
+            });
+          }
         }
         return true;
       } catch (e: any) {
-        setPromptError(formatDroneRuntimeError(e));
+        if (
+          selectedDroneRef.current === originDroneId &&
+          (selectedChatRef.current || 'default') === originChat
+        ) {
+          setPromptError(formatDroneRuntimeError(e));
+        }
         return false;
       } finally {
         setSendingPromptCount((c) => Math.max(0, c - 1));
