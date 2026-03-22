@@ -3493,6 +3493,124 @@ type StopChatResponseResult = {
   sessionName?: string | null;
 };
 
+async function stopTranscriptPendingPrompts(opts: {
+  droneId: string;
+  chatName: string;
+  droneEntry: any;
+  promptIds?: string[] | null;
+  includeAutomation?: boolean;
+}): Promise<StopChatResponseResult> {
+  const droneId = normalizeDroneIdentity(opts.droneId);
+  const chatName = normalizeChatName(opts.chatName);
+  if (!droneId) throw new Error('missing droneId');
+
+  await ensureChatEntry({ droneId, chatName });
+  await reconcileChatFromDaemon({ droneId, chatName });
+
+  const pending = await readPendingPrompts({ droneId, chatName });
+  const explicitPromptIds = new Set(
+    Array.isArray(opts.promptIds)
+      ? opts.promptIds.map((id) => String(id ?? '').trim()).filter(Boolean)
+      : [],
+  );
+  const filterByPromptIds = explicitPromptIds.size > 0;
+  const includeAutomation = opts.includeAutomation === true;
+  const cancelable = pending.filter((item) => {
+    if (!item?.id) return false;
+    if (filterByPromptIds) return explicitPromptIds.has(item.id);
+    if (!includeAutomation && item.automation) return false;
+    return item.state === 'queued' || item.state === 'sending' || item.state === 'sent';
+  });
+  if (cancelable.length === 0) {
+    return { mode: 'transcript', stopped: false, stoppedPromptIds: [], clearedPromptIds: [] };
+  }
+
+  const queuedIds = cancelable.filter((item) => item.state === 'queued').map((item) => item.id);
+  const activeIds = cancelable
+    .filter((item) => item.state === 'sending' || item.state === 'sent')
+    .map((item) => item.id);
+
+  if (activeIds.length > 0) {
+    const token = typeof opts.droneEntry?.token === 'string' ? String(opts.droneEntry.token).trim() : '';
+    const containerName = String(opts.droneEntry?.containerName ?? opts.droneEntry?.name ?? droneId).trim() || droneId;
+    const hostPort =
+      typeof opts.droneEntry?.hostPort === 'number' && Number.isFinite(opts.droneEntry.hostPort)
+        ? opts.droneEntry.hostPort
+        : await resolveHostPort(containerName, opts.droneEntry?.containerPort);
+    if (!token || !hostPort) throw new Error('drone daemon not reachable (missing hostPort/token)');
+
+    const client = makeClient(hostPort, token);
+    for (const promptId of activeIds) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await dronePromptCancel(client, promptId);
+      } catch (e: any) {
+        const msg = e?.message ?? String(e);
+        if (!isNotFoundErrorMessage(msg)) throw e;
+      }
+    }
+  }
+
+  const result = await updateRegistry((regAny: any) => {
+    const d = regAny?.drones?.[droneId] ?? null;
+    const entry = d?.chats?.[chatName] ?? null;
+    if (!d || !entry) {
+      return {
+        stoppedPromptIds: [] as string[],
+        clearedPromptIds: [] as string[],
+      };
+    }
+    const turns = Array.isArray(entry.turns) ? entry.turns : [];
+    const transcriptIds = new Set(turns.map((turn: any) => String(turn?.id ?? '').trim()).filter(Boolean));
+    const queuedSet = new Set(queuedIds);
+    const activeSet = new Set(activeIds);
+    const nextPending: any[] = [];
+    const stoppedPromptIds: string[] = [];
+    const clearedPromptIds: string[] = [];
+
+    for (const item of Array.isArray(entry.pendingPrompts) ? entry.pendingPrompts : []) {
+      const id = String(item?.id ?? '').trim();
+      if (!id || transcriptIds.has(id)) {
+        nextPending.push(item);
+        continue;
+      }
+      if (queuedSet.has(id) && String(item?.state ?? '').trim() === 'queued') {
+        clearedPromptIds.push(id);
+        continue;
+      }
+      if (activeSet.has(id)) {
+        const state = String(item?.state ?? '').trim();
+        if (state === 'sending' || state === 'sent' || state === 'queued') {
+          nextPending.push({
+            ...item,
+            state: 'failed',
+            error: state === 'queued' ? STOPPED_BEFORE_SUBMISSION_ERROR : STOPPED_BY_USER_ERROR,
+            updatedAt: nowIso(),
+          });
+          stoppedPromptIds.push(id);
+          continue;
+        }
+      }
+      nextPending.push(item);
+    }
+
+    entry.pendingPrompts = nextPending;
+    d.chats = d.chats ?? {};
+    d.chats[chatName] = entry;
+    regAny.drones = regAny.drones ?? {};
+    regAny.drones[droneId] = d;
+    return { stoppedPromptIds, clearedPromptIds };
+  });
+
+  enqueuePendingPromptPump(droneId, chatName);
+  return {
+    mode: 'transcript',
+    stopped: result.stoppedPromptIds.length > 0 || result.clearedPromptIds.length > 0,
+    stoppedPromptIds: result.stoppedPromptIds,
+    clearedPromptIds: result.clearedPromptIds,
+  };
+}
+
 type DroneChatStopReason = 'archive' | 'delete';
 type DroneChatStopPlan = {
   chatNames: string[];
@@ -3732,106 +3850,11 @@ async function stopTranscriptChatResponse(opts: {
   chatName: string;
   droneEntry: any;
 }): Promise<StopChatResponseResult> {
-  const droneId = normalizeDroneIdentity(opts.droneId);
-  const chatName = normalizeChatName(opts.chatName);
-  if (!droneId) throw new Error('missing droneId');
-
-  await ensureChatEntry({ droneId, chatName });
-  await reconcileChatFromDaemon({ droneId, chatName });
-
-  const pending = await readPendingPrompts({ droneId, chatName });
-  const cancelable = pending.filter((item) => {
-    if (!item?.id || item.automation) return false;
-    return item.state === 'queued' || item.state === 'sending' || item.state === 'sent';
+  return await stopTranscriptPendingPrompts({
+    droneId: opts.droneId,
+    chatName: opts.chatName,
+    droneEntry: opts.droneEntry,
   });
-  if (cancelable.length === 0) {
-    return { mode: 'transcript', stopped: false, stoppedPromptIds: [], clearedPromptIds: [] };
-  }
-
-  const queuedIds = cancelable.filter((item) => item.state === 'queued').map((item) => item.id);
-  const activeIds = cancelable
-    .filter((item) => item.state === 'sending' || item.state === 'sent')
-    .map((item) => item.id);
-
-  if (activeIds.length > 0) {
-    const token = typeof opts.droneEntry?.token === 'string' ? String(opts.droneEntry.token).trim() : '';
-    const containerName = String(opts.droneEntry?.containerName ?? opts.droneEntry?.name ?? droneId).trim() || droneId;
-    const hostPort =
-      typeof opts.droneEntry?.hostPort === 'number' && Number.isFinite(opts.droneEntry.hostPort)
-        ? opts.droneEntry.hostPort
-        : await resolveHostPort(containerName, opts.droneEntry?.containerPort);
-    if (!token || !hostPort) throw new Error('drone daemon not reachable (missing hostPort/token)');
-
-    const client = makeClient(hostPort, token);
-    for (const promptId of activeIds) {
-      try {
-        // eslint-disable-next-line no-await-in-loop
-        await dronePromptCancel(client, promptId);
-      } catch (e: any) {
-        const msg = e?.message ?? String(e);
-        if (!isNotFoundErrorMessage(msg)) throw e;
-      }
-    }
-  }
-
-  const result = await updateRegistry((regAny: any) => {
-    const d = regAny?.drones?.[droneId] ?? null;
-    const entry = d?.chats?.[chatName] ?? null;
-    if (!d || !entry) {
-      return {
-        stoppedPromptIds: [] as string[],
-        clearedPromptIds: [] as string[],
-      };
-    }
-    const turns = Array.isArray(entry.turns) ? entry.turns : [];
-    const transcriptIds = new Set(turns.map((turn: any) => String(turn?.id ?? '').trim()).filter(Boolean));
-    const queuedSet = new Set(queuedIds);
-    const activeSet = new Set(activeIds);
-    const nextPending: any[] = [];
-    const stoppedPromptIds: string[] = [];
-    const clearedPromptIds: string[] = [];
-
-    for (const item of Array.isArray(entry.pendingPrompts) ? entry.pendingPrompts : []) {
-      const id = String(item?.id ?? '').trim();
-      if (!id || transcriptIds.has(id)) {
-        nextPending.push(item);
-        continue;
-      }
-      if (queuedSet.has(id) && !item?.automation && String(item?.state ?? '').trim() === 'queued') {
-        clearedPromptIds.push(id);
-        continue;
-      }
-      if (activeSet.has(id) && !item?.automation) {
-        const state = String(item?.state ?? '').trim();
-        if (state === 'sending' || state === 'sent' || state === 'queued') {
-          nextPending.push({
-            ...item,
-            state: 'failed',
-            error: state === 'queued' ? STOPPED_BEFORE_SUBMISSION_ERROR : STOPPED_BY_USER_ERROR,
-            updatedAt: nowIso(),
-          });
-          stoppedPromptIds.push(id);
-          continue;
-        }
-      }
-      nextPending.push(item);
-    }
-
-    entry.pendingPrompts = nextPending;
-    d.chats = d.chats ?? {};
-    d.chats[chatName] = entry;
-    regAny.drones = regAny.drones ?? {};
-    regAny.drones[droneId] = d;
-    return { stoppedPromptIds, clearedPromptIds };
-  });
-
-  enqueuePendingPromptPump(droneId, chatName);
-  return {
-    mode: 'transcript',
-    stopped: result.stoppedPromptIds.length > 0 || result.clearedPromptIds.length > 0,
-    stoppedPromptIds: result.stoppedPromptIds,
-    clearedPromptIds: result.clearedPromptIds,
-  };
 }
 
 async function stopCliChatResponse(opts: {
@@ -14931,20 +14954,41 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         const stopModeRaw = String(body?.stopMode ?? body?.mode ?? '').trim().toLowerCase();
         const stopMode: PromptAutomationStopMode = stopModeRaw === 'runs-only' ? 'runs-only' : 'all';
         const clearQueued = body?.clearQueued === false ? false : true;
-        const resolved = await resolveDroneOrRespond(res, droneRef);
-        if (!resolved) return;
-        const droneId = resolved.id;
-        const droneName = String(resolved.drone?.name ?? droneRef).trim() || droneRef;
-        const lane = stopPromptAutomationJob({ droneId, chatName, stopMode, clearQueued });
-        json(res, 200, {
-          ok: true,
-          automation: 'prompt-loop',
-          id: droneId,
-          name: droneName,
-          chat: chatName,
-          job: promptAutomationJobResponse(lane),
-        });
-        return;
+        try {
+          const resolved = await resolveDroneOrRespond(res, droneRef);
+          if (!resolved) return;
+          const droneId = resolved.id;
+          const droneName = String(resolved.drone?.name ?? droneRef).trim() || droneRef;
+          const runningPromptId = String(getPromptAutomationLane(droneId, chatName)?.runningJob?.lastPromptId ?? '').trim();
+          const lane = stopPromptAutomationJob({ droneId, chatName, stopMode, clearQueued });
+          if (stopMode === 'all' && runningPromptId) {
+            await stopTranscriptPendingPrompts({
+              droneId,
+              chatName,
+              droneEntry: resolved.drone,
+              promptIds: [runningPromptId],
+              includeAutomation: true,
+            });
+          }
+          json(res, 200, {
+            ok: true,
+            automation: 'prompt-loop',
+            id: droneId,
+            name: droneName,
+            chat: chatName,
+            job: promptAutomationJobResponse(lane),
+          });
+          return;
+        } catch (e: any) {
+          const msg = String(e?.message ?? e ?? '').trim();
+          const code =
+            /still starting/i.test(msg) ? 409
+            : /unknown drone/i.test(msg) || /unknown chat/i.test(msg) ? 404
+            : /drone daemon not reachable/i.test(msg) ? 409
+            : 500;
+          json(res, code, { ok: false, error: msg || 'failed stopping automation' });
+          return;
+        }
       }
 
       // DELETE /api/drones/:id/chats/:chat/automations/queued/:queueId
