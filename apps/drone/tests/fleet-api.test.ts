@@ -234,6 +234,69 @@ describeSocketSuite('fleet api', () => {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
+  test('normalizes fleet relationship refs to stable drone ids in drone summaries', async () => {
+    const now = new Date().toISOString();
+    await updateRegistry((reg: any) => {
+      reg.drones = {
+        'fleet-chat-manager': {
+          id: 'owner-id',
+          name: 'fleet-chat-manager',
+          hostPort: null,
+          token: 'owner-token',
+          runtime: 'host',
+          containerPort: 7777,
+          repoPath: '',
+          createdAt: now,
+          chats: { default: { createdAt: now, turns: [], pendingPrompts: [] } },
+          fleet: {
+            createdBy: null,
+            assigned: ['worker-a', 'worker-b'],
+          },
+        },
+        'worker-a': {
+          id: 'worker-a-id',
+          name: 'worker-a',
+          hostPort: null,
+          token: 'worker-a-token',
+          runtime: 'host',
+          containerPort: 7777,
+          repoPath: '',
+          createdAt: now,
+          chats: { default: { createdAt: now, turns: [], pendingPrompts: [] } },
+          fleet: {
+            createdBy: 'fleet-chat-manager',
+            assigned: [],
+          },
+        },
+        'worker-b': {
+          id: 'worker-b-id',
+          name: 'worker-b',
+          hostPort: null,
+          token: 'worker-b-token',
+          runtime: 'host',
+          containerPort: 7777,
+          repoPath: '',
+          createdAt: now,
+          chats: { default: { createdAt: now, turns: [], pendingPrompts: [] } },
+          fleet: {
+            createdBy: null,
+            assigned: [],
+          },
+        },
+      };
+      reg.pending = {};
+    });
+
+    const dronesResp = await apiFetch('/api/drones');
+    expect(dronesResp.r.status).toBe(200);
+    const droneById = Object.fromEntries((dronesResp.data?.drones ?? []).map((item: any) => [String(item?.id ?? ''), item]));
+    expect(droneById['owner-id']?.fleetAssignedIds).toEqual(['worker-a-id', 'worker-b-id']);
+    expect(droneById['worker-a-id']?.fleetParentId).toBe('owner-id');
+
+    const actorResp = await apiFetch('/api/fleet/actors/owner-id');
+    expect(actorResp.r.status).toBe(200);
+  });
+
   test('persists fleet config and assignment and syncs policy to the daemon', async () => {
     const parentDaemon = await startStubDaemon('parent-token');
     const childDaemon = await startStubDaemon('child-token');

@@ -407,6 +407,15 @@ function findDroneIdByRef(regAny: any, refRaw: string): { kind: 'real' | 'pendin
   if (!ref) return null;
   if (regAny?.drones?.[ref]) return { kind: 'real', id: ref };
   if (regAny?.pending?.[ref]) return { kind: 'pending', id: ref };
+  const stableRef = normalizeDroneIdentity(ref);
+  if (stableRef) {
+    for (const [id, d] of Object.entries(regAny?.drones ?? {})) {
+      if (normalizeDroneIdentity((d as any)?.id) === stableRef) return { kind: 'real', id: String(id) };
+    }
+    for (const [id, d] of Object.entries(regAny?.pending ?? {})) {
+      if (normalizeDroneIdentity((d as any)?.id) === stableRef) return { kind: 'pending', id: String(id) };
+    }
+  }
   for (const [id, d] of Object.entries(regAny?.drones ?? {})) {
     if (String((d as any)?.name ?? '').trim() === ref) return { kind: 'real', id: String(id) };
   }
@@ -414,6 +423,27 @@ function findDroneIdByRef(regAny: any, refRaw: string): { kind: 'real' | 'pendin
     if (String((d as any)?.name ?? '').trim() === ref) return { kind: 'pending', id: String(id) };
   }
   return null;
+}
+
+function resolveStableDroneOrPendingIdFromRef(regAny: any, refRaw: unknown): string | null {
+  const ref = String(refRaw ?? '').trim();
+  if (!ref) return null;
+  const found = findDroneIdByRef(regAny, ref);
+  if (!found) return normalizeDroneIdentity(ref) || null;
+  const entry = found.kind === 'real' ? regAny?.drones?.[found.id] : regAny?.pending?.[found.id];
+  return normalizeDroneIdentity((entry as any)?.id) || normalizeDroneIdentity(found.id) || String(found.id).trim() || null;
+}
+
+function normalizeFleetAssignedRefsForSummary(regAny: any, actorIdRaw: unknown, assignedRaw: unknown): string[] {
+  const actorId = normalizeDroneIdentity(actorIdRaw);
+  if (!Array.isArray(assignedRaw)) return [];
+  return Array.from(
+    new Set(
+      assignedRaw
+        .map((item) => resolveStableDroneOrPendingIdFromRef(regAny, item))
+        .filter((item): item is string => Boolean(item) && item !== actorId),
+    ),
+  );
 }
 
 async function resolveDroneFromRegistry(
@@ -9652,8 +9682,8 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             name: String(p?.name ?? ''),
             group: typeof p?.group === 'string' && p.group.trim() ? p.group.trim() : null,
             createdAt: String(p?.createdAt ?? nowIso()),
-            fleetParentId: fleetActorConfig(p).createdBy,
-            fleetAssignedIds: fleetActorConfig(p).assigned,
+            fleetParentId: resolveStableDroneOrPendingIdFromRef(regAny, fleetActorConfig(p).createdBy),
+            fleetAssignedIds: normalizeFleetAssignedRefsForSummary(regAny, p?.id, fleetActorConfig(p).assigned),
             runtime,
             repoAttached,
             repoPath: repoAttached ? String(p?.repoPath ?? '') : '',
@@ -9734,8 +9764,8 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               name: d.name,
               group: d.group ?? null,
               createdAt: d.createdAt,
-              fleetParentId: fleetActorConfig(d).createdBy,
-              fleetAssignedIds: fleetActorConfig(d).assigned,
+              fleetParentId: resolveStableDroneOrPendingIdFromRef(regAny, fleetActorConfig(d).createdBy),
+              fleetAssignedIds: normalizeFleetAssignedRefsForSummary(regAny, d?.id, fleetActorConfig(d).assigned),
               runtime,
               repoAttached,
               repoPath: repoAttached ? repoPath : '',

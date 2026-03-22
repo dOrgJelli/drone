@@ -39,11 +39,12 @@ import {
   useDroneCanvasStore,
 } from './use-drone-canvas-store';
 import {
-  buildLineagePath,
   measureRectInWorldSpace,
-  resolveLineageEndpoint,
   type CanvasRect,
 } from './lineage-geometry';
+import {
+  buildCanvasRelationshipEdges,
+} from './relationship-edges';
 
 const NODE_HEIGHT_PX = 54;
 const DROP_STACK_SPACING_Y_PX = 48;
@@ -102,12 +103,6 @@ type DroneCanvasIndicatorState = {
   hubMessage?: DroneSummary['hubMessage'];
   busy: boolean;
   unreadAgentMessage: boolean;
-};
-
-type CanvasLineageEdge = {
-  key: string;
-  path: string;
-  variant: 'lineage' | 'assigned';
 };
 
 function resolveCanvasAssignmentDropTarget(
@@ -531,40 +526,13 @@ export function DroneCanvasDock({
     return out;
   }, [nodes]);
   const relationshipEdges = React.useMemo(() => {
-    const edges: CanvasLineageEdge[] = [];
-    for (const [childDroneId, parentDroneId] of Object.entries(fleetParentIdByDroneId)) {
-      const childNode = preferredNodeByDroneId[childDroneId];
-      const parentNode = preferredNodeByDroneId[parentDroneId];
-      if (!childNode || !parentNode) continue;
-      const source = renderedNodeBoundsById[parentNode.droneId] ?? fallbackNodeBoundsById[parentNode.droneId];
-      const target = renderedNodeBoundsById[childNode.droneId] ?? fallbackNodeBoundsById[childNode.droneId];
-      if (!source || !target) continue;
-      const { startX, startY, endX, endY } = resolveLineageEndpoint(source, target);
-      edges.push({
-        key: `${parentDroneId}->${childDroneId}`,
-        path: buildLineagePath(startX, startY, endX, endY),
-        variant: 'lineage',
-      });
-    }
-    for (const [ownerDroneId, assignedDroneIds] of Object.entries(fleetAssignedIdsByDroneId)) {
-      const ownerNode = preferredNodeByDroneId[ownerDroneId];
-      if (!ownerNode) continue;
-      for (const assignedDroneId of assignedDroneIds) {
-        if (fleetParentIdByDroneId[assignedDroneId] === ownerDroneId) continue;
-        const targetNode = preferredNodeByDroneId[assignedDroneId];
-        if (!targetNode) continue;
-        const source = renderedNodeBoundsById[ownerNode.droneId] ?? fallbackNodeBoundsById[ownerNode.droneId];
-        const target = renderedNodeBoundsById[targetNode.droneId] ?? fallbackNodeBoundsById[targetNode.droneId];
-        if (!source || !target) continue;
-        const { startX, startY, endX, endY } = resolveLineageEndpoint(source, target);
-        edges.push({
-          key: `${ownerDroneId}=>${assignedDroneId}`,
-          path: buildLineagePath(startX, startY, endX, endY),
-          variant: 'assigned',
-        });
-      }
-    }
-    return edges;
+    return buildCanvasRelationshipEdges({
+      preferredNodeByDroneId,
+      renderedNodeBoundsById,
+      fallbackNodeBoundsById,
+      fleetParentIdByDroneId,
+      fleetAssignedIdsByDroneId,
+    });
   }, [
     fallbackNodeBoundsById,
     fleetAssignedIdsByDroneId,

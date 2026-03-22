@@ -59,6 +59,10 @@ import { useWorkspaceActions } from './droneHub/app/use-workspace-actions';
 import { busyChatNodeIdsForDrone, droneChatNodeIds, normalizedDroneChats } from './droneHub/app/chat-node-helpers';
 import { orderSidebarEntries } from './droneHub/app/sidebar-group-order';
 import {
+  buildFleetAssignedIdsByDroneId,
+  buildFleetParentIdByDroneId,
+} from './droneHub/app/fleet-relationship-refs';
+import {
   useDroneHubSidebarProps,
   useDroneHubOverlaysProps,
   useDroneHubWorkspaceContentProps,
@@ -334,32 +338,10 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     return out;
   }, [drones]);
   const fleetParentIdByDroneId = React.useMemo(() => {
-    const out: Record<string, string> = {};
-    for (const drone of drones) {
-      const id = String(drone?.id ?? '').trim();
-      const parentId = String(drone?.fleetParentId ?? '').trim();
-      if (!id || !parentId) continue;
-      out[id] = parentId;
-    }
-    return out;
+    return buildFleetParentIdByDroneId(drones);
   }, [drones]);
   const fleetAssignedIdsByDroneId = React.useMemo(() => {
-    const out: Record<string, string[]> = {};
-    for (const drone of drones) {
-      const id = String(drone?.id ?? '').trim();
-      if (!id) continue;
-      const assignedIds = Array.isArray(drone?.fleetAssignedIds)
-        ? Array.from(
-            new Set(
-              drone.fleetAssignedIds
-                .map((item) => String(item ?? '').trim())
-                .filter((item) => item && item !== id),
-            ),
-          )
-        : [];
-      if (assignedIds.length > 0) out[id] = assignedIds;
-    }
-    return out;
+    return buildFleetAssignedIdsByDroneId(drones);
   }, [drones]);
   const validChatNodeIdSet = React.useMemo(() => {
     const out = new Set<string>();
