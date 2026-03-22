@@ -102,8 +102,8 @@ export function ImageAttachmentChips({
   droneHomePath?: string;
   onOpenFileReference?: (ref: MarkdownFileReference) => void;
 }) {
-  if (attachments.length === 0) return null;
   const [thumbFailCountByKey, setThumbFailCountByKey] = React.useState<Record<string, number>>({});
+  if (attachments.length === 0) return null;
   return (
     <div className="mt-2 flex flex-wrap items-center gap-1.5">
       {attachments.map((a, idx) => {

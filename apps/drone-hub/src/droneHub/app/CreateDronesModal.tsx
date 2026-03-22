@@ -110,10 +110,7 @@ export function CreateDronesModal({
       : '';
   const hostRuntimeSelected = createMode !== 'clone' && createRuntime === 'host';
   const hostCustomAgentsUnsupported = hostRuntimeSelected;
-  const filteredSpawnAgentMenuEntries = React.useMemo(
-    () => filterSpawnAgentMenuEntriesForRuntime(createRuntime, spawnAgentMenuEntries),
-    [createRuntime, spawnAgentMenuEntries],
-  );
+  const filteredSpawnAgentMenuEntries = filterSpawnAgentMenuEntriesForRuntime(createRuntime, spawnAgentMenuEntries);
 
   return (
     <div

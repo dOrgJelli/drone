@@ -55,18 +55,15 @@ export function CreateDronesFromAgentMessageModal(props: {
 }) {
   const { jobsModal } = props;
   if (!jobsModal) return null;
-  const agentMenuEntries = React.useMemo(
-    () => [
-      ...props.builtinAgentOptions.map((o) => ({ value: o.key, label: o.label })),
-      ...(props.customAgents.length > 0
-        ? [
-            { kind: 'separator' as const },
-            ...props.customAgents.map((a) => ({ value: `custom:${a.id}`, label: `Custom: ${a.label}` })),
-          ]
-        : []),
-    ],
-    [props.builtinAgentOptions, props.customAgents]
-  );
+  const agentMenuEntries = [
+    ...props.builtinAgentOptions.map((o) => ({ value: o.key, label: o.label })),
+    ...(props.customAgents.length > 0
+      ? [
+          { kind: 'separator' as const },
+          ...props.customAgents.map((a) => ({ value: `custom:${a.id}`, label: `Custom: ${a.label}` })),
+        ]
+      : []),
+  ];
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(0,0,0,.55)] backdrop-blur-sm px-4" role="dialog" aria-modal="true">
