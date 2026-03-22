@@ -8974,9 +8974,9 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             if (targetFound.id === resolved.id) throw fleetError('cannot assign actor to itself', 400);
             const current = fleetActorConfig(actor);
             setFleetActorConfig(actor, {
-              enabled: current.enabled,
-              capabilities: current.capabilities,
-              readScopes: current.readScopes,
+              enabled: true,
+              capabilities: Array.from(new Set([...current.capabilities, FLEET_CAPABILITY_SEND, FLEET_CAPABILITY_READ])),
+              readScopes: Array.from(new Set([...current.readScopes, 'assigned'])),
               assigned: Array.from(new Set([...current.assigned, targetFound.id])),
               quotas: current.quotas,
               createdBy: current.createdBy,

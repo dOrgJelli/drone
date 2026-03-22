@@ -23,6 +23,8 @@ import type { DroneSidebarProps } from './droneHub/app/DroneSidebar';
 import type { DroneHubOverlaysProps } from './droneHub/app/DroneHubOverlays';
 import type { DroneHubWorkspaceContentProps } from './droneHub/app/DroneHubWorkspaceContent';
 import { RightPanelTabContent } from './droneHub/app/RightPanelTabContent';
+import { dispatchFleetAssignmentUpdated } from './droneHub/app/fleet-assignment-events';
+import { assignFleetTargets } from './droneHub/fleet/fleet-api';
 import { useHubLogs } from './droneHub/app/use-hub-logs';
 import { useCreateDroneRowsState } from './droneHub/app/use-create-drone-rows-state';
 import { useCreateDraftWorkflowState } from './droneHub/app/use-create-draft-workflow-store';
@@ -1660,6 +1662,23 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     },
     [selectDroneChat, sidebarSelectableDroneIdSet],
   );
+  const assignCanvasDronesToOwner = React.useCallback(
+    async (ownerDroneIdRaw: string, targetDroneIdsRaw: string[]): Promise<{ ok: boolean; error?: string | null }> => {
+      const ownerDroneId = String(ownerDroneIdRaw ?? '').trim();
+      if (!ownerDroneId) return { ok: false, error: 'Missing fleet owner.' };
+      try {
+        const latest = await assignFleetTargets(ownerDroneId, targetDroneIdsRaw);
+        if (latest) dispatchFleetAssignmentUpdated({ ownerDroneId, actor: latest });
+        return { ok: true, error: null };
+      } catch (error: any) {
+        return {
+          ok: false,
+          error: String(error?.message ?? error ?? '').trim() || 'Failed to assign drones.',
+        };
+      }
+    },
+    [],
+  );
   const sendCanvasPrompt = React.useCallback(
     async (
       targetsRaw: Array<{ droneId: string; chatName: string }>,
@@ -2007,6 +2026,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
           draftRepoLabel={canvasDraftRepoLabel}
           chatNodeStateById={chatNodeStateById}
           onActivateChatFromCanvas={onActivateChatFromCanvas}
+          onAssignCanvasDronesToOwner={assignCanvasDronesToOwner}
           onSendCanvasPrompt={sendCanvasPrompt}
           onCreateCanvasDroneFromDraft={createCanvasDroneFromDraft}
           onRenameCanvasChat={renameCanvasChat}
@@ -2108,6 +2128,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     },
     [
       agentLabel,
+      assignCanvasDronesToOwner,
       currentDrone?.id,
       currentFsPath,
       currentPortReachability,

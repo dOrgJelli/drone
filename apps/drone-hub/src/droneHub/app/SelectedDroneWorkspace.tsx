@@ -50,6 +50,7 @@ import { resolveRunningPromptLoopIdentity } from './prompt-loop-running-identity
 import {
   parseGithubPullRequestHref,
 } from './selected-drone-workspace-utils';
+import { useFleetAssignmentDropState } from './use-fleet-assignment-drop-state';
 
 const EMPTY_SIDEBAR_CHAT_ORDER: string[] = [];
 
@@ -298,6 +299,26 @@ export function SelectedDroneWorkspace({
     [currentDrone, selectedChat],
   );
   const hostRuntime = String(currentDrone.runtime ?? '').trim().toLowerCase() === 'host';
+  const {
+    fleetBadgeAssigning,
+    fleetBadgeDropActive,
+    fleetBadgeError,
+    fleetBadgeSummaryText,
+    fleetBadgeTitle,
+    fleetDropHintVisible,
+    fleetDropHintText,
+    onFleetDropDragLeave,
+    onFleetDropDragOver,
+    onFleetDropDrop,
+    openFleetTab,
+    setFleetDropNodeRef,
+  } = useFleetAssignmentDropState({
+    currentDrone,
+    currentDroneLabel,
+    openDroneErrorModal,
+    setRightPanelOpen,
+    setRightPanelTab,
+  });
   const openChatErrorDetails = React.useCallback(() => {
     const message = String(chatInfoError ?? '').trim();
     if (!message) return;
@@ -688,6 +709,27 @@ export function SelectedDroneWorkspace({
                     <StatusBadge ok={currentDrone.statusOk} error={currentDrone.statusError} hubPhase={currentDrone.hubPhase} hubMessage={currentDrone.hubMessage} />
                   )}
                   {currentDrone.group && <GroupBadge group={currentDrone.group} />}
+                  <button
+                    type="button"
+                    onClick={openFleetTab}
+                    className={cn(
+                      'inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-[10px] font-semibold transition-all',
+                      fleetBadgeDropActive
+                        ? 'border-[var(--accent)] bg-[var(--accent-subtle)] text-[var(--fg-secondary)] shadow-[0_0_0_1px_rgba(167,139,250,.18)]'
+                        : fleetBadgeError
+                          ? 'border-[rgba(255,90,90,.28)] bg-[rgba(52,18,20,.75)] text-[var(--red)] hover:border-[rgba(255,90,90,.4)]'
+                          : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:border-[var(--accent-muted)] hover:text-[var(--fg-secondary)]',
+                    )}
+                    title={fleetBadgeError ? `${fleetBadgeTitle} ${fleetBadgeError}` : fleetBadgeTitle}
+                    aria-label={`${fleetBadgeSummaryText}. Open Fleet tab or drop drones here to assign them.`}
+                  >
+                    <span className="uppercase tracking-[0.12em]" style={{ fontFamily: 'var(--display)' }}>
+                      Fleet
+                    </span>
+                    <span className="font-mono text-[10px] text-inherit">
+                      {fleetBadgeAssigning ? 'Assigning…' : fleetBadgeSummaryText}
+                    </span>
+                  </button>
                 </div>
                 {String(currentDrone.repoPath ?? '').trim() ? (
                   <div className="text-[10px] text-[var(--muted)] truncate flex items-center gap-1.5 font-mono mt-0.5" title={currentDrone.repoPath}>
@@ -1258,7 +1300,40 @@ export function SelectedDroneWorkspace({
       {/* Body row: chat + right panel */}
       <div className="flex-1 flex min-h-0">
         {/* Chat area */}
-        <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden relative">
+        <div
+          ref={setFleetDropNodeRef}
+          data-fleet-assignment-drop-zone="1"
+          data-fleet-assignment-drone-id={currentDrone.id}
+          onDragOver={onFleetDropDragOver}
+          onDragLeave={onFleetDropDragLeave}
+          onDrop={onFleetDropDrop}
+          className={cn(
+            'flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden relative',
+            fleetBadgeDropActive && 'ring-1 ring-inset ring-[var(--accent-muted)]',
+          )}
+        >
+          {fleetDropHintVisible && (
+            <div className="pointer-events-none absolute inset-3 z-[4] rounded-xl border border-dashed border-[var(--accent-muted)] bg-[rgba(123,188,255,.06)] shadow-[inset_0_0_0_1px_rgba(123,188,255,.08)]" />
+          )}
+          {fleetDropHintVisible && (
+            <div className="pointer-events-none absolute left-1/2 top-4 z-[5] w-[min(520px,calc(100%-2rem))] -translate-x-1/2">
+              <div
+                className={cn(
+                  'rounded-lg border px-4 py-3 text-center shadow-[0_16px_44px_rgba(0,0,0,.22)] backdrop-blur-sm transition-all',
+                  fleetBadgeDropActive
+                    ? 'border-[var(--accent)] bg-[rgba(17,24,36,.94)] text-[var(--fg-secondary)]'
+                    : 'border-[var(--accent-muted)] bg-[rgba(17,20,28,.9)] text-[var(--muted)]',
+                )}
+              >
+                <div className="text-[10px] font-semibold uppercase tracking-[0.14em]" style={{ fontFamily: 'var(--display)' }}>
+                  Fleet Assignment
+                </div>
+                <div className="mt-1 text-[12px]">
+                  {fleetDropHintText}
+                </div>
+              </div>
+            </div>
+          )}
           <div className="flex-1 min-h-0 relative">
             {chatUiMode === 'transcript' ? (
               <div className="h-full min-w-0 min-h-0 overflow-auto">
