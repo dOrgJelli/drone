@@ -346,6 +346,7 @@ describeSocketSuite('fleet api', () => {
       expect(parentDaemon.policy?.capabilities).toContain('drone:message:send');
       expect(parentDaemon.policy?.capabilities).toContain('drone:message:read');
       expect(parentDaemon.policy?.readScopes).toContain('assigned');
+      expect(parentDaemon.policy?.relationships?.assigned).toEqual([{ id: 'child', name: 'child' }]);
     } finally {
       await parentDaemon.close();
       await childDaemon.close();

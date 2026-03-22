@@ -594,14 +594,26 @@ async function syncFleetPolicySnapshotToDrone(actorId: string, actorEntry: any):
   try {
     const daemon = await resolveDroneDaemonClientForEntry(actorEntry);
     if (!daemon) return;
+    const regAny: any = await loadRegistry();
     const actorConfig = fleetActorConfig(actorEntry);
     const limits = effectiveFleetLimits(actorEntry);
+    const actorPayload = fleetActorPayload(regAny, actorId);
     await droneFleetPolicySet(daemon.client, {
       apiVersion: FLEET_API_VERSION,
       enabled: actorConfig.enabled,
       actor: {
         id: actorId,
         name: String(actorEntry?.name ?? actorId),
+      },
+      relationships: {
+        children: (actorPayload?.relationships?.children ?? []).map((item: any) => ({
+          id: String(item?.id ?? '').trim(),
+          name: String(item?.name ?? '').trim(),
+        })),
+        assigned: (actorPayload?.relationships?.assigned ?? []).map((item: any) => ({
+          id: String(item?.id ?? '').trim(),
+          name: String(item?.name ?? '').trim(),
+        })),
       },
       capabilities: actorConfig.capabilities,
       readScopes: actorConfig.readScopes,
@@ -9633,6 +9645,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             group: typeof p?.group === 'string' && p.group.trim() ? p.group.trim() : null,
             createdAt: String(p?.createdAt ?? nowIso()),
             fleetParentId: fleetActorConfig(p).createdBy,
+            fleetAssignedIds: fleetActorConfig(p).assigned,
             runtime,
             repoAttached,
             repoPath: repoAttached ? String(p?.repoPath ?? '') : '',
@@ -9714,6 +9727,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               group: d.group ?? null,
               createdAt: d.createdAt,
               fleetParentId: fleetActorConfig(d).createdBy,
+              fleetAssignedIds: fleetActorConfig(d).assigned,
               runtime,
               repoAttached,
               repoPath: repoAttached ? repoPath : '',

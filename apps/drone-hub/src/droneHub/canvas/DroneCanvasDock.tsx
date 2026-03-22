@@ -10,7 +10,7 @@ import {
 } from '../app/app-config';
 import {
   dispatchCanvasAssignmentPreview,
-  resolveFleetAssignmentDropOwnerFromPoint,
+  resolveFleetAssignmentTargetFromPoint,
 } from '../app/fleet-assignment-events';
 import {
   draggedCanvasChatNodeIdsFromData,
@@ -106,7 +106,37 @@ type DroneCanvasIndicatorState = {
 type CanvasLineageEdge = {
   key: string;
   path: string;
+  variant: 'lineage' | 'assigned';
 };
+
+function resolveCanvasAssignmentDropTarget(
+  nodeIds: string[],
+  pointTarget: { ownerDroneId: string; canvasNodeId: string | null } | null,
+): { ownerDroneId: string | null; targetDroneIds: string[]; canvasNodeId: string | null } {
+  const ownerDroneId = String(pointTarget?.ownerDroneId ?? '').trim();
+  if (!ownerDroneId) return { ownerDroneId: null, targetDroneIds: [], canvasNodeId: null };
+  const draggedDroneIds = Array.from(
+    new Set(
+      nodeIds
+        .map((nodeId) => parseCanvasChatNodeId(nodeId)?.droneId ?? '')
+        .filter(Boolean),
+    ),
+  );
+  if (draggedDroneIds.includes(ownerDroneId)) {
+    return { ownerDroneId: null, targetDroneIds: [], canvasNodeId: null };
+  }
+  const targetDroneIds = Array.from(
+    new Set(
+      draggedDroneIds.filter((droneId) => droneId && droneId !== ownerDroneId),
+    ),
+  );
+  if (targetDroneIds.length === 0) return { ownerDroneId: null, targetDroneIds: [], canvasNodeId: null };
+  return {
+    ownerDroneId,
+    targetDroneIds,
+    canvasNodeId: String(pointTarget?.canvasNodeId ?? '').trim() || null,
+  };
+}
 
 function areCanvasRectMapsEqual(a: Record<string, CanvasRect>, b: Record<string, CanvasRect>): boolean {
   const aKeys = Object.keys(a);
@@ -279,6 +309,7 @@ export function DroneCanvasDock({
   sidebarSelectedChatNodeId,
   droneRepoById,
   fleetParentIdByDroneId,
+  fleetAssignedIdsByDroneId,
   draftRepoLabel,
   chatNodeStateById,
   onActivateChat,
@@ -309,6 +340,7 @@ export function DroneCanvasDock({
   sidebarSelectedChatNodeId?: string | null;
   droneRepoById: Record<string, string>;
   fleetParentIdByDroneId: Record<string, string>;
+  fleetAssignedIdsByDroneId: Record<string, string[]>;
   draftRepoLabel?: string;
   chatNodeStateById: Record<string, DroneCanvasIndicatorState>;
   onActivateChat?: (droneId: string, chatName: string) => void;
@@ -409,6 +441,7 @@ export function DroneCanvasDock({
   const viewportRef = React.useRef<HTMLDivElement | null>(null);
   const worldLayerRef = React.useRef<HTMLDivElement | null>(null);
   const lineageMarkerId = React.useId();
+  const assignedMarkerId = React.useId();
   const nodeDragRef = React.useRef<NodeDragState | null>(null);
   const panDragRef = React.useRef<PanDragState | null>(null);
   const marqueeDragRef = React.useRef<MarqueeDragState | null>(null);
@@ -433,6 +466,8 @@ export function DroneCanvasDock({
   const [messagePendingCount, setMessagePendingCount] = React.useState(0);
   const [renderedNodeBoundsById, setRenderedNodeBoundsById] = React.useState<Record<string, CanvasRect>>({});
   const [optimisticDroneNameById, setOptimisticDroneNameById] = React.useState<Record<string, string>>({});
+  const [assignmentHoverNodeId, setAssignmentHoverNodeId] = React.useState<string | null>(null);
+  const [assignmentHoverTargetCount, setAssignmentHoverTargetCount] = React.useState(0);
   const messageInputRef = React.useRef<HTMLTextAreaElement | null>(null);
   const draftCreateInFlightRef = React.useRef<Set<string>>(new Set());
   const messageSending = messagePendingCount > 0;
@@ -472,23 +507,25 @@ export function DroneCanvasDock({
     }
     return out;
   }, [nodeWidthByDroneId, nodes]);
-  const lineageEdges = React.useMemo(() => {
-    const preferredNodeByDroneId: Record<string, (typeof nodes)[number]> = {};
+  const preferredNodeByDroneId = React.useMemo(() => {
+    const out: Record<string, (typeof nodes)[number]> = {};
     for (const node of nodes) {
       if (isCanvasDraftNodeId(node.droneId)) continue;
       const chatRef = parseCanvasChatNodeId(node.droneId);
       if (!chatRef) continue;
-      const current = preferredNodeByDroneId[chatRef.droneId];
+      const current = out[chatRef.droneId];
       if (!current) {
-        preferredNodeByDroneId[chatRef.droneId] = node;
+        out[chatRef.droneId] = node;
         continue;
       }
       const currentChat = parseCanvasChatNodeId(current.droneId);
       if (currentChat?.chatName !== 'default' && chatRef.chatName === 'default') {
-        preferredNodeByDroneId[chatRef.droneId] = node;
+        out[chatRef.droneId] = node;
       }
     }
-
+    return out;
+  }, [nodes]);
+  const relationshipEdges = React.useMemo(() => {
     const edges: CanvasLineageEdge[] = [];
     for (const [childDroneId, parentDroneId] of Object.entries(fleetParentIdByDroneId)) {
       const childNode = preferredNodeByDroneId[childDroneId];
@@ -501,10 +538,35 @@ export function DroneCanvasDock({
       edges.push({
         key: `${parentDroneId}->${childDroneId}`,
         path: buildLineagePath(startX, startY, endX, endY),
+        variant: 'lineage',
       });
     }
+    for (const [ownerDroneId, assignedDroneIds] of Object.entries(fleetAssignedIdsByDroneId)) {
+      const ownerNode = preferredNodeByDroneId[ownerDroneId];
+      if (!ownerNode) continue;
+      for (const assignedDroneId of assignedDroneIds) {
+        if (fleetParentIdByDroneId[assignedDroneId] === ownerDroneId) continue;
+        const targetNode = preferredNodeByDroneId[assignedDroneId];
+        if (!targetNode) continue;
+        const source = renderedNodeBoundsById[ownerNode.droneId] ?? fallbackNodeBoundsById[ownerNode.droneId];
+        const target = renderedNodeBoundsById[targetNode.droneId] ?? fallbackNodeBoundsById[targetNode.droneId];
+        if (!source || !target) continue;
+        const { startX, startY, endX, endY } = resolveLineageEndpoint(source, target);
+        edges.push({
+          key: `${ownerDroneId}=>${assignedDroneId}`,
+          path: buildLineagePath(startX, startY, endX, endY),
+          variant: 'assigned',
+        });
+      }
+    }
     return edges;
-  }, [fallbackNodeBoundsById, fleetParentIdByDroneId, nodes, renderedNodeBoundsById]);
+  }, [
+    fallbackNodeBoundsById,
+    fleetAssignedIdsByDroneId,
+    fleetParentIdByDroneId,
+    preferredNodeByDroneId,
+    renderedNodeBoundsById,
+  ]);
   const selectedDroneIdSet = React.useMemo(() => new Set(selectedDroneIds), [selectedDroneIds]);
   const selectedDraftNodeId = React.useMemo(() => {
     if (selectedDroneIds.length !== 1) return null;
@@ -958,9 +1020,15 @@ export function DroneCanvasDock({
             ),
           );
           if (draggedDroneIds.length > 0) {
+            const assignmentTarget = resolveCanvasAssignmentDropTarget(
+              nodeDrag.droneIds,
+              resolveFleetAssignmentTargetFromPoint(event.clientX, event.clientY),
+            );
+            setAssignmentHoverNodeId(assignmentTarget.canvasNodeId);
+            setAssignmentHoverTargetCount(assignmentTarget.targetDroneIds.length);
             dispatchCanvasAssignmentPreview({
               droneIds: draggedDroneIds,
-              overDroneId: resolveFleetAssignmentDropOwnerFromPoint(event.clientX, event.clientY),
+              overDroneId: assignmentTarget.ownerDroneId,
             });
           }
         }
@@ -1043,7 +1111,11 @@ export function DroneCanvasDock({
       const nodeDrag = nodeDragRef.current;
       if (nodeDrag?.moved) {
         suppressNodeClickRef.current = true;
-        const ownerDroneId = resolveFleetAssignmentDropOwnerFromPoint(event.clientX, event.clientY);
+        const assignmentTarget = resolveCanvasAssignmentDropTarget(
+          nodeDrag.droneIds,
+          resolveFleetAssignmentTargetFromPoint(event.clientX, event.clientY),
+        );
+        const ownerDroneId = assignmentTarget.ownerDroneId;
         if (ownerDroneId) {
           moveNodes(
             nodeDrag.droneIds
@@ -1055,13 +1127,7 @@ export function DroneCanvasDock({
               .filter(Boolean) as Array<{ droneId: string; x: number; y: number }>,
           );
           if (onAssignDronesToOwner) {
-            const targetDroneIds = Array.from(
-              new Set(
-                nodeDrag.droneIds
-                  .map((nodeId) => parseCanvasChatNodeId(nodeId)?.droneId ?? '')
-                  .filter((droneId) => droneId && droneId !== ownerDroneId),
-              ),
-            );
+            const targetDroneIds = assignmentTarget.targetDroneIds;
             if (targetDroneIds.length > 0) {
               setMessageError(null);
               void onAssignDronesToOwner(ownerDroneId, targetDroneIds).then((result) => {
@@ -1076,6 +1142,8 @@ export function DroneCanvasDock({
         }
       }
       dispatchCanvasAssignmentPreview(null);
+      setAssignmentHoverNodeId(null);
+      setAssignmentHoverTargetCount(0);
       nodeDragRef.current = null;
       setDraggingNodeId(null);
 
@@ -1094,6 +1162,8 @@ export function DroneCanvasDock({
     window.addEventListener('mouseup', onWindowMouseUp);
     return () => {
       dispatchCanvasAssignmentPreview(null);
+      setAssignmentHoverNodeId(null);
+      setAssignmentHoverTargetCount(0);
       window.removeEventListener('mousemove', onWindowMouseMove);
       window.removeEventListener('mouseup', onWindowMouseUp);
     };
@@ -2045,7 +2115,7 @@ export function DroneCanvasDock({
             transformOrigin: '0 0',
           }}
         >
-          {lineageEdges.length > 0 ? (
+          {relationshipEdges.length > 0 ? (
             <svg
               width="1"
               height="1"
@@ -2065,17 +2135,29 @@ export function DroneCanvasDock({
                 >
                   <path d="M 0 0 L 10 5 L 0 10 z" fill="rgba(123, 188, 255, 0.92)" />
                 </marker>
+                <marker
+                  id={assignedMarkerId}
+                  viewBox="0 0 10 10"
+                  refX="8"
+                  refY="5"
+                  markerWidth="7"
+                  markerHeight="7"
+                  orient="auto-start-reverse"
+                >
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill="rgba(255, 178, 36, 0.92)" />
+                </marker>
               </defs>
-              {lineageEdges.map((edge) => (
+              {relationshipEdges.map((edge) => (
                 <path
                   key={edge.key}
                   d={edge.path}
                   fill="none"
-                  stroke="rgba(123, 188, 255, 0.74)"
-                  strokeWidth="1.8"
+                  stroke={edge.variant === 'assigned' ? 'rgba(255, 178, 36, 0.74)' : 'rgba(123, 188, 255, 0.74)'}
+                  strokeWidth={edge.variant === 'assigned' ? '1.5' : '1.8'}
                   strokeLinecap="round"
                   strokeLinejoin="round"
-                  markerEnd={`url(#${lineageMarkerId})`}
+                  strokeDasharray={edge.variant === 'assigned' ? '7 5' : undefined}
+                  markerEnd={`url(#${edge.variant === 'assigned' ? assignedMarkerId : lineageMarkerId})`}
                 />
               ))}
             </svg>
@@ -2087,6 +2169,7 @@ export function DroneCanvasDock({
             const selected = selectedDroneIdSet.has(node.droneId);
             const dragging = draggingNodeId === node.droneId;
             const inlineEditing = inlineRenamingDroneId === node.droneId;
+            const assignmentHoverTarget = assignmentHoverNodeId === node.droneId && assignmentHoverTargetCount > 0;
             const indicatorState = draftNode ? null : chatNodeStateById[node.droneId] ?? null;
             const indicator = renderNodeIndicator(indicatorState);
             const unreadIndicator = renderNodeUnreadIndicator(indicatorState);
@@ -2105,6 +2188,7 @@ export function DroneCanvasDock({
                 type="button"
                 data-canvas-node="1"
                 data-drone-id={node.droneId}
+                data-fleet-assignment-owner-id={!draftNode && chatDroneId ? chatDroneId : undefined}
                 ref={(el) => {
                   if (el) nodeElementByDroneIdRef.current[node.droneId] = el;
                   else delete nodeElementByDroneIdRef.current[node.droneId];
@@ -2116,6 +2200,8 @@ export function DroneCanvasDock({
                 className={`group/canvas-node absolute relative overflow-visible rounded-md border text-left px-2.5 shadow-[0_10px_20px_rgba(0,0,0,.28)] transition-[border-color,background-color,box-shadow] duration-100 flex items-center ${
                   dragging
                     ? 'border-[var(--accent)] bg-[var(--accent-subtle)]'
+                    : assignmentHoverTarget
+                      ? 'border-[var(--accent)] bg-[rgba(21,31,46,.96)] shadow-[0_0_0_1px_rgba(123,188,255,.16),0_16px_28px_rgba(0,0,0,.3)]'
                     : selected || inlineEditing
                       ? 'border-[var(--accent-muted)] bg-[rgba(38,46,66,.95)]'
                       : draftNode
@@ -2190,6 +2276,15 @@ export function DroneCanvasDock({
                       }}
                       className="h-8 w-full rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-2 text-[12.5px] font-semibold text-[var(--fg-secondary)] focus:outline-none focus:border-[var(--accent-muted)]"
                     />
+                  ) : assignmentHoverTarget ? (
+                    <span className="block">
+                      <span className="block truncate text-[12.5px] font-semibold text-[var(--fg-secondary)]">
+                        Release to assign
+                      </span>
+                      <span className="block truncate text-[10px] text-[var(--muted-dim)]">
+                        {assignmentHoverTargetCount} drone{assignmentHoverTargetCount === 1 ? '' : 's'} to this drone
+                      </span>
+                    </span>
                   ) : (
                     <span className="block">
                       <span className="block truncate text-[12.5px] font-semibold text-[var(--fg-secondary)]">
