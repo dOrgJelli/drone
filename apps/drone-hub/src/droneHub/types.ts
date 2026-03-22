@@ -4,6 +4,7 @@ export type DroneSummary = {
   group: string | null;
   createdAt: string;
   fleetParentId?: string | null;
+  fleetAssignedIds?: string[] | null;
   runtime?: 'container' | 'host';
   repoAttached?: boolean;
   repoPath: string;

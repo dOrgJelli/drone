@@ -174,6 +174,7 @@ async function loadFleetPolicySnapshot(fleetDir: string): Promise<FleetPolicySna
     apiVersion: FLEET_API_VERSION,
     enabled: false,
     actor: { id: null, name: null },
+    relationships: { children: [], assigned: [] },
     capabilities: [],
     readScopes: ['children'],
     sendScopes: ['children', 'assigned'],
@@ -187,6 +188,24 @@ async function loadFleetPolicySnapshot(fleetDir: string): Promise<FleetPolicySna
     actor: {
       id: typeof raw?.actor?.id === 'string' && raw.actor.id.trim() ? raw.actor.id.trim() : null,
       name: typeof raw?.actor?.name === 'string' && raw.actor.name.trim() ? raw.actor.name.trim() : null,
+    },
+    relationships: {
+      children: Array.isArray(raw?.relationships?.children)
+        ? raw.relationships.children
+            .map((item: any) => ({
+              id: String(item?.id ?? '').trim(),
+              name: String(item?.name ?? '').trim(),
+            }))
+            .filter((item: { id: string; name: string }) => item.id)
+        : [],
+      assigned: Array.isArray(raw?.relationships?.assigned)
+        ? raw.relationships.assigned
+            .map((item: any) => ({
+              id: String(item?.id ?? '').trim(),
+              name: String(item?.name ?? '').trim(),
+            }))
+            .filter((item: { id: string; name: string }) => item.id)
+        : [],
     },
     capabilities: Array.isArray(raw?.capabilities) ? raw.capabilities.map(String).filter(Boolean) : [],
     readScopes: Array.isArray(raw?.readScopes) ? raw.readScopes.map(String).filter(Boolean) : fallback.readScopes,
@@ -767,6 +786,8 @@ async function main() {
             'fleet send --to <drone> --chat <chat> --message "<text>"',
             'fleet stop --to <drone> --chat <chat>',
             'fleet read --from <drone> --chat <chat> --limit 20 [--cursor <cursor>]',
+            'fleet status',
+            'fleet assigned',
             'fleet request status --id <requestId>',
             'fleet capabilities',
           ],
@@ -782,6 +803,24 @@ async function main() {
           actor: {
             id: typeof body?.actor?.id === 'string' && body.actor.id.trim() ? body.actor.id.trim() : null,
             name: typeof body?.actor?.name === 'string' && body.actor.name.trim() ? body.actor.name.trim() : null,
+          },
+          relationships: {
+            children: Array.isArray(body?.relationships?.children)
+              ? body.relationships.children
+                  .map((item: any) => ({
+                    id: String(item?.id ?? '').trim(),
+                    name: String(item?.name ?? '').trim(),
+                  }))
+                  .filter((item: { id: string; name: string }) => item.id)
+              : [],
+            assigned: Array.isArray(body?.relationships?.assigned)
+              ? body.relationships.assigned
+                  .map((item: any) => ({
+                    id: String(item?.id ?? '').trim(),
+                    name: String(item?.name ?? '').trim(),
+                  }))
+                  .filter((item: { id: string; name: string }) => item.id)
+              : [],
           },
           capabilities: Array.isArray(body?.capabilities) ? body.capabilities.map(String).filter(Boolean) : [],
           readScopes: Array.isArray(body?.readScopes) ? body.readScopes.map(String).filter(Boolean) : ['children'],

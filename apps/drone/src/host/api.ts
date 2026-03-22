@@ -112,6 +112,10 @@ export async function fleetPolicySet(
     apiVersion?: string;
     enabled: boolean;
     actor: { id?: string | null; name?: string | null };
+    relationships?: {
+      children?: Array<{ id?: string | null; name?: string | null }>;
+      assigned?: Array<{ id?: string | null; name?: string | null }>;
+    };
     capabilities: string[];
     readScopes?: string[];
     sendScopes?: string[];

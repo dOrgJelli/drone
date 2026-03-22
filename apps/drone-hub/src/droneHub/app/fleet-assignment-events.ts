@@ -10,6 +10,12 @@ export type FleetAssignmentUpdatedDetail = {
   actor: FleetActorPayload;
 };
 
+export type FleetAssignmentPointTarget = {
+  ownerDroneId: string;
+  kind: 'chat-pane' | 'canvas-node';
+  canvasNodeId: string | null;
+};
+
 export const CANVAS_ASSIGNMENT_PREVIEW_EVENT = 'dronehub:canvas-assignment-preview';
 export const FLEET_ASSIGNMENT_UPDATED_EVENT = 'dronehub:fleet-assignment-updated';
 
@@ -45,7 +51,7 @@ export function dispatchFleetAssignmentUpdated(detail: FleetAssignmentUpdatedDet
   window.dispatchEvent(new CustomEvent(FLEET_ASSIGNMENT_UPDATED_EVENT, { detail }));
 }
 
-export function resolveFleetAssignmentDropOwnerFromPoint(clientX: number, clientY: number): string | null {
+export function resolveFleetAssignmentTargetFromPoint(clientX: number, clientY: number): FleetAssignmentPointTarget | null {
   if (typeof document === 'undefined') return null;
   const elements =
     typeof document.elementsFromPoint === 'function'
@@ -53,10 +59,22 @@ export function resolveFleetAssignmentDropOwnerFromPoint(clientX: number, client
       : [document.elementFromPoint(clientX, clientY)].filter(Boolean);
   for (const element of elements) {
     if (!(element instanceof HTMLElement)) continue;
+    const canvasNode = element.closest('[data-canvas-node="1"][data-fleet-assignment-owner-id]');
+    if (canvasNode instanceof HTMLElement) {
+      const ownerDroneId = String(canvasNode.dataset.fleetAssignmentOwnerId ?? '').trim();
+      const canvasNodeId = String(canvasNode.dataset.droneId ?? '').trim() || null;
+      if (ownerDroneId) return { ownerDroneId, kind: 'canvas-node', canvasNodeId };
+    }
     const dropZone = element.closest('[data-fleet-assignment-drop-zone="1"]');
     if (!(dropZone instanceof HTMLElement)) continue;
-    const ownerDroneId = String(dropZone.dataset.fleetAssignmentDroneId ?? '').trim();
-    if (ownerDroneId) return ownerDroneId;
+    const ownerDroneId =
+      String(dropZone.dataset.fleetAssignmentOwnerId ?? '').trim() ||
+      String(dropZone.dataset.fleetAssignmentDroneId ?? '').trim();
+    if (ownerDroneId) return { ownerDroneId, kind: 'chat-pane', canvasNodeId: null };
   }
   return null;
+}
+
+export function resolveFleetAssignmentDropOwnerFromPoint(clientX: number, clientY: number): string | null {
+  return resolveFleetAssignmentTargetFromPoint(clientX, clientY)?.ownerDroneId ?? null;
 }

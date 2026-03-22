@@ -16,6 +16,33 @@ export function normalizedDroneChats(
   return out;
 }
 
+export function hasOnlyDefaultChat(drone: DroneSummary | null | undefined): boolean {
+  const chats = normalizedDroneChats(drone, { includeDefaultWhenEmpty: true });
+  return chats.length === 1 && chats[0] === 'default';
+}
+
+export function resolveCanvasChatDisplay(
+  drone: DroneSummary | null | undefined,
+  chatNameRaw: string,
+  droneLabelRaw?: string | null,
+): { primaryLabel: string; secondaryLabel: string } {
+  const chatName = String(chatNameRaw ?? '').trim() || 'default';
+  const droneLabel =
+    String(droneLabelRaw ?? '').trim() ||
+    String(drone?.name ?? '').trim() ||
+    String(drone?.id ?? '').trim();
+  if (chatName === 'default' && hasOnlyDefaultChat(drone) && droneLabel) {
+    return {
+      primaryLabel: droneLabel,
+      secondaryLabel: '',
+    };
+  }
+  return {
+    primaryLabel: chatName,
+    secondaryLabel: droneLabel,
+  };
+}
+
 export function droneChatNodeIds(drone: DroneSummary | null | undefined): string[] {
   const droneId = String(drone?.id ?? '').trim();
   if (!droneId) return [];
