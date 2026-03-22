@@ -8,7 +8,7 @@ import {
   fleetRequestGet,
   type DroneClient,
 } from './host/api';
-import type { FleetRequestType } from './fleet/contracts';
+import type { FleetPolicySnapshot, FleetRequestType } from './fleet/contracts';
 
 function resolveBaseUrl(): string {
   const explicit =
@@ -85,6 +85,27 @@ function printJson(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
+async function readFleetSnapshot(client: DroneClient): Promise<FleetPolicySnapshot> {
+  const snapshot: any = await fleetCapabilities(client);
+  return {
+    apiVersion: String(snapshot?.apiVersion ?? ''),
+    enabled: snapshot?.enabled === true,
+    actor: {
+      id: typeof snapshot?.actor?.id === 'string' ? snapshot.actor.id : null,
+      name: typeof snapshot?.actor?.name === 'string' ? snapshot.actor.name : null,
+    },
+    relationships: {
+      children: Array.isArray(snapshot?.relationships?.children) ? snapshot.relationships.children : [],
+      assigned: Array.isArray(snapshot?.relationships?.assigned) ? snapshot.relationships.assigned : [],
+    },
+    capabilities: Array.isArray(snapshot?.capabilities) ? snapshot.capabilities : [],
+    readScopes: Array.isArray(snapshot?.readScopes) ? snapshot.readScopes : [],
+    sendScopes: Array.isArray(snapshot?.sendScopes) ? snapshot.sendScopes : [],
+    limits: snapshot?.limits && typeof snapshot.limits === 'object' ? snapshot.limits : {},
+    updatedAt: typeof snapshot?.updatedAt === 'string' ? snapshot.updatedAt : '',
+  };
+}
+
 async function resolveMessageText(parts: string[], optionMessage?: string): Promise<string> {
   const fromOption = String(optionMessage ?? '').trim();
   if (fromOption) return fromOption;
@@ -116,6 +137,43 @@ program
   .action(async () => {
     const client = await createClient();
     printJson(await fleetCapabilities(client));
+  });
+
+program
+  .command('status')
+  .description('Show fleet status for this drone, including children and assigned drones')
+  .action(async () => {
+    const client = await createClient();
+    const snapshot = await readFleetSnapshot(client);
+    printJson({
+      ok: true,
+      actor: snapshot.actor,
+      enabled: snapshot.enabled,
+      counts: {
+        children: snapshot.relationships.children.length,
+        assigned: snapshot.relationships.assigned.length,
+      },
+      children: snapshot.relationships.children,
+      assigned: snapshot.relationships.assigned,
+      capabilities: snapshot.capabilities,
+      readScopes: snapshot.readScopes,
+      sendScopes: snapshot.sendScopes,
+      limits: snapshot.limits,
+      updatedAt: snapshot.updatedAt,
+    });
+  });
+
+program
+  .command('assigned')
+  .description('Show drones assigned to this drone')
+  .action(async () => {
+    const client = await createClient();
+    const snapshot = await readFleetSnapshot(client);
+    printJson({
+      ok: true,
+      actor: snapshot.actor,
+      assigned: snapshot.relationships.assigned,
+    });
   });
 
 program

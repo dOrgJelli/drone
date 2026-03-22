@@ -41,6 +41,10 @@ export type FleetPolicySnapshot = {
     id: string | null;
     name: string | null;
   };
+  relationships: {
+    children: Array<{ id: string; name: string }>;
+    assigned: Array<{ id: string; name: string }>;
+  };
   capabilities: string[];
   readScopes: string[];
   sendScopes: string[];

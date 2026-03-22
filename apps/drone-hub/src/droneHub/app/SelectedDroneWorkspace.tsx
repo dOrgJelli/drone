@@ -1304,6 +1304,7 @@ export function SelectedDroneWorkspace({
           ref={setFleetDropNodeRef}
           data-fleet-assignment-drop-zone="1"
           data-fleet-assignment-drone-id={currentDrone.id}
+          data-fleet-assignment-owner-id={currentDrone.id}
           onDragOver={onFleetDropDragOver}
           onDragLeave={onFleetDropDragLeave}
           onDrop={onFleetDropDrop}

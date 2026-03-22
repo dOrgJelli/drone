@@ -176,6 +176,8 @@ describeSocketSuite('fleet daemon', () => {
     expect(Array.isArray(helpData?.commands)).toBe(true);
     expect((helpData?.commands ?? []).includes('fleet create --name <child> [--group <group>] [--clone-parent] [--idempotency-key <key>]')).toBe(true);
     expect((helpData?.commands ?? []).includes('fleet stop --to <drone> --chat <chat>')).toBe(true);
+    expect((helpData?.commands ?? []).includes('fleet status')).toBe(true);
+    expect((helpData?.commands ?? []).includes('fleet assigned')).toBe(true);
 
     const stopResponse = await fetch(`${baseUrl}/v1/fleet/requests`, {
       method: 'POST',
@@ -189,5 +191,49 @@ describeSocketSuite('fleet daemon', () => {
     expect(stopResponse.status).toBe(202);
     expect(stopData?.request?.type).toBe('stop_chat');
     expect(stopData?.request?.state).toBe('queued');
+  });
+
+  test('persists relationship snapshots in local fleet capabilities', async () => {
+    const port = await allocatePort();
+    const dataDir = path.join(tempRoot, `daemon-${port}`);
+    fs.mkdirSync(dataDir, { recursive: true });
+    const token = 'daemon-token';
+    const daemon = Bun.spawn([process.execPath, daemonEntry, '--host', '127.0.0.1', '--port', String(port), '--data-dir', dataDir, '--token', token], {
+      cwd: process.cwd(),
+      stdout: 'ignore',
+      stderr: 'pipe',
+    });
+    processes.push(daemon);
+    const baseUrl = `http://127.0.0.1:${port}`;
+    await waitForHealth(baseUrl, token, daemon);
+
+    const policyResponse = await fetch(`${baseUrl}/v1/fleet/policy`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        enabled: true,
+        actor: { id: 'alpha', name: 'Alpha' },
+        relationships: {
+          children: [{ id: 'bravo', name: 'Bravo' }],
+          assigned: [{ id: 'charlie', name: 'Charlie' }],
+        },
+        capabilities: ['drone:create', 'drone:message:send', 'drone:message:read'],
+        readScopes: ['children', 'assigned', 'self'],
+        sendScopes: ['children', 'assigned'],
+      }),
+    });
+    expect(policyResponse.status).toBe(200);
+
+    const capabilitiesResponse = await fetch(`${baseUrl}/v1/fleet/capabilities`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    const capabilitiesData: any = await capabilitiesResponse.json();
+    expect(capabilitiesResponse.status).toBe(200);
+    expect(capabilitiesData?.actor).toEqual({ id: 'alpha', name: 'Alpha' });
+    expect(capabilitiesData?.relationships?.children).toEqual([{ id: 'bravo', name: 'Bravo' }]);
+    expect(capabilitiesData?.relationships?.assigned).toEqual([{ id: 'charlie', name: 'Charlie' }]);
   });
 });
