@@ -606,8 +606,20 @@ async function readRegistryFromPath(p: string): Promise<DroneRegistry | null> {
 
 async function saveRegistryAtPath(p: string, reg: DroneRegistry): Promise<void> {
   await fs.mkdir(path.dirname(p), { recursive: true });
-  await fs.writeFile(p, JSON.stringify(reg, null, 2), 'utf8');
-  await setPrivateFileModeBestEffort(p);
+  const tmpPath = path.join(path.dirname(p), `.registry.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`);
+  try {
+    await fs.writeFile(tmpPath, JSON.stringify(reg, null, 2), 'utf8');
+    await setPrivateFileModeBestEffort(tmpPath);
+    await fs.rename(tmpPath, p);
+    await setPrivateFileModeBestEffort(p);
+  } catch (error) {
+    try {
+      await fs.rm(tmpPath, { force: true });
+    } catch {
+      // ignore cleanup failures
+    }
+    throw error;
+  }
 }
 
 function registriesEqual(a: DroneRegistry, b: DroneRegistry): boolean {
