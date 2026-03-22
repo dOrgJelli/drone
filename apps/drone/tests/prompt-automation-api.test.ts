@@ -240,6 +240,100 @@ describeSocketSuite('prompt automation api', () => {
     expect(String(mockPromptJobs.get(promptId)?.state ?? '')).toBe('canceled');
   });
 
+  test('automation stop all cancels an active automation transcript run', async () => {
+    const droneId = 'drone-stop-active-automation-response';
+    const now = new Date().toISOString();
+    mockPromptOutputOverride = () => ({
+      state: 'running',
+      stdout: 'partial automation output',
+      stderr: '',
+    });
+    await updateRegistry((reg: any) => {
+      reg.drones = reg.drones ?? {};
+      reg.drones[droneId] = {
+        id: droneId,
+        name: droneId,
+        hostPort: mockDaemon?.port ?? 1,
+        token: 'mock-token',
+        containerPort: 7777,
+        repoPath: '',
+        createdAt: now,
+        chats: {
+          default: {
+            createdAt: now,
+            agent: { kind: 'builtin', id: 'cursor' },
+            turns: [],
+            pendingPrompts: [],
+          },
+        },
+      };
+    });
+
+    const started = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats/default/automations/start`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        automationId: 'stop-active-automation',
+        automationLabel: 'Stop Active Automation',
+        prompt: 'repeat',
+        runs: 2,
+      }),
+    });
+    expect(started.r.status).toBe(202);
+
+    let activePromptId = '';
+    await pollUntil(
+      async () => {
+        const pending = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats/default/pending`);
+        const rows = Array.isArray(pending.data?.pending) ? pending.data.pending : [];
+        const activeRow = rows.find(
+          (row: any) =>
+            String(row?.automation?.kind ?? '') === 'prompt-loop' &&
+            String(row?.automation?.automationId ?? '') === 'stop-active-automation' &&
+            String(row?.automation?.stage ?? '') === 'run' &&
+            (String(row?.state ?? '') === 'sending' || String(row?.state ?? '') === 'sent'),
+        );
+        activePromptId = String(activeRow?.id ?? '').trim();
+        return activePromptId.length > 0;
+      },
+      15_000,
+      120,
+      'active automation run pending',
+    );
+
+    const stopped = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats/default/automations/stop`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ stopMode: 'all', clearQueued: false }),
+    });
+    expect(stopped.r.status).toBe(200);
+    expect(String(stopped.data?.job?.status ?? '')).toBe('stopped');
+
+    await pollUntil(
+      async () => {
+        const status = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats/default/automations/status`);
+        return status.data?.job?.running === false;
+      },
+      15_000,
+      120,
+      'automation stop all completed',
+    );
+
+    const pending = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats/default/pending`);
+    expect(pending.r.status).toBe(200);
+    const pendingRows = Array.isArray(pending.data?.pending) ? pending.data.pending : [];
+    const stoppedRow = pendingRows.find((row: any) => String(row?.id ?? '').trim() === activePromptId) ?? null;
+    expect(String(stoppedRow?.state ?? '')).toBe('failed');
+    expect(String(stoppedRow?.error ?? '')).toContain('Stopped by user');
+
+    const transcript = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats/default/transcript?turn=all`);
+    expect(transcript.r.status).toBe(200);
+    const transcriptRows = Array.isArray(transcript.data?.transcripts) ? transcript.data.transcripts : [];
+    expect(transcriptRows.some((row: any) => String(row?.id ?? '').trim() === activePromptId)).toBe(false);
+
+    expect(String(mockPromptJobs.get(activePromptId)?.state ?? '')).toBe('canceled');
+  });
+
   test('archiving a host-backed drone stops prompt jobs and clears queued automations', async () => {
     const droneId = 'drone-archive-stop-host';
     const promptId = 'archive-blocking-prompt';
