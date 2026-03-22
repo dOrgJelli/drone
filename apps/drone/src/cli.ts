@@ -365,7 +365,90 @@ type HubState = {
   uiPort: number;
   startedAt: string;
   logPath: string;
+  launchEnv?: HubLaunchEnvSnapshot | null;
 };
+
+type HubSecretSnapshot = {
+  present: boolean;
+  hasValue: boolean;
+  rawLength: number | null;
+  trimmedLength: number | null;
+  fingerprint: string | null;
+};
+
+type HubLaunchEnvSnapshot = {
+  llmProvider: 'openai' | 'gemini' | null;
+  llmProviderRaw: string | null;
+  openai: HubSecretSnapshot;
+  gemini: HubSecretSnapshot;
+};
+
+function normalizeHubLlmProviderEnv(raw: unknown): 'openai' | 'gemini' | null {
+  const value = String(raw ?? '').trim().toLowerCase();
+  if (value === 'openai' || value === 'gemini') return value;
+  return null;
+}
+
+function fingerprintSecretValue(raw: unknown): string | null {
+  const text = typeof raw === 'string' ? raw.trim() : '';
+  if (!text) return null;
+  return crypto.createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 12);
+}
+
+function captureSecretEnvSnapshot(raw: unknown): HubSecretSnapshot {
+  const present = raw !== undefined;
+  const text = typeof raw === 'string' ? raw : raw == null ? '' : String(raw);
+  const trimmed = text.trim();
+  return {
+    present,
+    hasValue: trimmed.length > 0,
+    rawLength: present ? text.length : null,
+    trimmedLength: present ? trimmed.length : null,
+    fingerprint: fingerprintSecretValue(trimmed),
+  };
+}
+
+function captureHubLaunchEnvSnapshot(): HubLaunchEnvSnapshot {
+  const llmProviderRaw = String(process.env.DRONE_HUB_LLM_PROVIDER ?? '').trim();
+  return {
+    llmProvider: normalizeHubLlmProviderEnv(llmProviderRaw),
+    llmProviderRaw: llmProviderRaw || null,
+    openai: captureSecretEnvSnapshot(process.env.OPENAI_API_KEY),
+    gemini: captureSecretEnvSnapshot(process.env.GEMINI_API_KEY),
+  };
+}
+
+function parseHubSecretSnapshot(raw: unknown): HubSecretSnapshot | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const value = raw as Record<string, unknown>;
+  return {
+    present: value.present === true,
+    hasValue: value.hasValue === true,
+    rawLength: Number.isFinite(Number(value.rawLength)) ? Number(value.rawLength) : null,
+    trimmedLength: Number.isFinite(Number(value.trimmedLength)) ? Number(value.trimmedLength) : null,
+    fingerprint: typeof value.fingerprint === 'string' && value.fingerprint.trim() ? value.fingerprint.trim() : null,
+  };
+}
+
+function parseHubLaunchEnvSnapshot(raw: unknown): HubLaunchEnvSnapshot | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const value = raw as Record<string, unknown>;
+  const openai = parseHubSecretSnapshot(value.openai);
+  const gemini = parseHubSecretSnapshot(value.gemini);
+  if (!openai || !gemini) return null;
+  const llmProviderRaw = typeof value.llmProviderRaw === 'string' ? value.llmProviderRaw.trim() : '';
+  return {
+    llmProvider: normalizeHubLlmProviderEnv(value.llmProvider),
+    llmProviderRaw: llmProviderRaw || null,
+    openai,
+    gemini,
+  };
+}
+
+function hubLaunchEnvSnapshotsDiffer(a: HubLaunchEnvSnapshot | null | undefined, b: HubLaunchEnvSnapshot | null | undefined): boolean {
+  if (!a || !b) return false;
+  return JSON.stringify(a) !== JSON.stringify(b);
+}
 
 function droneDir(): string {
   return droneRootPath();
@@ -412,7 +495,8 @@ async function readHubState(): Promise<HubState | null> {
     const apiHost = typeof parsed.apiHost === 'string' ? parsed.apiHost : '127.0.0.1';
     const startedAt = typeof parsed.startedAt === 'string' ? parsed.startedAt : new Date().toISOString();
     const logPath = typeof parsed.logPath === 'string' ? parsed.logPath : hubLogPath();
-    return { version: 1, pid, apiHost, apiPort, uiPort, startedAt, logPath };
+    const launchEnv = parseHubLaunchEnvSnapshot(parsed.launchEnv);
+    return { version: 1, pid, apiHost, apiPort, uiPort, startedAt, logPath, launchEnv };
   } catch {
     return null;
   }
@@ -1553,6 +1637,7 @@ async function hubRun(options: any) {
     uiPort,
     startedAt: new Date().toISOString(),
     logPath: hubLogPath(),
+    launchEnv: captureHubLaunchEnvSnapshot(),
   });
   await writeHubApiToken(apiToken);
 
@@ -1614,8 +1699,29 @@ async function hubStart(options: any) {
 
   const cur = await readHubState();
   if (cur && pidIsRunning(cur.pid)) {
+    const currentLaunchEnv = captureHubLaunchEnvSnapshot();
+    const launchEnvChanged = hubLaunchEnvSnapshotsDiffer(cur.launchEnv, currentLaunchEnv);
     // eslint-disable-next-line no-console
-    console.log(JSON.stringify({ ok: true, alreadyRunning: true, state: cur }, null, 2));
+    console.log(
+      JSON.stringify(
+        {
+          ok: true,
+          alreadyRunning: true,
+          state: cur,
+          ...(launchEnvChanged
+            ? {
+                restartRecommended: true,
+                reason:
+                  'The hub is already running with a different LLM environment snapshot. Restart it to pick up the current OPENAI_API_KEY/GEMINI_API_KEY/DRONE_HUB_LLM_PROVIDER values.',
+                runningLaunchEnv: cur.launchEnv,
+                currentLaunchEnv,
+              }
+            : {}),
+        },
+        null,
+        2
+      )
+    );
     return;
   }
   if (cur && !pidIsRunning(cur.pid)) {

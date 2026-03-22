@@ -125,6 +125,7 @@ import {
 import {
   archiveRetentionMs,
   clearStoredProviderApiKey,
+  collectProviderApiKeyDiagnostics,
   FILESYSTEM_UPLOAD_MAX_BYTES_MAX,
   FILESYSTEM_UPLOAD_MAX_BYTES_MIN,
   hubLog,
@@ -7656,8 +7657,45 @@ async function runNodeCli(args: string[], opts?: { cwd?: string; timeoutMs?: num
   return r;
 }
 
+function llmProviderEnvLogMeta() {
+  const raw = String(process.env.DRONE_HUB_LLM_PROVIDER ?? '').trim();
+  return {
+    pid: process.pid,
+    llmProviderEnv: parseLlmProvider(raw),
+    llmProviderEnvRaw: raw || null,
+  };
+}
+
+async function logProviderApiKeyResolution(
+  level: 'info' | 'warn' | 'error',
+  message: string,
+  provider: LlmProviderId,
+  meta?: Record<string, unknown>,
+) {
+  hubLog(level, message, {
+    ...llmProviderEnvLogMeta(),
+    provider,
+    keyDiagnostics: await collectProviderApiKeyDiagnostics(provider),
+    ...(meta ?? {}),
+  });
+}
+
+async function logHubLlmStartupSnapshot() {
+  const [openai, gemini] = await Promise.all([
+    collectProviderApiKeyDiagnostics('openai'),
+    collectProviderApiKeyDiagnostics('gemini'),
+  ]);
+  hubLog('info', 'hub llm configuration snapshot', {
+    ...llmProviderEnvLogMeta(),
+    cwd: process.cwd(),
+    openai,
+    gemini,
+  });
+}
+
 export async function startDroneHubApiServer(opts: { port: number; host?: string; apiToken: string; allowedOrigins?: string[] }) {
   loadHubEnv();
+  await logHubLlmStartupSnapshot();
   const host = opts.host ?? '127.0.0.1';
   const apiToken = String(opts.apiToken ?? '').trim();
   if (!apiToken) throw new Error('missing hub API token');
@@ -8071,6 +8109,12 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         const provider: LlmProviderId = pathname.endsWith('/gemini') ? 'gemini' : 'openai';
         if (method === 'GET') {
           const resolved = await resolveEffectiveProviderApiKeySettings(provider);
+          if (!resolved.apiKey) {
+            await logProviderApiKeyResolution('warn', 'settings provider lookup resolved without API key', provider, {
+              pathname,
+              method,
+            });
+          }
           json(res, 200, {
             ok: true,
             ...providerKeySettingsResponse(resolved),
@@ -8113,7 +8157,17 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
 
       if (pathname === '/api/settings/llm') {
         if (method === 'GET') {
-          json(res, 200, await resolveLlmSettingsResponse());
+          const data = await resolveLlmSettingsResponse();
+          const selectedProvider = data.provider.selected;
+          const selectedProviderSettings = selectedProvider === 'openai' ? data.openai : data.gemini;
+          if (!selectedProviderSettings.hasKey) {
+            await logProviderApiKeyResolution('warn', 'settings llm lookup resolved without selected provider key', selectedProvider, {
+              pathname,
+              method,
+              providerSource: data.provider.source,
+            });
+          }
+          json(res, 200, data);
           return;
         }
 
@@ -8321,6 +8375,10 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           selectedProvider = provider;
           const resolved = await resolveEffectiveProviderApiKeySettings(provider);
           if (!resolved.apiKey) {
+            await logProviderApiKeyResolution('warn', 'tldr/from-message rejected: missing provider key', provider, {
+              pathname,
+              method,
+            });
             json(res, 412, {
               ok: false,
               error: `Missing ${providerDisplayName(provider)} API key. Configure it in Settings.`,
@@ -8344,11 +8402,20 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           json(res, 200, { ok: true, tldr });
           return;
         } catch (e: any) {
-          hubLog('error', 'tldr/from-message request failed', {
-            provider: selectedProvider,
-            model: String(process.env.DRONE_HUB_TLDR_MODEL ?? '').trim() || null,
-            error: e?.message ?? String(e),
-          });
+          if (selectedProvider) {
+            await logProviderApiKeyResolution('error', 'tldr/from-message request failed', selectedProvider, {
+              pathname,
+              method,
+              model: String(process.env.DRONE_HUB_TLDR_MODEL ?? '').trim() || null,
+              error: e?.message ?? String(e),
+            });
+          } else {
+            hubLog('error', 'tldr/from-message request failed', {
+              ...llmProviderEnvLogMeta(),
+              model: String(process.env.DRONE_HUB_TLDR_MODEL ?? '').trim() || null,
+              error: e?.message ?? String(e),
+            });
+          }
           json(res, 500, { ok: false, error: e?.message ?? String(e) });
           return;
         }
@@ -8371,11 +8438,21 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           return;
         }
 
+        let selectedProvider: LlmProviderId | null = null;
         try {
           const { provider } = await resolveEffectiveLlmProvider();
+          selectedProvider = provider;
           const resolved = await resolveEffectiveProviderApiKeySettings(provider);
           if (!resolved.apiKey) {
-            throw new Error(`Missing ${providerDisplayName(provider)} API key. Configure it in Settings.`);
+            await logProviderApiKeyResolution('warn', 'jobs/from-message rejected: missing provider key', provider, {
+              pathname,
+              method,
+            });
+            json(res, 412, {
+              ok: false,
+              error: `Missing ${providerDisplayName(provider)} API key. Configure it in Settings.`,
+            });
+            return;
           }
           const plan = await jobsPlanFromAgentMessage(message, { provider, apiKey: resolved.apiKey });
           const group = typeof plan?.group === 'string' ? plan.group : 'jobs';
@@ -8383,6 +8460,13 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           json(res, 200, { ok: true, group, jobs });
           return;
         } catch (e: any) {
+          if (selectedProvider) {
+            await logProviderApiKeyResolution('error', 'jobs/from-message request failed', selectedProvider, {
+              pathname,
+              method,
+              error: e?.message ?? String(e),
+            });
+          }
           json(res, 500, { ok: false, error: e?.message ?? String(e) });
           return;
         }
@@ -8416,14 +8500,13 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           selectedProvider = provider;
           const resolved = await resolveEffectiveProviderApiKeySettings(provider);
           if (!resolved.apiKey) {
-            if (source || requestedDroneId) {
-              hubLog('warn', 'name-from-message rejected: missing provider key', {
-                provider,
-                source,
-                requestedDroneId,
-                messageLength,
-              });
-            }
+            await logProviderApiKeyResolution('warn', 'name-from-message rejected: missing provider key', provider, {
+              pathname,
+              method,
+              source,
+              requestedDroneId,
+              messageLength,
+            });
             json(res, 412, {
               ok: false,
               error: `Missing ${providerDisplayName(provider)} API key. Configure it in Settings.`,
@@ -8443,14 +8526,26 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           json(res, 200, { ok: true, name });
           return;
         } catch (e: any) {
-          hubLog('error', 'name-from-message request failed', {
-            provider: selectedProvider,
-            source,
-            requestedDroneId,
-            messageLength,
-            model: String(process.env.DRONE_HUB_DRONE_NAME_MODEL ?? '').trim() || null,
-            error: e?.message ?? String(e),
-          });
+          if (selectedProvider) {
+            await logProviderApiKeyResolution('error', 'name-from-message request failed', selectedProvider, {
+              pathname,
+              method,
+              source,
+              requestedDroneId,
+              messageLength,
+              model: String(process.env.DRONE_HUB_DRONE_NAME_MODEL ?? '').trim() || null,
+              error: e?.message ?? String(e),
+            });
+          } else {
+            hubLog('error', 'name-from-message request failed', {
+              ...llmProviderEnvLogMeta(),
+              source,
+              requestedDroneId,
+              messageLength,
+              model: String(process.env.DRONE_HUB_DRONE_NAME_MODEL ?? '').trim() || null,
+              error: e?.message ?? String(e),
+            });
+          }
           json(res, 500, { ok: false, error: e?.message ?? String(e) });
           return;
         }
@@ -8482,13 +8577,12 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           selectedProvider = provider;
           const resolved = await resolveEffectiveProviderApiKeySettings(provider);
           if (!resolved.apiKey) {
-            if (source) {
-              hubLog('warn', 'task-title-from-message rejected: missing provider key', {
-                provider,
-                source,
-                messageLength,
-              });
-            }
+            await logProviderApiKeyResolution('warn', 'task-title-from-message rejected: missing provider key', provider, {
+              pathname,
+              method,
+              source,
+              messageLength,
+            });
             json(res, 412, {
               ok: false,
               error: `Missing ${providerDisplayName(provider)} API key. Configure it in Settings.`,
@@ -8507,13 +8601,24 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           json(res, 200, { ok: true, title });
           return;
         } catch (e: any) {
-          hubLog('error', 'task-title-from-message request failed', {
-            provider: selectedProvider,
-            source,
-            messageLength,
-            model: String(process.env.DRONE_HUB_TASK_TITLE_MODEL ?? '').trim() || null,
-            error: e?.message ?? String(e),
-          });
+          if (selectedProvider) {
+            await logProviderApiKeyResolution('error', 'task-title-from-message request failed', selectedProvider, {
+              pathname,
+              method,
+              source,
+              messageLength,
+              model: String(process.env.DRONE_HUB_TASK_TITLE_MODEL ?? '').trim() || null,
+              error: e?.message ?? String(e),
+            });
+          } else {
+            hubLog('error', 'task-title-from-message request failed', {
+              ...llmProviderEnvLogMeta(),
+              source,
+              messageLength,
+              model: String(process.env.DRONE_HUB_TASK_TITLE_MODEL ?? '').trim() || null,
+              error: e?.message ?? String(e),
+            });
+          }
           json(res, 500, { ok: false, error: e?.message ?? String(e) });
           return;
         }

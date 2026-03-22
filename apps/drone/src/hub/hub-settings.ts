@@ -55,6 +55,29 @@ export type EffectiveProviderApiKeySettings = {
   source: ApiKeySettingsSource;
   updatedAt: string | null;
 };
+export type SecretValueDiagnostics = {
+  present: boolean;
+  hasValue: boolean;
+  rawLength: number | null;
+  trimmedLength: number | null;
+  fingerprint: string | null;
+};
+export type ProviderApiKeyResolutionDiagnostics = {
+  provider: LlmProviderId;
+  envVar: 'OPENAI_API_KEY' | 'GEMINI_API_KEY';
+  env: SecretValueDiagnostics;
+  stored: {
+    hasValue: boolean;
+    updatedAt: string | null;
+    fingerprint: string | null;
+  };
+  effective: {
+    source: ApiKeySettingsSource;
+    hasValue: boolean;
+    updatedAt: string | null;
+    fingerprint: string | null;
+  };
+};
 export type LlmProviderSource = 'settings' | 'environment' | 'default';
 export type EffectiveLlmProvider = {
   provider: LlmProviderId;
@@ -241,6 +264,25 @@ function normalizeApiKey(raw: unknown): string {
   return typeof raw === 'string' ? raw.trim() : '';
 }
 
+function apiKeyFingerprint(apiKeyRaw: unknown): string | null {
+  const apiKey = normalizeApiKey(apiKeyRaw);
+  if (!apiKey) return null;
+  return crypto.createHash('sha256').update(apiKey, 'utf8').digest('hex').slice(0, 12);
+}
+
+export function describeSecretValue(raw: unknown): SecretValueDiagnostics {
+  const present = raw !== undefined;
+  const text = typeof raw === 'string' ? raw : raw == null ? '' : String(raw);
+  const trimmed = text.trim();
+  return {
+    present,
+    hasValue: trimmed.length > 0,
+    rawLength: present ? text.length : null,
+    trimmedLength: present ? trimmed.length : null,
+    fingerprint: apiKeyFingerprint(trimmed),
+  };
+}
+
 function normalizeOrderedStringList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   const out: string[] = [];
@@ -419,6 +461,28 @@ export async function resolveEffectiveProviderApiKeySettings(provider: LlmProvid
     apiKey: null,
     source: null,
     updatedAt: null,
+  };
+}
+
+export async function collectProviderApiKeyDiagnostics(provider: LlmProviderId): Promise<ProviderApiKeyResolutionDiagnostics> {
+  const envVar = providerApiKeyEnvVar(provider);
+  const stored = await getStoredProviderApiKey(provider);
+  const effective = await resolveEffectiveProviderApiKeySettings(provider);
+  return {
+    provider,
+    envVar,
+    env: describeSecretValue(process.env[envVar]),
+    stored: {
+      hasValue: Boolean(stored?.apiKey),
+      updatedAt: stored?.updatedAt ?? null,
+      fingerprint: apiKeyFingerprint(stored?.apiKey),
+    },
+    effective: {
+      source: effective.source,
+      hasValue: Boolean(effective.apiKey),
+      updatedAt: effective.updatedAt,
+      fingerprint: apiKeyFingerprint(effective.apiKey),
+    },
   };
 }
 
