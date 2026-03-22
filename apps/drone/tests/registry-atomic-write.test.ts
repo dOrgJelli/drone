@@ -37,13 +37,10 @@ describe('registry writes', () => {
     await withTempHomes(async ({ xdgDataHome }) => {
       const fsPromises = require('node:fs/promises');
       const registryModulePath = require.resolve('../src/host/registry');
-      const pathsModulePath = require.resolve('../src/host/paths');
-
-      delete require.cache[registryModulePath];
-      delete require.cache[pathsModulePath];
-
       const pathsMod = require('../src/host/paths');
+
       pathsMod.resetDroneRootDirForTests();
+      delete require.cache[registryModulePath];
 
       const preferredDir = path.join(xdgDataHome, 'drone');
       const preferredPath = path.join(preferredDir, 'registry.json');
@@ -118,9 +115,7 @@ describe('registry writes', () => {
       } finally {
         fsPromises.writeFile = originalWriteFile;
         delete require.cache[registryModulePath];
-        delete require.cache[pathsModulePath];
-        const freshPathsMod = require('../src/host/paths');
-        freshPathsMod.resetDroneRootDirForTests();
+        pathsMod.resetDroneRootDirForTests();
       }
     });
   });
