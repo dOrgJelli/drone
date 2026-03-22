@@ -1,40 +1,12 @@
 import React from 'react';
 import { requestJson } from '../http';
+import {
+  FLEET_ASSIGNMENT_UPDATED_EVENT,
+  normalizeFleetAssignmentUpdatedDetail,
+  type FleetAssignmentUpdatedDetail,
+} from '../app/fleet-assignment-events';
+import type { FleetActorPayload } from './fleet-api';
 import { provisioningLabel, usePaneReadiness } from '../panes/usePaneReadiness';
-
-type FleetActorPayload = {
-  ok: true;
-  apiVersion: string;
-  actor: { id: string; name: string };
-  config: {
-    enabled: boolean;
-    capabilities: string[];
-    readScopes: string[];
-    quotas: Record<string, number>;
-  };
-  limits: {
-    maxChildren: number;
-    maxCreationsPerHour: number;
-    maxPendingCreationsGlobal: number;
-    maxMessagesPerMinute: number;
-    maxMessageSizeBytes: number;
-    maxReadPageSize: number;
-    defaultReadPageSize: number;
-    maxReadChars: number;
-  };
-  usage: {
-    childrenCount: number;
-    assignedCount: number;
-    creationsLastHour: number;
-    messagesLastMinute: number;
-    pendingCreationsGlobal: number;
-  };
-  relationships: {
-    children: Array<{ id: string; name: string; kind: 'real' | 'pending'; phase?: string | null }>;
-    assigned: Array<{ id: string; name: string; kind: 'real' | 'pending' }>;
-  };
-  availableTargets: Array<{ id: string; name: string; assigned: boolean; child: boolean }>;
-};
 
 type FleetAuditPayload = {
   ok: true;
@@ -291,6 +263,21 @@ export function DroneFleetDock({
       if (timer) clearInterval(timer);
     };
   }, [load, pollingDisabled]);
+
+  React.useEffect(() => {
+    const onFleetAssignmentUpdated = (event: Event) => {
+      const detail = normalizeFleetAssignmentUpdatedDetail(
+        (event as CustomEvent<FleetAssignmentUpdatedDetail | null>).detail,
+      );
+      if (!detail || detail.ownerDroneId !== droneId) return;
+      setData(detail.actor);
+      setError(null);
+    };
+    window.addEventListener(FLEET_ASSIGNMENT_UPDATED_EVENT, onFleetAssignmentUpdated as EventListener);
+    return () => {
+      window.removeEventListener(FLEET_ASSIGNMENT_UPDATED_EVENT, onFleetAssignmentUpdated as EventListener);
+    };
+  }, [droneId]);
 
   React.useEffect(() => {
     if (!data) return;

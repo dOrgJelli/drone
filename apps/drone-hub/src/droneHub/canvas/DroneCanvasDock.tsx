@@ -9,6 +9,10 @@ import {
   parseCanvasChatNodeId,
 } from '../app/app-config';
 import {
+  dispatchCanvasAssignmentPreview,
+  resolveFleetAssignmentDropOwnerFromPoint,
+} from '../app/fleet-assignment-events';
+import {
   draggedCanvasChatNodeIdsFromData,
   parseDroneHubDragData,
 } from '../app/drone-hub-dnd';
@@ -278,6 +282,7 @@ export function DroneCanvasDock({
   draftRepoLabel,
   chatNodeStateById,
   onActivateChat,
+  onAssignDronesToOwner,
   onSendCanvasPrompt,
   onCreateCanvasDroneFromDraft,
   onRenameChat,
@@ -307,6 +312,10 @@ export function DroneCanvasDock({
   draftRepoLabel?: string;
   chatNodeStateById: Record<string, DroneCanvasIndicatorState>;
   onActivateChat?: (droneId: string, chatName: string) => void;
+  onAssignDronesToOwner?: (
+    ownerDroneId: string,
+    targetDroneIds: string[],
+  ) => Promise<{ ok: boolean; error?: string | null }>;
   onSendCanvasPrompt?: (
     targets: Array<{ droneId: string; chatName: string }>,
     prompt: string,
@@ -940,6 +949,21 @@ export function DroneCanvasDock({
           );
           if (movedDistance >= DRAG_MOVE_THRESHOLD_PX) nodeDrag.moved = true;
         }
+        if (nodeDrag.moved) {
+          const draggedDroneIds = Array.from(
+            new Set(
+              nodeDrag.droneIds
+                .map((nodeId) => parseCanvasChatNodeId(nodeId)?.droneId ?? '')
+                .filter(Boolean),
+            ),
+          );
+          if (draggedDroneIds.length > 0) {
+            dispatchCanvasAssignmentPreview({
+              droneIds: draggedDroneIds,
+              overDroneId: resolveFleetAssignmentDropOwnerFromPoint(event.clientX, event.clientY),
+            });
+          }
+        }
         moveNodes(
           nodeDrag.droneIds.map((droneId) => {
             const start = nodeDrag.startPositionsById[droneId];
@@ -1015,9 +1039,43 @@ export function DroneCanvasDock({
       }
     };
 
-    const onWindowMouseUp = () => {
+    const onWindowMouseUp = (event: MouseEvent) => {
       const nodeDrag = nodeDragRef.current;
-      if (nodeDrag?.moved) suppressNodeClickRef.current = true;
+      if (nodeDrag?.moved) {
+        suppressNodeClickRef.current = true;
+        const ownerDroneId = resolveFleetAssignmentDropOwnerFromPoint(event.clientX, event.clientY);
+        if (ownerDroneId) {
+          moveNodes(
+            nodeDrag.droneIds
+              .map((droneId) => {
+                const start = nodeDrag.startPositionsById[droneId];
+                if (!start) return null;
+                return { droneId, x: start.x, y: start.y };
+              })
+              .filter(Boolean) as Array<{ droneId: string; x: number; y: number }>,
+          );
+          if (onAssignDronesToOwner) {
+            const targetDroneIds = Array.from(
+              new Set(
+                nodeDrag.droneIds
+                  .map((nodeId) => parseCanvasChatNodeId(nodeId)?.droneId ?? '')
+                  .filter((droneId) => droneId && droneId !== ownerDroneId),
+              ),
+            );
+            if (targetDroneIds.length > 0) {
+              setMessageError(null);
+              void onAssignDronesToOwner(ownerDroneId, targetDroneIds).then((result) => {
+                if (result.ok) {
+                  setMessageError(null);
+                  return;
+                }
+                if (result.error) setMessageError(result.error);
+              });
+            }
+          }
+        }
+      }
+      dispatchCanvasAssignmentPreview(null);
       nodeDragRef.current = null;
       setDraggingNodeId(null);
 
@@ -1035,10 +1093,11 @@ export function DroneCanvasDock({
     window.addEventListener('mousemove', onWindowMouseMove);
     window.addEventListener('mouseup', onWindowMouseUp);
     return () => {
+      dispatchCanvasAssignmentPreview(null);
       window.removeEventListener('mousemove', onWindowMouseMove);
       window.removeEventListener('mouseup', onWindowMouseUp);
     };
-  }, [clearSelection, moveNodes, setPan, setSelectedDroneIds]);
+  }, [clearSelection, moveNodes, onAssignDronesToOwner, setPan, setSelectedDroneIds]);
 
   const applyZoomAt = React.useCallback(
     (nextScaleRaw: number, anchorClientX: number, anchorClientY: number) => {

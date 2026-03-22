@@ -48,6 +48,10 @@ type RightPanelTabContentProps = {
     }
   >;
   onActivateChatFromCanvas: (droneId: string, chatName: string) => void;
+  onAssignCanvasDronesToOwner: (
+    ownerDroneId: string,
+    targetDroneIds: string[],
+  ) => Promise<{ ok: boolean; error?: string | null }>;
   onSendCanvasPrompt: (
     targets: Array<{ droneId: string; chatName: string }>,
     prompt: string,
@@ -141,6 +145,7 @@ export function RightPanelTabContent({
   draftRepoLabel,
   chatNodeStateById,
   onActivateChatFromCanvas,
+  onAssignCanvasDronesToOwner,
   onSendCanvasPrompt,
   onCreateCanvasDroneFromDraft,
   onRenameCanvasChat,
@@ -216,6 +221,7 @@ export function RightPanelTabContent({
           draftRepoLabel={draftRepoLabel}
           chatNodeStateById={chatNodeStateById}
           onActivateChat={onActivateChatFromCanvas}
+          onAssignDronesToOwner={onAssignCanvasDronesToOwner}
           onSendCanvasPrompt={onSendCanvasPrompt}
           onCreateCanvasDroneFromDraft={onCreateCanvasDroneFromDraft}
           onRenameChat={onRenameCanvasChat}

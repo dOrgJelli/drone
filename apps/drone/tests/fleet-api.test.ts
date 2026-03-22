@@ -299,6 +299,59 @@ describeSocketSuite('fleet api', () => {
     }
   });
 
+  test('auto-enables assigned fleet access when adding a target', async () => {
+    const parentDaemon = await startStubDaemon('parent-auto-token');
+    const childDaemon = await startStubDaemon('child-auto-token');
+    try {
+      const now = new Date().toISOString();
+      await updateRegistry((reg: any) => {
+        reg.drones = {
+          parent: {
+            id: 'parent',
+            name: 'parent',
+            hostPort: parentDaemon.port,
+            token: 'parent-auto-token',
+            containerPort: 7777,
+            repoPath: '',
+            createdAt: now,
+            chats: { default: { createdAt: now, agent: { kind: 'builtin', id: 'cursor' }, turns: [], pendingPrompts: [] } },
+          },
+          child: {
+            id: 'child',
+            name: 'child',
+            hostPort: childDaemon.port,
+            token: 'child-auto-token',
+            containerPort: 7777,
+            repoPath: '',
+            createdAt: now,
+            chats: { default: { createdAt: now, agent: { kind: 'builtin', id: 'cursor' }, turns: [], pendingPrompts: [] } },
+          },
+        };
+      });
+
+      const assigned = await apiFetch('/api/fleet/actors/parent/assigned', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ target: 'child' }),
+      });
+      expect(assigned.r.status).toBe(200);
+      expect(assigned.data?.config?.enabled).toBe(true);
+      expect(assigned.data?.config?.capabilities).toContain('drone:message:send');
+      expect(assigned.data?.config?.capabilities).toContain('drone:message:read');
+      expect(assigned.data?.config?.readScopes).toContain('assigned');
+      expect((assigned.data?.relationships?.assigned ?? []).map((item: any) => item.id)).toContain('child');
+
+      await Bun.sleep(250);
+      expect(parentDaemon.policy?.enabled).toBe(true);
+      expect(parentDaemon.policy?.capabilities).toContain('drone:message:send');
+      expect(parentDaemon.policy?.capabilities).toContain('drone:message:read');
+      expect(parentDaemon.policy?.readScopes).toContain('assigned');
+    } finally {
+      await parentDaemon.close();
+      await childDaemon.close();
+    }
+  });
+
   test('reconciles send and read fleet requests for a child drone', async () => {
     const parentDaemon = await startStubDaemon('parent-send-token');
     const childDaemon = await startStubDaemon('child-send-token');
