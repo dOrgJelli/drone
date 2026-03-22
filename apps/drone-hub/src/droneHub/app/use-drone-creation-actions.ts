@@ -101,7 +101,9 @@ type UseDroneCreationActionsArgs = {
   setDraftAutoRenaming: React.Dispatch<React.SetStateAction<boolean>>;
   setDraftCreateOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setDraftCreating: React.Dispatch<React.SetStateAction<boolean>>;
-  setNameSuggestToast: React.Dispatch<React.SetStateAction<{ id: string; title?: string; message: string } | null>>;
+  setNameSuggestToast: React.Dispatch<
+    React.SetStateAction<{ id: string; title?: string; message: string; tone?: 'success' | 'error' } | null>
+  >;
   setSelectedDrone: React.Dispatch<React.SetStateAction<string | null>>;
   setSelectedDroneIds: React.Dispatch<React.SetStateAction<string[]>>;
   setSelectedChat: React.Dispatch<React.SetStateAction<string>>;
@@ -201,7 +203,7 @@ export function useDroneCreationActions({
       const text = String(message ?? '').trim();
       if (!text) return;
       const id = makeId();
-      setNameSuggestToast({ id, title, message: text });
+      setNameSuggestToast({ id, title, message: text, tone: 'error' });
       window.setTimeout(() => {
         setNameSuggestToast((current) => (current?.id === id ? null : current));
       }, 5000);

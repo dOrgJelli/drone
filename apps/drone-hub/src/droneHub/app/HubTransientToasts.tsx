@@ -4,6 +4,7 @@ type NameSuggestToast = {
   id: string;
   title?: string;
   message: string;
+  tone?: 'success' | 'error';
 };
 
 type HubTransientToastsProps = {
@@ -21,20 +22,26 @@ export function HubTransientToasts({
   onDismissNameSuggestToast,
   onDismissJobsModalError,
 }: HubTransientToastsProps) {
+  const nameSuggestToastTone = nameSuggestToast?.tone === 'success' ? 'success' : 'error';
+  const nameSuggestToastBorderClass =
+    nameSuggestToastTone === 'success' ? 'border-[rgba(74,222,128,.28)]' : 'border-[rgba(255,90,90,.2)]';
+  const nameSuggestToastLabelClass =
+    nameSuggestToastTone === 'success' ? 'text-[var(--green)]' : 'text-[var(--red)]';
+
   return (
     <>
       {nameSuggestToast && (
         <div
           onClick={onDismissNameSuggestToast}
           title="Click to dismiss"
-          className={`fixed right-4 z-50 max-w-[420px] rounded-lg border border-[rgba(255,90,90,.2)] bg-[var(--panel-alt)] shadow-[0_16px_48px_rgba(0,0,0,.3)] px-4 py-3 animate-slide-up ${
+          className={`fixed right-4 z-50 max-w-[420px] rounded-lg border ${nameSuggestToastBorderClass} bg-[var(--panel-alt)] shadow-[0_16px_48px_rgba(0,0,0,.3)] px-4 py-3 animate-slide-up ${
             jobsModalError && !jobsModalOpen ? 'bottom-[98px]' : 'bottom-4'
           } cursor-pointer`}
         >
           <div className="flex items-start gap-3">
             <div className="min-w-0 flex-1">
-              <div className="text-[10px] font-semibold text-[var(--red)] mb-1 tracking-wide uppercase" style={{ fontFamily: 'var(--display)' }}>
-                {nameSuggestToast.title ?? 'Action failed'}
+              <div className={`text-[10px] font-semibold mb-1 tracking-wide uppercase ${nameSuggestToastLabelClass}`} style={{ fontFamily: 'var(--display)' }}>
+                {nameSuggestToast.title ?? (nameSuggestToastTone === 'success' ? 'Action completed' : 'Action failed')}
               </div>
               <div className="text-[11px] text-[var(--muted)] whitespace-pre-wrap">{nameSuggestToast.message}</div>
             </div>

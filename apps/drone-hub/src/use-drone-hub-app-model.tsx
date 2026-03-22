@@ -1204,6 +1204,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     terminalEmulator,
     activeRepoPath,
     setActiveRepoPath,
+    setNameSuggestToast,
     requestJson,
   });
   const { closeDroneErrorModal, openDroneErrorModal, clearDroneHubError } =

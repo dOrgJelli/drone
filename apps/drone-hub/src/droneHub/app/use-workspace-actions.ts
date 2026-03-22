@@ -23,8 +23,81 @@ type UseWorkspaceActionsArgs = {
   terminalEmulator: string;
   activeRepoPath: string;
   setActiveRepoPath: React.Dispatch<React.SetStateAction<string>>;
+  setNameSuggestToast: React.Dispatch<
+    React.SetStateAction<{ id: string; title?: string; message: string; tone?: 'success' | 'error' } | null>
+  >;
   requestJson: RequestJson;
 };
+
+function shortSha(raw: unknown): string | null {
+  const sha = String(raw ?? '').trim().toLowerCase();
+  if (!/^[0-9a-f]{7,40}$/.test(sha)) return null;
+  return sha.slice(0, 7);
+}
+
+function repoActionDroneLabel(currentDrone: DroneSummary | null): string {
+  return String(currentDrone?.name ?? '').trim() || 'drone';
+}
+
+function formatRepoPushSuccessMessage(data: any, currentDrone: DroneSummary | null): { title: string; message: string } {
+  const mode = String(data?.mode ?? '').trim().toLowerCase();
+  const droneLabel = repoActionDroneLabel(currentDrone);
+  const hostRef = String(data?.hostRef ?? '').trim();
+  const mergeSha = shortSha(data?.mergeCommitSha);
+  const mergeSubject = String(data?.mergeCommitSubject ?? '').trim();
+
+  if (mode === 'host-noop') {
+    return {
+      title: 'Host repo already current',
+      message: `Host runtime drone "${droneLabel}" already uses the host repo directly.`,
+    };
+  }
+
+  if (mergeSha && mergeSubject) {
+    return {
+      title: 'Host changes pulled into drone',
+      message: `Created merge commit ${mergeSha}: ${mergeSubject}`,
+    };
+  }
+
+  if (mergeSha) {
+    return {
+      title: 'Host changes pulled into drone',
+      message: `Created merge commit ${mergeSha}${hostRef ? ` from ${hostRef}` : ''} in "${droneLabel}".`,
+    };
+  }
+
+  return {
+    title: 'Host changes pulled into drone',
+    message: hostRef ? `Pulled ${hostRef} into "${droneLabel}".` : `Pulled host changes into "${droneLabel}".`,
+  };
+}
+
+function formatRepoPullSuccessMessage(data: any, currentDrone: DroneSummary | null): { title: string; message: string } {
+  const mode = String(data?.mode ?? '').trim().toLowerCase();
+  const droneLabel = repoActionDroneLabel(currentDrone);
+  const hostRef = String(data?.fromRef ?? '').trim();
+  const exportedHeadSha = shortSha(data?.exportedHeadSha);
+  const autoCommitSha = shortSha(data?.droneAutoCommitSha);
+
+  if (mode === 'no-changes' || data?.noChanges === true) {
+    return {
+      title: 'No drone changes to apply',
+      message: exportedHeadSha
+        ? `No new commits to apply from "${droneLabel}" (${exportedHeadSha}).`
+        : `No new commits to apply from "${droneLabel}".`,
+    };
+  }
+
+  const suffix: string[] = [];
+  if (autoCommitSha) suffix.push(`Snapshot commit ${autoCommitSha} captured prior drone edits.`);
+  suffix.push('Review the host working tree and commit when ready.');
+
+  return {
+    title: 'Drone changes applied to host',
+    message: `${hostRef ? `Applied ${droneLabel} changes onto ${hostRef}.` : `Applied ${droneLabel} changes onto the host repo.`} ${suffix.join(' ')}`,
+  };
+}
 
 export function useWorkspaceActions({
   autoDelete,
@@ -33,6 +106,7 @@ export function useWorkspaceActions({
   terminalEmulator,
   activeRepoPath,
   setActiveRepoPath,
+  setNameSuggestToast,
   requestJson,
 }: UseWorkspaceActionsArgs) {
   const [deletingRepos, setDeletingRepos] = React.useState<Record<string, boolean>>({});
@@ -61,6 +135,19 @@ export function useWorkspaceActions({
     setRepoOpError(message);
     setRepoOpErrorMeta(meta ?? null);
   }, []);
+
+  const showTransientToast = React.useCallback(
+    (message: string, title: string, tone: 'success' | 'error' = 'error') => {
+      const text = String(message ?? '').trim();
+      if (!text) return;
+      const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      setNameSuggestToast({ id, title, message: text, tone });
+      window.setTimeout(() => {
+        setNameSuggestToast((current) => (current?.id === id ? null : current));
+      }, 5000);
+    },
+    [setNameSuggestToast],
+  );
 
   const deleteRepo = React.useCallback(
     async (repoPath: string) => {
@@ -259,12 +346,14 @@ export function useWorkspaceActions({
         response = await postJson(url, { commitDirty: true, commitMessage: autoCommitMessage });
       }
       if (!response.ok) throwRepoPullError(response.data, 'Repo pull failed.');
+      const success = formatRepoPullSuccessMessage(response.data, currentDrone);
+      showTransientToast(success.message, success.title, 'success');
     } catch (e: any) {
       setRepoOperationError(e?.message ?? String(e));
     } finally {
       setRepoOp(null);
     }
-  }, [clearRepoOperationError, currentDrone, postJson, setRepoOperationError]);
+  }, [clearRepoOperationError, currentDrone, postJson, setRepoOperationError, showTransientToast]);
 
   const pushRepoChanges = React.useCallback(async () => {
     if (!currentDrone) return;
@@ -296,12 +385,14 @@ export function useWorkspaceActions({
       };
       const response = await postJson(url, {});
       if (!response.ok) throwRepoPushError(response.data, 'Repo push failed.');
+      const success = formatRepoPushSuccessMessage(response.data, currentDrone);
+      showTransientToast(success.message, success.title, 'success');
     } catch (e: any) {
       setRepoOperationError(e?.message ?? String(e));
     } finally {
       setRepoOp(null);
     }
-  }, [clearRepoOperationError, currentDrone, postJson, setRepoOperationError]);
+  }, [clearRepoOperationError, currentDrone, postJson, setRepoOperationError, showTransientToast]);
 
   const reseedRepo = React.useCallback(async () => {
     if (!currentDrone) return;

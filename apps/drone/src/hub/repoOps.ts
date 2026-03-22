@@ -132,6 +132,32 @@ export class RepoPatchApplyError extends Error {
 export function isRepoPatchApplyError(err: unknown): err is RepoPatchApplyError {
   return err instanceof RepoPatchApplyError;
 }
+
+export function resolveBundleImportSourceRefFromListHeads(raw: string): string {
+  const refs = Array.from(
+    new Set(
+      String(raw ?? '')
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => line.match(/^[0-9a-f]{40,}\s+(\S+)$/i)?.[1] ?? '')
+        .filter(Boolean)
+    )
+  );
+
+  if (refs.includes('HEAD')) return 'HEAD';
+  if (refs.length === 1) return refs[0] ?? 'HEAD';
+
+  const branchRefs = refs.filter((ref) => ref.startsWith('refs/heads/'));
+  if (branchRefs.length === 1) return branchRefs[0] ?? 'HEAD';
+
+  throw new Error(
+    refs.length > 0
+      ? `Bundle does not advertise an unambiguous import ref: ${refs.join(', ')}`
+      : 'Bundle does not advertise any importable refs.'
+  );
+}
+
 async function runLocal(
   cmd: string,
   args: string[],
@@ -1358,7 +1384,14 @@ export async function importBundleHeadToHostRef(opts: { repoRoot: string; bundle
     throw new Error(`bundle not found: ${bundlePath}`);
   }
 
-  const fetch = await runLocal('git', ['-C', repoRoot, 'fetch', '--no-tags', '--force', bundlePath, `HEAD:${refName}`]);
+  const listHeads = await runLocal('git', ['bundle', 'list-heads', bundlePath]);
+  if (listHeads.code !== 0) {
+    const details = `${String(listHeads.stderr ?? '')}\n${String(listHeads.stdout ?? '')}`.trim();
+    throw new Error(`Failed reading bundle refs from ${bundlePath}.${details ? `\n\n${details}` : ''}`);
+  }
+
+  const sourceRef = resolveBundleImportSourceRefFromListHeads(listHeads.stdout);
+  const fetch = await runLocal('git', ['-C', repoRoot, 'fetch', '--no-tags', '--force', bundlePath, `${sourceRef}:${refName}`]);
   if (fetch.code !== 0) {
     const details = `${String(fetch.stderr ?? '')}\n${String(fetch.stdout ?? '')}`.trim();
     throw new Error(`Failed importing bundle into ${refName}.${details ? `\n\n${details}` : ''}`);

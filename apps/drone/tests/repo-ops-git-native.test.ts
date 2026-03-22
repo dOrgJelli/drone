@@ -130,7 +130,7 @@ describe('repoOps git-native pull helpers', () => {
     }
   });
 
-  test('imports bundle HEAD into a temporary host ref and supports cleanup', async () => {
+  test('imports a revision-range bundle into a temporary host ref and supports cleanup', async () => {
     const { repoRoot, cleanup } = mkRepo();
     try {
       writeAndCommit(repoRoot, 'a.txt', 'one\n', 'init');
@@ -148,6 +148,29 @@ describe('repoOps git-native pull helpers', () => {
       await deleteHostRefBestEffort({ repoRoot, refName });
       const missingRef = run('git', ['rev-parse', '--verify', refName], repoRoot);
       expect(missingRef.code).not.toBe(0);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test('imports a branch bundle even when the bundle does not advertise HEAD', async () => {
+    const { repoRoot, cleanup } = mkRepo();
+    try {
+      writeAndCommit(repoRoot, 'a.txt', 'one\n', 'init');
+      writeAndCommit(repoRoot, 'a.txt', 'two\n', 'update');
+      const head = runOrThrow('git', ['rev-parse', 'HEAD'], repoRoot).trim();
+      const bundlePath = path.join(repoRoot, 'branch.bundle');
+      runOrThrow('git', ['bundle', 'create', bundlePath, 'main'], repoRoot);
+
+      const advertisedRefs = runOrThrow('git', ['bundle', 'list-heads', bundlePath], repoRoot);
+      expect(advertisedRefs).toContain('refs/heads/main');
+      expect(advertisedRefs).not.toContain(' HEAD');
+
+      const refName = 'refs/drone/imports/test/import-branch';
+      const importedSha = await importBundleHeadToHostRef({ repoRoot, bundlePath, refName });
+      expect(importedSha).toBe(head);
+      const refSha = runOrThrow('git', ['rev-parse', refName], repoRoot).trim();
+      expect(refSha).toBe(head);
     } finally {
       cleanup();
     }

@@ -78,6 +78,7 @@ import {
   importBundleHeadToHostRef,
   isHostRepoPullBeforeCreateError,
   mergeBranchIntoMainWorkingTreeNoCommit,
+  resolveBundleImportSourceRefFromListHeads,
   gitStashPop,
   gitStashPush,
   gitTopLevel,
@@ -1259,6 +1260,13 @@ async function importBundleHeadToDroneRef(opts: {
 
   await dvmCopyToContainer(opts.containerName, hostBundlePath, containerBundlePath);
 
+  const listHeads = await dvmExec(opts.containerName, 'git', ['bundle', 'list-heads', containerBundlePath]);
+  if (listHeads.code !== 0) {
+    const details = `${String(listHeads.stderr ?? '')}\n${String(listHeads.stdout ?? '')}`.trim();
+    throw new Error(`Failed reading bundle refs in container.${details ? `\n\n${details}` : ''}`);
+  }
+
+  const sourceRef = resolveBundleImportSourceRefFromListHeads(String(listHeads.stdout ?? ''));
   const fetch = await dvmExec(opts.containerName, 'git', [
     '-C',
     repoPathInContainer,
@@ -1266,7 +1274,7 @@ async function importBundleHeadToDroneRef(opts: {
     '--no-tags',
     '--force',
     containerBundlePath,
-    `HEAD:${refName}`,
+    `${sourceRef}:${refName}`,
   ]);
   if (fetch.code !== 0) {
     const details = `${String(fetch.stderr ?? '')}\n${String(fetch.stdout ?? '')}`.trim();
@@ -12482,6 +12490,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         let importRefName = '';
         let importRefSha = '';
         let mergeCommitSha = '';
+        let mergeCommitSubject = '';
         let hostBundlePath = '';
         let containerBundlePath = '';
         let baseAdvanced = false;
@@ -12557,6 +12566,17 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
                 args: ['rev-parse', 'HEAD'],
               });
               mergeCommitSha = parseShaFromText(head.stdout) ?? '';
+              const subject = await runGitInDrone({
+                container: containerName,
+                repoPathInContainer,
+                args: ['log', '-1', '--format=%s', 'HEAD'],
+              });
+              if (subject.code === 0) {
+                mergeCommitSubject = String(subject.stdout ?? '')
+                  .trim()
+                  .split(/\r?\n/, 1)[0]
+                  ?.trim();
+              }
               try {
                 await dvmRepoSetBaseSha({ container: containerName, repoPathInContainer, baseSha: fromRefSha });
                 baseAdvanced = true;
@@ -12615,6 +12635,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
                 importedRef: importRefName || null,
                 importedRefSha: importRefSha || null,
                 mergeCommitSha: mergeCommitSha || null,
+                mergeCommitSubject: mergeCommitSubject || null,
                 baseAdvanced,
                 baseAdvanceError,
               };
@@ -12632,6 +12653,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               importedRef: importRefName,
               importedRefSha: importRefSha || null,
               mergeCommitSha: mergeCommitSha || null,
+              mergeCommitSubject: mergeCommitSubject || null,
               baseAdvanced,
               baseAdvanceError,
             });
@@ -12674,6 +12696,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
                 importedRef: importRefName || null,
                 importedRefSha: importRefSha || null,
                 mergeCommitSha: null,
+                mergeCommitSubject: null,
                 baseAdvanced,
                 baseAdvanceError,
               };
@@ -12724,6 +12747,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               importedRef: importRefName || null,
               importedRefSha: importRefSha || null,
               mergeCommitSha: null,
+              mergeCommitSubject: null,
               baseAdvanced,
               baseAdvanceError,
             };
