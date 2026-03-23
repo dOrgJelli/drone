@@ -2154,6 +2154,9 @@ export function DroneCanvasDock({
               : chatDroneId
                 ? String(droneRepoById[chatDroneId] ?? '').trim()
                 : '';
+            const repoBranch = !draftNode && chatDroneId
+              ? String(droneById[chatDroneId]?.repoBranch ?? '').trim()
+              : '';
             const chatDroneLabel = chatDroneId
               ? String(effectiveDroneNameById[chatDroneId] ?? '').trim() || chatDroneId
               : '';
@@ -2214,6 +2217,14 @@ export function DroneCanvasDock({
                 {repoLabel ? (
                   <span className="pointer-events-none absolute left-2 top-full mt-[1px] inline-flex max-w-[260px] rounded-[4px] border border-[var(--border-subtle)] bg-[rgba(10,14,22,.95)] px-1.5 py-[1px] text-[9px] font-mono text-[var(--muted-dim)] shadow-[0_6px_14px_rgba(0,0,0,.28)]">
                     {repoLabel}
+                  </span>
+                ) : null}
+                {repoBranch ? (
+                  <span
+                    className="pointer-events-none absolute right-2 top-full mt-[1px] inline-flex max-w-[180px] rounded-[4px] border border-[var(--border-subtle)] bg-[rgba(10,14,22,.95)] px-1.5 py-[1px] text-[9px] font-mono text-[var(--muted-dim)] shadow-[0_6px_14px_rgba(0,0,0,.28)]"
+                    title={repoBranch}
+                  >
+                    {repoBranch}
                   </span>
                 ) : null}
                 <span className="min-w-0 flex-1">

@@ -8,6 +8,7 @@ export type DroneSummary = {
   runtime?: 'container' | 'host';
   repoAttached?: boolean;
   repoPath: string;
+  repoBranch?: string | null;
   cwd?: string;
   containerPort: number;
   hostPort: number | null;
