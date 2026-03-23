@@ -33,7 +33,7 @@ import { chatInputDraftKeyForDroneChat, droneHomePath, isDroneStartingOrSeeding,
 import { resolvePreviewHostPane } from './locked-preview-host-pane';
 import { openDroneTabFromLastPreview, resolveDroneOpenTabUrl } from './quick-actions';
 import { cn } from '../../ui/cn';
-import { dropdownMenuItemBaseClass, dropdownPanelBaseClass } from '../../ui/dropdown';
+import { dropdownMenuItemBaseClass, dropdownPanelBaseClass, useDropdownDismiss } from '../../ui/dropdown';
 import { UiMenuSelect, type UiMenuSelectEntry } from '../../ui/menuSelect';
 import { createDraftChatAutomationLaunch } from './chat-draft-automation';
 import { useDroneHubUiStore, useSelectedDroneWorkspaceUiState } from './use-drone-hub-ui-store';
@@ -47,6 +47,7 @@ import {
   type TranscriptRenderBlock,
 } from './prompt-loop-groups';
 import { resolveRunningPromptLoopIdentity } from './prompt-loop-running-identity';
+import type { RepoTransferPeer } from './use-workspace-actions';
 import {
   parseGithubPullRequestHref,
 } from './selected-drone-workspace-utils';
@@ -109,7 +110,10 @@ type SelectedDroneWorkspaceProps = {
   openingEditor: { editor: 'code' | 'cursor' } | null;
   pullRepoChanges: () => Promise<void>;
   pushRepoChanges: () => Promise<void>;
-  repoOp: { kind: 'pull' | 'push' | 'reseed' } | null;
+  repoTransferPeers: RepoTransferPeer[];
+  pullRepoChangesFromDrone: (sourceDroneId: string) => Promise<void>;
+  applyRepoChangesToDrone: (targetDroneId: string) => Promise<void>;
+  repoOp: { kind: 'pull' | 'push' | 'reseed' | 'pull-from-drone' | 'push-to-drone' } | null;
   headerOverflowRef: React.RefObject<HTMLDivElement | null>;
   reseedRepo: () => Promise<void>;
   terminalMenuRef: React.RefObject<HTMLDivElement | null>;
@@ -219,6 +223,9 @@ export function SelectedDroneWorkspace({
   openingEditor,
   pullRepoChanges,
   pushRepoChanges,
+  repoTransferPeers,
+  pullRepoChangesFromDrone,
+  applyRepoChangesToDrone,
   repoOp,
   headerOverflowRef,
   reseedRepo,
@@ -298,7 +305,27 @@ export function SelectedDroneWorkspace({
     () => resolveChatNameForDrone(currentDrone, selectedChat),
     [currentDrone, selectedChat],
   );
+  const syncMenuRef = React.useRef<HTMLDivElement | null>(null);
+  const [syncMenuOpen, setSyncMenuOpen] = React.useState(false);
+  useDropdownDismiss(syncMenuRef, syncMenuOpen, setSyncMenuOpen);
+  React.useEffect(() => {
+    setSyncMenuOpen(false);
+  }, [currentDrone.id, repoOp?.kind]);
   const hostRuntime = String(currentDrone.runtime ?? '').trim().toLowerCase() === 'host';
+  const repoSyncBusyLabel =
+    repoOp?.kind === 'pull'
+      ? 'Applying...'
+      : repoOp?.kind === 'push'
+        ? 'Pulling host...'
+        : repoOp?.kind === 'pull-from-drone'
+          ? 'Pulling drone...'
+          : repoOp?.kind === 'push-to-drone'
+            ? 'Applying to drone...'
+            : repoOp?.kind === 'reseed'
+              ? 'Reseeding...'
+              : 'Sync...';
+  const syncDisabled =
+    isDroneStartingOrSeeding(currentDrone.hubPhase) || Boolean(openingEditor) || Boolean(openingTerminal) || Boolean(repoOp);
   const {
     fleetBadgeAssigning,
     fleetBadgeDropActive,
@@ -1056,44 +1083,103 @@ export function SelectedDroneWorkspace({
             Cursor
           </button>
           {currentDroneRepoAttached && (
-            <>
+            <div ref={syncMenuRef} className="relative">
               <button
                 type="button"
-                onClick={() => void pullRepoChanges()}
-                disabled={isDroneStartingOrSeeding(currentDrone.hubPhase) || Boolean(openingEditor) || Boolean(openingTerminal) || Boolean(repoOp)}
+                onClick={() => {
+                  setHeaderOverflowOpen(false);
+                  setTerminalMenuOpen(false);
+                  setSyncMenuOpen((open) => !open);
+                }}
+                disabled={syncDisabled}
                 className={`inline-flex items-center gap-1.5 px-2 py-1 rounded text-[10px] font-semibold tracking-wide uppercase border transition-all ${
-                  isDroneStartingOrSeeding(currentDrone.hubPhase) || Boolean(openingEditor) || Boolean(openingTerminal) || Boolean(repoOp)
+                  syncDisabled
                     ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
                     : 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)] hover:text-[var(--muted)] hover:border-[var(--border)]'
                 }`}
                 style={{ fontFamily: 'var(--display)' }}
-                title={
-                  hostRuntime
-                    ? 'Host runtime uses the host repository directly; this action is a no-op.'
-                    : 'Apply repo changes from the drone container into the local repo'
-                }
+                title="Sync this drone repo with the host or another drone"
+                aria-haspopup="menu"
+                aria-expanded={syncMenuOpen}
               >
-                {repoOp?.kind === 'pull' ? 'Applying...' : hostRuntime ? 'Apply (noop)' : 'Apply changes'}
+                <span>{hostRuntime ? 'Sync (host)' : repoSyncBusyLabel}</span>
+                <IconChevron down={!syncMenuOpen} className="text-[var(--muted-dim)] opacity-60" />
               </button>
-              <button
-                type="button"
-                onClick={() => void pushRepoChanges()}
-                disabled={isDroneStartingOrSeeding(currentDrone.hubPhase) || Boolean(openingEditor) || Boolean(openingTerminal) || Boolean(repoOp)}
-                className={`inline-flex items-center gap-1.5 px-2 py-1 rounded text-[10px] font-semibold tracking-wide uppercase border transition-all ${
-                  isDroneStartingOrSeeding(currentDrone.hubPhase) || Boolean(openingEditor) || Boolean(openingTerminal) || Boolean(repoOp)
-                    ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
-                    : 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)] hover:text-[var(--muted)] hover:border-[var(--border)]'
-                }`}
-                style={{ fontFamily: 'var(--display)' }}
-                title={
-                  hostRuntime
-                    ? 'Host runtime uses the host repository directly; this action is a no-op.'
-                    : 'Merge the current host branch into this drone branch'
-                }
-              >
-                {repoOp?.kind === 'push' ? 'Pulling host…' : hostRuntime ? 'Pull host (noop)' : 'Pull host changes'}
-              </button>
-            </>
+              {syncMenuOpen && !syncDisabled ? (
+                <div className={cn('absolute right-0 mt-2 w-[280px] z-50', dropdownPanelBaseClass)} role="menu">
+                  <div className="py-1">
+                    <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]">Host</div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSyncMenuOpen(false);
+                        void pullRepoChanges();
+                      }}
+                      className={cn(dropdownMenuItemBaseClass, 'text-[var(--fg-secondary)] hover:bg-[var(--hover)]')}
+                      role="menuitem"
+                      title={hostRuntime ? 'Host runtime uses the host repository directly; this action is a no-op.' : 'Apply this drone repo into the host repo'}
+                    >
+                      {hostRuntime ? 'Apply to host (noop)' : 'Apply to host'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSyncMenuOpen(false);
+                        void pushRepoChanges();
+                      }}
+                      className={cn(dropdownMenuItemBaseClass, 'text-[var(--fg-secondary)] hover:bg-[var(--hover)]')}
+                      role="menuitem"
+                      title={hostRuntime ? 'Host runtime uses the host repository directly; this action is a no-op.' : 'Pull the current host branch into this drone repo'}
+                    >
+                      {hostRuntime ? 'Pull from host (noop)' : 'Pull from host'}
+                    </button>
+                    <div className="my-1 border-t border-[var(--border-subtle)]" />
+                    <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]">Peer Drones</div>
+                    {repoTransferPeers.length > 0 ? (
+                      <>
+                        <div className="px-3 py-1 text-[10px] text-[var(--muted)]">Apply current drone into:</div>
+                        {repoTransferPeers.map((peer) => (
+                          <button
+                            key={`apply-${peer.id}`}
+                            type="button"
+                            onClick={() => {
+                              setSyncMenuOpen(false);
+                              void applyRepoChangesToDrone(peer.id);
+                            }}
+                            className={cn(dropdownMenuItemBaseClass, 'text-[var(--fg-secondary)] hover:bg-[var(--hover)]')}
+                            role="menuitem"
+                            title={`Apply "${currentDroneLabel}" into "${peer.name}"`}
+                          >
+                            Apply to {peer.name}
+                            {peer.group ? <span className="ml-1 text-[var(--muted-dim)]">[{peer.group}]</span> : null}
+                          </button>
+                        ))}
+                        <div className="my-1 border-t border-[var(--border-subtle)]" />
+                        <div className="px-3 py-1 text-[10px] text-[var(--muted)]">Pull another drone into current:</div>
+                        {repoTransferPeers.map((peer) => (
+                          <button
+                            key={`pull-${peer.id}`}
+                            type="button"
+                            onClick={() => {
+                              setSyncMenuOpen(false);
+                              void pullRepoChangesFromDrone(peer.id);
+                            }}
+                            className={cn(dropdownMenuItemBaseClass, 'text-[var(--fg-secondary)] hover:bg-[var(--hover)]')}
+                            role="menuitem"
+                            title={`Pull "${peer.name}" into "${currentDroneLabel}"`}
+                          >
+                            Pull from {peer.name}
+                            {peer.group ? <span className="ml-1 text-[var(--muted-dim)]">[{peer.group}]</span> : null}
+                          </button>
+                        ))}
+                      </>
+                    ) : (
+                      <div className="px-3 py-2 text-[11px] text-[var(--muted)]">No peer drones on the same repo are available.</div>
+                    )}
+                  </div>
+                </div>
+              ) : null}
+            </div>
           )}
           {/* Overflow menu */}
           <div ref={headerOverflowRef as React.RefObject<HTMLDivElement>} className="relative">

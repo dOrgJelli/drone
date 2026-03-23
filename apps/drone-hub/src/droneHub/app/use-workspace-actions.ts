@@ -1,7 +1,7 @@
 import React from 'react';
 import type { DroneSummary, RepoSummary } from '../types';
 import type { RepoOpErrorMeta } from './helpers';
-import { droneHomePath, isHostRuntimeDrone } from './helpers';
+import { compareDronesByNewestFirst, droneHomePath, isHostRuntimeDrone } from './helpers';
 
 type LaunchHint =
   | {
@@ -12,13 +12,20 @@ type LaunchHint =
     }
   | null;
 
-type RepoOpState = null | { kind: 'pull' | 'push' | 'reseed' };
+type RepoOpState = null | { kind: 'pull' | 'push' | 'reseed' | 'pull-from-drone' | 'push-to-drone' };
+
+export type RepoTransferPeer = {
+  id: string;
+  name: string;
+  group: string | null;
+};
 
 type RequestJson = <T>(url: string, init?: RequestInit) => Promise<T>;
 
 type UseWorkspaceActionsArgs = {
   autoDelete: boolean;
   currentDrone: DroneSummary | null;
+  drones: DroneSummary[];
   selectedChat: string;
   terminalEmulator: string;
   activeRepoPath: string;
@@ -37,6 +44,33 @@ function shortSha(raw: unknown): string | null {
 
 function repoActionDroneLabel(currentDrone: DroneSummary | null): string {
   return String(currentDrone?.name ?? '').trim() || 'drone';
+}
+
+function peerDroneLabel(drone: Pick<DroneSummary, 'name'> | null | undefined, fallback = 'drone'): string {
+  return String(drone?.name ?? '').trim() || fallback;
+}
+
+export function listRepoTransferPeers(currentDrone: DroneSummary | null, drones: DroneSummary[]): RepoTransferPeer[] {
+  const currentDroneId = String(currentDrone?.id ?? '').trim();
+  const currentRepoPath = String(currentDrone?.repoPath ?? '').trim();
+  if (!currentDroneId || !currentRepoPath || String(currentDrone?.runtime ?? '').trim().toLowerCase() === 'host') return [];
+
+  return (Array.isArray(drones) ? drones : [])
+    .filter((drone) => {
+      const droneId = String(drone?.id ?? '').trim();
+      if (!droneId || droneId === currentDroneId) return false;
+      if (String(drone?.runtime ?? '').trim().toLowerCase() === 'host') return false;
+      const repoPath = String(drone?.repoPath ?? '').trim();
+      if (!repoPath || repoPath !== currentRepoPath) return false;
+      return Boolean(drone?.repoAttached ?? repoPath);
+    })
+    .slice()
+    .sort(compareDronesByNewestFirst)
+    .map((drone) => ({
+      id: String(drone.id ?? '').trim(),
+      name: String(drone.name ?? '').trim() || String(drone.id ?? '').trim(),
+      group: typeof drone.group === 'string' && drone.group.trim() ? drone.group.trim() : null,
+    }));
 }
 
 function formatRepoPushSuccessMessage(data: any, currentDrone: DroneSummary | null): { title: string; message: string } {
@@ -99,9 +133,44 @@ function formatRepoPullSuccessMessage(data: any, currentDrone: DroneSummary | nu
   };
 }
 
+function formatPeerRepoTransferSuccessMessage(data: any): { title: string; message: string } {
+  const mode = String(data?.mode ?? '').trim().toLowerCase();
+  const sourceName = String(data?.sourceDroneName ?? '').trim() || 'source drone';
+  const targetName = String(data?.targetDroneName ?? '').trim() || 'target drone';
+  const mergeSha = shortSha(data?.mergeCommitSha);
+  const mergeSubject = String(data?.mergeCommitSubject ?? '').trim();
+
+  if (mode === 'no-changes' || data?.noChanges === true) {
+    return {
+      title: 'No peer changes to apply',
+      message: `No new commits to apply from "${sourceName}" into "${targetName}".`,
+    };
+  }
+
+  if (mergeSha && mergeSubject) {
+    return {
+      title: 'Drone changes synced',
+      message: `Merged "${sourceName}" into "${targetName}" as ${mergeSha}: ${mergeSubject}`,
+    };
+  }
+
+  if (mergeSha) {
+    return {
+      title: 'Drone changes synced',
+      message: `Merged "${sourceName}" into "${targetName}" as ${mergeSha}.`,
+    };
+  }
+
+  return {
+    title: 'Drone changes synced',
+    message: `Merged "${sourceName}" into "${targetName}".`,
+  };
+}
+
 export function useWorkspaceActions({
   autoDelete,
   currentDrone,
+  drones,
   selectedChat,
   terminalEmulator,
   activeRepoPath,
@@ -116,6 +185,7 @@ export function useWorkspaceActions({
   const [repoOp, setRepoOp] = React.useState<RepoOpState>(null);
   const [repoOpError, setRepoOpError] = React.useState<string | null>(null);
   const [repoOpErrorMeta, setRepoOpErrorMeta] = React.useState<RepoOpErrorMeta | null>(null);
+  const repoTransferPeers = React.useMemo(() => listRepoTransferPeers(currentDrone, drones), [currentDrone, drones]);
 
   const shouldConfirmDelete = React.useCallback((): boolean => !autoDelete, [autoDelete]);
 
@@ -394,6 +464,83 @@ export function useWorkspaceActions({
     }
   }, [clearRepoOperationError, currentDrone, postJson, setRepoOperationError, showTransientToast]);
 
+  const transferRepoChangesFromDrone = React.useCallback(
+    async (sourceDroneIdRaw: string, targetDroneIdRaw: string, busyKind: 'pull-from-drone' | 'push-to-drone') => {
+      const sourceDroneId = String(sourceDroneIdRaw ?? '').trim();
+      const targetDroneId = String(targetDroneIdRaw ?? '').trim();
+      if (!sourceDroneId || !targetDroneId) return;
+      const sourceDrone = (Array.isArray(drones) ? drones : []).find((drone) => String(drone?.id ?? '').trim() === sourceDroneId) ?? null;
+      const targetDrone = (Array.isArray(drones) ? drones : []).find((drone) => String(drone?.id ?? '').trim() === targetDroneId) ?? null;
+      clearRepoOperationError();
+      setRepoOp({ kind: busyKind });
+      try {
+        const url = `/api/drones/${encodeURIComponent(targetDroneId)}/repo/pull-from-drone`;
+        const throwRepoTransferError = (data: any, fallback: string): never => {
+          const message = String(data?.error ?? fallback);
+          const code = String(data?.code ?? '').trim();
+          const patchName = String(data?.patchName ?? '').trim();
+          const conflictFiles = Array.isArray(data?.conflictFiles)
+            ? data.conflictFiles.map((f: any) => String(f ?? '').trim()).filter(Boolean)
+            : [];
+          setRepoOperationError(message, {
+            code: code || null,
+            patchName: patchName || null,
+            conflictFiles,
+          });
+          throw new Error(message);
+        };
+
+        const defaultAutoCommitMessage = 'chore(drone): snapshot working tree before drone sync';
+        let response = await postJson(url, { sourceDroneId });
+        const initialCode = String(response.data?.code ?? '').trim().toLowerCase();
+        if (!response.ok && initialCode === 'source_drone_dirty') {
+          const dirtyFileCount = Number(response.data?.dirtyFileCount);
+          const dirtyLabel =
+            Number.isFinite(dirtyFileCount) && dirtyFileCount > 0
+              ? `${Math.floor(dirtyFileCount)} file${dirtyFileCount === 1 ? '' : 's'}`
+              : 'one or more files';
+          const autoCommitMessage = String(response.data?.autoCommitMessage ?? '').trim() || defaultAutoCommitMessage;
+          const sourceLabel = peerDroneLabel(sourceDrone, 'source drone');
+          const confirmed = window.confirm(
+            `"${sourceLabel}" has uncommitted changes (${dirtyLabel}).\n\nPress OK to stage everything, create a placeholder commit, and continue sync.\n\nPress Cancel to stop.`,
+          );
+          if (!confirmed) return;
+          response = await postJson(url, { sourceDroneId, commitDirty: true, commitMessage: autoCommitMessage });
+        }
+        if (!response.ok) throwRepoTransferError(response.data, 'Peer repo transfer failed.');
+        const success = formatPeerRepoTransferSuccessMessage({
+          ...response.data,
+          sourceDroneName: peerDroneLabel(sourceDrone, String(response.data?.sourceDroneName ?? '').trim() || 'source drone'),
+          targetDroneName: peerDroneLabel(targetDrone, String(response.data?.targetDroneName ?? '').trim() || 'target drone'),
+        });
+        showTransientToast(success.message, success.title, 'success');
+      } catch (e: any) {
+        setRepoOperationError(e?.message ?? String(e));
+      } finally {
+        setRepoOp(null);
+      }
+    },
+    [clearRepoOperationError, drones, postJson, setRepoOperationError, showTransientToast],
+  );
+
+  const pullRepoChangesFromDrone = React.useCallback(
+    async (sourceDroneId: string) => {
+      const targetDroneId = String(currentDrone?.id ?? '').trim();
+      if (!targetDroneId) return;
+      await transferRepoChangesFromDrone(sourceDroneId, targetDroneId, 'pull-from-drone');
+    },
+    [currentDrone, transferRepoChangesFromDrone],
+  );
+
+  const applyRepoChangesToDrone = React.useCallback(
+    async (targetDroneId: string) => {
+      const sourceDroneId = String(currentDrone?.id ?? '').trim();
+      if (!sourceDroneId) return;
+      await transferRepoChangesFromDrone(sourceDroneId, targetDroneId, 'push-to-drone');
+    },
+    [currentDrone, transferRepoChangesFromDrone],
+  );
+
   const reseedRepo = React.useCallback(async () => {
     if (!currentDrone) return;
     const droneId = String(currentDrone.id ?? '').trim();
@@ -427,6 +574,9 @@ export function useWorkspaceActions({
     openDroneEditor,
     pullRepoChanges,
     pushRepoChanges,
+    repoTransferPeers,
+    pullRepoChangesFromDrone,
+    applyRepoChangesToDrone,
     reseedRepo,
   };
 }
