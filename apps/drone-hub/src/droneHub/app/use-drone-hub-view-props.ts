@@ -419,6 +419,7 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
     sendGroupBroadcastPrompt,
     uiDroneName,
     selectDroneCard,
+    selectDroneChat,
     deleteDrone,
     deletingDrones,
     parseJobsFromAgentMessage,

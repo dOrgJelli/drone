@@ -37,6 +37,7 @@ type UseWorkspaceNavigationActionsArgs = {
   setCreateMessageSuffixRows: React.Dispatch<React.SetStateAction<string[]>>;
   setCloneIncludeChats: React.Dispatch<React.SetStateAction<boolean>>;
   setChatHeaderRepoPath: React.Dispatch<React.SetStateAction<string>>;
+  setFleetDashboardOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setSelectedDrone: React.Dispatch<React.SetStateAction<string | null>>;
   setSelectedDroneIds: React.Dispatch<React.SetStateAction<string[]>>;
   setKanbanBoardOpen: React.Dispatch<React.SetStateAction<boolean>>;
@@ -83,6 +84,7 @@ export function useWorkspaceNavigationActions({
   setCreateMessageSuffixRows,
   setCloneIncludeChats,
   setChatHeaderRepoPath,
+  setFleetDashboardOpen,
   setSelectedDrone,
   setSelectedDroneIds,
   setKanbanBoardOpen,
@@ -147,6 +149,7 @@ export function useWorkspaceNavigationActions({
     }
     setAppView('workspace');
     setKanbanBoardOpen(false);
+    setFleetDashboardOpen(false);
     setCreateOpen(false);
     setCreateError(null);
     setDraftCreateOpen(false);
@@ -177,6 +180,7 @@ export function useWorkspaceNavigationActions({
     setAppView,
     setChatHeaderRepoPath,
     setKanbanBoardOpen,
+    setFleetDashboardOpen,
     setCreateError,
     setCreateOpen,
     setCreateRuntime,
@@ -203,6 +207,7 @@ export function useWorkspaceNavigationActions({
       setAppView('workspace');
       setKanbanBoardOpen(false);
       setDraftChat(null);
+      setFleetDashboardOpen(false);
       setDraftCreateOpen(false);
       setDraftCreateError(null);
       setCreateError(null);
@@ -230,6 +235,7 @@ export function useWorkspaceNavigationActions({
       renamingDrones,
       setAppView,
       setKanbanBoardOpen,
+      setFleetDashboardOpen,
       setCloneIncludeChats,
       setCloneSourceId,
       setCreateError,
@@ -244,6 +250,7 @@ export function useWorkspaceNavigationActions({
       setDraftChat,
       setDraftCreateError,
       setDraftCreateOpen,
+      setFleetDashboardOpen,
       suggestCloneName,
     ],
   );

@@ -24,6 +24,7 @@ type UseDroneSelectionStateArgs = {
   selectedDrone: string | null;
   selectedDroneIds: string[];
   selectedChat: string;
+  fleetDashboardOpen: boolean;
   kanbanBoardOpen: boolean;
   draftChat: { prompt: unknown | null } | null;
   drones: DroneSummary[];
@@ -36,6 +37,7 @@ type UseDroneSelectionStateArgs = {
   resetGroupDndState: () => void;
   setGroupMoveError: React.Dispatch<React.SetStateAction<string | null>>;
   setAppView: React.Dispatch<React.SetStateAction<'workspace' | 'settings'>>;
+  setFleetDashboardOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setDraftChat: React.Dispatch<React.SetStateAction<any>>;
   setDraftCreateOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setDraftCreateError: React.Dispatch<React.SetStateAction<string | null>>;
@@ -51,6 +53,7 @@ export function useDroneSelectionState({
   selectedDrone,
   selectedDroneIds,
   selectedChat,
+  fleetDashboardOpen,
   kanbanBoardOpen,
   draftChat,
   drones,
@@ -63,6 +66,7 @@ export function useDroneSelectionState({
   resetGroupDndState,
   setGroupMoveError,
   setAppView,
+  setFleetDashboardOpen,
   setDraftChat,
   setDraftCreateOpen,
   setDraftCreateError,
@@ -99,6 +103,7 @@ export function useDroneSelectionState({
       preferredSelectedDroneRef.current = null;
       preferredSelectedDroneHoldUntilRef.current = 0;
       setAppView('workspace');
+      setFleetDashboardOpen(false);
       setSelectedGroupMultiChat(null);
       setKanbanBoardOpen(false);
       setDraftChat(null);
@@ -146,6 +151,7 @@ export function useDroneSelectionState({
       selectedDrone,
       selectionAnchorRef,
       setAppView,
+      setFleetDashboardOpen,
       setDraftChat,
       setDraftCreateError,
       setDraftCreateOpen,
@@ -182,6 +188,14 @@ export function useDroneSelectionState({
 
   // Auto-select first drone (and recover from deletions).
   React.useEffect(() => {
+    if (fleetDashboardOpen) {
+      if (selectedDrone) setSelectedDrone(null);
+      setSelectedDroneIds((prev) => (prev.length === 0 ? prev : []));
+      selectionAnchorRef.current = null;
+      preferredSelectedDroneRef.current = null;
+      preferredSelectedDroneHoldUntilRef.current = 0;
+      return;
+    }
     if (kanbanBoardOpen) {
       if (selectedDrone) setSelectedDrone(null);
       setSelectedDroneIds((prev) => (prev.length === 0 ? prev : []));
@@ -242,6 +256,7 @@ export function useDroneSelectionState({
     }
   }, [
     draftChat,
+    fleetDashboardOpen,
     dronesFilteredByRepo,
     kanbanBoardOpen,
     preferredSelectedDroneHoldUntilRef,

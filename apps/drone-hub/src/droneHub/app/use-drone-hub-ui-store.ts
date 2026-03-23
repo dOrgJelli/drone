@@ -57,6 +57,7 @@ type DroneHubUiState = {
   showHiddenSidebarGroups: boolean;
   autoDelete: boolean;
   terminalEmulator: string;
+  fleetDashboardOpen: boolean;
   selectedDrone: string | null;
   selectedDroneIds: string[];
   selectedGroupMultiChat: string | null;
@@ -105,6 +106,7 @@ type DroneHubUiState = {
   setShowHiddenSidebarGroups: (next: Updater<boolean>) => void;
   setAutoDelete: (next: Updater<boolean>) => void;
   setTerminalEmulator: (next: Updater<string>) => void;
+  setFleetDashboardOpen: (next: Updater<boolean>) => void;
   setSelectedDrone: (next: Updater<string | null>) => void;
   setSelectedDroneIds: (next: Updater<string[]>) => void;
   setSelectedGroupMultiChat: (next: Updater<string | null>) => void;
@@ -347,6 +349,7 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
       showHiddenSidebarGroups: false,
       autoDelete: false,
       terminalEmulator: 'auto',
+      fleetDashboardOpen: false,
       selectedDrone: null,
       selectedDroneIds: [],
       selectedGroupMultiChat: null,
@@ -404,6 +407,7 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
         set((s) => ({ showHiddenSidebarGroups: resolveNext(s.showHiddenSidebarGroups, next) })),
       setAutoDelete: (next) => set((s) => ({ autoDelete: resolveNext(s.autoDelete, next) })),
       setTerminalEmulator: (next) => set((s) => ({ terminalEmulator: resolveNext(s.terminalEmulator, next) })),
+      setFleetDashboardOpen: (next) => set((s) => ({ fleetDashboardOpen: resolveNext(s.fleetDashboardOpen, next) })),
       setSelectedDrone: (next) => set((s) => ({ selectedDrone: resolveNext(s.selectedDrone, next) })),
       setSelectedDroneIds: (next) => set((s) => ({ selectedDroneIds: resolveNext(s.selectedDroneIds, next) })),
       setSelectedGroupMultiChat: (next) => set((s) => ({ selectedGroupMultiChat: resolveNext(s.selectedGroupMultiChat, next) })),
@@ -638,6 +642,7 @@ export function useDroneHubAppModelUiState() {
       showHiddenSidebarGroups: s.showHiddenSidebarGroups,
       autoDelete: s.autoDelete,
       terminalEmulator: s.terminalEmulator,
+      fleetDashboardOpen: s.fleetDashboardOpen,
       selectedDrone: s.selectedDrone,
       selectedDroneIds: s.selectedDroneIds,
       selectedGroupMultiChat: s.selectedGroupMultiChat,
@@ -673,6 +678,7 @@ export function useDroneHubAppModelUiState() {
       setSidebarChatOrderByDrone: s.setSidebarChatOrderByDrone,
       setHiddenSidebarGroups: s.setHiddenSidebarGroups,
       setShowHiddenSidebarGroups: s.setShowHiddenSidebarGroups,
+      setFleetDashboardOpen: s.setFleetDashboardOpen,
       setSelectedDrone: s.setSelectedDrone,
       setSelectedDroneIds: s.setSelectedDroneIds,
       setSelectedGroupMultiChat: s.setSelectedGroupMultiChat,
@@ -714,6 +720,7 @@ export function useDroneSidebarUiState() {
       appView: s.appView,
       viewMode: s.viewMode,
       activeRepoPath: s.activeRepoPath,
+      fleetDashboardOpen: s.fleetDashboardOpen,
       selectedDrone: s.selectedDrone,
       selectedChat: s.selectedChat,
       selectedGroupMultiChat: s.selectedGroupMultiChat,
@@ -739,6 +746,7 @@ export function useDroneSidebarUiState() {
       setShowHiddenSidebarGroups: s.setShowHiddenSidebarGroups,
       setActiveRepoPath: s.setActiveRepoPath,
       setAutoDelete: s.setAutoDelete,
+      setFleetDashboardOpen: s.setFleetDashboardOpen,
       setKanbanBoardOpen: s.setKanbanBoardOpen,
       setSidebarCollapsed: s.setSidebarCollapsed,
     })),

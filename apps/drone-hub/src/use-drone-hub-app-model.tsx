@@ -139,6 +139,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     showHiddenSidebarGroups,
     autoDelete,
     terminalEmulator,
+    fleetDashboardOpen,
     selectedDrone,
     selectedDroneIds,
     selectedGroupMultiChat,
@@ -171,6 +172,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setSidebarDroneOrderByGroup,
     setSidebarChatOrderByDrone,
     setHiddenSidebarGroups,
+    setFleetDashboardOpen,
     setSelectedDrone,
     setSelectedDroneIds,
     setSelectedGroupMultiChat,
@@ -835,6 +837,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
       setCreateMessageSuffixRows,
       setCloneIncludeChats,
       setChatHeaderRepoPath,
+      setFleetDashboardOpen,
       setSelectedDrone,
       setSelectedDroneIds,
       setKanbanBoardOpen,
@@ -851,6 +854,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setDraftChat(null);
     setDraftCreateOpen(false);
     setDraftCreateError(null);
+    setFleetDashboardOpen(false);
     setSelectedGroupMultiChat(null);
     setSelectedDrone(null);
     setSelectedDroneIds([]);
@@ -869,6 +873,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setDraftChat,
     setDraftCreateError,
     setDraftCreateOpen,
+    setFleetDashboardOpen,
     setKanbanBoardOpen,
     setSelectedChat,
     setSelectedDrone,
@@ -883,6 +888,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setDraftChat(null);
     setDraftCreateOpen(false);
     setDraftCreateError(null);
+    setFleetDashboardOpen(true);
     setSelectedGroupMultiChat(null);
     setSelectedDrone(null);
     setSelectedDroneIds([]);
@@ -901,6 +907,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setDraftChat,
     setDraftCreateError,
     setDraftCreateOpen,
+    setFleetDashboardOpen,
     setKanbanBoardOpen,
     setSelectedChat,
     setSelectedDrone,
@@ -917,9 +924,10 @@ export function useDroneHubAppModel(): DroneHubAppModel {
       setDraftChat(null);
       setDraftCreateOpen(false);
       setDraftCreateError(null);
+      setFleetDashboardOpen(false);
       setSelectedGroupMultiChat(group);
     },
-    [setAppView, setDraftChat, setDraftCreateError, setDraftCreateOpen, setKanbanBoardOpen, setSelectedGroupMultiChat],
+    [setAppView, setDraftChat, setDraftCreateError, setDraftCreateOpen, setFleetDashboardOpen, setKanbanBoardOpen, setSelectedGroupMultiChat],
   );
   const openSidebarVisibleMultiChat = React.useCallback(() => {
     if (sidebarVisibleDrones.length === 0) return;
@@ -928,12 +936,14 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setDraftChat(null);
     setDraftCreateOpen(false);
     setDraftCreateError(null);
+    setFleetDashboardOpen(false);
     setSelectedGroupMultiChat(SIDEBAR_VISIBLE_MULTI_CHAT_GROUP);
   }, [
     setAppView,
     setDraftChat,
     setDraftCreateError,
     setDraftCreateOpen,
+    setFleetDashboardOpen,
     setKanbanBoardOpen,
     setSelectedGroupMultiChat,
     sidebarVisibleDrones.length,
@@ -1009,18 +1019,20 @@ export function useDroneHubAppModel(): DroneHubAppModel {
       const droneId = String(droneIdRaw ?? '').trim();
       if (!droneId) return;
       setDraftChat(null);
+      setFleetDashboardOpen(false);
       setGroupMoveError(null);
       setSelectedDrone(droneId);
       if (!selectedDroneSet.has(droneId)) setSelectedDroneIds([droneId]);
       selectionAnchorRef.current = droneId;
     },
-    [movingDroneGroups, selectedDroneSet, selectionAnchorRef, setDraftChat, setGroupMoveError, setSelectedDrone, setSelectedDroneIds],
+    [movingDroneGroups, selectedDroneSet, selectionAnchorRef, setDraftChat, setFleetDashboardOpen, setGroupMoveError, setSelectedDrone, setSelectedDroneIds],
   );
   const { selectDroneCard: selectDroneCardBase, selectDroneChat: selectDroneChatBase } = useDroneSelectionState({
     orderedDroneIds,
     selectedDrone,
     selectedDroneIds,
     selectedChat,
+    fleetDashboardOpen,
     kanbanBoardOpen,
     draftChat,
     drones,
@@ -1033,6 +1045,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     resetGroupDndState,
     setGroupMoveError,
     setAppView,
+    setFleetDashboardOpen,
     setDraftChat,
     setDraftCreateOpen,
     setDraftCreateError,
