@@ -397,6 +397,46 @@ async function withLockedDroneContainer<T>(
   });
 }
 
+function lockedDroneContainerSortKey(opts: { requestedDroneName: string; droneEntry: any }): string {
+  const requestedDroneName = String(opts.requestedDroneName ?? '').trim();
+  const seedEntry = opts.droneEntry;
+  const seedId = normalizeDroneIdentity(seedEntry?.id) || null;
+  if (seedId) return `drone:${seedId}`;
+  return `drone-name:${String(seedEntry?.containerName ?? seedEntry?.name ?? requestedDroneName).trim() || requestedDroneName}`;
+}
+
+async function withLockedDroneContainers<T>(
+  sourceOpts: { requestedDroneName: string; droneEntry: any },
+  targetOpts: { requestedDroneName: string; droneEntry: any },
+  fn: (ctx: {
+    source: { registryDroneName: string; containerName: string; droneEntry: any; droneId: string | null };
+    target: { registryDroneName: string; containerName: string; droneEntry: any; droneId: string | null };
+  }) => Promise<T>,
+): Promise<T> {
+  const sourceKey = lockedDroneContainerSortKey(sourceOpts);
+  const targetKey = lockedDroneContainerSortKey(targetOpts);
+
+  if (sourceKey === targetKey) {
+    return await withLockedDroneContainer(sourceOpts, async (ctx) => {
+      return await fn({ source: ctx, target: ctx });
+    });
+  }
+
+  if (sourceKey.localeCompare(targetKey) <= 0) {
+    return await withLockedDroneContainer(sourceOpts, async (source) => {
+      return await withLockedDroneContainer(targetOpts, async (target) => {
+        return await fn({ source, target });
+      });
+    });
+  }
+
+  return await withLockedDroneContainer(targetOpts, async (target) => {
+    return await withLockedDroneContainer(sourceOpts, async (source) => {
+      return await fn({ source, target });
+    });
+  });
+}
+
 type ResolvedDrone = { id: string; drone: any };
 type ResolvedOrPendingDrone =
   | { kind: 'real'; id: string; drone: any }
@@ -13755,6 +13795,467 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           }
           if (repoRoot && importRefName) {
             await deleteHostRefBestEffort({ repoRoot, refName: importRefName });
+          }
+        }
+      }
+
+      // POST /api/drones/:id/repo/pull-from-drone
+      // Pull committed repo changes from one container drone into another as a normal git merge commit in the target drone repo.
+      if (
+        method === 'POST' &&
+        parts.length === 5 &&
+        parts[0] === 'api' &&
+        parts[1] === 'drones' &&
+        parts[3] === 'repo' &&
+        parts[4] === 'pull-from-drone'
+      ) {
+        const targetDroneRef = decodeURIComponent(parts[2]);
+        const resolvedTarget = await resolveDroneOrRespond(res, targetDroneRef);
+        if (!resolvedTarget) return;
+        const targetDroneId = resolvedTarget.id;
+        const targetEntry = resolvedTarget.drone;
+        const targetDroneName = String(targetEntry?.name ?? targetDroneRef).trim() || targetDroneRef;
+        const targetRuntime = droneRuntime(targetEntry);
+
+        if (targetRuntime === 'host') {
+          json(res, 409, {
+            ok: false,
+            error: 'peer repo sync is only supported between container drones',
+            code: 'peer_sync_unsupported_runtime',
+          });
+          return;
+        }
+
+        const targetRepoPathRaw = String(targetEntry?.repoPath ?? '').trim();
+        if (!targetRepoPathRaw) {
+          json(res, 400, { ok: false, error: 'target drone has no repo attached' });
+          return;
+        }
+
+        let body: any = null;
+        try {
+          body = await readJsonBody(req);
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e), id: targetDroneId, name: targetDroneName });
+          return;
+        }
+
+        const sourceDroneRef = String(body?.sourceDroneId ?? '').trim();
+        if (!sourceDroneRef) {
+          json(res, 400, { ok: false, error: 'missing sourceDroneId', id: targetDroneId, name: targetDroneName });
+          return;
+        }
+
+        const regAny: any = await loadRegistry();
+        const foundSource = findDroneIdByRef(regAny, sourceDroneRef);
+        if (!foundSource || foundSource.kind !== 'real') {
+          json(res, 404, { ok: false, error: `unknown source drone: ${sourceDroneRef}`, id: targetDroneId, name: targetDroneName });
+          return;
+        }
+        const sourceDroneId = foundSource.id;
+        if (sourceDroneId === targetDroneId) {
+          json(res, 409, { ok: false, error: 'source and target drones must be different', code: 'same_drone' });
+          return;
+        }
+        const sourceEntry = regAny?.drones?.[sourceDroneId] ?? null;
+        if (!sourceEntry) {
+          json(res, 404, { ok: false, error: `unknown source drone: ${sourceDroneRef}`, id: targetDroneId, name: targetDroneName });
+          return;
+        }
+        const sourceDroneName = String(sourceEntry?.name ?? sourceDroneRef).trim() || sourceDroneRef;
+        const sourceRuntime = droneRuntime(sourceEntry);
+        if (sourceRuntime === 'host') {
+          json(res, 409, {
+            ok: false,
+            error: 'peer repo sync is only supported between container drones',
+            code: 'peer_sync_unsupported_runtime',
+            sourceDroneId,
+            sourceDroneName,
+            targetDroneId,
+            targetDroneName,
+          });
+          return;
+        }
+        const sourceRepoPathRaw = String(sourceEntry?.repoPath ?? '').trim();
+        if (!sourceRepoPathRaw) {
+          json(res, 400, {
+            ok: false,
+            error: 'source drone has no repo attached',
+            sourceDroneId,
+            sourceDroneName,
+            targetDroneId,
+            targetDroneName,
+          });
+          return;
+        }
+
+        const commitDirtyRaw = body?.commitDirty;
+        const commitDirty =
+          commitDirtyRaw === true ||
+          commitDirtyRaw === 1 ||
+          String(commitDirtyRaw ?? '')
+            .trim()
+            .toLowerCase() === 'true';
+        const defaultAutoCommitMessage = 'chore(drone): snapshot working tree before drone sync';
+        const requestedAutoCommitMessage = String(body?.commitMessage ?? '').trim();
+        const autoCommitMessage = requestedAutoCommitMessage || defaultAutoCommitMessage;
+
+        await setDroneHubMetaByIdentity({
+          droneId: targetDroneId,
+          hub: { phase: 'seeding', message: `Pulling repo changes from ${sourceDroneName}…` },
+        });
+
+        let sourceRepoRoot = '';
+        let targetRepoRoot = '';
+        let exportPath = '';
+        let importRefName = '';
+        let importRefSha = '';
+        let containerBundlePath = '';
+        let mergeCommitSha = '';
+        let mergeCommitSubject = '';
+        let sourceDirtyFileCount = 0;
+        let sourceAutoCommitSha: string | null = null;
+        let sourceAutoCommitMessage: string | null = null;
+        let noChangesToPull = false;
+        const sourceSafeSeg =
+          String(sourceDroneName ?? '')
+            .toLowerCase()
+            .replace(/[^a-z0-9_.-]+/g, '-')
+            .replace(/^-+|-+$/g, '') || 'source';
+        const targetSafeSeg =
+          String(targetDroneName ?? '')
+            .toLowerCase()
+            .replace(/[^a-z0-9_.-]+/g, '-')
+            .replace(/^-+|-+$/g, '') || 'target';
+        const importRunId = `${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
+
+        try {
+          sourceRepoRoot = await gitTopLevel(sourceRepoPathRaw);
+          targetRepoRoot = await gitTopLevel(targetRepoPathRaw);
+          if (sourceRepoRoot !== targetRepoRoot) {
+            await setDroneHubMetaByIdentity({ droneId: targetDroneId, hub: null });
+            json(res, 409, {
+              ok: false,
+              error: 'source and target drones are not attached to the same host repo',
+              code: 'repo_mismatch',
+              sourceDroneId,
+              sourceDroneName,
+              targetDroneId,
+              targetDroneName,
+            });
+            return;
+          }
+
+          const sourceRepoPathInContainer = String(sourceEntry?.repo?.dest ?? '/work/repo').trim() || '/work/repo';
+          const targetRepoPathInContainer = String(targetEntry?.repo?.dest ?? '/work/repo').trim() || '/work/repo';
+          const patchesOutRoot = droneRootPath('repo-exports');
+          await fs.mkdir(patchesOutRoot, { recursive: true });
+          importRefName = `refs/drone/imports/peer/${sourceSafeSeg}/${targetSafeSeg}/${importRunId}`;
+          containerBundlePath = normalizeContainerPath(`/tmp/drone-hub/imports/${sourceSafeSeg}-${targetSafeSeg}-${importRunId}.bundle`);
+
+          const transferResult = await withLockedDroneContainers(
+            { requestedDroneName: sourceDroneName, droneEntry: sourceEntry },
+            { requestedDroneName: targetDroneName, droneEntry: targetEntry },
+            async ({ source, target }) => {
+              const targetStatus = await runGitInDroneOrThrow({
+                container: target.containerName,
+                repoPathInContainer: targetRepoPathInContainer,
+                args: ['status', '--porcelain'],
+              });
+              if (String(targetStatus.stdout ?? '').trim()) {
+                return {
+                  ok: false as const,
+                  code: 'target_drone_dirty' as const,
+                  details: 'Target drone repo has local changes. Commit or stash them before pulling from another drone.',
+                  conflictFiles: [] as string[],
+                  looksLikeConflict: false,
+                };
+              }
+
+              const sourceStatus = await runGitInDroneOrThrow({
+                container: source.containerName,
+                repoPathInContainer: sourceRepoPathInContainer,
+                args: ['status', '--porcelain'],
+              });
+              const changedLines = String(sourceStatus.stdout ?? '')
+                .split(/\r?\n/)
+                .map((line) => line.trimEnd())
+                .filter((line) => line.length > 0);
+              sourceDirtyFileCount = changedLines.length;
+              if (sourceDirtyFileCount > 0) {
+                if (!commitDirty) {
+                  return {
+                    ok: false as const,
+                    code: 'source_drone_dirty' as const,
+                    details: 'Source drone repo has uncommitted changes. Commit or auto-commit them before syncing.',
+                    conflictFiles: [] as string[],
+                    looksLikeConflict: false,
+                  };
+                }
+                await runGitInDroneOrThrow({
+                  container: source.containerName,
+                  repoPathInContainer: sourceRepoPathInContainer,
+                  args: ['add', '-A'],
+                });
+                const commit = await runGitInDrone({
+                  container: source.containerName,
+                  repoPathInContainer: sourceRepoPathInContainer,
+                  args: ['-c', 'user.name=Drone Hub', '-c', 'user.email=drone-hub@local', 'commit', '-m', autoCommitMessage],
+                });
+                if (commit.code !== 0) {
+                  const details = `${String(commit.stderr ?? '')}\n${String(commit.stdout ?? '')}`.trim();
+                  throw new Error(`Failed to create placeholder source drone commit before sync.${details ? `\n\n${details}` : ''}`);
+                }
+                const headRaw = await runGitInDroneOrThrow({
+                  container: source.containerName,
+                  repoPathInContainer: sourceRepoPathInContainer,
+                  args: ['rev-parse', 'HEAD'],
+                });
+                const autoSha = String(headRaw.stdout ?? '').trim().toLowerCase();
+                sourceAutoCommitSha = /^[0-9a-f]{40}$/.test(autoSha) ? autoSha : null;
+                sourceAutoCommitMessage = autoCommitMessage;
+              }
+
+              try {
+                const exported = await dvmRepoExport({
+                  container: source.containerName,
+                  repoPathInContainer: sourceRepoPathInContainer,
+                  outDir: patchesOutRoot,
+                  format: 'bundle',
+                });
+                exportPath = exported.exportedPath;
+              } catch (e: any) {
+                const exportMsg = e?.message ?? String(e);
+                if (looksLikeEmptyBundleExportError(exportMsg)) {
+                  noChangesToPull = true;
+                  return { ok: true as const, noChanges: true as const };
+                }
+                throw e;
+              }
+
+              importRefSha = await importBundleHeadToDroneRef({
+                containerName: target.containerName,
+                repoPathInContainer: targetRepoPathInContainer,
+                hostBundlePath: exportPath,
+                containerBundlePath,
+                refName: importRefName,
+              });
+
+              const merge = await runGitInDrone({
+                container: target.containerName,
+                repoPathInContainer: targetRepoPathInContainer,
+                args: ['merge', '--no-ff', importRefName],
+              });
+
+              if (merge.code === 0) {
+                const head = await runGitInDroneOrThrow({
+                  container: target.containerName,
+                  repoPathInContainer: targetRepoPathInContainer,
+                  args: ['rev-parse', 'HEAD'],
+                });
+                mergeCommitSha = parseShaFromText(head.stdout) ?? '';
+                const subject = await runGitInDrone({
+                  container: target.containerName,
+                  repoPathInContainer: targetRepoPathInContainer,
+                  args: ['log', '-1', '--format=%s', 'HEAD'],
+                });
+                if (subject.code === 0) {
+                  mergeCommitSubject = String(subject.stdout ?? '')
+                    .trim()
+                    .split(/\r?\n/, 1)[0]
+                    ?.trim();
+                }
+                return { ok: true as const, noChanges: false as const };
+              }
+
+              const combined = `${String(merge.stderr ?? '')}\n${String(merge.stdout ?? '')}`.trim();
+              const conflictFiles = Array.from(
+                new Set([
+                  ...parseMergeConflictFilesFromText(combined),
+                  ...(await droneUnmergedFiles({ containerName: target.containerName, repoPathInContainer: targetRepoPathInContainer })),
+                ]),
+              ).sort((a, b) => a.localeCompare(b));
+              const looksLikeConflict =
+                conflictFiles.length > 0 || /CONFLICT|Automatic merge failed|Merge conflict/i.test(combined);
+              const details = (merge.stderr || merge.stdout || `git merge failed (exit ${merge.code})`).trim();
+
+              if (!looksLikeConflict) {
+                try {
+                  await runGitInDrone({
+                    container: target.containerName,
+                    repoPathInContainer: targetRepoPathInContainer,
+                    args: ['merge', '--abort'],
+                  });
+                } catch {
+                  // ignore cleanup failure
+                }
+              }
+
+              return {
+                ok: false as const,
+                code: null,
+                details,
+                conflictFiles,
+                looksLikeConflict,
+              };
+            },
+          );
+
+          if (transferResult.ok && transferResult.noChanges) {
+            await setDroneHubMetaByIdentity({ droneId: targetDroneId, hub: null });
+            json(res, 200, {
+              ok: true,
+              mode: 'no-changes',
+              noChanges: true,
+              sourceDroneId,
+              sourceDroneName,
+              targetDroneId,
+              targetDroneName,
+              sourceDirtyFileCount,
+              sourceAutoCommitSha,
+              sourceAutoCommitMessage,
+            });
+            return;
+          }
+
+          if (!transferResult.ok && transferResult.code === 'source_drone_dirty') {
+            await setDroneHubMetaByIdentity({ droneId: targetDroneId, hub: null });
+            json(res, 409, {
+              ok: false,
+              error: transferResult.details,
+              code: transferResult.code,
+              dirtyFileCount: sourceDirtyFileCount,
+              autoCommitMessage,
+              sourceDroneId,
+              sourceDroneName,
+              targetDroneId,
+              targetDroneName,
+            });
+            return;
+          }
+
+          if (!transferResult.ok && transferResult.code === 'target_drone_dirty') {
+            await setDroneHubMetaByIdentity({ droneId: targetDroneId, hub: null });
+            json(res, 409, {
+              ok: false,
+              error: transferResult.details,
+              code: transferResult.code,
+              sourceDroneId,
+              sourceDroneName,
+              targetDroneId,
+              targetDroneName,
+            });
+            return;
+          }
+
+          if (transferResult.ok) {
+            await setDroneHubMetaByIdentity({ droneId: targetDroneId, hub: null });
+            json(res, 200, {
+              ok: true,
+              mode: 'peer-merge-commit',
+              sourceDroneId,
+              sourceDroneName,
+              targetDroneId,
+              targetDroneName,
+              importedRef: importRefName || null,
+              importedRefSha: importRefSha || null,
+              mergeCommitSha: mergeCommitSha || null,
+              mergeCommitSubject: mergeCommitSubject || null,
+              sourceDirtyFileCount,
+              sourceAutoCommitSha,
+              sourceAutoCommitMessage,
+            });
+            return;
+          }
+
+          if (transferResult.looksLikeConflict) {
+            const guidance = [
+              'Conflicts were left in the target drone repo as a normal Git merge conflict state.',
+              'Conflict marker mapping: <<<<<<< ours is the current target drone branch; >>>>>>> theirs is the pulled source drone branch.',
+              'Resolve conflicts inside the target drone, then stage and commit to finish the merge.',
+            ].join(' ');
+            const fullMsg = `${transferResult.details}\n\n${guidance}`;
+            await setDroneHubMetaByIdentity({
+              droneId: targetDroneId,
+              hub: {
+                phase: 'error',
+                message: `Peer sync conflict${importRefName ? ` (${importRefName})` : ''}: resolve conflicts in target drone`,
+              },
+            });
+            json(res, 409, {
+              ok: false,
+              error: fullMsg,
+              code: 'target_conflicts_ready',
+              patchName: importRefName || null,
+              conflictFiles: transferResult.conflictFiles,
+              importedRef: importRefName || null,
+              importedRefSha: importRefSha || null,
+              sourceDroneId,
+              sourceDroneName,
+              targetDroneId,
+              targetDroneName,
+            });
+            return;
+          }
+
+          throw new Error(transferResult.details || 'peer repo sync failed');
+        } catch (e: any) {
+          const msg = e?.message ?? String(e);
+          if (looksLikeBundleMissingPrerequisiteError(msg)) {
+            await setDroneHubMetaByIdentity({ droneId: targetDroneId, hub: { phase: 'error', message: 'Peer sync needs reseed (history mismatch)' } });
+            json(res, 409, {
+              ok: false,
+              error: 'Target drone is missing prerequisite commits for this source export. Re-seed or re-clone the target drone and sync again.',
+              code: 'bundle_missing_prereq',
+              reseedRequired: true,
+              sourceDroneId,
+              sourceDroneName,
+              targetDroneId,
+              targetDroneName,
+            });
+            return;
+          }
+
+          await setDroneHubMetaByIdentity({ droneId: targetDroneId, hub: { phase: 'error', message: `Peer sync failed: ${msg}` } });
+          json(res, 500, {
+            ok: false,
+            error: msg,
+            code: null,
+            patchName: null,
+            conflictFiles: [],
+            sourceDroneId,
+            sourceDroneName,
+            targetDroneId,
+            targetDroneName,
+          });
+          return;
+        } finally {
+          if (exportPath) {
+            try {
+              await fs.rm(exportPath, { recursive: true, force: true });
+            } catch {
+              // ignore cleanup failure
+            }
+          }
+
+          if (importRefName || containerBundlePath) {
+            try {
+              await withLockedDroneContainer({ requestedDroneName: targetDroneName, droneEntry: targetEntry }, async ({ containerName }) => {
+                const targetRepoPathInContainer = String(targetEntry?.repo?.dest ?? '/work/repo').trim() || '/work/repo';
+                if (importRefName) {
+                  await runGitInDrone({
+                    container: containerName,
+                    repoPathInContainer: targetRepoPathInContainer,
+                    args: ['update-ref', '-d', importRefName],
+                  });
+                }
+                if (containerBundlePath) {
+                  await dvmExec(containerName, 'bash', ['-lc', `rm -f ${JSON.stringify(containerBundlePath)} || true`]);
+                }
+              });
+            } catch {
+              // ignore cleanup failure
+            }
           }
         }
       }

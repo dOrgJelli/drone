@@ -293,6 +293,32 @@ describeSocketSuite('host runtime routing api', () => {
     }
   });
 
+  test('rejects peer drone sync route on host runtime targets', async () => {
+    const droneId = 'host-peer-sync';
+    const repoRoot = path.join(tempRoot, 'host-peer-sync-root');
+    fs.mkdirSync(repoRoot, { recursive: true });
+    runGit(repoRoot, ['init']);
+    runGit(repoRoot, ['config', 'user.email', 'host-runtime@example.com']);
+    runGit(repoRoot, ['config', 'user.name', 'Host Runtime']);
+    fs.writeFileSync(path.join(repoRoot, 'tracked.txt'), 'base\n', 'utf8');
+    runGit(repoRoot, ['add', 'tracked.txt']);
+    runGit(repoRoot, ['commit', '-m', 'init']);
+
+    await seedHostDrone(droneId, {
+      cwd: repoRoot,
+      repoPath: repoRoot,
+    });
+
+    const resp = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/repo/pull-from-drone`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sourceDroneId: 'peer-source' }),
+    });
+    expect(resp.r.status).toBe(409);
+    expect(resp.data?.ok).toBe(false);
+    expect(String(resp.data?.code ?? '')).toBe('peer_sync_unsupported_runtime');
+  });
+
   test('stages deferred image attachments on host runtime prompts', async () => {
     const droneId = 'host-prompt-attachments';
     const droneRoot = path.join(tempRoot, 'host-prompt-root');
