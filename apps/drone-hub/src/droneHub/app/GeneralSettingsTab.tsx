@@ -188,7 +188,7 @@ export function GeneralSettingsTab({
               autoComplete="off"
               name="openai-api-key"
               spellCheck={false}
-              style={(showOpenAiKey ? {} : ({ WebkitTextSecurity: 'disc' } as React.CSSProperties))}
+              style={({ WebkitTextSecurity: showOpenAiKey ? 'none' : 'disc' } as React.CSSProperties)}
               className="flex-1 h-9 rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.15)] px-3 text-[13px] text-[var(--fg)] placeholder:text-[var(--muted-dim)] focus:outline-none focus:border-[var(--accent-muted)] transition-colors font-mono"
               placeholder="sk-..."
               disabled={savingOpenAiSettings || clearingOpenAiSettings}
@@ -257,7 +257,7 @@ export function GeneralSettingsTab({
               autoComplete="off"
               name="gemini-api-key"
               spellCheck={false}
-              style={(showGeminiKey ? {} : ({ WebkitTextSecurity: 'disc' } as React.CSSProperties))}
+              style={({ WebkitTextSecurity: showGeminiKey ? 'none' : 'disc' } as React.CSSProperties)}
               className="flex-1 h-9 rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.15)] px-3 text-[13px] text-[var(--fg)] placeholder:text-[var(--muted-dim)] focus:outline-none focus:border-[var(--accent-muted)] transition-colors font-mono"
               placeholder="AIza..."
               disabled={savingGeminiSettings || clearingGeminiSettings}
