@@ -8512,6 +8512,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         const provider: LlmProviderId = pathname.endsWith('/gemini') ? 'gemini' : 'openai';
         if (method === 'GET') {
           const resolved = await resolveEffectiveProviderApiKeySettings(provider);
+          const revealApiKey = u.searchParams.get('reveal') === '1';
           if (!resolved.apiKey) {
             await logProviderApiKeyResolution('warn', 'settings provider lookup resolved without API key', provider, {
               pathname,
@@ -8520,7 +8521,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           }
           json(res, 200, {
             ok: true,
-            ...providerKeySettingsResponse(resolved),
+            ...providerKeySettingsResponse(resolved, { includeApiKey: revealApiKey }),
           });
           return;
         }

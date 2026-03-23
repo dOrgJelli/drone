@@ -1,14 +1,19 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
+import { startDroneHubApiServer } from '../src/hub/server';
 import { resetDroneRootDirForTests } from '../src/host/paths';
 import {
   collectProviderApiKeyDiagnostics,
   describeSecretValue,
   upsertStoredProviderApiKey,
 } from '../src/hub/hub-settings';
+import { getSocketListenSupport } from './socket-listen-support';
+
+const listenSupport = getSocketListenSupport();
+const describeSocketSuite = listenSupport.ok ? describe : describe.skip;
 
 async function withTempDroneDataDirAndEnv<T>(
   env: Partial<Record<'OPENAI_API_KEY' | 'GEMINI_API_KEY', string | undefined>>,
@@ -90,5 +95,66 @@ describe('LLM settings diagnostics', () => {
       expect(diagnostics.effective.hasValue).toBe(true);
       expect(diagnostics.effective.fingerprint).toBe(diagnostics.stored.fingerprint);
     });
+  });
+});
+
+describeSocketSuite('LLM settings api', () => {
+  const token = 'test-token';
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'drone-llm-settings-api-'));
+  const xdgDataHome = path.join(tempRoot, 'xdg-data');
+  const prevXdg = process.env.XDG_DATA_HOME;
+  const prevDroneDataDir = process.env.DRONE_DATA_DIR;
+  const droneDataDir = path.join(tempRoot, 'data', 'drone');
+  let server: Awaited<ReturnType<typeof startDroneHubApiServer>> | null = null;
+  let baseUrl = '';
+
+  const apiFetch = async (p: string, init?: RequestInit) => {
+    const r = await fetch(`${baseUrl}${p}`, {
+      ...init,
+      headers: {
+        ...(init?.headers ?? {}),
+        authorization: `Bearer ${token}`,
+      },
+    });
+    const text = await r.text();
+    const data = text ? JSON.parse(text) : null;
+    return { r, data };
+  };
+
+  beforeAll(async () => {
+    fs.mkdirSync(path.join(xdgDataHome, 'drone'), { recursive: true });
+    fs.mkdirSync(droneDataDir, { recursive: true });
+    process.env.XDG_DATA_HOME = xdgDataHome;
+    process.env.DRONE_DATA_DIR = droneDataDir;
+    resetDroneRootDirForTests();
+    server = await startDroneHubApiServer({ port: 0, apiToken: token });
+    baseUrl = `http://${server.host}:${server.port}`;
+  });
+
+  afterAll(async () => {
+    if (server) await server.close();
+    if (prevXdg == null) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = prevXdg;
+    if (prevDroneDataDir == null) delete process.env.DRONE_DATA_DIR;
+    else process.env.DRONE_DATA_DIR = prevDroneDataDir;
+    resetDroneRootDirForTests();
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  test('keeps provider keys masked unless reveal is requested', async () => {
+    await upsertStoredProviderApiKey('openai', 'stored-openai-key');
+
+    const hidden = await apiFetch('/api/settings/openai');
+    expect(hidden.r.status).toBe(200);
+    expect(hidden.data.hasKey).toBe(true);
+    expect(hidden.data.source).toBe('settings');
+    expect(hidden.data.keyHint).toBe('stor...-key');
+    expect(hidden.data.apiKey).toBeUndefined();
+
+    const revealed = await apiFetch('/api/settings/openai?reveal=1');
+    expect(revealed.r.status).toBe(200);
+    expect(revealed.data.hasKey).toBe(true);
+    expect(revealed.data.source).toBe('settings');
+    expect(revealed.data.apiKey).toBe('stored-openai-key');
   });
 });

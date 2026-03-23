@@ -27,6 +27,7 @@ export function GeneralSettingsTab({
     llmProviderDraft,
     savingLlmProvider,
     showGeminiKey,
+    revealingGeminiKey,
     geminiSettingsDraft,
     savingGeminiSettings,
     clearingGeminiSettings,
@@ -34,13 +35,13 @@ export function GeneralSettingsTab({
     savingOpenAiSettings,
     clearingOpenAiSettings,
     showOpenAiKey,
+    revealingOpenAiKey,
     llmSettingsNotice,
     setLlmProviderDraft,
-    setShowGeminiKey,
-    setShowOpenAiKey,
     updateOpenAiSettingsDraft,
     updateGeminiSettingsDraft,
     saveLlmProviderSettings,
+    toggleApiKeyVisibility,
     mutateApiKeySettings,
   } = llm;
   const {
@@ -191,20 +192,20 @@ export function GeneralSettingsTab({
               style={({ WebkitTextSecurity: showOpenAiKey ? 'none' : 'disc' } as React.CSSProperties)}
               className="flex-1 h-9 rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.15)] px-3 text-[13px] text-[var(--fg)] placeholder:text-[var(--muted-dim)] focus:outline-none focus:border-[var(--accent-muted)] transition-colors font-mono"
               placeholder="sk-..."
-              disabled={savingOpenAiSettings || clearingOpenAiSettings}
+              disabled={savingOpenAiSettings || clearingOpenAiSettings || revealingOpenAiKey}
             />
             <button
               type="button"
-              onClick={() => setShowOpenAiKey((v) => !v)}
-              disabled={savingOpenAiSettings || clearingOpenAiSettings}
+              onClick={() => void toggleApiKeyVisibility('openai')}
+              disabled={savingOpenAiSettings || clearingOpenAiSettings || revealingOpenAiKey}
               className={`h-9 px-3 rounded text-[11px] font-semibold tracking-wide uppercase border transition-all ${
-                savingOpenAiSettings || clearingOpenAiSettings
+                savingOpenAiSettings || clearingOpenAiSettings || revealingOpenAiKey
                   ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
                   : 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]'
               }`}
               style={{ fontFamily: 'var(--display)' }}
             >
-              {showOpenAiKey ? 'Hide' : 'Show'}
+              {revealingOpenAiKey ? 'Loading…' : showOpenAiKey ? 'Hide' : 'Show'}
             </button>
           </div>
           <div className="flex items-center gap-2">
@@ -260,20 +261,20 @@ export function GeneralSettingsTab({
               style={({ WebkitTextSecurity: showGeminiKey ? 'none' : 'disc' } as React.CSSProperties)}
               className="flex-1 h-9 rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.15)] px-3 text-[13px] text-[var(--fg)] placeholder:text-[var(--muted-dim)] focus:outline-none focus:border-[var(--accent-muted)] transition-colors font-mono"
               placeholder="AIza..."
-              disabled={savingGeminiSettings || clearingGeminiSettings}
+              disabled={savingGeminiSettings || clearingGeminiSettings || revealingGeminiKey}
             />
             <button
               type="button"
-              onClick={() => setShowGeminiKey((v) => !v)}
-              disabled={savingGeminiSettings || clearingGeminiSettings}
+              onClick={() => void toggleApiKeyVisibility('gemini')}
+              disabled={savingGeminiSettings || clearingGeminiSettings || revealingGeminiKey}
               className={`h-9 px-3 rounded text-[11px] font-semibold tracking-wide uppercase border transition-all ${
-                savingGeminiSettings || clearingGeminiSettings
+                savingGeminiSettings || clearingGeminiSettings || revealingGeminiKey
                   ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
                   : 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]'
               }`}
               style={{ fontFamily: 'var(--display)' }}
             >
-              {showGeminiKey ? 'Hide' : 'Show'}
+              {revealingGeminiKey ? 'Loading…' : showGeminiKey ? 'Hide' : 'Show'}
             </button>
           </div>
           <div className="flex items-center gap-2">

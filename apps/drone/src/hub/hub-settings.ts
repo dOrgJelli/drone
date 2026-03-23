@@ -507,17 +507,22 @@ export async function resolveEffectiveLlmProvider(): Promise<EffectiveLlmProvide
   return { provider: 'openai', source: 'default' };
 }
 
-export function providerKeySettingsResponse(settings: EffectiveProviderApiKeySettings): {
+export function providerKeySettingsResponse(
+  settings: EffectiveProviderApiKeySettings,
+  options?: { includeApiKey?: boolean },
+): {
   hasKey: boolean;
   source: ApiKeySettingsSource;
   keyHint: string | null;
   updatedAt: string | null;
+  apiKey?: string | null;
 } {
   return {
     hasKey: Boolean(settings.apiKey),
     source: settings.source,
     keyHint: apiKeyHint(settings.apiKey),
     updatedAt: settings.source === 'settings' ? settings.updatedAt : null,
+    ...(options?.includeApiKey ? { apiKey: settings.apiKey } : {}),
   };
 }
 

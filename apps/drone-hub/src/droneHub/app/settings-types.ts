@@ -13,6 +13,7 @@ export type ApiKeySettingsResponse = {
   source: 'settings' | 'environment' | null;
   keyHint: string | null;
   updatedAt: string | null;
+  apiKey?: string | null;
 };
 
 export type LlmSettingsResponse = {
