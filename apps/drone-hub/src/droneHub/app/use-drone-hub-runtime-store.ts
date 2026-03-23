@@ -7,12 +7,13 @@ import type { StartupSeedState } from './app-types';
 
 type Updater<T> = T | ((prev: T) => T);
 
-type DroneHubRuntimePersistedState = Pick<DroneHubRuntimeState, 'unreadAgentMessageByChatNodeId'>;
+type DroneHubRuntimePersistedState = Pick<DroneHubRuntimeState, 'unreadAgentMessageByChatNodeId' | 'lastAgentSnippetByChatNodeId'>;
 
 type DroneHubRuntimeState = {
   optimisticallyDeletedDrones: Record<string, boolean>;
   startupSeedByDrone: Record<string, StartupSeedState>;
   unreadAgentMessageByChatNodeId: Record<string, boolean>;
+  lastAgentSnippetByChatNodeId: Record<string, string>;
   transcripts: TranscriptItem[] | null;
   transcriptError: string | null;
   loadingTranscript: boolean;
@@ -24,6 +25,7 @@ type DroneHubRuntimeState = {
   setOptimisticallyDeletedDrones: (next: Updater<Record<string, boolean>>) => void;
   setStartupSeedByDrone: (next: Updater<Record<string, StartupSeedState>>) => void;
   setUnreadAgentMessageByChatNodeId: (next: Updater<Record<string, boolean>>) => void;
+  setLastAgentSnippetByChatNodeId: (next: Updater<Record<string, string>>) => void;
   setTranscripts: (next: Updater<TranscriptItem[] | null>) => void;
   setTranscriptError: (next: Updater<string | null>) => void;
   setLoadingTranscript: (next: Updater<boolean>) => void;
@@ -57,6 +59,7 @@ export const useDroneHubRuntimeStore = create<DroneHubRuntimeState>()(
       optimisticallyDeletedDrones: {},
       startupSeedByDrone: {},
       unreadAgentMessageByChatNodeId: {},
+      lastAgentSnippetByChatNodeId: {},
       transcripts: null,
       transcriptError: null,
       loadingTranscript: false,
@@ -76,6 +79,10 @@ export const useDroneHubRuntimeStore = create<DroneHubRuntimeState>()(
       setUnreadAgentMessageByChatNodeId: (next) =>
         set((s) => ({
           unreadAgentMessageByChatNodeId: resolveNext(s.unreadAgentMessageByChatNodeId, next),
+        })),
+      setLastAgentSnippetByChatNodeId: (next) =>
+        set((s) => ({
+          lastAgentSnippetByChatNodeId: resolveNext(s.lastAgentSnippetByChatNodeId, next),
         })),
       setTranscripts: (next) => set((s) => ({ transcripts: resolveNext(s.transcripts, next) })),
       setTranscriptError: (next) =>
@@ -99,12 +106,22 @@ export const useDroneHubRuntimeStore = create<DroneHubRuntimeState>()(
       storage: createJSONStorage(() => localStorage),
       partialize: (state): DroneHubRuntimePersistedState => ({
         unreadAgentMessageByChatNodeId: state.unreadAgentMessageByChatNodeId,
+        lastAgentSnippetByChatNodeId: state.lastAgentSnippetByChatNodeId,
       }),
       merge: (persistedState, currentState) => {
         const persisted =
           (persistedState as Partial<DroneHubRuntimePersistedState> & {
             unreadAgentMessageByDroneId?: unknown;
           }) ?? {};
+        const rawSnippets = (persisted as any).lastAgentSnippetByChatNodeId;
+        const lastAgentSnippetByChatNodeId: Record<string, string> =
+          rawSnippets && typeof rawSnippets === 'object' && !Array.isArray(rawSnippets)
+            ? Object.fromEntries(
+                Object.entries(rawSnippets as Record<string, unknown>)
+                  .map(([k, v]) => [String(k).trim(), String(v ?? '').trim()])
+                  .filter(([k, v]) => k && v),
+              )
+            : {};
         return {
           ...currentState,
           ...persisted,
@@ -113,6 +130,7 @@ export const useDroneHubRuntimeStore = create<DroneHubRuntimeState>()(
               persisted.unreadAgentMessageByDroneId ??
               currentState.unreadAgentMessageByChatNodeId,
           ),
+          lastAgentSnippetByChatNodeId,
         };
       },
     },
@@ -125,6 +143,7 @@ export function useDroneHubRuntimeState() {
       optimisticallyDeletedDrones: s.optimisticallyDeletedDrones,
       startupSeedByDrone: s.startupSeedByDrone,
       unreadAgentMessageByChatNodeId: s.unreadAgentMessageByChatNodeId,
+      lastAgentSnippetByChatNodeId: s.lastAgentSnippetByChatNodeId,
       transcripts: s.transcripts,
       transcriptError: s.transcriptError,
       loadingTranscript: s.loadingTranscript,
@@ -136,6 +155,7 @@ export function useDroneHubRuntimeState() {
       setOptimisticallyDeletedDrones: s.setOptimisticallyDeletedDrones,
       setStartupSeedByDrone: s.setStartupSeedByDrone,
       setUnreadAgentMessageByChatNodeId: s.setUnreadAgentMessageByChatNodeId,
+      setLastAgentSnippetByChatNodeId: s.setLastAgentSnippetByChatNodeId,
       setTranscripts: s.setTranscripts,
       setTranscriptError: s.setTranscriptError,
       setLoadingTranscript: s.setLoadingTranscript,

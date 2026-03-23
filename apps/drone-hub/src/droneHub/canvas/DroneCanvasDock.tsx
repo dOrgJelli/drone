@@ -103,6 +103,7 @@ type DroneCanvasIndicatorState = {
   hubMessage?: DroneSummary['hubMessage'];
   busy: boolean;
   unreadAgentMessage: boolean;
+  lastAgentSnippet: string | null;
 };
 
 function resolveCanvasAssignmentDropTarget(
@@ -2147,6 +2148,7 @@ export function DroneCanvasDock({
             const assignmentHoverTarget = assignmentHoverNodeId === node.droneId && assignmentHoverTargetCount > 0;
             const isActiveSidebarChat = !draftNode && node.droneId === sidebarSelectedChatNodeId;
             const indicatorState = draftNode ? null : chatNodeStateById[node.droneId] ?? null;
+            const lastAgentSnippet = indicatorState?.lastAgentSnippet ?? null;
             const indicator = renderNodeIndicator(indicatorState);
             const unreadIndicator = renderNodeUnreadIndicator(indicatorState);
             const nodeWidth = nodeWidthByDroneId[node.droneId] ?? NODE_MIN_WIDTH_PX;
@@ -2211,6 +2213,14 @@ export function DroneCanvasDock({
                 {unreadIndicator ? (
                   <span className="pointer-events-none absolute left-0 bottom-full mb-1 z-[2]">
                     {unreadIndicator}
+                  </span>
+                ) : null}
+                {lastAgentSnippet ? (
+                  <span
+                    className="pointer-events-none absolute left-0 bottom-full mb-[18px] z-[1] inline-flex max-w-[280px] rounded-[4px] border border-[var(--border-subtle)] bg-[rgba(10,14,22,.96)] px-2 py-1 text-[10px] leading-[1.35] text-[var(--muted)] shadow-[0_6px_14px_rgba(0,0,0,.35)]"
+                    title={lastAgentSnippet}
+                  >
+                    <span className="line-clamp-2 break-words whitespace-pre-wrap">{lastAgentSnippet}</span>
                   </span>
                 ) : null}
                 {draftNode ? (

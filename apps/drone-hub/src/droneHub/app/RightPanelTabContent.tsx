@@ -46,6 +46,7 @@ type RightPanelTabContentProps = {
       hubMessage?: DroneSummary['hubMessage'];
       busy: boolean;
       unreadAgentMessage: boolean;
+      lastAgentSnippet: string | null;
     }
   >;
   onActivateChatFromCanvas: (droneId: string, chatName: string) => void;
