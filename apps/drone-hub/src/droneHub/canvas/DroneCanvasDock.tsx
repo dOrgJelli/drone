@@ -2145,6 +2145,7 @@ export function DroneCanvasDock({
             const dragging = draggingNodeId === node.droneId;
             const inlineEditing = inlineRenamingDroneId === node.droneId;
             const assignmentHoverTarget = assignmentHoverNodeId === node.droneId && assignmentHoverTargetCount > 0;
+            const isActiveSidebarChat = !draftNode && node.droneId === sidebarSelectedChatNodeId;
             const indicatorState = draftNode ? null : chatNodeStateById[node.droneId] ?? null;
             const indicator = renderNodeIndicator(indicatorState);
             const unreadIndicator = renderNodeUnreadIndicator(indicatorState);
@@ -2199,6 +2200,9 @@ export function DroneCanvasDock({
                   willChange: dragging ? 'transform' : undefined,
                 }}
               >
+                {isActiveSidebarChat ? (
+                  <span className="pointer-events-none absolute left-0 top-0 bottom-0 w-[3px] rounded-l-md bg-[var(--accent)] z-[2]" />
+                ) : null}
                 {indicator ? (
                   <span className="pointer-events-none absolute right-0 bottom-full mb-1 z-[2]">
                     {indicator}
