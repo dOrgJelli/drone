@@ -105,6 +105,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     optimisticallyDeletedDrones,
     startupSeedByDrone,
     unreadAgentMessageByChatNodeId,
+    lastAgentSnippetByChatNodeId,
     transcripts,
     transcriptError,
     loadingTranscript,
@@ -116,6 +117,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setOptimisticallyDeletedDrones,
     setStartupSeedByDrone,
     setUnreadAgentMessageByChatNodeId,
+    setLastAgentSnippetByChatNodeId,
     setTranscripts,
     setTranscriptError,
     setLoadingTranscript,
@@ -419,6 +421,23 @@ export function useDroneHubAppModel(): DroneHubAppModel {
       return changed ? next : prev;
     });
   }, [dronesError, dronesLoading, setUnreadAgentMessageByChatNodeId, validChatNodeIdSet]);
+  React.useEffect(() => {
+    if (dronesLoading || dronesError) return;
+    setLastAgentSnippetByChatNodeId((prev) => {
+      const prevEntries = Object.entries(prev);
+      if (prevEntries.length === 0) return prev;
+      const next: Record<string, string> = {};
+      let changed = false;
+      for (const [nodeId, snippet] of prevEntries) {
+        if (!snippet || !validChatNodeIdSet.has(nodeId)) {
+          changed = true;
+          continue;
+        }
+        next[nodeId] = snippet;
+      }
+      return changed ? next : prev;
+    });
+  }, [dronesError, dronesLoading, setLastAgentSnippetByChatNodeId, validChatNodeIdSet]);
   const sidebarSelectableDroneIdSet = React.useMemo(
     () => new Set(sidebarDronesFilteredByRepo.map((drone) => drone.id)),
     [sidebarDronesFilteredByRepo],
@@ -1163,8 +1182,27 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     previousBusyChatNodeIdSetRef.current = nextBusyChatNodeIdSet;
     if (markUnreadChatNodeIds.length > 0) {
       markChatsUnread(markUnreadChatNodeIds);
+      for (const nodeId of markUnreadChatNodeIds) {
+        const chatRef = parseCanvasChatNodeId(nodeId);
+        if (!chatRef) continue;
+        void (async () => {
+          try {
+            const data = await requestJson<{ ok: true; transcripts: Array<{ output?: string }> }>(
+              `/api/drones/${encodeURIComponent(chatRef.droneId)}/chats/${encodeURIComponent(chatRef.chatName)}/transcript?turn=last`,
+            );
+            const output = String(data?.transcripts?.[0]?.output ?? '').trim();
+            if (!output) return;
+            const snippet = output.length > 200 ? `${output.slice(0, 197)}…` : output;
+            setLastAgentSnippetByChatNodeId((prev) =>
+              prev[nodeId] === snippet ? prev : { ...prev, [nodeId]: snippet },
+            );
+          } catch {
+            // Ignore fetch errors for snippet preview.
+          }
+        })();
+      }
     }
-  }, [drones, markChatsUnread, selectedChat, selectedDrone]);
+  }, [drones, markChatsUnread, requestJson, selectedChat, selectedDrone, setLastAgentSnippetByChatNodeId]);
 
   const selectedDroneIdentity = React.useMemo(() => {
     if (!selectedDrone) return '';
@@ -1565,6 +1603,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
         hubMessage?: DroneSummary['hubMessage'];
         busy: boolean;
         unreadAgentMessage: boolean;
+        lastAgentSnippet: string | null;
       }
     > = {};
     for (const drone of drones) {
@@ -1580,11 +1619,12 @@ export function useDroneHubAppModel(): DroneHubAppModel {
           hubMessage: drone.hubMessage,
           busy: busyChatNodeIdSet.has(nodeId),
           unreadAgentMessage: unreadAgentMessageByChatNodeId[nodeId] === true,
+          lastAgentSnippet: lastAgentSnippetByChatNodeId[nodeId] ?? null,
         };
       }
     }
     return out;
-  }, [busyChatNodeIdSet, drones, unreadAgentMessageByChatNodeId]);
+  }, [busyChatNodeIdSet, drones, lastAgentSnippetByChatNodeId, unreadAgentMessageByChatNodeId]);
   const showRespondingAsStatusInHeader =
     Boolean(currentDroneBusy) && Boolean(currentDrone?.statusOk) && currentDrone?.hubPhase !== 'error';
   const currentCustomAgentMissing = currentAgent.kind === 'custom' && !customAgents.some((a) => a.id === currentAgent.id);
