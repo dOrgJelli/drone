@@ -35,6 +35,7 @@ type UseDroneHubLifecycleEffectsArgs = {
   setHeaderOverflowOpen: Setter<boolean>;
   droneErrorModal: DroneErrorModalState | null;
   setDroneErrorModal: Setter<DroneErrorModalState | null>;
+  openFleetDashboard: () => void;
   openDraftChatComposer: (opts?: { repoPath?: string | null; group?: string | null }) => void;
   openKanbanBoard: () => void;
   openGroupMultiChat: (group: string) => void;
@@ -105,6 +106,7 @@ export function useDroneHubLifecycleEffects({
   setHeaderOverflowOpen,
   droneErrorModal,
   setDroneErrorModal,
+  openFleetDashboard,
   openDraftChatComposer,
   openKanbanBoard,
   openGroupMultiChat,
@@ -250,6 +252,10 @@ export function useDroneHubLifecycleEffects({
     };
 
     const shortcutActionHandlers: Record<ShortcutActionId, (event: KeyboardEvent) => boolean> = {
+      openFleetDashboard: () => {
+        openFleetDashboard();
+        return true;
+      },
       toggleTldr: () => {
         toggleTldrFromShortcut();
         return true;
@@ -414,6 +420,7 @@ export function useDroneHubLifecycleEffects({
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [
     currentDrone,
+    openFleetDashboard,
     openDraftChatComposer,
     openKanbanBoard,
     openGroupMultiChat,

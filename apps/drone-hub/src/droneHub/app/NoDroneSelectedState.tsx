@@ -1,15 +1,7 @@
 import React from 'react';
 import { EmptyState } from '../chat';
+import { FleetDashboard, type NoDroneSelectedStateProps } from './FleetDashboard';
 import { IconBoard, IconDrone, IconPlus, IconPlusDouble } from './icons';
-
-type NoDroneSelectedStateProps = {
-  dronesLoading: boolean;
-  sidebarDroneCount: number;
-  dronesError: string | null | undefined;
-  onOpenDraftChatComposer: () => void;
-  onOpenCreateModal: () => void;
-  onOpenKanbanBoard: () => void;
-};
 
 export function NoDroneSelectedState({
   dronesLoading,
@@ -18,8 +10,11 @@ export function NoDroneSelectedState({
   onOpenDraftChatComposer,
   onOpenCreateModal,
   onOpenKanbanBoard,
+  ...fleetDashboardProps
 }: NoDroneSelectedStateProps) {
-  if (!dronesLoading && sidebarDroneCount === 0 && !dronesError) {
+  const showNoDronesEmptyState = !dronesLoading && sidebarDroneCount === 0 && !dronesError;
+
+  if (showNoDronesEmptyState) {
     return (
       <EmptyState
         icon={<IconDrone className="w-8 h-8 text-[var(--muted-dim)]" />}
@@ -69,25 +64,5 @@ export function NoDroneSelectedState({
     );
   }
 
-  return (
-    <EmptyState
-      icon={<IconDrone className="w-8 h-8 text-[var(--muted-dim)]" />}
-      title="Select a drone"
-      description="Choose a drone from the sidebar to view its session output."
-      actions={
-        <button
-          type="button"
-          onClick={onOpenKanbanBoard}
-          className="inline-flex items-center gap-2 h-[32px] px-3 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[11px] text-[var(--muted)] hover:text-[var(--accent)] hover:border-[var(--accent-muted)] hover:bg-[var(--accent-subtle)] transition-all"
-          title="Open task board"
-          aria-label="Open task board"
-        >
-          <IconBoard className="opacity-80" />
-          <span className="font-semibold tracking-wide uppercase" style={{ fontFamily: 'var(--display)' }}>
-            Open task board
-          </span>
-        </button>
-      }
-    />
-  );
+  return <FleetDashboard {...fleetDashboardProps} dronesLoading={dronesLoading} sidebarDroneCount={sidebarDroneCount} dronesError={dronesError} onOpenDraftChatComposer={onOpenDraftChatComposer} onOpenCreateModal={onOpenCreateModal} onOpenKanbanBoard={onOpenKanbanBoard} />;
 }

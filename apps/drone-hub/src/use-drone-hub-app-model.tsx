@@ -876,6 +876,38 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setSelectedGroupMultiChat,
   ]);
 
+  const openFleetDashboard = React.useCallback(() => {
+    setAppView('workspace');
+    setCreateOpen(false);
+    setCreateError(null);
+    setDraftChat(null);
+    setDraftCreateOpen(false);
+    setDraftCreateError(null);
+    setSelectedGroupMultiChat(null);
+    setSelectedDrone(null);
+    setSelectedDroneIds([]);
+    selectionAnchorRef.current = null;
+    preferredSelectedDroneRef.current = null;
+    preferredSelectedDroneHoldUntilRef.current = 0;
+    setSelectedChat('default');
+    setKanbanBoardOpen(false);
+  }, [
+    preferredSelectedDroneHoldUntilRef,
+    preferredSelectedDroneRef,
+    selectionAnchorRef,
+    setAppView,
+    setCreateError,
+    setCreateOpen,
+    setDraftChat,
+    setDraftCreateError,
+    setDraftCreateOpen,
+    setKanbanBoardOpen,
+    setSelectedChat,
+    setSelectedDrone,
+    setSelectedDroneIds,
+    setSelectedGroupMultiChat,
+  ]);
+
   const openGroupMultiChat = React.useCallback(
     (groupRaw: string) => {
       const group = String(groupRaw ?? '').trim();
@@ -1292,6 +1324,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setHeaderOverflowOpen,
     droneErrorModal,
     setDroneErrorModal,
+    openFleetDashboard,
     openDraftChatComposer,
     openKanbanBoard,
     openGroupMultiChat,
@@ -2460,6 +2493,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     queueDraftPromptDuringCreate,
     createDroneFromDraft,
     enqueueQueuedPrompt,
+    removeQueuedPrompt,
     setDraftCreateError,
     selectedGroupMultiChatData,
     groupBroadcastPromptError,
@@ -2467,6 +2501,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     sendGroupBroadcastPrompt,
     uiDroneName,
     selectDroneCard,
+    selectDroneChat,
     deleteDrone,
     deletingDrones,
     parseJobsFromAgentMessage,
