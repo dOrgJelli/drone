@@ -2521,6 +2521,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     dronesLoading,
     sidebarDrones,
     dronesError,
+    unreadAgentMessageByChatNodeId,
     openDraftChatComposer,
     openCreateModal,
     openKanbanBoard,

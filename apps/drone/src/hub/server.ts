@@ -3196,9 +3196,17 @@ function startupPromptToPendingPrompt(prompt: PendingStartupPrompt): PendingProm
   };
 }
 
+function pruneCompletedPendingPrompts(list: PendingPrompt[], turnsRaw: unknown): PendingPrompt[] {
+  const turns = Array.isArray(turnsRaw) ? turnsRaw : [];
+  const transcriptIds = new Set(turns.map((t: any) => String(t?.id ?? '').trim()).filter(Boolean));
+  if (transcriptIds.size === 0) return list;
+  return list.filter((item) => item.state === 'failed' || !transcriptIds.has(item.id));
+}
+
 function pendingPromptsFromChatEntry(entry: any): PendingPrompt[] {
   const list = Array.isArray(entry?.pendingPrompts) ? entry.pendingPrompts : [];
-  return list
+  return pruneCompletedPendingPrompts(
+    list
     .map((p: any) => ({
       id: String(p?.id ?? '').trim(),
       at: String(p?.at ?? '').trim(),
@@ -3215,7 +3223,9 @@ function pendingPromptsFromChatEntry(entry: any): PendingPrompt[] {
       updatedAt: typeof p?.updatedAt === 'string' ? p.updatedAt : undefined,
     }))
     .filter((p: PendingPrompt) => p.id && p.prompt.trim())
-    .slice(-60);
+    .slice(-60),
+    entry?.turns,
+  );
 }
 
 function normalizeChatImageAttachmentRefs(raw: unknown): ChatImageAttachmentRef[] {
@@ -5486,6 +5496,13 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
       changed = true;
       continue;
     }
+  }
+
+  const prunedPendingList = pruneCompletedPendingPrompts(pendingList as PendingPrompt[], turns);
+  if (prunedPendingList.length !== pendingList.length) {
+    pendingList.length = 0;
+    pendingList.push(...prunedPendingList);
+    changed = true;
   }
 
   if (changed) {

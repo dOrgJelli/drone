@@ -338,6 +338,49 @@ describeSocketSuite('chat management api', () => {
     expect(Number(output.data?.offsetBytes ?? 0)).toBe(0);
   });
 
+  test('does not surface completed transcript prompts as pending or fleet work', async () => {
+    const droneId = 'completed-prompt-hidden';
+    await seedDrone(droneId);
+
+    const oldIso = new Date(Date.now() - 15 * 60_000).toISOString();
+    await updateRegistry((reg: any) => {
+      const entry = reg?.drones?.[droneId]?.chats?.default;
+      if (!entry) throw new Error('missing seeded chat entry');
+      entry.turns = [
+        {
+          id: 'prompt-1',
+          at: oldIso,
+          promptAt: oldIso,
+          completedAt: oldIso,
+          prompt: 'hello',
+          ok: true,
+          output: 'done',
+        },
+      ];
+      entry.pendingPrompts = [
+        {
+          id: 'prompt-1',
+          at: oldIso,
+          updatedAt: oldIso,
+          prompt: 'hello',
+          state: 'sent',
+        },
+      ];
+    });
+
+    const pending = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats/default/pending`);
+    expect(pending.r.status).toBe(200);
+    expect(pending.data?.ok).toBe(true);
+    expect(pending.data?.pending).toEqual([]);
+
+    const fleetWork = await apiFetch('/api/fleet/work');
+    expect(fleetWork.r.status).toBe(200);
+    expect(fleetWork.data?.ok).toBe(true);
+    expect(Array.isArray(fleetWork.data?.items)).toBe(true);
+    expect((fleetWork.data?.items ?? []).some((item: any) => item?.droneId === droneId && item?.promptId === 'prompt-1')).toBe(false);
+    expect(Number(fleetWork.data?.counts?.stuck ?? 0)).toBe(0);
+  });
+
   test('renames pending drones before startup completes', async () => {
     const droneId = 'pending-rename';
     const now = new Date().toISOString();
