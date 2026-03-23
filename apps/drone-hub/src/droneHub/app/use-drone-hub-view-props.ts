@@ -410,6 +410,7 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
     startDraftAutomation,
     queueDraftPromptDuringCreate,
     enqueueQueuedPrompt,
+    removeQueuedPrompt,
     setDraftCreateError,
     createDroneFromDraft,
     selectedGroupMultiChatData,
@@ -614,10 +615,15 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
     noDroneSelectedStateProps: {
       dronesLoading,
       sidebarDroneCount: sidebarDrones.length,
+      sidebarDrones,
       dronesError,
+      queuedPromptsByDroneChat,
+      removeQueuedPrompt,
       onOpenDraftChatComposer: openDraftChatComposer,
       onOpenCreateModal: openCreateModal,
       onOpenKanbanBoard: openKanbanBoard,
+      onSelectDrone: selectDroneCard,
+      onSelectDroneChat: selectDroneChat,
     },
     renderPersistentPreviewContent,
     selectedDroneWorkspaceProps: currentDrone

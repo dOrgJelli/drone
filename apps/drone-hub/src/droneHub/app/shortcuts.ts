@@ -1,4 +1,5 @@
 export type ShortcutActionId =
+  | 'openFleetDashboard'
   | 'createDraftDrone'
   | 'openKanbanBoard'
   | 'focusPrimaryChatInput'
@@ -32,6 +33,11 @@ export type ShortcutDefinition = {
 };
 
 export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
+  {
+    id: 'openFleetDashboard',
+    label: 'Open fleet dashboard',
+    description: 'Clears the current drone selection and returns to the fleet overview.',
+  },
   {
     id: 'createDraftDrone',
     label: 'Create new drone',
@@ -105,6 +111,7 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
 ];
 
 const DEFAULT_SHORTCUT_BINDINGS: ShortcutBindingMap = {
+  openFleetDashboard: { key: 'v', mod: false, ctrl: false, meta: false, alt: false, shift: false },
   createDraftDrone: { key: 'tab', mod: false, ctrl: false, meta: false, alt: false, shift: false },
   openKanbanBoard: { key: 'y', mod: false, ctrl: false, meta: false, alt: false, shift: false },
   focusPrimaryChatInput: { key: 'enter', mod: false, ctrl: false, meta: false, alt: false, shift: false },
@@ -168,6 +175,7 @@ export function sanitizeSingleShortcutBinding(value: unknown, fallback: Shortcut
 
 export function cloneDefaultShortcutBindings(): ShortcutBindingMap {
   return {
+    openFleetDashboard: { ...DEFAULT_SHORTCUT_BINDINGS.openFleetDashboard! },
     createDraftDrone: { ...DEFAULT_SHORTCUT_BINDINGS.createDraftDrone! },
     openKanbanBoard: { ...DEFAULT_SHORTCUT_BINDINGS.openKanbanBoard! },
     focusPrimaryChatInput: { ...DEFAULT_SHORTCUT_BINDINGS.focusPrimaryChatInput! },

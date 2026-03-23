@@ -3116,6 +3116,8 @@ const STOPPED_BY_USER_ERROR = 'Stopped by user.';
 const STOPPED_BEFORE_SUBMISSION_ERROR = 'Stopped before submission.';
 const STOPPED_BY_ARCHIVE_ERROR = 'Stopped because the drone was archived.';
 const STOPPED_BY_DELETE_ERROR = 'Stopped because the drone was deleted.';
+const STOPPED_BY_LIFECYCLE_STOP_ERROR = 'Stopped because the drone was stopped.';
+const STOPPED_BY_LIFECYCLE_RESTART_ERROR = 'Stopped because the drone was restarted.';
 
 // NOTE: Pending prompts are executed in the drone daemon (tmux-backed) and are restart-resumable.
 
@@ -3161,6 +3163,28 @@ function startupPromptToPendingPrompt(prompt: PendingStartupPrompt): PendingProm
     ...(prompt.error ? { error: prompt.error } : {}),
     updatedAt: prompt.updatedAt ?? nowIso(),
   };
+}
+
+function pendingPromptsFromChatEntry(entry: any): PendingPrompt[] {
+  const list = Array.isArray(entry?.pendingPrompts) ? entry.pendingPrompts : [];
+  return list
+    .map((p: any) => ({
+      id: String(p?.id ?? '').trim(),
+      at: String(p?.at ?? '').trim(),
+      prompt: String(p?.prompt ?? ''),
+      cwd: typeof p?.cwd === 'string' ? String(p.cwd) : p?.cwd === null ? null : undefined,
+      attachments: normalizeChatImageAttachmentRefs(p?.attachments),
+      automation: normalizePromptAutomationMeta((p as any)?.automation),
+      blockedByAutomation: Boolean((p as any)?.blockedByAutomation),
+      state:
+        p?.state === 'sent' || p?.state === 'failed' || p?.state === 'sending' || p?.state === 'queued'
+          ? (p.state as PendingPromptState)
+          : 'sending',
+      error: typeof p?.error === 'string' ? p.error : undefined,
+      updatedAt: typeof p?.updatedAt === 'string' ? p.updatedAt : undefined,
+    }))
+    .filter((p: PendingPrompt) => p.id && p.prompt.trim())
+    .slice(-60);
 }
 
 function normalizeChatImageAttachmentRefs(raw: unknown): ChatImageAttachmentRef[] {
@@ -3306,25 +3330,7 @@ async function readPendingPrompts(opts: { droneId: string; chatName: string }): 
   }
   const chatName = opts.chatName || 'default';
   const entry = d?.chats?.[chatName];
-  const list = Array.isArray(entry?.pendingPrompts) ? entry.pendingPrompts : [];
-  return list
-    .map((p: any) => ({
-      id: String(p?.id ?? '').trim(),
-      at: String(p?.at ?? '').trim(),
-      prompt: String(p?.prompt ?? ''),
-      cwd: typeof p?.cwd === 'string' ? String(p.cwd) : p?.cwd === null ? null : undefined,
-      attachments: normalizeChatImageAttachmentRefs(p?.attachments),
-      automation: normalizePromptAutomationMeta((p as any)?.automation),
-      blockedByAutomation: Boolean((p as any)?.blockedByAutomation),
-      state:
-        p?.state === 'sent' || p?.state === 'failed' || p?.state === 'sending' || p?.state === 'queued'
-          ? (p.state as PendingPromptState)
-          : 'sending',
-      error: typeof p?.error === 'string' ? p.error : undefined,
-      updatedAt: typeof p?.updatedAt === 'string' ? p.updatedAt : undefined,
-    }))
-    .filter((p: PendingPrompt) => p.id && p.prompt.trim())
-    .slice(-50);
+  return pendingPromptsFromChatEntry(entry).slice(-50);
 }
 
 async function readPendingStartupPrompts(opts: { droneId: string; chatName: string }): Promise<PendingPrompt[]> {
@@ -3631,7 +3637,7 @@ async function stopTranscriptPendingPrompts(opts: {
   };
 }
 
-type DroneChatStopReason = 'archive' | 'delete';
+type DroneChatStopReason = 'archive' | 'delete' | 'stop' | 'restart';
 type DroneChatStopPlan = {
   chatNames: string[];
   builtinChatNames: string[];
@@ -3640,7 +3646,196 @@ type DroneChatStopPlan = {
 };
 
 function droneChatStopError(reason: DroneChatStopReason): string {
-  return reason === 'archive' ? STOPPED_BY_ARCHIVE_ERROR : STOPPED_BY_DELETE_ERROR;
+  if (reason === 'archive') return STOPPED_BY_ARCHIVE_ERROR;
+  if (reason === 'delete') return STOPPED_BY_DELETE_ERROR;
+  return reason === 'restart' ? STOPPED_BY_LIFECYCLE_RESTART_ERROR : STOPPED_BY_LIFECYCLE_STOP_ERROR;
+}
+
+type FleetWorkDerivedState = 'queued' | 'running' | 'failed' | 'stuck';
+
+function deriveFleetWorkState(item: PendingPrompt): FleetWorkDerivedState {
+  if (item.state === 'failed') return 'failed';
+  const staleState = stalePendingPromptState({
+    state: item.state,
+    updatedAt: item.updatedAt,
+    at: item.at,
+    enqueueTimeoutMs: defaultPromptEnqueueTimeoutMs(),
+  });
+  if (staleState === 'sending' || staleState === 'sent') return 'stuck';
+  if (item.state === 'queued') return 'queued';
+  return 'running';
+}
+
+function buildFleetWorkPayload(regAny: any) {
+  const items: Array<{
+    key: string;
+    source: 'drone' | 'startup';
+    droneId: string;
+    droneName: string;
+    chatName: string;
+    promptId: string;
+    prompt: string;
+    cwd?: string | null;
+    at: string;
+    updatedAt: string | null;
+    state: PendingPromptState;
+    derivedState: FleetWorkDerivedState;
+    error: string | null;
+    runtime: DroneRuntime;
+    blockedByAutomation: boolean;
+    attachmentsCount: number;
+    canCancel: boolean;
+    canRetry: boolean;
+    canUnstick: boolean;
+  }> = [];
+
+  for (const [droneIdRaw, entry] of Object.entries(regAny?.drones ?? {}) as Array<[string, any]>) {
+    const droneId = normalizeDroneIdentity(droneIdRaw);
+    if (!droneId || !entry || typeof entry !== 'object') continue;
+    const droneName = String(entry?.name ?? droneId).trim() || droneId;
+    const runtime = droneRuntime(entry);
+    const chats = entry?.chats && typeof entry.chats === 'object' ? Object.entries(entry.chats) : [];
+    for (const [chatNameRaw, chatEntry] of chats as Array<[string, any]>) {
+      const chatName = normalizeChatName(chatNameRaw);
+      if (!chatName) continue;
+      for (const item of pendingPromptsFromChatEntry(chatEntry)) {
+        const derivedState = deriveFleetWorkState(item);
+        const attachmentsCount = Array.isArray(item.attachments) ? item.attachments.length : 0;
+        items.push({
+          key: `${droneId}:${chatName}:${item.id}`,
+          source: 'drone',
+          droneId,
+          droneName,
+          chatName,
+          promptId: item.id,
+          prompt: item.prompt,
+          ...(typeof item.cwd === 'string' || item.cwd === null ? { cwd: item.cwd } : {}),
+          at: item.at,
+          updatedAt: item.updatedAt ?? null,
+          state: item.state,
+          derivedState,
+          error: typeof item.error === 'string' ? item.error : null,
+          runtime,
+          blockedByAutomation: Boolean(item.blockedByAutomation),
+          attachmentsCount,
+          canCancel: item.state === 'queued',
+          canRetry: !item.automation && item.state === 'failed' && attachmentsCount === 0 && Boolean(item.prompt.trim()),
+          canUnstick: runtime !== 'host' && derivedState === 'stuck',
+        });
+      }
+    }
+  }
+
+  for (const [droneIdRaw, pendingEntry] of Object.entries(regAny?.pending ?? {}) as Array<[string, any]>) {
+    const droneId = normalizeDroneIdentity(droneIdRaw);
+    if (!droneId || regAny?.drones?.[droneId]) continue;
+    const droneName = String(pendingEntry?.name ?? droneId).trim() || droneId;
+    const runtime = normalizeDroneRuntime((pendingEntry as any)?.runtime);
+    for (const item of normalizePendingStartupPrompts((pendingEntry as any)?.startupQueuedPrompts)) {
+      const pendingPrompt = startupPromptToPendingPrompt(item);
+      items.push({
+        key: `${droneId}:${item.chatName}:${item.id}`,
+        source: 'startup',
+        droneId,
+        droneName,
+        chatName: item.chatName,
+        promptId: item.id,
+        prompt: item.prompt,
+        ...(typeof pendingPrompt.cwd === 'string' || pendingPrompt.cwd === null ? { cwd: pendingPrompt.cwd } : {}),
+        at: pendingPrompt.at,
+        updatedAt: pendingPrompt.updatedAt ?? null,
+        state: pendingPrompt.state,
+        derivedState: deriveFleetWorkState(pendingPrompt),
+        error: typeof pendingPrompt.error === 'string' ? pendingPrompt.error : null,
+        runtime,
+        blockedByAutomation: false,
+        attachmentsCount: 0,
+        canCancel: false,
+        canRetry: pendingPrompt.state === 'failed' && Boolean(pendingPrompt.prompt.trim()),
+        canUnstick: false,
+      });
+    }
+  }
+
+  const rank = { stuck: 0, running: 1, queued: 2, failed: 3 } satisfies Record<FleetWorkDerivedState, number>;
+  items.sort((a, b) => {
+    const byState = rank[a.derivedState] - rank[b.derivedState];
+    if (byState !== 0) return byState;
+    const aMs = Date.parse(a.updatedAt ?? a.at ?? '');
+    const bMs = Date.parse(b.updatedAt ?? b.at ?? '');
+    return (Number.isFinite(bMs) ? bMs : 0) - (Number.isFinite(aMs) ? aMs : 0);
+  });
+
+  return {
+    ok: true as const,
+    counts: {
+      total: items.length,
+      queued: items.filter((item) => item.derivedState === 'queued').length,
+      running: items.filter((item) => item.derivedState === 'running').length,
+      failed: items.filter((item) => item.derivedState === 'failed').length,
+      stuck: items.filter((item) => item.derivedState === 'stuck').length,
+    },
+    items,
+  };
+}
+
+async function clearDroneHubState(droneIdRaw: string): Promise<void> {
+  const droneId = normalizeDroneIdentity(droneIdRaw);
+  if (!droneId) return;
+  await updateRegistry((regAny: any) => {
+    const entry = regAny?.drones?.[droneId];
+    if (!entry || typeof entry !== 'object') return;
+    if (entry.hub) delete entry.hub;
+    regAny.drones = regAny.drones ?? {};
+    regAny.drones[droneId] = entry;
+  });
+}
+
+async function runDroneLifecycleAction(opts: { droneId: string; droneEntry: any; action: 'start' | 'stop' | 'restart' }) {
+  const droneId = normalizeDroneIdentity(opts.droneId);
+  if (!droneId) throw new Error('missing droneId');
+  const droneEntry = opts.droneEntry;
+  if (!droneEntry || typeof droneEntry !== 'object') throw new Error(`unknown drone: ${opts.droneId}`);
+  if (droneRuntime(droneEntry) === 'host') {
+    throw new Error('lifecycle controls are not yet supported for host runtime drones');
+  }
+
+  const droneName = String(droneEntry?.name ?? droneId).trim() || droneId;
+  const containerName = String(droneEntry?.containerName ?? droneEntry?.name ?? `drone-${droneId}`).trim() || `drone-${droneId}`;
+
+  if (opts.action === 'stop' || opts.action === 'restart') {
+    await stopAllDroneChatActivity({
+      droneId,
+      droneEntry,
+      reason: opts.action === 'restart' ? 'restart' : 'stop',
+      updateLiveRegistry: true,
+    });
+    try {
+      await dvmStop(containerName);
+    } catch (e: any) {
+      const msg = e?.message ?? String(e);
+      if (!looksLikeContainerNotRunningError(msg)) throw e;
+    }
+  }
+
+  if (opts.action === 'start' || opts.action === 'restart') {
+    try {
+      await dvmStart(containerName);
+    } catch (e: any) {
+      const msg = e?.message ?? String(e);
+      if (!looksLikeContainerAlreadyRunningError(msg)) throw e;
+    }
+  }
+
+  await clearDroneHubState(droneId);
+  return {
+    ok: true as const,
+    id: droneId,
+    name: droneName,
+    action: opts.action,
+    runtime: 'container' as const,
+    containerName,
+  };
 }
 
 function listStoppablePromptIdsFromChatEntry(entry: any): string[] {
@@ -8902,6 +9097,13 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         return;
       }
 
+      // GET /api/fleet/work
+      if (method === 'GET' && parts.length === 3 && parts[0] === 'api' && parts[1] === 'fleet' && parts[2] === 'work') {
+        const regAny: any = await loadRegistry();
+        json(res, 200, buildFleetWorkPayload(regAny));
+        return;
+      }
+
       // GET /api/fleet/actors/:drone
       if (method === 'GET' && parts.length === 4 && parts[0] === 'api' && parts[1] === 'fleet' && parts[2] === 'actors') {
         const droneRef = decodeURIComponent(parts[3]);
@@ -13691,6 +13893,40 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         } catch (e: any) {
           const msg = e?.message ?? String(e);
           const status = /not found/i.test(msg) ? 404 : 500;
+          json(res, status, { ok: false, error: msg });
+          return;
+        }
+      }
+
+      // POST /api/drones/:id/lifecycle/:action
+      if (
+        method === 'POST' &&
+        parts.length === 5 &&
+        parts[0] === 'api' &&
+        parts[1] === 'drones' &&
+        parts[3] === 'lifecycle' &&
+        (parts[4] === 'start' || parts[4] === 'stop' || parts[4] === 'restart')
+      ) {
+        const droneRef = decodeURIComponent(parts[2]);
+        const action = parts[4] as 'start' | 'stop' | 'restart';
+        try {
+          const resolved = await resolveDroneOrRespond(res, droneRef);
+          if (!resolved) return;
+          const result = await runDroneLifecycleAction({
+            droneId: resolved.id,
+            droneEntry: resolved.drone,
+            action,
+          });
+          json(res, 200, result);
+          return;
+        } catch (e: any) {
+          const msg = e?.message ?? String(e);
+          const status =
+            /still starting/i.test(msg) ? 409
+            : /unknown drone/i.test(msg) ? 404
+            : /host runtime/i.test(msg) ? 409
+            : looksLikeMissingContainerError(msg) ? 404
+            : 500;
           json(res, status, { ok: false, error: msg });
           return;
         }
