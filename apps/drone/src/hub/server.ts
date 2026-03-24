@@ -3661,6 +3661,13 @@ function normalizePendingPromptState(raw: unknown): PendingPromptState {
   return 'queued';
 }
 
+function normalizePendingPromptText(raw: unknown): string {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    return String((raw as any).prompt ?? (raw as any).message ?? '');
+  }
+  return String(raw ?? '');
+}
+
 function normalizePendingStartupPrompts(raw: unknown, chatNameFilter?: string): PendingStartupPrompt[] {
   const list = Array.isArray(raw) ? raw : [];
   const out: PendingStartupPrompt[] = [];
@@ -3668,7 +3675,7 @@ function normalizePendingStartupPrompts(raw: unknown, chatNameFilter?: string): 
   for (const item of list) {
     if (!item || typeof item !== 'object') continue;
     const id = String((item as any).id ?? '').trim();
-    const prompt = String((item as any).prompt ?? '');
+    const prompt = normalizePendingPromptText((item as any).prompt);
     const chatName = normalizeChatName((item as any).chatName);
     if (!id || !prompt.trim()) continue;
     if (chatFilter && chatName !== chatFilter) continue;
@@ -3761,7 +3768,7 @@ function pendingPromptsFromChatEntry(entry: any, opts?: { keepRecentlyCompleted?
     .map((p: any) => ({
       id: String(p?.id ?? '').trim(),
       at: String(p?.at ?? '').trim(),
-      prompt: String(p?.prompt ?? ''),
+      prompt: normalizePendingPromptText(p?.prompt),
       cwd: typeof p?.cwd === 'string' ? String(p.cwd) : p?.cwd === null ? null : undefined,
       attachments: normalizeChatImageAttachmentRefs(p?.attachments),
       automation: normalizePromptAutomationMeta((p as any)?.automation),

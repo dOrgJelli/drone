@@ -265,4 +265,54 @@ describeSocketSuite('playbook api', () => {
       'Summarize the issue in one sentence.',
     ]);
   });
+
+  test('launching structured playbook messages queues plain prompt strings', async () => {
+    const repoPath = path.join(tempRoot, 'repo-structured-prompts');
+    fs.mkdirSync(repoPath, { recursive: true });
+
+    const created = await apiFetch('/api/playbooks', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        label: 'Structured prompts',
+        agent: { kind: 'builtin', id: 'codex' },
+        messages: [
+          { id: 'finding', prompt: 'Find the biggest issue in this repo.', captureFinding: true },
+          { id: 'summary', prompt: 'Summarize the issue in one sentence.', captureFinding: false },
+        ],
+      }),
+    });
+    expect(created.r.status).toBe(201);
+    const playbookId = String(created.data?.playbook?.id ?? '');
+    expect(playbookId).toBeTruthy();
+
+    const launched = await apiFetch(`/api/playbooks/${encodeURIComponent(playbookId)}/run`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        repoPath,
+        pullHostBranchBeforeCreate: false,
+      }),
+    });
+    expect(launched.r.status).toBe(202);
+    const droneId = String(launched.data?.droneId ?? '');
+    expect(droneId).toBeTruthy();
+
+    const reg = await loadRegistry();
+    const queued = reg.pending?.[droneId]?.startupQueuedPrompts ?? [];
+    expect(queued).toHaveLength(2);
+    expect(queued).toMatchObject([
+      {
+        prompt: 'Find the biggest issue in this repo.',
+        messageId: 'finding',
+        captureFinding: true,
+        state: 'queued',
+      },
+      {
+        prompt: 'Summarize the issue in one sentence.',
+        messageId: 'summary',
+        state: 'queued',
+      },
+    ]);
+  });
 });

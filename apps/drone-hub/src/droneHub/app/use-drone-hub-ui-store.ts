@@ -46,6 +46,9 @@ type DroneHubUiState = {
   activeRepoPath: string;
   settingsActiveTab: SettingsTabId;
   settingsPlaybookFocusId: string | null;
+  playbookRunsSelectionInitialized: boolean;
+  playbookRunsSelectedPlaybookId: string;
+  playbookRunsSelectedRepoPath: string;
   chatHeaderRepoPath: string;
   sidebarReposCollapsed: boolean;
   sidebarAutoMinimize: boolean;
@@ -98,6 +101,9 @@ type DroneHubUiState = {
   setActiveRepoPath: (next: Updater<string>) => void;
   setSettingsActiveTab: (next: Updater<SettingsTabId>) => void;
   setSettingsPlaybookFocusId: (next: Updater<string | null>) => void;
+  setPlaybookRunsSelectionInitialized: (next: Updater<boolean>) => void;
+  setPlaybookRunsSelectedPlaybookId: (next: Updater<string>) => void;
+  setPlaybookRunsSelectedRepoPath: (next: Updater<string>) => void;
   setChatHeaderRepoPath: (next: Updater<string>) => void;
   setSidebarReposCollapsed: (next: Updater<boolean>) => void;
   setSidebarAutoMinimize: (next: Updater<boolean>) => void;
@@ -163,6 +169,9 @@ type DroneHubUiPersistedState = Pick<
   DroneHubUiState,
   | 'activeRepoPath'
   | 'settingsActiveTab'
+  | 'playbookRunsSelectionInitialized'
+  | 'playbookRunsSelectedPlaybookId'
+  | 'playbookRunsSelectedRepoPath'
   | 'chatHeaderRepoPath'
   | 'sidebarReposCollapsed'
   | 'sidebarAutoMinimize'
@@ -262,6 +271,10 @@ function normalizeBoolean(value: unknown): boolean {
   return value === true;
 }
 
+function normalizeTrimmedString(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : String(value ?? '').trim();
+}
+
 function normalizeChatInputDrafts(value: unknown): Record<string, string> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   const entries = Object.entries(value as Record<string, unknown>);
@@ -314,6 +327,38 @@ function readPersistedChatInputDrafts(): Record<string, string> {
   return {};
 }
 
+function readPersistedDroneHubUiSelections(): Pick<
+  DroneHubUiState,
+  'playbookRunsSelectionInitialized' | 'playbookRunsSelectedPlaybookId' | 'playbookRunsSelectedRepoPath'
+> {
+  const storageRaw = readLocalStorageItem('droneHub.ui');
+  if (!storageRaw) {
+    return {
+      playbookRunsSelectionInitialized: false,
+      playbookRunsSelectedPlaybookId: '',
+      playbookRunsSelectedRepoPath: '',
+    };
+  }
+  try {
+    const parsed = JSON.parse(storageRaw) as any;
+    const persistedState =
+      parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Object.prototype.hasOwnProperty.call(parsed, 'state')
+        ? parsed.state
+        : parsed;
+    return {
+      playbookRunsSelectionInitialized: normalizeBoolean(persistedState?.playbookRunsSelectionInitialized),
+      playbookRunsSelectedPlaybookId: normalizeTrimmedString(persistedState?.playbookRunsSelectedPlaybookId),
+      playbookRunsSelectedRepoPath: normalizeTrimmedString(persistedState?.playbookRunsSelectedRepoPath),
+    };
+  } catch {
+    return {
+      playbookRunsSelectionInitialized: false,
+      playbookRunsSelectedPlaybookId: '',
+      playbookRunsSelectedRepoPath: '',
+    };
+  }
+}
+
 function writePersistedChatInputDrafts(value: Record<string, string>): void {
   try {
     if (Object.keys(value).length === 0) {
@@ -338,6 +383,7 @@ function schedulePersistChatInputDrafts(value: Record<string, string>): void {
 }
 
 const initialChatInputDrafts = readPersistedChatInputDrafts();
+const initialPlaybookRunsSelections = readPersistedDroneHubUiSelections();
 
 export const useDroneHubUiStore = create<DroneHubUiState>()(
   persist(
@@ -345,6 +391,9 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
       activeRepoPath: '',
       settingsActiveTab: 'general',
       settingsPlaybookFocusId: null,
+      playbookRunsSelectionInitialized: initialPlaybookRunsSelections.playbookRunsSelectionInitialized,
+      playbookRunsSelectedPlaybookId: initialPlaybookRunsSelections.playbookRunsSelectedPlaybookId,
+      playbookRunsSelectedRepoPath: initialPlaybookRunsSelections.playbookRunsSelectedRepoPath,
       chatHeaderRepoPath: '',
       sidebarReposCollapsed: false,
       sidebarAutoMinimize: false,
@@ -398,6 +447,12 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
       setSettingsActiveTab: (next) => set((s) => ({ settingsActiveTab: resolveNext(s.settingsActiveTab, next) })),
       setSettingsPlaybookFocusId: (next) =>
         set((s) => ({ settingsPlaybookFocusId: resolveNext(s.settingsPlaybookFocusId, next) })),
+      setPlaybookRunsSelectionInitialized: (next) =>
+        set((s) => ({ playbookRunsSelectionInitialized: resolveNext(s.playbookRunsSelectionInitialized, next) })),
+      setPlaybookRunsSelectedPlaybookId: (next) =>
+        set((s) => ({ playbookRunsSelectedPlaybookId: normalizeTrimmedString(resolveNext(s.playbookRunsSelectedPlaybookId, next)) })),
+      setPlaybookRunsSelectedRepoPath: (next) =>
+        set((s) => ({ playbookRunsSelectedRepoPath: normalizeTrimmedString(resolveNext(s.playbookRunsSelectedRepoPath, next)) })),
       setChatHeaderRepoPath: (next) => set((s) => ({ chatHeaderRepoPath: resolveNext(s.chatHeaderRepoPath, next) })),
       setSidebarReposCollapsed: (next) => set((s) => ({ sidebarReposCollapsed: resolveNext(s.sidebarReposCollapsed, next) })),
       setSidebarAutoMinimize: (next) => set((s) => ({ sidebarAutoMinimize: resolveNext(s.sidebarAutoMinimize, next) })),
@@ -558,12 +613,15 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
     }),
     {
       name: 'droneHub.ui',
-      version: 7,
+      version: 8,
       storage: createJSONStorage(() => localStorage),
       migrate: (persistedState, version) => migrateDroneHubUiPersistedState(persistedState, version),
       partialize: (state): DroneHubUiPersistedState => ({
         activeRepoPath: state.activeRepoPath,
         settingsActiveTab: state.settingsActiveTab,
+        playbookRunsSelectionInitialized: state.playbookRunsSelectionInitialized,
+        playbookRunsSelectedPlaybookId: state.playbookRunsSelectedPlaybookId,
+        playbookRunsSelectedRepoPath: state.playbookRunsSelectedRepoPath,
         chatHeaderRepoPath: state.chatHeaderRepoPath,
         sidebarReposCollapsed: state.sidebarReposCollapsed,
         sidebarAutoMinimize: state.sidebarAutoMinimize,
@@ -609,6 +667,15 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
             persisted.settingsActiveTab === 'system'
               ? persisted.settingsActiveTab
               : currentState.settingsActiveTab,
+          playbookRunsSelectionInitialized: normalizeBoolean(
+            persisted.playbookRunsSelectionInitialized ?? currentState.playbookRunsSelectionInitialized,
+          ),
+          playbookRunsSelectedPlaybookId: normalizeTrimmedString(
+            persisted.playbookRunsSelectedPlaybookId ?? currentState.playbookRunsSelectedPlaybookId,
+          ),
+          playbookRunsSelectedRepoPath: normalizeTrimmedString(
+            persisted.playbookRunsSelectedRepoPath ?? currentState.playbookRunsSelectedRepoPath,
+          ),
           appView: normalizeAppView(persisted.appView ?? currentState.appView),
           sidebarAutoMinimize: normalizeBoolean(persisted.sidebarAutoMinimize ?? currentState.sidebarAutoMinimize),
           sidebarGroupingMode: normalizeSidebarGroupingMode(
@@ -659,6 +726,9 @@ export function useDroneHubAppModelUiState() {
       activeRepoPath: s.activeRepoPath,
       settingsActiveTab: s.settingsActiveTab,
       settingsPlaybookFocusId: s.settingsPlaybookFocusId,
+      playbookRunsSelectionInitialized: s.playbookRunsSelectionInitialized,
+      playbookRunsSelectedPlaybookId: s.playbookRunsSelectedPlaybookId,
+      playbookRunsSelectedRepoPath: s.playbookRunsSelectedRepoPath,
       chatHeaderRepoPath: s.chatHeaderRepoPath,
       appView: s.appView,
       viewMode: s.viewMode,
@@ -701,6 +771,9 @@ export function useDroneHubAppModelUiState() {
       setActiveRepoPath: s.setActiveRepoPath,
       setSettingsActiveTab: s.setSettingsActiveTab,
       setSettingsPlaybookFocusId: s.setSettingsPlaybookFocusId,
+      setPlaybookRunsSelectionInitialized: s.setPlaybookRunsSelectionInitialized,
+      setPlaybookRunsSelectedPlaybookId: s.setPlaybookRunsSelectedPlaybookId,
+      setPlaybookRunsSelectedRepoPath: s.setPlaybookRunsSelectedRepoPath,
       setChatHeaderRepoPath: s.setChatHeaderRepoPath,
       setAppView: s.setAppView,
       setSidebarGroupingMode: s.setSidebarGroupingMode,

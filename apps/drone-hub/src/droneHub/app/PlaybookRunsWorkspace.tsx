@@ -5,6 +5,7 @@ import type { PlaybookDefinition, PlaybookRunSummary } from '../types';
 import { fetchJson, useNowMs, usePoll } from './hooks';
 import { IconBoard, IconChevron, IconSpinner, IconTrash } from './icons';
 import { normalizePlaybookArtifactPath } from './playbook-config';
+import { useDroneHubUiStore } from './use-drone-hub-ui-store';
 import { playbookArtifactKey, usePlaybookArtifactAvailability } from './use-playbook-artifact-availability';
 
 type PlaybookRunsWorkspaceProps = {
@@ -26,6 +27,10 @@ function repoLabel(repoPathRaw: string): string {
   return parts[parts.length - 1] || repoPath;
 }
 
+function runCountLabel(count: number): string {
+  return `${count} run${count === 1 ? '' : 's'}`;
+}
+
 export function PlaybookRunsWorkspace({
   initialRepoPath,
   registeredRepoPaths,
@@ -37,23 +42,56 @@ export function PlaybookRunsWorkspace({
   onOpenRun,
   onOpenArtifact,
 }: PlaybookRunsWorkspaceProps) {
-  const [selectedRepoPath, setSelectedRepoPath] = React.useState(() => String(initialRepoPath ?? '').trim());
+  const playbookRunsSelectionInitialized = useDroneHubUiStore((s) => s.playbookRunsSelectionInitialized);
+  const setPlaybookRunsSelectionInitialized = useDroneHubUiStore((s) => s.setPlaybookRunsSelectionInitialized);
+  const selectedPlaybookId = useDroneHubUiStore((s) => s.playbookRunsSelectedPlaybookId);
+  const setStoredSelectedPlaybookId = useDroneHubUiStore((s) => s.setPlaybookRunsSelectedPlaybookId);
+  const selectedRepoPath = useDroneHubUiStore((s) => s.playbookRunsSelectedRepoPath);
+  const setStoredSelectedRepoPath = useDroneHubUiStore((s) => s.setPlaybookRunsSelectedRepoPath);
   const [launchPendingCountById, setLaunchPendingCountById] = React.useState<Record<string, number>>({});
   const [actionBusyByKey, setActionBusyByKey] = React.useState<Record<string, true>>({});
   const [actionError, setActionError] = React.useState<string | null>(null);
   const [expandedSummaryByRunId, setExpandedSummaryByRunId] = React.useState<Record<string, true>>({});
   const [refreshNonce, setRefreshNonce] = React.useState(0);
 
+  const initialRepoPathNormalized = React.useMemo(() => String(initialRepoPath ?? '').trim(), [initialRepoPath]);
+
+  const setSelectedPlaybookId = React.useCallback(
+    (next: string | ((current: string) => string)) => {
+      setPlaybookRunsSelectionInitialized(true);
+      setStoredSelectedPlaybookId(next);
+    },
+    [setPlaybookRunsSelectionInitialized, setStoredSelectedPlaybookId],
+  );
+
+  const setSelectedRepoPath = React.useCallback(
+    (next: string | ((current: string) => string)) => {
+      setPlaybookRunsSelectionInitialized(true);
+      setStoredSelectedRepoPath(next);
+    },
+    [setPlaybookRunsSelectionInitialized, setStoredSelectedRepoPath],
+  );
+
+  React.useEffect(() => {
+    if (playbookRunsSelectionInitialized) return;
+    if (!initialRepoPathNormalized) return;
+    setStoredSelectedRepoPath(initialRepoPathNormalized);
+    setPlaybookRunsSelectionInitialized(true);
+  }, [
+    initialRepoPathNormalized,
+    playbookRunsSelectionInitialized,
+    setPlaybookRunsSelectionInitialized,
+    setStoredSelectedRepoPath,
+  ]);
+
   React.useEffect(() => {
     if (!selectedRepoPath) return;
+    if (registeredRepoPaths.length === 0) return;
     if (registeredRepoPaths.includes(selectedRepoPath)) return;
     setSelectedRepoPath('');
   }, [registeredRepoPaths, selectedRepoPath]);
 
-  const repoQuery = React.useMemo(
-    () => (selectedRepoPath ? `?repoPath=${encodeURIComponent(selectedRepoPath)}&refresh=${refreshNonce}` : `?refresh=${refreshNonce}`),
-    [refreshNonce, selectedRepoPath],
-  );
+  const runsQuery = React.useMemo(() => `?refresh=${refreshNonce}`, [refreshNonce]);
 
   const { value: playbooksResp, error: playbooksError, loading: playbooksLoading } = usePoll<{ ok: true; playbooks: PlaybookDefinition[] }>(
     () => fetchJson('/api/playbooks'),
@@ -61,15 +99,63 @@ export function PlaybookRunsWorkspace({
     [],
   );
   const { value: runsResp, error: runsError, loading: runsLoading } = usePoll<{ ok: true; runs: PlaybookRunSummary[] }>(
-    () => fetchJson(`/api/playbook-runs${repoQuery}`),
+    () => fetchJson(`/api/playbook-runs${runsQuery}`),
     2000,
-    [repoQuery],
+    [runsQuery],
   );
   const nowMs = useNowMs(30_000, true);
 
   const playbooks = Array.isArray(playbooksResp?.playbooks) ? playbooksResp.playbooks : [];
   const runs = Array.isArray(runsResp?.runs) ? runsResp.runs : [];
   const artifactAvailabilityByKey = usePlaybookArtifactAvailability({ runs });
+
+  React.useEffect(() => {
+    if (playbooksLoading) return;
+    if (!selectedPlaybookId) return;
+    if (playbooks.some((playbook) => playbook.id === selectedPlaybookId)) return;
+    setSelectedPlaybookId('');
+  }, [playbooks, playbooksLoading, selectedPlaybookId, setSelectedPlaybookId]);
+
+  const selectedPlaybook = React.useMemo(
+    () => playbooks.find((playbook) => playbook.id === selectedPlaybookId) ?? null,
+    [playbooks, selectedPlaybookId],
+  );
+  const runsForSelectedRepo = React.useMemo(
+    () => (selectedRepoPath ? runs.filter((run) => run.repoPath === selectedRepoPath) : runs),
+    [runs, selectedRepoPath],
+  );
+  const playbookRunCountById = React.useMemo(() => {
+    const next: Record<string, number> = {};
+    for (const run of runsForSelectedRepo) next[run.playbookId] = (next[run.playbookId] ?? 0) + 1;
+    return next;
+  }, [runsForSelectedRepo]);
+  const runsForSelectedPlaybook = React.useMemo(
+    () => (selectedPlaybookId ? runs.filter((run) => run.playbookId === selectedPlaybookId) : runs),
+    [runs, selectedPlaybookId],
+  );
+  const repoRunCountByPath = React.useMemo(() => {
+    const next: Record<string, number> = {};
+    for (const run of runsForSelectedPlaybook) next[run.repoPath] = (next[run.repoPath] ?? 0) + 1;
+    return next;
+  }, [runsForSelectedPlaybook]);
+  const filteredRuns = React.useMemo(
+    () =>
+      runs.filter(
+        (run) =>
+          (!selectedPlaybookId || run.playbookId === selectedPlaybookId) &&
+          (!selectedRepoPath || run.repoPath === selectedRepoPath),
+      ),
+    [runs, selectedPlaybookId, selectedRepoPath],
+  );
+  const selectedPlaybookPendingLaunchCount = selectedPlaybook ? launchPendingCountById[selectedPlaybook.id] ?? 0 : 0;
+  const runDisabled = !selectedPlaybook || !selectedRepoPath;
+  const runDisabledReason = !selectedPlaybook
+    ? 'Select a playbook to launch.'
+    : !selectedRepoPath
+      ? 'Select a repo to launch the selected playbook.'
+      : selectedPlaybookPendingLaunchCount > 0
+        ? `Starting ${selectedPlaybookPendingLaunchCount} run${selectedPlaybookPendingLaunchCount === 1 ? '' : 's'}. Click again to queue another.`
+        : 'Run the selected playbook.';
 
   const runPlaybook = React.useCallback(
     async (playbook: PlaybookDefinition) => {
@@ -163,28 +249,14 @@ export function PlaybookRunsWorkspace({
                 Launch repo-scoped hidden runs, watch their status, and open any run chat directly.
               </p>
             </div>
-            <div className="flex items-center gap-2">
-              <select
-                value={selectedRepoPath}
-                onChange={(e) => setSelectedRepoPath(e.target.value)}
-                className="h-9 rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.18)] px-2 text-[12px] text-[var(--fg)] focus:outline-none focus:border-[var(--accent-muted)]"
-              >
-                <option value="">All repos</option>
-                {registeredRepoPaths.map((repoPath) => (
-                  <option key={repoPath} value={repoPath}>
-                    {repoLabel(repoPath)}
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button"
-                onClick={onClose}
-                className="h-8 px-3 rounded text-[11px] font-semibold tracking-wide uppercase border bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]"
-                style={{ fontFamily: 'var(--display)' }}
-              >
-                Back
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              className="h-8 px-3 rounded text-[11px] font-semibold tracking-wide uppercase border bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]"
+              style={{ fontFamily: 'var(--display)' }}
+            >
+              Back
+            </button>
           </div>
 
           {(actionError || playbooksError || runsError) && (
@@ -201,67 +273,225 @@ export function PlaybookRunsWorkspace({
                   Launch
                 </div>
               </div>
-              {playbooksLoading ? (
-                <div className="text-[11px] text-[var(--muted-dim)]">Loading playbooks...</div>
-              ) : playbooks.length === 0 ? (
-                <div className="rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 py-3 text-[11px] text-[var(--muted-dim)]">
-                  No playbooks yet. Create one in Settings &gt; Playbooks.
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
-                  {playbooks.map((playbook) => (
-                    <div key={playbook.id} className="rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 py-3 flex flex-col gap-3">
-                      {(() => {
-                        const pendingLaunchCount = launchPendingCountById[playbook.id] ?? 0;
-                        const runDisabledReason = !selectedRepoPath
-                          ? 'Select a repo from the dropdown above to run this playbook.'
-                          : pendingLaunchCount > 0
-                            ? `Starting ${pendingLaunchCount} run${pendingLaunchCount === 1 ? '' : 's'}. Click again to queue another.`
-                            : 'Run this playbook.';
-                        const runDisabled = !selectedRepoPath;
-
-                        return (
-                          <div className="flex items-center justify-between gap-2">
+              <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1.35fr)_minmax(280px,0.85fr)] gap-4">
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                  <div className="rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] overflow-hidden">
+                    <div className="px-3 py-2 border-b border-[var(--border-subtle)]">
+                      <div className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+                        Playbooks
+                      </div>
+                      <div className="text-[11px] text-[var(--muted)] mt-1">
+                        Select a playbook row to focus the runs table and enable launch.
+                      </div>
+                    </div>
+                    {playbooksLoading ? (
+                      <div className="px-3 py-3 text-[11px] text-[var(--muted-dim)]">Loading playbooks...</div>
+                    ) : playbooks.length === 0 ? (
+                      <div className="px-3 py-3 text-[11px] text-[var(--muted-dim)]">
+                        No playbooks yet. Create one in Settings &gt; Playbooks.
+                      </div>
+                    ) : (
+                      <div className="max-h-[360px] overflow-y-auto">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedPlaybookId('')}
+                          aria-pressed={selectedPlaybookId === ''}
+                          className={`w-full px-3 py-3 text-left transition-colors ${
+                            selectedPlaybookId === '' ? 'bg-[var(--accent-subtle)] text-[var(--fg)]' : 'hover:bg-[var(--hover)] text-[var(--fg)]'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-3">
                             <div>
+                              <div className="text-[12px] font-semibold">All playbooks</div>
+                              <div className="text-[10px] text-[var(--muted-dim)] mt-1">Show runs for every playbook.</div>
+                            </div>
+                            <div className="rounded-full border border-[var(--border-subtle)] px-2 py-1 text-[10px] font-semibold text-[var(--muted)]">
+                              {runCountLabel(runsForSelectedRepo.length)}
+                            </div>
+                          </div>
+                        </button>
+                        {playbooks.map((playbook) => {
+                          const active = selectedPlaybookId === playbook.id;
+                          const pendingLaunchCount = launchPendingCountById[playbook.id] ?? 0;
+                          return (
+                            <div
+                              key={playbook.id}
+                              className={`flex items-stretch border-t ${
+                                active ? 'border-[var(--accent-muted)]' : 'border-[var(--border-subtle)]'
+                              }`}
+                            >
+                              <button
+                                type="button"
+                                onClick={() => setSelectedPlaybookId((current) => (current === playbook.id ? '' : playbook.id))}
+                                aria-pressed={active}
+                                className={`flex-1 px-3 py-3 text-left transition-colors ${
+                                  active ? 'bg-[var(--accent-subtle)] text-[var(--fg)]' : 'bg-transparent text-[var(--fg)] hover:bg-[var(--hover)]'
+                                }`}
+                              >
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <div className="text-[12px] font-semibold">{playbook.label || 'Untitled playbook'}</div>
+                                    <div className="text-[10px] text-[var(--muted-dim)] mt-1">
+                                      {playbook.messages.length} run message{playbook.messages.length === 1 ? '' : 's'}
+                                      {playbook.actions.length > 0 ? ` • ${playbook.actions.length} action button${playbook.actions.length === 1 ? '' : 's'}` : ''}
+                                      {pendingLaunchCount > 0 ? ` • starting ${pendingLaunchCount}` : ''}
+                                    </div>
+                                  </div>
+                                  <div className="rounded-full border border-[var(--border-subtle)] px-2 py-1 text-[10px] font-semibold text-[var(--muted)]">
+                                    {runCountLabel(playbookRunCountById[playbook.id] ?? 0)}
+                                  </div>
+                                </div>
+                                <div className="mt-2 text-[11px] text-[var(--muted-dim)] whitespace-pre-wrap line-clamp-2">
+                                  {playbook.messages[0]?.prompt ?? 'No prompt yet.'}
+                                </div>
+                              </button>
                               <button
                                 type="button"
                                 onClick={() => onOpenPlaybookSettings(playbook.id)}
-                                className="text-[12px] font-semibold text-[var(--accent)] hover:underline"
-                                title={`Open "${playbook.label || 'Untitled playbook'}" in Settings > Playbooks`}
-                              >
-                                {playbook.label || 'Untitled playbook'}
-                              </button>
-                              <div className="text-[10px] text-[var(--muted-dim)] mt-1">
-                                {playbook.messages.length} run message{playbook.messages.length === 1 ? '' : 's'}
-                                {playbook.actions.length > 0 ? `, ${playbook.actions.length} action button${playbook.actions.length === 1 ? '' : 's'}` : ''}
-                                {pendingLaunchCount > 0 ? `, starting ${pendingLaunchCount} now` : ''}
-                              </div>
-                            </div>
-                            <span className="inline-flex" title={runDisabledReason}>
-                              <button
-                                type="button"
-                                onClick={() => void runPlaybook(playbook)}
-                                disabled={runDisabled}
-                                className={`h-8 px-3 rounded text-[10px] font-semibold tracking-wide uppercase border transition-all ${
-                                  runDisabled
-                                    ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
-                                    : 'bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-fg)] hover:brightness-110'
+                                className={`shrink-0 px-3 text-[10px] font-semibold uppercase tracking-wide border-l transition-colors ${
+                                  active
+                                    ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)] hover:brightness-105'
+                                    : 'border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]'
                                 }`}
                                 style={{ fontFamily: 'var(--display)' }}
+                                title={`Open "${playbook.label || 'Untitled playbook'}" in Settings > Playbooks`}
                               >
-                                Run
+                                Edit
                               </button>
-                            </span>
-                          </div>
-                        );
-                      })()}
-                      <div className="text-[11px] text-[var(--muted-dim)] whitespace-pre-wrap line-clamp-3">
-                        {playbook.messages[0]?.prompt ?? ''}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] overflow-hidden">
+                    <div className="px-3 py-2 border-b border-[var(--border-subtle)]">
+                      <div className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+                        Repos
+                      </div>
+                      <div className="text-[11px] text-[var(--muted)] mt-1">
+                        Select a repo row to filter runs and choose the launch target.
                       </div>
                     </div>
-                  ))}
+                    <div className="max-h-[360px] overflow-y-auto">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedRepoPath('')}
+                        aria-pressed={selectedRepoPath === ''}
+                        className={`w-full px-3 py-3 text-left transition-colors ${
+                          selectedRepoPath === '' ? 'bg-[var(--accent-subtle)] text-[var(--fg)]' : 'hover:bg-[var(--hover)] text-[var(--fg)]'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <div className="text-[12px] font-semibold">All repos</div>
+                            <div className="text-[10px] text-[var(--muted-dim)] mt-1">Show runs across every registered repo.</div>
+                          </div>
+                          <div className="rounded-full border border-[var(--border-subtle)] px-2 py-1 text-[10px] font-semibold text-[var(--muted)]">
+                            {runCountLabel(runsForSelectedPlaybook.length)}
+                          </div>
+                        </div>
+                      </button>
+                      {registeredRepoPaths.map((repoPath) => {
+                        const active = selectedRepoPath === repoPath;
+                        return (
+                          <button
+                            key={repoPath}
+                            type="button"
+                            onClick={() => setSelectedRepoPath((current) => (current === repoPath ? '' : repoPath))}
+                            aria-pressed={active}
+                            className={`w-full px-3 py-3 text-left transition-colors border-t ${
+                              active
+                                ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--fg)]'
+                                : 'border-[var(--border-subtle)] bg-transparent text-[var(--fg)] hover:bg-[var(--hover)]'
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="text-[12px] font-semibold">{repoLabel(repoPath)}</div>
+                                <div className="mt-1 truncate text-[10px] text-[var(--muted-dim)]" title={repoPath}>
+                                  {repoPath}
+                                </div>
+                              </div>
+                              <div className="rounded-full border border-[var(--border-subtle)] px-2 py-1 text-[10px] font-semibold text-[var(--muted)]">
+                                {runCountLabel(repoRunCountByPath[repoPath] ?? 0)}
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
                 </div>
-              )}
+
+                <div className="rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] p-4 flex flex-col gap-3">
+                  <div>
+                    <div className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+                      Current Selection
+                    </div>
+                    <div className="text-[11px] text-[var(--muted)] mt-1">
+                      Use the selected playbook and repo for the next launch.
+                    </div>
+                  </div>
+                  <div className="rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 py-3 flex flex-col gap-3">
+                    <div>
+                      <div className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+                        Playbook
+                      </div>
+                      <div className="text-[13px] font-semibold text-[var(--fg)] mt-1">
+                        {selectedPlaybook?.label || 'No playbook selected'}
+                      </div>
+                      <div className="text-[11px] text-[var(--muted-dim)] mt-1 whitespace-pre-wrap line-clamp-3">
+                        {selectedPlaybook
+                          ? selectedPlaybook.messages[0]?.prompt || 'No prompt yet.'
+                          : 'Pick a playbook row to focus the run list and enable the launch button.'}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+                        Repo
+                      </div>
+                      <div className="text-[13px] font-semibold text-[var(--fg)] mt-1">
+                        {selectedRepoPath ? repoLabel(selectedRepoPath) : 'No repo selected'}
+                      </div>
+                      <div className="text-[11px] text-[var(--muted-dim)] mt-1" title={selectedRepoPath || undefined}>
+                        {selectedRepoPath || 'Pick a repo row to set the launch target. "All repos" keeps the table broad but does not launch.'}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="inline-flex" title={runDisabledReason}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (selectedPlaybook) void runPlaybook(selectedPlaybook);
+                        }}
+                        disabled={runDisabled}
+                        className={`h-9 px-4 rounded text-[10px] font-semibold tracking-wide uppercase border transition-all ${
+                          runDisabled
+                            ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
+                            : 'bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-fg)] hover:brightness-110'
+                        }`}
+                        style={{ fontFamily: 'var(--display)' }}
+                      >
+                        {selectedPlaybook ? `Run ${selectedPlaybook.label || 'Playbook'}` : 'Run Selected Playbook'}
+                      </button>
+                    </span>
+                    {selectedPlaybook && (
+                      <button
+                        type="button"
+                        onClick={() => onOpenPlaybookSettings(selectedPlaybook.id)}
+                        className="h-9 px-3 rounded text-[10px] font-semibold tracking-wide uppercase border bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]"
+                        style={{ fontFamily: 'var(--display)' }}
+                      >
+                        Edit Playbook
+                      </button>
+                    )}
+                  </div>
+                  <div className="text-[11px] text-[var(--muted-dim)]">{runDisabledReason}</div>
+                </div>
+              </div>
             </section>
 
             <section className="flex flex-col gap-3">
@@ -270,12 +500,16 @@ export function PlaybookRunsWorkspace({
                 <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--muted)]" style={{ fontFamily: 'var(--display)' }}>
                   Current Runs
                 </div>
+                <div className="text-[10px] text-[var(--muted-dim)]">
+                  {selectedPlaybook?.label || 'All playbooks'} • {selectedRepoPath ? repoLabel(selectedRepoPath) : 'All repos'}
+                </div>
               </div>
               {runsLoading ? (
                 <div className="text-[11px] text-[var(--muted-dim)]">Loading runs...</div>
-              ) : runs.length === 0 ? (
+              ) : filteredRuns.length === 0 ? (
                 <div className="rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 py-3 text-[11px] text-[var(--muted-dim)]">
-                  No playbook runs for {selectedRepoPath ? repoLabel(selectedRepoPath) : 'the current repo filter'}.
+                  No playbook runs for {selectedPlaybook?.label || 'the current playbook filter'} in{' '}
+                  {selectedRepoPath ? repoLabel(selectedRepoPath) : 'the current repo filter'}.
                 </div>
               ) : (
                 <div className="overflow-x-auto rounded border border-[var(--border-subtle)]">
@@ -292,7 +526,7 @@ export function PlaybookRunsWorkspace({
                       </tr>
                     </thead>
                     <tbody>
-                      {runs.map((run) => {
+                      {filteredRuns.map((run) => {
                         const summaryExpanded = Boolean(expandedSummaryByRunId[run.id]);
                         const deleteBusy = Boolean(deletingDrones[run.droneId]);
                         return (
