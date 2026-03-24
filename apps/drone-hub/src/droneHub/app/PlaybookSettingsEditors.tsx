@@ -84,6 +84,82 @@ export function PlaybookTextListEditor({
   );
 }
 
+type PlaybookMessageListEditorProps = {
+  messages: PlaybookDefinition['messages'];
+  addDisabled?: boolean;
+  onAdd: () => void;
+  onUpdate: (messageId: string, patch: Partial<PlaybookDefinition['messages'][number]>) => void;
+  onDelete: (messageId: string) => void;
+};
+
+export function PlaybookMessageListEditor({
+  messages,
+  addDisabled,
+  onAdd,
+  onUpdate,
+  onDelete,
+}: PlaybookMessageListEditorProps) {
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <label className="text-[11px] text-[var(--muted-dim)]">Run Messages</label>
+          <div className="text-[10px] text-[var(--muted-dim)] mt-1">
+            Checked rows capture the reply as a finding title for future playbook runs.
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onAdd}
+          disabled={addDisabled}
+          className="h-7 px-2 rounded text-[10px] font-semibold tracking-wide uppercase border bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)] disabled:opacity-40 disabled:cursor-not-allowed"
+          style={{ fontFamily: 'var(--display)' }}
+        >
+          Add message
+        </button>
+      </div>
+      {messages.length === 0 ? (
+        <div className="rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 py-2 text-[11px] text-[var(--muted-dim)]">
+          No run messages for this playbook.
+        </div>
+      ) : (
+        messages.map((message, index) => (
+          <div key={message.id} className="rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 py-3 flex flex-col gap-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-[10px] font-semibold text-[var(--muted-dim)] tracking-[0.08em] uppercase" style={{ fontFamily: 'var(--display)' }}>
+                Message #{index + 1}
+              </div>
+              <button
+                type="button"
+                onClick={() => onDelete(message.id)}
+                className="h-7 px-2 rounded text-[10px] font-semibold tracking-wide uppercase border bg-[var(--red-subtle)] border-[rgba(255,90,90,.28)] text-[var(--red)] hover:bg-[rgba(255,90,90,.18)]"
+                style={{ fontFamily: 'var(--display)' }}
+              >
+                Delete
+              </button>
+            </div>
+            <textarea
+              value={message.prompt}
+              onChange={(e) => onUpdate(message.id, { prompt: e.target.value })}
+              className="w-full min-h-[92px] rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.2)] px-3 py-2 text-[12px] leading-relaxed text-[var(--fg-secondary)] resize-y focus:outline-none focus:border-[var(--accent-muted)]"
+              placeholder="Message queued into the run chat..."
+            />
+            <label className="inline-flex items-center gap-2 text-[11px] text-[var(--muted-dim)]">
+              <input
+                type="checkbox"
+                checked={message.captureFinding === true}
+                onChange={(e) => onUpdate(message.id, { captureFinding: e.target.checked })}
+                className="h-4 w-4 rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.2)]"
+              />
+              Capture this reply as a finding title
+            </label>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
 type PlaybookActionListEditorProps = {
   actions: PlaybookDefinition['actions'];
   addDisabled?: boolean;

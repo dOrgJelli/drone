@@ -5,7 +5,7 @@ import { requestJson } from '../http';
 import type { CustomAgentProfile, PlaybookDefinition } from '../types';
 import { BUILTIN_AGENT_OPTIONS } from './app-config';
 import { makeId } from './helpers';
-import { PlaybookActionListEditor, PlaybookTextListEditor } from './PlaybookSettingsEditors';
+import { PlaybookActionListEditor, PlaybookMessageListEditor, PlaybookTextListEditor } from './PlaybookSettingsEditors';
 import {
   createPlaybookDefinition,
   normalizePlaybookActionLabel,
@@ -69,7 +69,7 @@ function createEditablePlaybook(seed?: Partial<PlaybookDefinition>): EditablePla
     id: playbook.id || `local-${makeId()}`,
     agent: normalizePlaybookAgent(playbook.agent),
     model: playbook.model ?? null,
-    messages: playbook.messages.length > 0 ? playbook.messages : [''],
+    messages: playbook.messages.length > 0 ? playbook.messages : [{ id: `message-${makeId()}`, prompt: '', captureFinding: false }],
     artifacts: playbook.artifacts ?? [],
     actions: playbook.actions ?? [],
   };
@@ -106,7 +106,11 @@ function patchEditablePlaybook(current: EditablePlaybook, patch: Partial<Playboo
       ? {
           messages: (Array.isArray(patch.messages) ? patch.messages : [])
             .slice(0, PLAYBOOK_MAX_MESSAGES)
-            .map((item) => String(item ?? '').slice(0, PLAYBOOK_MESSAGE_MAX_CHARS)),
+            .map((item, index) => ({
+              id: String(item?.id ?? '').trim() || `message-${index + 1}`,
+              prompt: String(item?.prompt ?? '').slice(0, PLAYBOOK_MESSAGE_MAX_CHARS),
+              captureFinding: item?.captureFinding === true,
+            })),
         }
       : {}),
     ...(Object.prototype.hasOwnProperty.call(patch, 'artifacts')
@@ -141,7 +145,7 @@ function validateEditablePlaybookForSave(playbook: EditablePlaybook): string | n
   const label = normalizePlaybookLabel(playbook.label);
   if (!label) return 'Each playbook needs a label.';
 
-  const blankMessageIndex = playbook.messages.findIndex((message) => !String(message ?? '').trim());
+  const blankMessageIndex = playbook.messages.findIndex((message) => !String(message?.prompt ?? '').trim());
   if (blankMessageIndex >= 0) {
     return `"${label}" has an empty run message at row ${blankMessageIndex + 1}. Fill it in or delete it before saving.`;
   }
@@ -244,7 +248,7 @@ export function PlaybookSettingsSection({
       label: '',
       agent: { kind: 'builtin', id: 'cursor' },
       model: null,
-      messages: [''],
+      messages: [{ id: `message-${makeId()}`, prompt: '', captureFinding: false }],
       artifacts: [],
       actions: [],
     });
@@ -502,23 +506,24 @@ export function PlaybookSettingsSection({
                     ) : null}
 
                     <div className="flex flex-col gap-2">
-                      <PlaybookTextListEditor
-                        title="Run Messages"
-                        items={playbook.messages}
-                        emptyText="No run messages for this playbook."
-                        addLabel="Add message"
+                      <PlaybookMessageListEditor
+                        messages={playbook.messages}
                         addDisabled={playbook.messages.length >= PLAYBOOK_MAX_MESSAGES}
-                        placeholder="Message queued into the run chat..."
-                        multiline
-                        onAdd={() => updatePlaybook(playbook.clientId, { messages: [...playbook.messages, ''] })}
-                        onChange={(messageIndex, value) => {
-                          const next = playbook.messages.slice();
-                          next[messageIndex] = value;
-                          updatePlaybook(playbook.clientId, { messages: next });
-                        }}
-                        onDelete={(messageIndex) => {
-                          const next = playbook.messages.filter((_, idx) => idx !== messageIndex);
-                          updatePlaybook(playbook.clientId, { messages: next.length > 0 ? next : [''] });
+                        onAdd={() =>
+                          updatePlaybook(playbook.clientId, {
+                            messages: [...playbook.messages, { id: `message-${makeId()}`, prompt: '', captureFinding: false }],
+                          })
+                        }
+                        onUpdate={(messageId, patch) =>
+                          updatePlaybook(playbook.clientId, {
+                            messages: playbook.messages.map((item) => (item.id === messageId ? { ...item, ...patch } : item)),
+                          })
+                        }
+                        onDelete={(messageId) => {
+                          const next = playbook.messages.filter((item) => item.id !== messageId);
+                          updatePlaybook(playbook.clientId, {
+                            messages: next.length > 0 ? next : [{ id: `message-${makeId()}`, prompt: '', captureFinding: false }],
+                          });
                         }}
                       />
                     </div>
@@ -569,7 +574,7 @@ export function PlaybookSettingsSection({
                   </>
                 ) : (
                   <div className="text-[11px] text-[var(--muted-dim)] whitespace-pre-wrap line-clamp-2">
-                    {playbook.messages[0] || 'No messages yet.'}
+                    {playbook.messages[0]?.prompt || 'No messages yet.'}
                   </div>
                 )}
               </div>

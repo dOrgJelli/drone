@@ -172,9 +172,15 @@ describeSocketSuite('prompt automation api', () => {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     mockPromptOutputOverride = null;
     mockPromptJobs.clear();
+    await updateRegistry((reg: any) => {
+      reg.pending = {};
+      reg.drones = {};
+      reg.archived = {};
+      reg.playbookFindings = {};
+    });
   });
 
   test('stop endpoint cancels an active transcript response without creating a transcript turn', async () => {
@@ -238,6 +244,79 @@ describeSocketSuite('prompt automation api', () => {
     expect(transcript.data?.transcripts).toEqual([]);
 
     expect(String(mockPromptJobs.get(promptId)?.state ?? '')).toBe('canceled');
+  });
+
+  test('captures a playbook finding when a marked prompt reply completes', async () => {
+    const droneId = 'playbook-finding-drone';
+    const promptId = 'finding-prompt';
+    const now = new Date().toISOString();
+    mockPromptJobs.set(promptId, {
+      id: promptId,
+      state: 'done',
+      startedAt: now,
+      finishedAt: now,
+      stdout: 'Crash when saving an empty draft\nRepro: open the editor and press save immediately.',
+      stderr: '',
+    });
+    await updateRegistry((reg: any) => {
+      reg.drones = reg.drones ?? {};
+      reg.playbookFindings = {};
+      reg.drones[droneId] = {
+        id: droneId,
+        name: 'playbook-finding-drone',
+        kind: 'playbook-run',
+        visibility: 'hidden',
+        playbook: {
+          id: 'bug-sweep',
+          label: 'Bug sweep',
+          messageCount: 1,
+          chatName: 'default',
+        },
+        hostPort: mockDaemon?.port ?? 1,
+        token: 'mock-token',
+        containerPort: 7777,
+        repoPath: '/tmp/repo-under-test',
+        createdAt: now,
+        chats: {
+          default: {
+            createdAt: now,
+            agent: { kind: 'builtin', id: 'cursor' },
+            turns: [],
+            pendingPrompts: [
+              {
+                id: promptId,
+                at: now,
+                updatedAt: now,
+                prompt: 'Find one bug in this repo.',
+                messageId: 'message-1',
+                captureFinding: true,
+                state: 'sent',
+              },
+            ],
+          },
+        },
+      };
+    });
+
+    const transcript = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats/default/transcript?turn=all`);
+    expect(transcript.r.status).toBe(200);
+
+    const reg = await loadRegistry();
+    const findingScopes = Object.values(reg.playbookFindings ?? {}) as Array<any>;
+    expect(findingScopes).toHaveLength(1);
+    expect(findingScopes[0]?.playbookId).toBe('bug-sweep');
+    expect(findingScopes[0]?.repoPath).toBe('/tmp/repo-under-test');
+    expect(findingScopes[0]?.findings).toMatchObject([
+      {
+        playbookId: 'bug-sweep',
+        playbookLabel: 'Bug sweep',
+        droneId,
+        chatName: 'default',
+        promptId,
+        messageId: 'message-1',
+        title: 'Crash when saving an empty draft',
+      },
+    ]);
   });
 
   test('stop endpoint ignores recently completed prompts that already exist in the transcript', async () => {

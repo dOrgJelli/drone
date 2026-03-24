@@ -74,6 +74,7 @@ describeSocketSuite('playbook api', () => {
   afterEach(async () => {
     await updateRegistry((reg: any) => {
       reg.playbooks = {};
+      reg.playbookFindings = {};
       reg.pending = {};
       reg.drones = {};
       reg.archived = {};
@@ -100,9 +101,9 @@ describeSocketSuite('playbook api', () => {
     expect(created.data?.playbook?.label).toBe('Bug sweep');
     expect(created.data?.playbook?.agent).toEqual({ kind: 'builtin', id: 'codex' });
     expect(created.data?.playbook?.model).toBe('gpt-5');
-    expect(created.data?.playbook?.messages).toEqual([
-      'Find the biggest bug in this repo.',
-      'Summarize the bug in one sentence.',
+    expect(created.data?.playbook?.messages).toMatchObject([
+      { prompt: 'Find the biggest bug in this repo.', captureFinding: false },
+      { prompt: 'Summarize the bug in one sentence.', captureFinding: false },
     ]);
     expect(created.data?.playbook?.artifacts).toEqual(['reports/bug.md', 'reports/bug.json']);
     expect(created.data?.playbook?.actions).toHaveLength(2);
@@ -132,7 +133,7 @@ describeSocketSuite('playbook api', () => {
     expect(updated.data?.playbook?.label).toBe('Bug sweep v2');
     expect(updated.data?.playbook?.agent).toEqual({ kind: 'builtin', id: 'claude' });
     expect(updated.data?.playbook?.model).toBeNull();
-    expect(updated.data?.playbook?.messages).toEqual(['Find the most severe bug in the current codebase.']);
+    expect(updated.data?.playbook?.messages).toMatchObject([{ prompt: 'Find the most severe bug in the current codebase.', captureFinding: false }]);
     expect(updated.data?.playbook?.artifacts).toEqual(['reports/severity.md']);
     expect(updated.data?.playbook?.actions).toHaveLength(1);
     expect(updated.data?.playbook?.actions?.[0]?.label).toBe('Fix now');
@@ -141,7 +142,7 @@ describeSocketSuite('playbook api', () => {
     expect(reg.playbooks?.[playbookId]?.label).toBe('Bug sweep v2');
     expect(reg.playbooks?.[playbookId]?.agent).toEqual({ kind: 'builtin', id: 'claude' });
     expect(reg.playbooks?.[playbookId]?.model).toBeUndefined();
-    expect(reg.playbooks?.[playbookId]?.messages).toEqual(['Find the most severe bug in the current codebase.']);
+    expect(reg.playbooks?.[playbookId]?.messages).toMatchObject([{ prompt: 'Find the most severe bug in the current codebase.' }]);
     expect(reg.playbooks?.[playbookId]?.artifacts).toEqual(['reports/severity.md']);
     expect(reg.playbooks?.[playbookId]?.actions).toHaveLength(1);
   });

@@ -157,6 +157,34 @@ export async function fleetRequestResolve(
   return await req(client, 'POST', `/v1/fleet/requests/${encodeURIComponent(id)}/resolve`, payload);
 }
 
+export async function playbookStateSet(
+  client: DroneClient,
+  payload: {
+    enabled: boolean;
+    actor?: { id?: string | null; name?: string | null };
+    playbook?: { id?: string | null; label?: string | null } | null;
+    repoPath?: string | null;
+    findings?: Array<{
+      id?: string;
+      title?: string;
+      prompt?: string;
+      promptId?: string;
+      messageId?: string;
+      chatName?: string;
+      createdAt?: string;
+      droneId?: string;
+      droneName?: string;
+    }>;
+    updatedAt?: string;
+  },
+) {
+  return await req(client, 'POST', '/v1/playbook/state', payload);
+}
+
+export async function playbookFindings(client: DroneClient) {
+  return await req(client, 'GET', '/v1/playbook/findings');
+}
+
 export async function terminalInput(client: DroneClient, payload: { session: string; data: string }) {
   return await req(client, 'POST', '/v1/terminal/input', payload);
 }

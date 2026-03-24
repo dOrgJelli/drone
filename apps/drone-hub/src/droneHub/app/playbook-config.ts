@@ -1,5 +1,5 @@
 import type { ChatAgentConfig } from '../../domain';
-import type { PlaybookDefinition } from '../types';
+import type { PlaybookDefinition, PlaybookMessageDefinition } from '../types';
 
 export const PLAYBOOK_LABEL_MAX_CHARS = 72;
 export const PLAYBOOK_ACTION_LABEL_MAX_CHARS = 40;
@@ -8,6 +8,15 @@ export const PLAYBOOK_MODEL_MAX_CHARS = 160;
 export const PLAYBOOK_MAX_MESSAGES = 20;
 export const PLAYBOOK_MAX_ACTIONS = 12;
 export const PLAYBOOK_MAX_ITEMS = 60;
+
+function normalizePlaybookMessagePrompt(value: unknown): string {
+  return String(value ?? '').slice(0, PLAYBOOK_MESSAGE_MAX_CHARS);
+}
+
+function normalizePlaybookMessageId(value: unknown, fallbackIndex: number): string {
+  const id = String(value ?? '').trim();
+  return id || `message-${fallbackIndex + 1}`;
+}
 
 export function normalizePlaybookLabel(value: unknown): string {
   return String(value ?? '').trim().slice(0, PLAYBOOK_LABEL_MAX_CHARS);
@@ -56,20 +65,42 @@ export function normalizePlaybookModel(value: unknown, agentRaw?: unknown): stri
   return model;
 }
 
-export function normalizePlaybookMessages(value: unknown): string[] {
+export function normalizePlaybookMessages(value: unknown): PlaybookMessageDefinition[] {
   const list = Array.isArray(value) ? value : [];
-  const out: string[] = [];
-  for (const item of list) {
-    const message = String(item ?? '').slice(0, PLAYBOOK_MESSAGE_MAX_CHARS);
-    if (!message.trim()) continue;
-    out.push(message);
+  const out: PlaybookMessageDefinition[] = [];
+  for (let index = 0; index < list.length; index += 1) {
+    const item = list[index];
+    const rawPrompt =
+      item && typeof item === 'object' && !Array.isArray(item)
+        ? normalizePlaybookMessagePrompt((item as any).prompt ?? '')
+        : normalizePlaybookMessagePrompt(item);
+    if (!rawPrompt.trim()) continue;
+    out.push({
+      id:
+        item && typeof item === 'object' && !Array.isArray(item)
+          ? normalizePlaybookMessageId((item as any).id, index)
+          : normalizePlaybookMessageId('', index),
+      prompt: rawPrompt,
+      captureFinding: item && typeof item === 'object' && !Array.isArray(item) ? (item as any).captureFinding === true : false,
+    });
     if (out.length >= PLAYBOOK_MAX_MESSAGES) break;
   }
   return out;
 }
 
 function normalizePlaybookActionMessages(value: unknown): string[] {
-  return Array.isArray(value) ? normalizePlaybookMessages(value) : [];
+  const list = Array.isArray(value) ? value : [];
+  const out: string[] = [];
+  for (const item of list) {
+    const message =
+      item && typeof item === 'object' && !Array.isArray(item)
+        ? normalizePlaybookMessagePrompt((item as any).prompt ?? (item as any).message ?? '')
+        : normalizePlaybookMessagePrompt(item);
+    if (!message.trim()) continue;
+    out.push(message);
+    if (out.length >= PLAYBOOK_MAX_MESSAGES) break;
+  }
+  return out;
 }
 
 export function createPlaybookDefinition(seed?: Partial<PlaybookDefinition>): PlaybookDefinition {

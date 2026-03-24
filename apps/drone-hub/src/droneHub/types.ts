@@ -516,12 +516,18 @@ export type PendingPrompt = {
 
 export type CustomAgentProfile = { id: string; label: string; command: string };
 
+export type PlaybookMessageDefinition = {
+  id: string;
+  prompt: string;
+  captureFinding: boolean;
+};
+
 export type PlaybookDefinition = {
   id: string;
   label: string;
   agent: ChatAgentConfig;
   model?: string | null;
-  messages: string[];
+  messages: PlaybookMessageDefinition[];
   artifacts: string[];
   actions: Array<{
     id: string;

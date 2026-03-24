@@ -226,6 +226,87 @@ async function saveFleetPolicySnapshot(fleetDir: string, snapshot: FleetPolicySn
   await writeJsonFileAtomic(path.join(fleetDir, 'policy.json'), snapshot);
 }
 
+type PlaybookStateSnapshot = {
+  enabled: boolean;
+  actor: {
+    id: string | null;
+    name: string | null;
+  };
+  playbook: {
+    id: string | null;
+    label: string | null;
+  } | null;
+  repoPath: string | null;
+  findings: Array<{
+    id: string;
+    title: string;
+    prompt: string;
+    promptId: string;
+    messageId?: string;
+    chatName: string;
+    createdAt: string;
+    droneId?: string;
+    droneName?: string;
+  }>;
+  updatedAt: string;
+};
+
+function normalizePlaybookStateSnapshot(raw: any): PlaybookStateSnapshot {
+  const fallback: PlaybookStateSnapshot = {
+    enabled: false,
+    actor: { id: null, name: null },
+    playbook: null,
+    repoPath: null,
+    findings: [],
+    updatedAt: nowIso(),
+  };
+  return {
+    enabled: raw?.enabled === true,
+    actor: {
+      id: typeof raw?.actor?.id === 'string' && raw.actor.id.trim() ? raw.actor.id.trim() : null,
+      name: typeof raw?.actor?.name === 'string' && raw.actor.name.trim() ? raw.actor.name.trim() : null,
+    },
+    playbook:
+      raw?.playbook && typeof raw.playbook === 'object'
+        ? {
+            id: typeof raw.playbook.id === 'string' && raw.playbook.id.trim() ? raw.playbook.id.trim() : null,
+            label: typeof raw.playbook.label === 'string' && raw.playbook.label.trim() ? raw.playbook.label.trim() : null,
+          }
+        : null,
+    repoPath: typeof raw?.repoPath === 'string' && raw.repoPath.trim() ? raw.repoPath.trim() : null,
+    findings: Array.isArray(raw?.findings)
+      ? raw.findings
+          .map((item: any) => {
+            const id = String(item?.id ?? '').trim();
+            const title = String(item?.title ?? '').trim();
+            const promptId = String(item?.promptId ?? '').trim();
+            if (!id || !title || !promptId) return null;
+            return {
+              id,
+              title,
+              prompt: String(item?.prompt ?? ''),
+              promptId,
+              ...(typeof item?.messageId === 'string' && item.messageId.trim() ? { messageId: item.messageId.trim() } : {}),
+              chatName: typeof item?.chatName === 'string' && item.chatName.trim() ? item.chatName.trim() : 'default',
+              createdAt: typeof item?.createdAt === 'string' && item.createdAt.trim() ? item.createdAt.trim() : nowIso(),
+              ...(typeof item?.droneId === 'string' && item.droneId.trim() ? { droneId: item.droneId.trim() } : {}),
+              ...(typeof item?.droneName === 'string' && item.droneName.trim() ? { droneName: item.droneName.trim() } : {}),
+            };
+          })
+          .filter(Boolean)
+      : fallback.findings,
+    updatedAt: typeof raw?.updatedAt === 'string' && raw.updatedAt.trim() ? raw.updatedAt.trim() : fallback.updatedAt,
+  };
+}
+
+async function loadPlaybookStateSnapshot(dataDir: string): Promise<PlaybookStateSnapshot> {
+  return normalizePlaybookStateSnapshot(await readJsonFile(path.join(dataDir, 'playbook.json'), null));
+}
+
+async function savePlaybookStateSnapshot(dataDir: string, snapshot: PlaybookStateSnapshot): Promise<void> {
+  await writeJsonFileAtomic(path.join(dataDir, 'playbook.json'), snapshot);
+}
+
 function normalizeFleetRequestState(raw: unknown): FleetRequestState | null {
   const value = String(raw ?? '').trim().toLowerCase();
   if (value === 'queued' || value === 'running' || value === 'done' || value === 'failed') return value;
@@ -792,6 +873,24 @@ async function main() {
             'fleet capabilities',
           ],
         });
+        return;
+      }
+
+      if (method === 'GET' && pathname === '/v1/playbook/findings') {
+        const snapshot = await loadPlaybookStateSnapshot(dataDir);
+        if (!snapshot.enabled || !snapshot.playbook?.id) {
+          json(res, 409, { error: 'this drone was not created by a playbook' });
+          return;
+        }
+        json(res, 200, { ok: true, ...snapshot });
+        return;
+      }
+
+      if (method === 'POST' && pathname === '/v1/playbook/state') {
+        const body = await readJson(req);
+        const snapshot = normalizePlaybookStateSnapshot(body);
+        await savePlaybookStateSnapshot(dataDir, snapshot);
+        json(res, 200, { ok: true, snapshot });
         return;
       }
 
