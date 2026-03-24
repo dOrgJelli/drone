@@ -256,7 +256,7 @@ export function PlaybookRunsWorkspace({
                         );
                       })()}
                       <div className="text-[11px] text-[var(--muted-dim)] whitespace-pre-wrap line-clamp-3">
-                        {playbook.messages[0] ?? ''}
+                        {playbook.messages[0]?.prompt ?? ''}
                       </div>
                     </div>
                   ))}

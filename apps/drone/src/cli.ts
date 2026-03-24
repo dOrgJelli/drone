@@ -18,6 +18,7 @@ import {
   hostDroneRootPath,
   hostDroneWorkspacePath,
   installFleetCliScript,
+  installPlaybookCliScript,
   missingHostDependencyMessage,
   normalizeDroneRuntime,
   type DroneRuntime,
@@ -1095,6 +1096,10 @@ createCommand
     const installFleetCli = await dvmExec(containerName, 'bash', ['-lc', installFleetCliScript()]);
     if (installFleetCli.code !== 0) {
       throw new Error(installFleetCli.stderr || installFleetCli.stdout || 'failed installing fleet CLI in container');
+    }
+    const installPlaybookCli = await dvmExec(containerName, 'bash', ['-lc', installPlaybookCliScript()]);
+    if (installPlaybookCli.code !== 0) {
+      throw new Error(installPlaybookCli.stderr || installPlaybookCli.stdout || 'failed installing playbook CLI in container');
     }
 
     await dvmSessionStart(

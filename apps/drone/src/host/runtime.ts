@@ -68,3 +68,18 @@ export function installFleetCliScript(opts?: { runtimeDir?: string; binPath?: st
     `chmod 755 ${shellQuote(binPath)}`,
   ].join('\n');
 }
+
+export function installPlaybookCliScript(opts?: { runtimeDir?: string; binPath?: string }): string {
+  const runtimeDir = String(opts?.runtimeDir ?? '/dvm-data/drone/dist').trim() || '/dvm-data/drone/dist';
+  const binPath = String(opts?.binPath ?? '/usr/local/bin/playbook').trim() || '/usr/local/bin/playbook';
+  const playbookJs = path.posix.join(runtimeDir, 'playbook.js');
+  return [
+    'set -euo pipefail',
+    `mkdir -p ${shellQuote(path.posix.dirname(binPath))}`,
+    `cat > ${shellQuote(binPath)} <<'EOF'`,
+    '#!/usr/bin/env bash',
+    `exec node ${shellQuote(playbookJs)} "$@"`,
+    'EOF',
+    `chmod 755 ${shellQuote(binPath)}`,
+  ].join('\n');
+}

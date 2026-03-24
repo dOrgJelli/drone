@@ -236,4 +236,63 @@ describeSocketSuite('fleet daemon', () => {
     expect(capabilitiesData?.relationships?.children).toEqual([{ id: 'bravo', name: 'Bravo' }]);
     expect(capabilitiesData?.relationships?.assigned).toEqual([{ id: 'charlie', name: 'Charlie' }]);
   });
+
+  test('persists playbook findings snapshots for local listing', async () => {
+    const port = await allocatePort();
+    const dataDir = path.join(tempRoot, `daemon-${port}`);
+    fs.mkdirSync(dataDir, { recursive: true });
+    const token = 'daemon-token';
+    const daemon = Bun.spawn([process.execPath, daemonEntry, '--host', '127.0.0.1', '--port', String(port), '--data-dir', dataDir, '--token', token], {
+      cwd: process.cwd(),
+      stdout: 'ignore',
+      stderr: 'pipe',
+    });
+    processes.push(daemon);
+    const baseUrl = `http://127.0.0.1:${port}`;
+    await waitForHealth(baseUrl, token, daemon);
+
+    const setResponse = await fetch(`${baseUrl}/v1/playbook/state`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        enabled: true,
+        actor: { id: 'drone-alpha', name: 'Drone Alpha' },
+        playbook: { id: 'bug-sweep', label: 'Bug sweep' },
+        repoPath: '/tmp/repo-under-test',
+        findings: [
+          {
+            id: 'finding-1',
+            title: 'Crash when saving an empty draft',
+            prompt: 'Find one bug in this repo.',
+            promptId: 'prompt-1',
+            messageId: 'message-1',
+            chatName: 'default',
+            createdAt: '2026-03-24T00:00:00.000Z',
+            droneId: 'drone-alpha',
+            droneName: 'Drone Alpha',
+          },
+        ],
+      }),
+    });
+    expect(setResponse.status).toBe(200);
+
+    const listResponse = await fetch(`${baseUrl}/v1/playbook/findings`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    const listData: any = await listResponse.json();
+    expect(listResponse.status).toBe(200);
+    expect(listData?.playbook).toEqual({ id: 'bug-sweep', label: 'Bug sweep' });
+    expect(listData?.repoPath).toBe('/tmp/repo-under-test');
+    expect(listData?.findings).toMatchObject([
+      {
+        id: 'finding-1',
+        title: 'Crash when saving an empty draft',
+        promptId: 'prompt-1',
+        messageId: 'message-1',
+      },
+    ]);
+  });
 });

@@ -4,7 +4,8 @@
   "description": "Drone: per-container agent wrapper daemon + host CLI (via dvm)",
   "bin": {
     "drone": "dist/cli.js",
-    "fleet": "dist/fleet.js"
+    "fleet": "dist/fleet.js",
+    "playbook": "dist/playbook.js"
   },
   "main": "dist/cli.js",
   "type": "commonjs",

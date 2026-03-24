@@ -12,7 +12,7 @@ import { RawData, WebSocket, WebSocketServer } from 'ws';
 
 import { droneRootPath } from '../host/paths';
 import { loadRegistry, updateRegistry } from '../host/registry';
-import { installFleetCliScript, normalizeDroneRuntime, type DroneRuntime } from '../host/runtime';
+import { installFleetCliScript, installPlaybookCliScript, normalizeDroneRuntime, type DroneRuntime } from '../host/runtime';
 import { resolveContainerTerminalShellCommand, resolveHostTerminalShellCommand } from '../host/shell';
 import {
   dvmBaseSet,
@@ -36,6 +36,7 @@ import {
 } from '../host/dvm';
 import {
   fleetPolicySet as droneFleetPolicySet,
+  playbookStateSet as dronePlaybookStateSet,
   fleetRequestClaim as droneFleetRequestClaim,
   fleetRequestList as droneFleetRequestList,
   fleetRequestResolve as droneFleetRequestResolve,
@@ -668,6 +669,62 @@ async function listFleetMessagesForTarget(targetId: string, chatNameRaw: unknown
   return transcriptTurnsToFleetMessages(chatName, turns);
 }
 
+function buildPlaybookStateSnapshotForDrone(regAny: any, droneId: string, droneEntry: any) {
+  const playbook = playbookMetaFromEntry(droneEntry?.playbook);
+  const repoPath = String(droneEntry?.repoPath ?? '').trim();
+  if (normalizeDroneEntryKind(droneEntry?.kind) !== 'playbook-run' || !playbook) {
+    return {
+      enabled: false,
+      actor: {
+        id: droneId,
+        name: String(droneEntry?.name ?? droneId).trim() || droneId,
+      },
+      playbook: null,
+      repoPath: repoPath || null,
+      findings: [],
+      updatedAt: nowIso(),
+    };
+  }
+  const findings = listPlaybookFindingsForScope(regAny, playbook.id, repoPath).map((item) => ({
+    id: item.id,
+    title: item.title,
+    prompt: item.prompt,
+    promptId: item.promptId,
+    ...(item.messageId ? { messageId: item.messageId } : {}),
+    chatName: item.chatName,
+    createdAt: item.createdAt,
+    droneId: item.droneId,
+    droneName: item.droneName,
+  }));
+  return {
+    enabled: true,
+    actor: {
+      id: droneId,
+      name: String(droneEntry?.name ?? droneId).trim() || droneId,
+    },
+    playbook: {
+      id: playbook.id,
+      label: playbook.label,
+    },
+    repoPath: repoPath || null,
+    findings,
+    updatedAt:
+      findings.length > 0
+        ? findings.reduce((latest, item) => {
+            const current = Date.parse(String(item.createdAt ?? ''));
+            return Number.isFinite(current) && current > latest ? current : latest;
+          }, 0) > 0
+          ? new Date(
+              findings.reduce((latest, item) => {
+                const current = Date.parse(String(item.createdAt ?? ''));
+                return Number.isFinite(current) && current > latest ? current : latest;
+              }, 0),
+            ).toISOString()
+          : nowIso()
+        : nowIso(),
+  };
+}
+
 async function syncFleetPolicySnapshotToDrone(actorId: string, actorEntry: any): Promise<void> {
   try {
     const daemon = await resolveDroneDaemonClientForEntry(actorEntry);
@@ -698,6 +755,17 @@ async function syncFleetPolicySnapshotToDrone(actorId: string, actorEntry: any):
       sendScopes: ['children', 'assigned'],
       limits,
     });
+  } catch {
+    // ignore (best-effort sync)
+  }
+}
+
+async function syncPlaybookStateSnapshotToDrone(droneId: string, droneEntry: any): Promise<void> {
+  try {
+    const daemon = await resolveDroneDaemonClientForEntry(droneEntry);
+    if (!daemon) return;
+    const regAny: any = await loadRegistry();
+    await dronePlaybookStateSet(daemon.client, buildPlaybookStateSnapshotForDrone(regAny, droneId, droneEntry));
   } catch {
     // ignore (best-effort sync)
   }
@@ -1003,6 +1071,7 @@ async function runFleetReconcilerCycle(): Promise<void> {
         daemon = null;
       }
       await syncFleetPolicySnapshotToDrone(String(actorId), actorEntry);
+      await syncPlaybookStateSnapshotToDrone(String(actorId), actorEntry);
       if (!daemon) continue;
       let requests: any[] = [];
       try {
@@ -2090,12 +2159,18 @@ type TranscriptTurn = {
 
 type PendingPhase = 'starting' | 'creating' | 'seeding' | 'error';
 
+type PlaybookMessageDefinition = {
+  id: string;
+  prompt: string;
+  captureFinding: boolean;
+};
+
 type PlaybookDefinition = {
   id: string;
   label: string;
   agent: ChatAgentConfig;
   model?: string | null;
-  messages: string[];
+  messages: PlaybookMessageDefinition[];
   artifacts: string[];
   actions: Array<{
     id: string;
@@ -2108,6 +2183,21 @@ type PlaybookDefinition = {
 
 type PlaybookRunStatus = 'starting' | 'running' | 'completed' | 'failed';
 
+type PlaybookFinding = {
+  id: string;
+  playbookId: string;
+  playbookLabel: string;
+  repoPath: string;
+  droneId: string;
+  droneName: string;
+  chatName: string;
+  promptId: string;
+  messageId?: string;
+  prompt: string;
+  title: string;
+  createdAt: string;
+};
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -2118,6 +2208,7 @@ const PLAYBOOK_MESSAGE_MAX_CHARS = 8_000;
 const PLAYBOOK_MAX_MESSAGES = 20;
 const PLAYBOOK_MAX_ACTIONS = 12;
 const PLAYBOOK_MAX_ITEMS = 60;
+const PLAYBOOK_FINDING_TITLE_MAX_CHARS = 240;
 
 function normalizeDroneEntryKind(raw: unknown): 'standard' | 'playbook-run' {
   return String(raw ?? '').trim().toLowerCase() === 'playbook-run' ? 'playbook-run' : 'standard';
@@ -2157,11 +2248,42 @@ function normalizePlaybookActionLabel(raw: unknown): string {
   return String(raw ?? '').trim().slice(0, PLAYBOOK_ACTION_LABEL_MAX_CHARS);
 }
 
-function normalizePlaybookMessages(raw: unknown): string[] {
+function normalizePlaybookMessageId(raw: unknown, fallbackIndex: number): string {
+  const id = String(raw ?? '').trim();
+  return id || `message-${fallbackIndex + 1}`;
+}
+
+function normalizePlaybookMessages(raw: unknown): PlaybookMessageDefinition[] {
+  const list = Array.isArray(raw) ? raw : [];
+  const out: PlaybookMessageDefinition[] = [];
+  for (let index = 0; index < list.length; index += 1) {
+    const item = list[index];
+    const prompt =
+      item && typeof item === 'object' && !Array.isArray(item)
+        ? String((item as any).prompt ?? '').slice(0, PLAYBOOK_MESSAGE_MAX_CHARS)
+        : String(item ?? '').slice(0, PLAYBOOK_MESSAGE_MAX_CHARS);
+    if (!prompt.trim()) continue;
+    out.push({
+      id:
+        item && typeof item === 'object' && !Array.isArray(item)
+          ? normalizePlaybookMessageId((item as any).id, index)
+          : normalizePlaybookMessageId('', index),
+      prompt,
+      captureFinding: item && typeof item === 'object' && !Array.isArray(item) ? (item as any).captureFinding === true : false,
+    });
+    if (out.length >= PLAYBOOK_MAX_MESSAGES) break;
+  }
+  return out;
+}
+
+function normalizePlaybookActionMessages(raw: unknown): string[] {
   const list = Array.isArray(raw) ? raw : [];
   const out: string[] = [];
   for (const item of list) {
-    const message = String(item ?? '').slice(0, PLAYBOOK_MESSAGE_MAX_CHARS);
+    const message =
+      item && typeof item === 'object' && !Array.isArray(item)
+        ? String((item as any).prompt ?? (item as any).message ?? '').slice(0, PLAYBOOK_MESSAGE_MAX_CHARS)
+        : String(item ?? '').slice(0, PLAYBOOK_MESSAGE_MAX_CHARS);
     if (!message.trim()) continue;
     out.push(message);
     if (out.length >= PLAYBOOK_MAX_MESSAGES) break;
@@ -2193,7 +2315,7 @@ function normalizePlaybookActions(raw: unknown): Array<{ id: string; label: stri
     if (!item || typeof item !== 'object') continue;
     const id = String((item as any).id ?? '').trim() || crypto.randomUUID();
     const label = normalizePlaybookActionLabel((item as any).label ?? '');
-    const messages = normalizePlaybookMessages((item as any).messages);
+    const messages = normalizePlaybookActionMessages((item as any).messages);
     if (!label || messages.length === 0) continue;
     out.push({ id, label, messages });
     if (out.length >= PLAYBOOK_MAX_ACTIONS) break;
@@ -2244,6 +2366,46 @@ function normalizePlaybookDefinitions(regAny: any): PlaybookDefinition[] {
     if (Number.isFinite(aMs) && Number.isFinite(bMs) && aMs !== bMs) return bMs - aMs;
     return a.label.localeCompare(b.label) || a.id.localeCompare(b.id);
   });
+}
+
+function playbookFindingScopeKey(playbookIdRaw: unknown, repoPathRaw: unknown): string {
+  const playbookId = String(playbookIdRaw ?? '').trim();
+  const repoPath = String(repoPathRaw ?? '').trim();
+  return `${playbookId}::${repoPath}`;
+}
+
+function normalizePlaybookFindingTitle(raw: unknown): string {
+  const text = String(raw ?? '').trim();
+  if (!text) return '';
+  const firstLine = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+  const collapsed = (firstLine || text).replace(/\s+/g, ' ').trim();
+  return collapsed.slice(0, PLAYBOOK_FINDING_TITLE_MAX_CHARS);
+}
+
+function listPlaybookFindingsForScope(regAny: any, playbookIdRaw: unknown, repoPathRaw: unknown): PlaybookFinding[] {
+  const scope = playbookFindingScopeKey(playbookIdRaw, repoPathRaw);
+  const findings = Array.isArray(regAny?.playbookFindings?.[scope]?.findings) ? regAny.playbookFindings[scope].findings : [];
+  return findings
+    .filter((item: any) => item && typeof item === 'object')
+    .map((item: any) => ({
+      id: String(item.id ?? '').trim(),
+      playbookId: String(item.playbookId ?? playbookIdRaw ?? '').trim(),
+      playbookLabel: String(item.playbookLabel ?? playbookIdRaw ?? '').trim(),
+      repoPath: String(item.repoPath ?? repoPathRaw ?? '').trim(),
+      droneId: String(item.droneId ?? '').trim(),
+      droneName: String(item.droneName ?? item.droneId ?? '').trim(),
+      chatName: normalizeChatName(item.chatName ?? 'default'),
+      promptId: String(item.promptId ?? '').trim(),
+      ...(typeof item.messageId === 'string' && item.messageId.trim() ? { messageId: item.messageId.trim() } : {}),
+      prompt: String(item.prompt ?? ''),
+      title: normalizePlaybookFindingTitle(item.title ?? ''),
+      createdAt: typeof item.createdAt === 'string' && item.createdAt.trim() ? item.createdAt.trim() : nowIso(),
+    }))
+    .filter((item: PlaybookFinding) => item.id && item.playbookId && item.promptId && item.title)
+    .sort((a: PlaybookFinding, b: PlaybookFinding) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
 }
 
 function lastTranscriptTurnFromEntry(entry: any): any | null {
@@ -3459,6 +3621,8 @@ type PendingPrompt = {
   id: string;
   at: string;
   prompt: string;
+  messageId?: string;
+  captureFinding?: boolean;
   cwd?: string | null;
   attachments?: ChatImageAttachmentRef[];
   automation?: PromptAutomationMeta;
@@ -3474,6 +3638,8 @@ type PendingStartupPrompt = {
   chatName: string;
   at: string;
   prompt: string;
+  messageId?: string;
+  captureFinding?: boolean;
   cwd?: string | null;
   state: PendingPromptState;
   error?: string;
@@ -3511,6 +3677,10 @@ function normalizePendingStartupPrompts(raw: unknown, chatNameFilter?: string): 
       chatName,
       at: typeof (item as any).at === 'string' ? String((item as any).at) : nowIso(),
       prompt,
+      ...(typeof (item as any).messageId === 'string' && String((item as any).messageId).trim()
+        ? { messageId: String((item as any).messageId).trim() }
+        : {}),
+      ...((item as any).captureFinding === true ? { captureFinding: true } : {}),
       cwd:
         typeof (item as any).cwd === 'string' ? String((item as any).cwd) : (item as any).cwd === null ? null : undefined,
       state: normalizePendingPromptState((item as any).state),
@@ -3526,6 +3696,8 @@ function startupPromptToPendingPrompt(prompt: PendingStartupPrompt): PendingProm
     id: prompt.id,
     at: prompt.at,
     prompt: prompt.prompt,
+    ...(prompt.messageId ? { messageId: prompt.messageId } : {}),
+    ...(prompt.captureFinding === true ? { captureFinding: true } : {}),
     ...(typeof prompt.cwd === 'string' || prompt.cwd === null ? { cwd: prompt.cwd } : {}),
     state: prompt.state,
     ...(prompt.error ? { error: prompt.error } : {}),
@@ -5641,6 +5813,31 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
 
   const turns: any[] = Array.isArray(entry?.turns) ? entry.turns : [];
   const transcriptIds = new Set(turns.map((t: any) => String(t?.id ?? '').trim()).filter(Boolean));
+  const playbook = playbookMetaFromEntry(d?.playbook);
+  const findingsToCapture: PlaybookFinding[] = [];
+  const maybeCapturePlaybookFinding = (pendingPrompt: any, outputRaw: unknown, createdAtRaw: unknown) => {
+    if (!playbook) return;
+    if (normalizeDroneEntryKind(d?.kind) !== 'playbook-run') return;
+    if ((pendingPrompt as any)?.captureFinding !== true) return;
+    const title = normalizePlaybookFindingTitle(outputRaw);
+    if (!title) return;
+    findingsToCapture.push({
+      id: crypto.randomUUID(),
+      playbookId: playbook.id,
+      playbookLabel: playbook.label,
+      repoPath: String(d?.repoPath ?? '').trim(),
+      droneId,
+      droneName: String(d?.name ?? droneId).trim() || droneId,
+      chatName: opts.chatName,
+      promptId: String((pendingPrompt as any)?.id ?? '').trim(),
+      ...(typeof (pendingPrompt as any)?.messageId === 'string' && String((pendingPrompt as any).messageId).trim()
+        ? { messageId: String((pendingPrompt as any).messageId).trim() }
+        : {}),
+      prompt: String((pendingPrompt as any)?.prompt ?? ''),
+      title,
+      createdAt: typeof createdAtRaw === 'string' && createdAtRaw.trim() ? createdAtRaw.trim() : nowIso(),
+    });
+  };
 
   const client = makeClient(hostPort, token);
   let changed = false;
@@ -5763,6 +5960,7 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
           ok: true,
           output,
         });
+        maybeCapturePlaybookFinding(p, output, finishedAt);
         transcriptIds.add(id);
         pendingList[i] = { ...p, state: 'sent', updatedAt: nowIso() };
         changed = true;
@@ -5792,6 +5990,7 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
           ok: true,
           output,
         });
+        maybeCapturePlaybookFinding(p, output, finishedAt);
         transcriptIds.add(id);
         pendingList[i] = { ...p, state: 'sent', updatedAt: nowIso() };
         changed = true;
@@ -5830,6 +6029,7 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
         ok: true,
         output: output || '(no output)',
       });
+      maybeCapturePlaybookFinding(p, output || '(no output)', finishedAt);
       transcriptIds.add(id);
       pendingList[i] = { ...p, state: 'sent', updatedAt: nowIso() };
       changed = true;
@@ -5866,6 +6066,7 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
             ok: true,
             output,
           });
+          maybeCapturePlaybookFinding(p, output, finishedAt);
           transcriptIds.add(id);
           pendingList[i] = { ...p, state: 'sent', error: undefined, updatedAt: nowIso() };
           changed = true;
@@ -5900,6 +6101,7 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
             ok: true,
             output,
           });
+          maybeCapturePlaybookFinding(p, output, finishedAt);
           transcriptIds.add(id);
           pendingList[i] = { ...p, state: 'sent', error: undefined, updatedAt: nowIso() };
           changed = true;
@@ -5954,6 +6156,7 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
     d.chats = d.chats ?? {};
     d.chats[opts.chatName] = entry;
     regAny.drones[droneId] = d;
+    const findingsCaptured = findingsToCapture.slice();
     await updateRegistry((regLatest: any) => {
       const dLatest = regLatest?.drones?.[droneId];
       if (!dLatest) return;
@@ -5975,6 +6178,25 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
         cur.piSessionId = String((entry as any).piSessionId).trim();
       }
       dLatest.chats[opts.chatName] = cur;
+      if (findingsCaptured.length > 0) {
+        const playbookLatest = playbookMetaFromEntry(dLatest?.playbook);
+        const repoPathLatest = String(dLatest?.repoPath ?? '').trim();
+        if (playbookLatest) {
+          const scope = playbookFindingScopeKey(playbookLatest.id, repoPathLatest);
+          regLatest.playbookFindings = regLatest.playbookFindings ?? {};
+          const currentScope = regLatest.playbookFindings[scope] ?? {
+            playbookId: playbookLatest.id,
+            playbookLabel: playbookLatest.label,
+            repoPath: repoPathLatest,
+            findings: [],
+          };
+          currentScope.findings = Array.isArray(currentScope.findings) ? currentScope.findings : [];
+          currentScope.findings.push(...findingsCaptured);
+          currentScope.findings = currentScope.findings.slice(-500);
+          currentScope.updatedAt = nowIso();
+          regLatest.playbookFindings[scope] = currentScope;
+        }
+      }
       regLatest.drones = regLatest.drones ?? {};
       regLatest.drones[droneId] = dLatest;
     });
@@ -5982,6 +6204,11 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
     // Best-effort: session ids may have been established (codexThreadId/openCodeSessionId/piSessionId)
     // or a prior prompt may have completed/failed, unblocking queued follow-ups.
     enqueuePendingPromptPump(droneId, opts.chatName);
+    if (findingsCaptured.length > 0) {
+      const regLatest: any = await loadRegistry();
+      const latestDrone = regLatest?.drones?.[droneId] ?? null;
+      if (latestDrone) await syncPlaybookStateSnapshotToDrone(droneId, latestDrone);
+    }
   }
 }
 
@@ -6628,6 +6855,7 @@ async function provisionDroneFromPending(name: string) {
     const regAfterCreate: any = await loadRegistry();
     const createdDrone = findDroneEntryByIdentity(regAfterCreate, pendingDroneId)?.entry ?? null;
     if (createdDrone) {
+      await syncPlaybookStateSnapshotToDrone(pendingDroneId, createdDrone);
       await syncSkillLibraryForDrone({ droneId: pendingDroneId, droneEntry: createdDrone });
     }
   } catch (e: any) {
@@ -6722,6 +6950,10 @@ async function upgradeDroneDaemonInContainer(opts: { containerName: string; cont
   const installFleetCli = await dvmExec(opts.containerName, 'bash', ['-lc', installFleetCliScript()]);
   if (installFleetCli.code !== 0) {
     throw new Error(installFleetCli.stderr || installFleetCli.stdout || 'failed installing fleet CLI in container');
+  }
+  const installPlaybookCli = await dvmExec(opts.containerName, 'bash', ['-lc', installPlaybookCliScript()]);
+  if (installPlaybookCli.code !== 0) {
+    throw new Error(installPlaybookCli.stderr || installPlaybookCli.stdout || 'failed installing playbook CLI in container');
   }
 
   // Restart daemon session so new code is loaded.
@@ -9930,11 +10162,13 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         const runtime: DroneRuntime = 'container';
         const containerPort = 7777;
         const createdEnvironment = deriveCreatedDroneEnvironmentConfig(regAny, { repoPath, runtime });
-        const startupQueuedPrompts = playbook.messages.map((prompt, index) => ({
+        const startupQueuedPrompts = playbook.messages.map((message, index) => ({
           id: `${droneId.replace(/[^A-Za-z0-9._-]+/g, '').slice(0, 24)}-${String(index + 1).padStart(2, '0')}`,
           chatName: 'default',
           at,
-          prompt,
+          prompt: message.prompt,
+          ...(message.id ? { messageId: message.id } : {}),
+          ...(message.captureFinding === true ? { captureFinding: true } : {}),
           state: 'queued' as const,
           updatedAt: at,
         }));
