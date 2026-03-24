@@ -7,6 +7,10 @@ import { normalizeDroneRuntime, type DroneRuntime } from './runtime';
 
 type DroneRegistryDroneKind = 'standard' | 'playbook-run';
 type DroneRegistryDroneVisibility = 'visible' | 'hidden';
+type DroneRegistryBuiltinAgentId = 'cursor' | 'codex' | 'claude' | 'opencode' | 'pi';
+type DroneRegistryChatAgentConfig =
+  | { kind: 'builtin'; id: DroneRegistryBuiltinAgentId }
+  | { kind: 'custom'; id: string; label: string; command: string };
 
 type DroneRegistryPlaybookMeta = {
   id: string;
@@ -17,19 +21,21 @@ type DroneRegistryPlaybookMeta = {
   actions?: Array<{
     id: string;
     label: string;
-    message: string;
+    messages: string[];
   }>;
 };
 
 type DroneRegistryPlaybookEntry = {
   id: string;
   label: string;
+  agent: DroneRegistryChatAgentConfig;
+  model?: string;
   messages: string[];
   artifacts?: string[];
   actions?: Array<{
     id: string;
     label: string;
-    message: string;
+    messages: string[];
   }>;
   createdAt: string;
   updatedAt?: string;
@@ -39,9 +45,7 @@ type DroneRegistryChatEntry = {
   createdAt: string;
   chatId?: string;
   model?: string;
-  agent?:
-    | { kind: 'builtin'; id: 'cursor' | 'codex' | 'claude' | 'opencode' | 'pi' }
-    | { kind: 'custom'; id: string; label: string; command: string };
+  agent?: DroneRegistryChatAgentConfig;
   codexThreadId?: string;
   claudeSessionId?: string;
   openCodeSessionId?: string;
@@ -345,6 +349,42 @@ export type DroneRegistry = {
   drones: Record<string, DroneRegistryDroneEntry>;
 };
 
+function normalizeRegistryBuiltinAgentId(raw: unknown): DroneRegistryBuiltinAgentId | null {
+  const id = String(raw ?? '')
+    .trim()
+    .toLowerCase();
+  if (id === 'cursor' || id === 'codex' || id === 'claude' || id === 'opencode' || id === 'pi') return id;
+  if (id === 'cloud') return 'claude';
+  if (id === 'open-code' || id === 'open_code') return 'opencode';
+  if (id === 'pi-agent' || id === 'pi_agent') return 'pi';
+  return null;
+}
+
+function normalizeRegistryPlaybookAgent(raw: unknown): DroneRegistryChatAgentConfig {
+  if (raw && typeof raw === 'object') {
+    if ((raw as any).kind === 'builtin') {
+      const id = normalizeRegistryBuiltinAgentId((raw as any).id);
+      if (id) return { kind: 'builtin', id };
+    }
+    if ((raw as any).kind === 'custom') {
+      const id = String((raw as any).id ?? '').trim();
+      const label = String((raw as any).label ?? '').trim();
+      const command = String((raw as any).command ?? '').trim();
+      if (id && label && command) return { kind: 'custom', id, label, command };
+    }
+  }
+  return { kind: 'builtin', id: 'cursor' };
+}
+
+function normalizeRegistryPlaybookModel(raw: unknown, agent: DroneRegistryChatAgentConfig): string | undefined {
+  if (agent.kind !== 'builtin') return undefined;
+  const model = String(raw ?? '').trim();
+  if (!model) return undefined;
+  if (model.length > 160) return undefined;
+  if (/[\r\n\t]/.test(model)) return undefined;
+  return model;
+}
+
 export function registryHasDisplayName(
   reg: Pick<DroneRegistry, 'drones' | 'pending'> | null | undefined,
   nameRaw: string,
@@ -514,6 +554,8 @@ function normalizeV2Registry(input: DroneRegistry): DroneRegistry {
     if (!entry || typeof entry !== 'object') continue;
     const id = typeof entry.id === 'string' && entry.id.trim() ? entry.id.trim() : String(key);
     const label = typeof entry.label === 'string' ? entry.label.trim() : '';
+    const agent = normalizeRegistryPlaybookAgent(entry.agent);
+    const model = normalizeRegistryPlaybookModel(entry.model, agent);
     const messages = Array.isArray(entry.messages)
       ? entry.messages.map((item: unknown) => String(item ?? '')).filter((item: string) => item.trim())
       : [];
@@ -526,15 +568,19 @@ function normalizeV2Registry(input: DroneRegistry): DroneRegistry {
             const action = item as any;
             const id = String(action?.id ?? '').trim();
             const label = typeof action?.label === 'string' ? action.label.trim() : '';
-            const message = typeof action?.message === 'string' ? action.message : '';
-            if (!id || !label || !message.trim()) return null;
-            return { id, label, message };
+            const messages = Array.isArray(action?.messages)
+              ? action.messages.map((entry: unknown) => String(entry ?? '')).filter((entry: string) => entry.trim())
+              : [];
+            if (!id || !label || messages.length === 0) return null;
+            return { id, label, messages };
           })
           .filter(Boolean)
       : [];
     (input.playbooks as any)[key] = {
       id,
       label,
+      agent,
+      ...(model ? { model } : {}),
       messages: messages.slice(0, 40),
       artifacts: artifacts.slice(0, 60),
       actions: actions.slice(0, 20),
@@ -575,16 +621,18 @@ function normalizeV2Registry(input: DroneRegistry): DroneRegistry {
             artifacts: Array.isArray(entry.playbook.artifacts)
               ? entry.playbook.artifacts.map((item: any) => String(item ?? '').trim()).filter(Boolean)
               : undefined,
-            actions: Array.isArray(entry.playbook.actions)
-              ? entry.playbook.actions
-                  .filter((item: any) => item && typeof item === 'object')
-                  .map((item: any) => ({
-                    id: String(item.id ?? '').trim(),
-                    label: String(item.label ?? '').trim(),
-                    message: String(item.message ?? ''),
-                  }))
-                  .filter((item: any) => item.id && item.label && item.message.trim())
-              : undefined,
+	            actions: Array.isArray(entry.playbook.actions)
+	              ? entry.playbook.actions
+	                  .filter((item: any) => item && typeof item === 'object')
+	                  .map((item: any) => ({
+	                    id: String(item.id ?? '').trim(),
+	                    label: String(item.label ?? '').trim(),
+	                    messages: Array.isArray(item.messages)
+	                      ? item.messages.map((entry: unknown) => String(entry ?? '')).filter((entry: string) => entry.trim())
+	                      : [],
+	                  }))
+	                  .filter((item: any) => item.id && item.label && item.messages.length > 0)
+	              : undefined,
           }
         : undefined;
     }
@@ -623,16 +671,18 @@ function normalizeV2Registry(input: DroneRegistry): DroneRegistry {
             artifacts: Array.isArray(entry.playbook.artifacts)
               ? entry.playbook.artifacts.map((item: any) => String(item ?? '').trim()).filter(Boolean)
               : undefined,
-            actions: Array.isArray(entry.playbook.actions)
-              ? entry.playbook.actions
-                  .filter((item: any) => item && typeof item === 'object')
-                  .map((item: any) => ({
-                    id: String(item.id ?? '').trim(),
-                    label: String(item.label ?? '').trim(),
-                    message: String(item.message ?? ''),
-                  }))
-                  .filter((item: any) => item.id && item.label && item.message.trim())
-              : undefined,
+	            actions: Array.isArray(entry.playbook.actions)
+	              ? entry.playbook.actions
+	                  .filter((item: any) => item && typeof item === 'object')
+	                  .map((item: any) => ({
+	                    id: String(item.id ?? '').trim(),
+	                    label: String(item.label ?? '').trim(),
+	                    messages: Array.isArray(item.messages)
+	                      ? item.messages.map((entry: unknown) => String(entry ?? '')).filter((entry: string) => entry.trim())
+	                      : [],
+	                  }))
+	                  .filter((item: any) => item.id && item.label && item.messages.length > 0)
+	              : undefined,
           }
         : undefined;
     }
@@ -671,16 +721,18 @@ function normalizeV2Registry(input: DroneRegistry): DroneRegistry {
             artifacts: Array.isArray(entry.playbook.artifacts)
               ? entry.playbook.artifacts.map((item: any) => String(item ?? '').trim()).filter(Boolean)
               : undefined,
-            actions: Array.isArray(entry.playbook.actions)
-              ? entry.playbook.actions
-                  .filter((item: any) => item && typeof item === 'object')
-                  .map((item: any) => ({
-                    id: String(item.id ?? '').trim(),
-                    label: String(item.label ?? '').trim(),
-                    message: String(item.message ?? ''),
-                  }))
-                  .filter((item: any) => item.id && item.label && item.message.trim())
-              : undefined,
+	            actions: Array.isArray(entry.playbook.actions)
+	              ? entry.playbook.actions
+	                  .filter((item: any) => item && typeof item === 'object')
+	                  .map((item: any) => ({
+	                    id: String(item.id ?? '').trim(),
+	                    label: String(item.label ?? '').trim(),
+	                    messages: Array.isArray(item.messages)
+	                      ? item.messages.map((entry: unknown) => String(entry ?? '')).filter((entry: string) => entry.trim())
+	                      : [],
+	                  }))
+	                  .filter((item: any) => item.id && item.label && item.messages.length > 0)
+	              : undefined,
           }
         : undefined;
     }

@@ -1,19 +1,65 @@
 import React from 'react';
+import type { ChatAgentConfig } from '../../domain';
+import { UiMenuSelect } from '../../ui/menuSelect';
 import { requestJson } from '../http';
-import type { PlaybookDefinition } from '../types';
+import type { CustomAgentProfile, PlaybookDefinition } from '../types';
+import { BUILTIN_AGENT_OPTIONS } from './app-config';
 import { makeId } from './helpers';
 import { PlaybookActionListEditor, PlaybookTextListEditor } from './PlaybookSettingsEditors';
 import {
   createPlaybookDefinition,
-  patchPlaybookDefinition,
+  normalizePlaybookActionLabel,
+  normalizePlaybookAgent,
+  normalizePlaybookArtifactPath,
+  normalizePlaybookLabel,
+  normalizePlaybookModel,
+  PLAYBOOK_ACTION_LABEL_MAX_CHARS,
   PLAYBOOK_MAX_ITEMS,
   PLAYBOOK_MAX_ACTIONS,
   PLAYBOOK_MAX_MESSAGES,
+  PLAYBOOK_LABEL_MAX_CHARS,
+  PLAYBOOK_MODEL_MAX_CHARS,
+  PLAYBOOK_MESSAGE_MAX_CHARS,
 } from './playbook-config';
+import { useDroneHubUiStore } from './use-drone-hub-ui-store';
 
 type EditablePlaybook = PlaybookDefinition & {
   clientId: string;
 };
+
+type PlaybookSettingsSectionProps = {
+  focusedPlaybookId?: string | null;
+  onFocusedPlaybookHandled?: () => void;
+};
+
+function playbookAgentKey(agent: ChatAgentConfig | null | undefined): string {
+  if (agent?.kind === 'builtin') return `builtin:${agent.id}`;
+  if (agent?.kind === 'custom') return `custom:${agent.id}`;
+  return 'builtin:cursor';
+}
+
+function playbookAgentLabel(agent: ChatAgentConfig | null | undefined, customAgents: CustomAgentProfile[]): string {
+  if (agent?.kind === 'builtin') {
+    return BUILTIN_AGENT_OPTIONS.find((option) => option.agent.id === agent.id)?.label ?? `Builtin: ${agent.id}`;
+  }
+  if (agent?.kind === 'custom') {
+    const local = customAgents.find((item) => item.id === agent.id) ?? null;
+    return local ? `Custom: ${local.label}` : `Custom: ${agent.label}`;
+  }
+  return 'Cursor Agent';
+}
+
+function resolvePlaybookAgentFromKey(keyRaw: string, customAgents: CustomAgentProfile[]): ChatAgentConfig {
+  const key = String(keyRaw ?? '').trim();
+  const builtin = BUILTIN_AGENT_OPTIONS.find((option) => option.key === key);
+  if (builtin) return builtin.agent;
+  if (key.startsWith('custom:')) {
+    const id = key.slice('custom:'.length);
+    const custom = customAgents.find((item) => item.id === id) ?? null;
+    if (custom) return { kind: 'custom', id: custom.id, label: custom.label, command: custom.command };
+  }
+  return { kind: 'builtin', id: 'cursor' };
+}
 
 function createEditablePlaybook(seed?: Partial<PlaybookDefinition>): EditablePlaybook {
   const playbook = createPlaybookDefinition(seed);
@@ -21,6 +67,8 @@ function createEditablePlaybook(seed?: Partial<PlaybookDefinition>): EditablePla
     ...playbook,
     clientId: `playbook-${playbook.id || makeId()}`,
     id: playbook.id || `local-${makeId()}`,
+    agent: normalizePlaybookAgent(playbook.agent),
+    model: playbook.model ?? null,
     messages: playbook.messages.length > 0 ? playbook.messages : [''],
     artifacts: playbook.artifacts ?? [],
     actions: playbook.actions ?? [],
@@ -30,22 +78,119 @@ function createEditablePlaybook(seed?: Partial<PlaybookDefinition>): EditablePla
 function normalizeDraftForSave(playbook: EditablePlaybook): PlaybookDefinition {
   return createPlaybookDefinition({
     ...playbook,
+    agent: playbook.agent,
+    model: playbook.model,
     messages: playbook.messages,
     artifacts: playbook.artifacts,
     actions: playbook.actions,
   });
 }
 
+function patchEditablePlaybook(current: EditablePlaybook, patch: Partial<PlaybookDefinition>): EditablePlaybook {
+  const nextAgent = Object.prototype.hasOwnProperty.call(patch, 'agent') ? normalizePlaybookAgent(patch.agent) : normalizePlaybookAgent(current.agent);
+  return {
+    ...current,
+    ...(Object.prototype.hasOwnProperty.call(patch, 'label')
+      ? { label: String(patch.label ?? '').slice(0, PLAYBOOK_LABEL_MAX_CHARS) }
+      : {}),
+    ...(Object.prototype.hasOwnProperty.call(patch, 'agent') ? { agent: nextAgent } : {}),
+    ...(Object.prototype.hasOwnProperty.call(patch, 'agent') || Object.prototype.hasOwnProperty.call(patch, 'model')
+      ? {
+          model: normalizePlaybookModel(
+            Object.prototype.hasOwnProperty.call(patch, 'model') ? patch.model : current.model,
+            nextAgent,
+          ),
+        }
+      : {}),
+    ...(Object.prototype.hasOwnProperty.call(patch, 'messages')
+      ? {
+          messages: (Array.isArray(patch.messages) ? patch.messages : [])
+            .slice(0, PLAYBOOK_MAX_MESSAGES)
+            .map((item) => String(item ?? '').slice(0, PLAYBOOK_MESSAGE_MAX_CHARS)),
+        }
+      : {}),
+    ...(Object.prototype.hasOwnProperty.call(patch, 'artifacts')
+      ? {
+          artifacts: (Array.isArray(patch.artifacts) ? patch.artifacts : [])
+            .slice(0, PLAYBOOK_MAX_ITEMS)
+            .map((item) => {
+              const raw = String(item ?? '');
+              return raw.trim() ? normalizePlaybookArtifactPath(raw) : '';
+            }),
+        }
+      : {}),
+    ...(Object.prototype.hasOwnProperty.call(patch, 'actions')
+      ? {
+          actions: (Array.isArray(patch.actions) ? patch.actions : []).slice(0, PLAYBOOK_MAX_ACTIONS).map((item) => ({
+            id: String(item?.id ?? '').trim() || `action-${makeId()}`,
+            label: String(item?.label ?? '').slice(0, PLAYBOOK_ACTION_LABEL_MAX_CHARS),
+            messages: (Array.isArray(item?.messages) ? item.messages : [])
+              .slice(0, PLAYBOOK_MAX_MESSAGES)
+              .map((message) => String(message ?? '').slice(0, PLAYBOOK_MESSAGE_MAX_CHARS)),
+          })),
+        }
+      : {}),
+  };
+}
+
 function isUnsavedPlaybook(playbook: EditablePlaybook): boolean {
   return playbook.id.startsWith('local-');
 }
 
-export function PlaybookSettingsSection() {
+function validateEditablePlaybookForSave(playbook: EditablePlaybook): string | null {
+  const label = normalizePlaybookLabel(playbook.label);
+  if (!label) return 'Each playbook needs a label.';
+
+  const blankMessageIndex = playbook.messages.findIndex((message) => !String(message ?? '').trim());
+  if (blankMessageIndex >= 0) {
+    return `"${label}" has an empty run message at row ${blankMessageIndex + 1}. Fill it in or delete it before saving.`;
+  }
+
+  if (playbook.messages.length === 0) {
+    return `"${label}" needs at least one message.`;
+  }
+
+  const blankArtifactIndex = playbook.artifacts.findIndex((artifact) => !String(artifact ?? '').trim());
+  if (blankArtifactIndex >= 0) {
+    return `"${label}" has an empty artifact path at row ${blankArtifactIndex + 1}. Fill it in or delete it before saving.`;
+  }
+
+  const incompleteActionIndex = playbook.actions.findIndex((action) => {
+    const actionLabel = String(action?.label ?? '').trim();
+    if (!actionLabel) return true;
+    if (!Array.isArray(action?.messages) || action.messages.length === 0) return true;
+    return action.messages.some((message) => !String(message ?? '').trim());
+  });
+  if (incompleteActionIndex >= 0) {
+    return `"${label}" has an incomplete action at row ${incompleteActionIndex + 1}. Each action needs a button label and one or more queued messages before saving.`;
+  }
+
+  return null;
+}
+
+export function PlaybookSettingsSection({
+  focusedPlaybookId = null,
+  onFocusedPlaybookHandled,
+}: PlaybookSettingsSectionProps) {
+  const customAgents = useDroneHubUiStore((state) => state.customAgents);
   const [playbooks, setPlaybooks] = React.useState<EditablePlaybook[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [savingById, setSavingById] = React.useState<Record<string, true>>({});
   const [deletingById, setDeletingById] = React.useState<Record<string, true>>({});
+  const [expandedByClientId, setExpandedByClientId] = React.useState<Record<string, true>>({});
+  const baseAgentMenuEntries = React.useMemo(
+    () => [
+      ...BUILTIN_AGENT_OPTIONS.map((option) => ({ value: option.key, label: option.label })),
+      ...(customAgents.length > 0
+        ? [
+            { kind: 'separator' as const },
+            ...customAgents.map((agent) => ({ value: `custom:${agent.id}`, label: `Custom: ${agent.label}` })),
+          ]
+        : []),
+    ],
+    [customAgents],
+  );
 
   const loadPlaybooks = React.useCallback(async () => {
     setLoading(true);
@@ -64,27 +209,58 @@ export function PlaybookSettingsSection() {
     void loadPlaybooks();
   }, [loadPlaybooks]);
 
+  React.useEffect(() => {
+    if (loading || !focusedPlaybookId) return;
+    const target = playbooks.find((playbook) => playbook.id === focusedPlaybookId) ?? null;
+    if (target) {
+      setExpandedByClientId((prev) => (prev[target.clientId] ? prev : { ...prev, [target.clientId]: true }));
+      const targetId = `playbook-settings-${focusedPlaybookId}`;
+      window.requestAnimationFrame(() => {
+        document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
+    }
+    onFocusedPlaybookHandled?.();
+  }, [focusedPlaybookId, loading, onFocusedPlaybookHandled, playbooks]);
+
+  const toggleExpanded = React.useCallback((clientId: string) => {
+    setExpandedByClientId((prev) => {
+      if (prev[clientId]) {
+        const next = { ...prev };
+        delete next[clientId];
+        return next;
+      }
+      return { ...prev, [clientId]: true };
+    });
+  }, []);
+
   const updatePlaybook = React.useCallback((clientId: string, patch: Partial<PlaybookDefinition>) => {
     setPlaybooks((prev) =>
-      prev.map((item) => (item.clientId === clientId ? { ...patchPlaybookDefinition(item, patch), clientId: item.clientId } : item)),
+      prev.map((item) => (item.clientId === clientId ? patchEditablePlaybook(item, patch) : item)),
     );
   }, []);
 
   const addPlaybook = React.useCallback(() => {
-    setPlaybooks((prev) => [
-      createEditablePlaybook({
-        label: '',
-        messages: [''],
-        artifacts: [],
-        actions: [],
-      }),
-      ...prev,
-    ]);
+    const created = createEditablePlaybook({
+      label: '',
+      agent: { kind: 'builtin', id: 'cursor' },
+      model: null,
+      messages: [''],
+      artifacts: [],
+      actions: [],
+    });
+    setPlaybooks((prev) => [created, ...prev]);
+    setExpandedByClientId((prev) => ({ ...prev, [created.clientId]: true }));
   }, []);
 
   const removePlaybook = React.useCallback(async (playbook: EditablePlaybook) => {
     if (isUnsavedPlaybook(playbook)) {
       setPlaybooks((prev) => prev.filter((item) => item.clientId !== playbook.clientId));
+      setExpandedByClientId((prev) => {
+        if (!prev[playbook.clientId]) return prev;
+        const next = { ...prev };
+        delete next[playbook.clientId];
+        return next;
+      });
       return;
     }
     setDeletingById((prev) => ({ ...prev, [playbook.clientId]: true }));
@@ -92,6 +268,12 @@ export function PlaybookSettingsSection() {
     try {
       await requestJson(`/api/playbooks/${encodeURIComponent(playbook.id)}`, { method: 'DELETE' });
       setPlaybooks((prev) => prev.filter((item) => item.clientId !== playbook.clientId));
+      setExpandedByClientId((prev) => {
+        if (!prev[playbook.clientId]) return prev;
+        const next = { ...prev };
+        delete next[playbook.clientId];
+        return next;
+      });
     } catch (e: any) {
       setError(e?.message ?? String(e));
     } finally {
@@ -104,15 +286,12 @@ export function PlaybookSettingsSection() {
   }, []);
 
   const savePlaybook = React.useCallback(async (playbook: EditablePlaybook) => {
+    const validationError = validateEditablePlaybookForSave(playbook);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
     const next = normalizeDraftForSave(playbook);
-    if (!next.label) {
-      setError('Each playbook needs a label.');
-      return;
-    }
-    if (next.messages.length === 0) {
-      setError(`"${next.label}" needs at least one message.`);
-      return;
-    }
     setSavingById((prev) => ({ ...prev, [playbook.clientId]: true }));
     setError(null);
     try {
@@ -129,6 +308,13 @@ export function PlaybookSettingsSection() {
           });
       const saved = createEditablePlaybook(data.playbook);
       setPlaybooks((prev) => prev.map((item) => (item.clientId === playbook.clientId ? saved : item)));
+      setExpandedByClientId((prev) => {
+        if (!prev[playbook.clientId]) return prev;
+        const next = { ...prev };
+        delete next[playbook.clientId];
+        next[saved.clientId] = true;
+        return next;
+      });
     } catch (e: any) {
       setError(e?.message ?? String(e));
     } finally {
@@ -175,118 +361,217 @@ export function PlaybookSettingsSection() {
         <div className="flex flex-col gap-3">
           {playbooks.map((playbook, index) => {
             const busy = Boolean(savingById[playbook.clientId] || deletingById[playbook.clientId]);
+            const expanded = Boolean(expandedByClientId[playbook.clientId]);
+            const selectedAgentKey = playbookAgentKey(playbook.agent);
+            const selectedAgentLabel = playbookAgentLabel(playbook.agent, customAgents);
+            const customAgentMissing = playbook.agent.kind === 'custom' && !customAgents.some((agent) => agent.id === playbook.agent.id);
             return (
-              <div key={playbook.clientId} className="rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.16)] px-3 py-3 flex flex-col gap-3">
+              <div
+                key={playbook.clientId}
+                id={playbook.id ? `playbook-settings-${playbook.id}` : undefined}
+                className="rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.16)] px-3 py-3 flex flex-col gap-3"
+              >
                 <div className="flex items-center justify-between gap-2">
-                  <div className="text-[10px] font-semibold text-[var(--muted-dim)] tracking-[0.08em] uppercase" style={{ fontFamily: 'var(--display)' }}>
-                    Playbook #{index + 1}
-                  </div>
+                  <button
+                    type="button"
+                    onClick={() => toggleExpanded(playbook.clientId)}
+                    className="min-w-0 text-left"
+                    title={expanded ? 'Collapse playbook' : 'Expand playbook'}
+                  >
+                    <div className="text-[10px] font-semibold text-[var(--muted-dim)] tracking-[0.08em] uppercase" style={{ fontFamily: 'var(--display)' }}>
+                      Playbook #{index + 1}
+                    </div>
+                    <div className="text-[12px] text-[var(--fg)] mt-1">
+                      {playbook.label || 'Untitled playbook'}
+                      <span className="text-[var(--muted-dim)]"> {expanded ? '[-]' : '[+]'}</span>
+                    </div>
+                    <div className="text-[10px] text-[var(--muted-dim)] mt-1">
+                      {playbook.messages.length} message{playbook.messages.length === 1 ? '' : 's'}, {playbook.artifacts.length} artifact{playbook.artifacts.length === 1 ? '' : 's'}, {playbook.actions.length} action{playbook.actions.length === 1 ? '' : 's'}
+                    </div>
+                  </button>
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => void savePlaybook(playbook)}
-                      disabled={busy}
-                      className={`h-7 px-2 rounded text-[10px] font-semibold tracking-wide uppercase border transition-all ${
-                        busy
-                          ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
-                          : 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]'
-                      }`}
+                      onClick={() => toggleExpanded(playbook.clientId)}
+                      className="h-7 px-2 rounded text-[10px] font-semibold tracking-wide uppercase border bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]"
                       style={{ fontFamily: 'var(--display)' }}
                     >
-                      Save
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void removePlaybook(playbook)}
-                      disabled={busy}
-                      className={`h-7 px-2 rounded text-[10px] font-semibold tracking-wide uppercase border transition-all ${
-                        busy
-                          ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
-                          : 'bg-[var(--red-subtle)] border-[rgba(255,90,90,.28)] text-[var(--red)] hover:bg-[rgba(255,90,90,.18)]'
-                      }`}
-                      style={{ fontFamily: 'var(--display)' }}
-                    >
-                      Delete
+                      {expanded ? 'Collapse' : 'Expand'}
                     </button>
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-[120px_1fr] gap-2 items-center">
-                  <label className="text-[11px] text-[var(--muted-dim)]">Label</label>
-                  <input
-                    type="text"
-                    value={playbook.label}
-                    onChange={(e) => updatePlaybook(playbook.clientId, { label: e.target.value })}
-                    className="w-full h-9 rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.2)] px-2 text-[12px] text-[var(--fg)] focus:outline-none focus:border-[var(--accent-muted)]"
-                    placeholder="e.g. Find biggest bug"
-                  />
-                </div>
+                {expanded ? (
+                  <>
+                    <div className="flex items-center justify-between gap-2">
+                      <div />
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => void savePlaybook(playbook)}
+                          disabled={busy}
+                          className={`h-7 px-2 rounded text-[10px] font-semibold tracking-wide uppercase border transition-all ${
+                            busy
+                              ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
+                              : 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]'
+                          }`}
+                          style={{ fontFamily: 'var(--display)' }}
+                        >
+                          Save
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void removePlaybook(playbook)}
+                          disabled={busy}
+                          className={`h-7 px-2 rounded text-[10px] font-semibold tracking-wide uppercase border transition-all ${
+                            busy
+                              ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
+                              : 'bg-[var(--red-subtle)] border-[rgba(255,90,90,.28)] text-[var(--red)] hover:bg-[rgba(255,90,90,.18)]'
+                          }`}
+                          style={{ fontFamily: 'var(--display)' }}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
 
-                <div className="flex flex-col gap-2">
-                  <PlaybookTextListEditor
-                    title="Run Messages"
-                    items={playbook.messages}
-                    emptyText="No run messages for this playbook."
-                    addLabel="Add message"
-                    addDisabled={playbook.messages.length >= PLAYBOOK_MAX_MESSAGES}
-                    placeholder="Message queued into the run chat..."
-                    multiline
-                    onAdd={() => updatePlaybook(playbook.clientId, { messages: [...playbook.messages, ''] })}
-                    onChange={(messageIndex, value) => {
-                      const next = playbook.messages.slice();
-                      next[messageIndex] = value;
-                      updatePlaybook(playbook.clientId, { messages: next });
-                    }}
-                    onDelete={(messageIndex) => {
-                      const next = playbook.messages.filter((_, idx) => idx !== messageIndex);
-                      updatePlaybook(playbook.clientId, { messages: next.length > 0 ? next : [''] });
-                    }}
-                  />
-                </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-[120px_1fr] gap-2 items-center">
+                      <label className="text-[11px] text-[var(--muted-dim)]">Label</label>
+                      <input
+                        type="text"
+                        value={playbook.label}
+                        onChange={(e) => updatePlaybook(playbook.clientId, { label: e.target.value })}
+                        className="w-full h-9 rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.2)] px-2 text-[12px] text-[var(--fg)] focus:outline-none focus:border-[var(--accent-muted)]"
+                        placeholder="e.g. Find biggest bug"
+                      />
+                    </div>
 
-                <div className="flex flex-col gap-2">
-                  <PlaybookTextListEditor
-                    title="Artifacts"
-                    description="Optional repo-relative file paths to surface from each run when they exist."
-                    items={playbook.artifacts}
-                    emptyText="No artifact paths for this playbook."
-                    addLabel="Add artifact"
-                    addDisabled={playbook.artifacts.length >= PLAYBOOK_MAX_ITEMS}
-                    placeholder="e.g. reports/bug-summary.md"
-                    onAdd={() => updatePlaybook(playbook.clientId, { artifacts: [...playbook.artifacts, ''] })}
-                    onChange={(artifactIndex, value) => {
-                      const next = playbook.artifacts.slice();
-                      next[artifactIndex] = value;
-                      updatePlaybook(playbook.clientId, { artifacts: next });
-                    }}
-                    onDelete={(artifactIndex) => {
-                      const next = playbook.artifacts.filter((_, idx) => idx !== artifactIndex);
-                      updatePlaybook(playbook.clientId, { artifacts: next });
-                    }}
-                  />
-                </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-[120px_1fr] gap-2 items-start">
+                      <label className="text-[11px] text-[var(--muted-dim)] pt-2">Agent</label>
+                      <div className="flex flex-col gap-2">
+                        <UiMenuSelect
+                          value={selectedAgentKey}
+                          onValueChange={(next) => {
+                            const agent = resolvePlaybookAgentFromKey(next, customAgents);
+                            updatePlaybook(playbook.clientId, { agent, ...(agent.kind === 'builtin' ? {} : { model: null }) });
+                          }}
+                          entries={baseAgentMenuEntries}
+                          triggerLabel={selectedAgentLabel}
+                          title="Choose which agent this playbook run should use."
+                        />
+                        <div className="text-[10px] text-[var(--muted-dim)] leading-relaxed">
+                          {playbook.agent.kind === 'builtin'
+                            ? "Leave model empty to use this agent's default model."
+                            : 'Custom agents manage model selection in their own CLI.'}
+                        </div>
+                        {customAgentMissing ? (
+                          <div className="text-[10px] text-[var(--red)] leading-relaxed">
+                            This playbook references a custom agent that is not currently saved locally.
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
 
-                <div className="flex flex-col gap-2">
-                  <PlaybookActionListEditor
-                    actions={playbook.actions}
-                    addDisabled={playbook.actions.length >= PLAYBOOK_MAX_ACTIONS}
-                    onAdd={() =>
-                      updatePlaybook(playbook.clientId, {
-                        actions: [...playbook.actions, { id: `action-${makeId()}`, label: '', message: '' }],
-                      })
-                    }
-                    onUpdate={(actionId, patch) =>
-                      updatePlaybook(playbook.clientId, {
-                        actions: playbook.actions.map((item) => (item.id === actionId ? { ...item, ...patch } : item)),
-                      })
-                    }
-                    onDelete={(actionId) =>
-                      updatePlaybook(playbook.clientId, {
-                        actions: playbook.actions.filter((item) => item.id !== actionId),
-                      })
-                    }
-                  />
-                </div>
+                    {playbook.agent.kind === 'builtin' ? (
+                      <div className="grid grid-cols-1 sm:grid-cols-[120px_1fr] gap-2 items-center">
+                        <label className="text-[11px] text-[var(--muted-dim)]">Model</label>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            value={playbook.model ?? ''}
+                            onChange={(e) => updatePlaybook(playbook.clientId, { model: e.target.value.slice(0, PLAYBOOK_MODEL_MAX_CHARS) })}
+                            className="w-full h-9 rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.2)] px-2 text-[12px] text-[var(--fg)] focus:outline-none focus:border-[var(--accent-muted)] font-mono"
+                            placeholder="Default model"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => updatePlaybook(playbook.clientId, { model: null })}
+                            disabled={!String(playbook.model ?? '').trim()}
+                            className={`h-8 px-2 rounded text-[10px] font-semibold tracking-wide uppercase border transition-all ${
+                              !String(playbook.model ?? '').trim()
+                                ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
+                                : 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]'
+                            }`}
+                            style={{ fontFamily: 'var(--display)' }}
+                            title="Clear model override"
+                          >
+                            Clear
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    <div className="flex flex-col gap-2">
+                      <PlaybookTextListEditor
+                        title="Run Messages"
+                        items={playbook.messages}
+                        emptyText="No run messages for this playbook."
+                        addLabel="Add message"
+                        addDisabled={playbook.messages.length >= PLAYBOOK_MAX_MESSAGES}
+                        placeholder="Message queued into the run chat..."
+                        multiline
+                        onAdd={() => updatePlaybook(playbook.clientId, { messages: [...playbook.messages, ''] })}
+                        onChange={(messageIndex, value) => {
+                          const next = playbook.messages.slice();
+                          next[messageIndex] = value;
+                          updatePlaybook(playbook.clientId, { messages: next });
+                        }}
+                        onDelete={(messageIndex) => {
+                          const next = playbook.messages.filter((_, idx) => idx !== messageIndex);
+                          updatePlaybook(playbook.clientId, { messages: next.length > 0 ? next : [''] });
+                        }}
+                      />
+                    </div>
+
+                    <div className="flex flex-col gap-2">
+                      <PlaybookTextListEditor
+                        title="Artifacts"
+                        description="Optional repo-relative file paths to surface from each run when they exist."
+                        items={playbook.artifacts}
+                        emptyText="No artifact paths for this playbook."
+                        addLabel="Add artifact"
+                        addDisabled={playbook.artifacts.length >= PLAYBOOK_MAX_ITEMS}
+                        placeholder="e.g. reports/bug-summary.md"
+                        onAdd={() => updatePlaybook(playbook.clientId, { artifacts: [...playbook.artifacts, ''] })}
+                        onChange={(artifactIndex, value) => {
+                          const next = playbook.artifacts.slice();
+                          next[artifactIndex] = value;
+                          updatePlaybook(playbook.clientId, { artifacts: next });
+                        }}
+                        onDelete={(artifactIndex) => {
+                          const next = playbook.artifacts.filter((_, idx) => idx !== artifactIndex);
+                          updatePlaybook(playbook.clientId, { artifacts: next });
+                        }}
+                      />
+                    </div>
+
+                    <div className="flex flex-col gap-2">
+                      <PlaybookActionListEditor
+                        actions={playbook.actions}
+                        addDisabled={playbook.actions.length >= PLAYBOOK_MAX_ACTIONS}
+                        onAdd={() =>
+                          updatePlaybook(playbook.clientId, {
+                            actions: [...playbook.actions, { id: `action-${makeId()}`, label: '', messages: [''] }],
+                          })
+                        }
+                        onUpdate={(actionId, patch) =>
+                          updatePlaybook(playbook.clientId, {
+                            actions: playbook.actions.map((item) => (item.id === actionId ? { ...item, ...patch } : item)),
+                          })
+                        }
+                        onDelete={(actionId) =>
+                          updatePlaybook(playbook.clientId, {
+                            actions: playbook.actions.filter((item) => item.id !== actionId),
+                          })
+                        }
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-[11px] text-[var(--muted-dim)] whitespace-pre-wrap line-clamp-2">
+                    {playbook.messages[0] || 'No messages yet.'}
+                  </div>
+                )}
               </div>
             );
           })}

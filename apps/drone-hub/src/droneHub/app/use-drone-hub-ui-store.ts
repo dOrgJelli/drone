@@ -16,6 +16,7 @@ import {
 } from './shortcuts';
 import { readLocalStorageItem } from './hooks';
 import type { CustomAgentProfile } from '../types';
+import type { SettingsTabId } from './settings-tabs';
 import {
   automationConfigsEqual,
   createAutomationConfig,
@@ -43,6 +44,8 @@ const CHAT_INPUT_DRAFTS_PERSIST_DEBOUNCE_MS = 300;
 
 type DroneHubUiState = {
   activeRepoPath: string;
+  settingsActiveTab: SettingsTabId;
+  settingsPlaybookFocusId: string | null;
   chatHeaderRepoPath: string;
   sidebarReposCollapsed: boolean;
   sidebarAutoMinimize: boolean;
@@ -93,6 +96,8 @@ type DroneHubUiState = {
   terminalMenuOpen: boolean;
   agentMenuOpen: boolean;
   setActiveRepoPath: (next: Updater<string>) => void;
+  setSettingsActiveTab: (next: Updater<SettingsTabId>) => void;
+  setSettingsPlaybookFocusId: (next: Updater<string | null>) => void;
   setChatHeaderRepoPath: (next: Updater<string>) => void;
   setSidebarReposCollapsed: (next: Updater<boolean>) => void;
   setSidebarAutoMinimize: (next: Updater<boolean>) => void;
@@ -157,6 +162,7 @@ function resolveNext<T>(prev: T, next: Updater<T>): T {
 type DroneHubUiPersistedState = Pick<
   DroneHubUiState,
   | 'activeRepoPath'
+  | 'settingsActiveTab'
   | 'chatHeaderRepoPath'
   | 'sidebarReposCollapsed'
   | 'sidebarAutoMinimize'
@@ -337,6 +343,8 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
   persist(
     (set) => ({
       activeRepoPath: '',
+      settingsActiveTab: 'general',
+      settingsPlaybookFocusId: null,
       chatHeaderRepoPath: '',
       sidebarReposCollapsed: false,
       sidebarAutoMinimize: false,
@@ -387,6 +395,9 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
       terminalMenuOpen: false,
       agentMenuOpen: false,
       setActiveRepoPath: (next) => set((s) => ({ activeRepoPath: resolveNext(s.activeRepoPath, next) })),
+      setSettingsActiveTab: (next) => set((s) => ({ settingsActiveTab: resolveNext(s.settingsActiveTab, next) })),
+      setSettingsPlaybookFocusId: (next) =>
+        set((s) => ({ settingsPlaybookFocusId: resolveNext(s.settingsPlaybookFocusId, next) })),
       setChatHeaderRepoPath: (next) => set((s) => ({ chatHeaderRepoPath: resolveNext(s.chatHeaderRepoPath, next) })),
       setSidebarReposCollapsed: (next) => set((s) => ({ sidebarReposCollapsed: resolveNext(s.sidebarReposCollapsed, next) })),
       setSidebarAutoMinimize: (next) => set((s) => ({ sidebarAutoMinimize: resolveNext(s.sidebarAutoMinimize, next) })),
@@ -552,6 +563,7 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
       migrate: (persistedState, version) => migrateDroneHubUiPersistedState(persistedState, version),
       partialize: (state): DroneHubUiPersistedState => ({
         activeRepoPath: state.activeRepoPath,
+        settingsActiveTab: state.settingsActiveTab,
         chatHeaderRepoPath: state.chatHeaderRepoPath,
         sidebarReposCollapsed: state.sidebarReposCollapsed,
         sidebarAutoMinimize: state.sidebarAutoMinimize,
@@ -586,6 +598,17 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
         return {
           ...currentState,
           ...persistedRest,
+          settingsActiveTab:
+            persisted.settingsActiveTab === 'general' ||
+            persisted.settingsActiveTab === 'trash' ||
+            persisted.settingsActiveTab === 'archive' ||
+            persisted.settingsActiveTab === 'shortcuts' ||
+            persisted.settingsActiveTab === 'automations' ||
+            persisted.settingsActiveTab === 'playbooks' ||
+            persisted.settingsActiveTab === 'skills' ||
+            persisted.settingsActiveTab === 'system'
+              ? persisted.settingsActiveTab
+              : currentState.settingsActiveTab,
           appView: normalizeAppView(persisted.appView ?? currentState.appView),
           sidebarAutoMinimize: normalizeBoolean(persisted.sidebarAutoMinimize ?? currentState.sidebarAutoMinimize),
           sidebarGroupingMode: normalizeSidebarGroupingMode(
@@ -634,6 +657,8 @@ export function useDroneHubAppModelUiState() {
   return useDroneHubUiStore(
     useShallow((s) => ({
       activeRepoPath: s.activeRepoPath,
+      settingsActiveTab: s.settingsActiveTab,
+      settingsPlaybookFocusId: s.settingsPlaybookFocusId,
       chatHeaderRepoPath: s.chatHeaderRepoPath,
       appView: s.appView,
       viewMode: s.viewMode,
@@ -674,6 +699,8 @@ export function useDroneHubAppModelUiState() {
       shortcutBindings: s.shortcutBindings,
       terminalMenuOpen: s.terminalMenuOpen,
       setActiveRepoPath: s.setActiveRepoPath,
+      setSettingsActiveTab: s.setSettingsActiveTab,
+      setSettingsPlaybookFocusId: s.setSettingsPlaybookFocusId,
       setChatHeaderRepoPath: s.setChatHeaderRepoPath,
       setAppView: s.setAppView,
       setSidebarGroupingMode: s.setSidebarGroupingMode,

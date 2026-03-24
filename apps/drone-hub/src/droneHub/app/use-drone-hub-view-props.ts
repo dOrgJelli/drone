@@ -380,6 +380,8 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
     onResetOnboarding,
     draftChat,
     activeRepoPath,
+    settingsActiveTab,
+    settingsPlaybookFocusId,
     kanbanBoardOpen,
     playbookRunsOpen,
     kanbanBoard,
@@ -420,6 +422,8 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
     createDroneFromDraft,
     registeredRepoPaths,
     setActiveRepoPath,
+    setSettingsActiveTab,
+    setSettingsPlaybookFocusId,
     selectedGroupMultiChatData,
     groupBroadcastPromptError,
     groupBroadcastSending,
@@ -556,7 +560,11 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
       hubLogsState,
       hubLogsTailLines,
       hubLogsMaxBytes,
+      activeTab: settingsActiveTab,
+      focusedPlaybookId: settingsPlaybookFocusId,
       onBackToWorkspace: () => setAppView('workspace'),
+      onSelectTab: (tabId) => setSettingsActiveTab(tabId),
+      onFocusedPlaybookHandled: () => setSettingsPlaybookFocusId(null),
       onReplayOnboarding: () => {
         setAppView('workspace');
         onReplayOnboarding();
@@ -615,11 +623,19 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
       : null,
     playbookRunsWorkspaceProps: playbookRunsOpen
       ? {
-          activeRepoPath,
+          initialRepoPath: activeRepoPath,
           registeredRepoPaths,
           pullHostBranchBeforeCreate,
-          onSetActiveRepoPath: setActiveRepoPath,
           onClose: () => setPlaybookRunsOpen(false),
+          onOpenPlaybookSettings: (playbookId) => {
+            setSettingsActiveTab('playbooks');
+            setSettingsPlaybookFocusId(playbookId);
+            setAppView('settings');
+          },
+          onDeleteRunDrone: async (droneId) => {
+            await deleteDrone(droneId);
+          },
+          deletingDrones,
           onOpenRun: (droneId, chatName) => {
             setPlaybookRunsOpen(false);
             selectDroneChat(droneId, chatName);

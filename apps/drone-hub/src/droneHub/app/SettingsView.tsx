@@ -23,7 +23,11 @@ type SettingsViewProps = {
   hubLogsState: UseHubLogsResult;
   hubLogsTailLines: number;
   hubLogsMaxBytes: number;
+  activeTab: SettingsTabId;
+  focusedPlaybookId: string | null;
   onBackToWorkspace: () => void;
+  onSelectTab: (tabId: SettingsTabId) => void;
+  onFocusedPlaybookHandled: () => void;
   onReplayOnboarding: () => void;
   onResetOnboarding: () => void;
 };
@@ -44,13 +48,16 @@ export function SettingsView({
   hubLogsState,
   hubLogsTailLines,
   hubLogsMaxBytes,
+  activeTab,
+  focusedPlaybookId,
   onBackToWorkspace,
+  onSelectTab,
+  onFocusedPlaybookHandled,
   onReplayOnboarding,
   onResetOnboarding,
 }: SettingsViewProps) {
   const transcriptInlineImages = useDroneHubUiStore((s) => s.transcriptInlineImages);
   const setTranscriptInlineImages = useDroneHubUiStore((s) => s.setTranscriptInlineImages);
-  const [activeTab, setActiveTab] = React.useState<SettingsTabId>('general');
   const settingsScrollRef = React.useRef<HTMLDivElement>(null);
 
   const settingsBusy =
@@ -81,13 +88,13 @@ export function SettingsView({
 
   const handleSelectTab = React.useCallback(
     (tabId: SettingsTabId) => {
-      setActiveTab(tabId);
+      onSelectTab(tabId);
       if (tabId === 'archive') {
         void deleteAction.loadArchivedDrones();
         void deleteAction.loadArchivedChats();
       }
     },
-    [deleteAction],
+    [deleteAction, onSelectTab],
   );
 
   const handleRefreshAll = React.useCallback(() => {
@@ -122,7 +129,9 @@ export function SettingsView({
     if (activeTab === 'archive') return <ArchiveSettingsTab deleteAction={deleteAction} />;
     if (activeTab === 'shortcuts') return <ShortcutSettingsSection />;
     if (activeTab === 'automations') return <AutomationSettingsSection />;
-    if (activeTab === 'playbooks') return <PlaybookSettingsSection />;
+    if (activeTab === 'playbooks') {
+      return <PlaybookSettingsSection focusedPlaybookId={focusedPlaybookId} onFocusedPlaybookHandled={onFocusedPlaybookHandled} />;
+    }
     if (activeTab === 'skills') return <SkillLibrarySection skillLibrary={skillLibrary} />;
     return <SystemLogsSettingsTab hubLogsState={hubLogsState} hubLogsTailLines={hubLogsTailLines} hubLogsMaxBytes={hubLogsMaxBytes} />;
   };

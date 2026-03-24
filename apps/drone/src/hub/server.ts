@@ -2093,12 +2093,14 @@ type PendingPhase = 'starting' | 'creating' | 'seeding' | 'error';
 type PlaybookDefinition = {
   id: string;
   label: string;
+  agent: ChatAgentConfig;
+  model?: string | null;
   messages: string[];
   artifacts: string[];
   actions: Array<{
     id: string;
     label: string;
-    message: string;
+    messages: string[];
   }>;
   createdAt: string;
   updatedAt?: string;
@@ -2132,7 +2134,7 @@ function playbookMetaFromEntry(raw: unknown):
       messageCount: number;
       chatName: string;
       artifacts: string[];
-      actions: Array<{ id: string; label: string; message: string }>;
+      actions: Array<{ id: string; label: string; messages: string[] }>;
     }
   | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -2148,7 +2150,11 @@ function playbookMetaFromEntry(raw: unknown):
 }
 
 function normalizePlaybookLabel(raw: unknown): string {
-  return String(raw ?? '').replace(/\s+/g, ' ').trim().slice(0, PLAYBOOK_LABEL_MAX_CHARS);
+  return String(raw ?? '').trim().slice(0, PLAYBOOK_LABEL_MAX_CHARS);
+}
+
+function normalizePlaybookActionLabel(raw: unknown): string {
+  return String(raw ?? '').trim().slice(0, PLAYBOOK_ACTION_LABEL_MAX_CHARS);
 }
 
 function normalizePlaybookMessages(raw: unknown): string[] {
@@ -2180,19 +2186,28 @@ function normalizePlaybookArtifacts(raw: unknown): string[] {
   return out;
 }
 
-function normalizePlaybookActions(raw: unknown): Array<{ id: string; label: string; message: string }> {
+function normalizePlaybookActions(raw: unknown): Array<{ id: string; label: string; messages: string[] }> {
   const list = Array.isArray(raw) ? raw : [];
-  const out: Array<{ id: string; label: string; message: string }> = [];
+  const out: Array<{ id: string; label: string; messages: string[] }> = [];
   for (const item of list) {
     if (!item || typeof item !== 'object') continue;
     const id = String((item as any).id ?? '').trim() || crypto.randomUUID();
-    const label = String((item as any).label ?? '').replace(/\s+/g, ' ').trim().slice(0, PLAYBOOK_ACTION_LABEL_MAX_CHARS);
-    const message = String((item as any).message ?? '').slice(0, PLAYBOOK_MESSAGE_MAX_CHARS);
-    if (!label || !message.trim()) continue;
-    out.push({ id, label, message });
+    const label = normalizePlaybookActionLabel((item as any).label ?? '');
+    const messages = normalizePlaybookMessages((item as any).messages);
+    if (!label || messages.length === 0) continue;
+    out.push({ id, label, messages });
     if (out.length >= PLAYBOOK_MAX_ACTIONS) break;
   }
   return out;
+}
+
+function normalizePlaybookAgent(raw: unknown): ChatAgentConfig {
+  return parseSeedAgent(raw) ?? { kind: 'builtin', id: 'cursor' };
+}
+
+function normalizePlaybookModel(raw: unknown, agent: ChatAgentConfig): string | null {
+  if (agent.kind !== 'builtin') return null;
+  return normalizeChatModel(raw);
 }
 
 function normalizePlaybookDefinitions(regAny: any): PlaybookDefinition[] {
@@ -2203,6 +2218,8 @@ function normalizePlaybookDefinitions(regAny: any): PlaybookDefinition[] {
     const id = String((raw as any).id ?? key).trim();
     if (!id || seen.has(id)) continue;
     const label = normalizePlaybookLabel((raw as any).label ?? '');
+    const agent = normalizePlaybookAgent((raw as any).agent);
+    const model = normalizePlaybookModel((raw as any).model, agent);
     const messages = normalizePlaybookMessages((raw as any).messages);
     const artifacts = normalizePlaybookArtifacts((raw as any).artifacts);
     const actions = normalizePlaybookActions((raw as any).actions);
@@ -2210,6 +2227,8 @@ function normalizePlaybookDefinitions(regAny: any): PlaybookDefinition[] {
     out.push({
       id,
       label,
+      agent,
+      model,
       messages,
       artifacts,
       actions,
@@ -2249,7 +2268,7 @@ function summarizePlaybookRunEntry(args: {
     messageCount: number;
     chatName: string;
     artifacts: string[];
-    actions: Array<{ id: string; label: string; message: string }>;
+    actions: Array<{ id: string; label: string; messages: string[] }>;
   };
   pendingEntry?: any | null;
   droneEntry?: any | null;
@@ -2269,7 +2288,7 @@ function summarizePlaybookRunEntry(args: {
   updatedAt: string;
   lastMessage: string;
   artifacts: string[];
-  actions: Array<{ id: string; label: string; message: string }>;
+  actions: Array<{ id: string; label: string; messages: string[] }>;
   pendingCount: number;
   failedCount: number;
   runsCompleted: number;
@@ -6528,6 +6547,9 @@ async function provisionDroneFromPending(name: string) {
   const startupQueuedPrompts = Array.isArray(pendingTransition?.startupQueuedPrompts)
     ? (pendingTransition.startupQueuedPrompts as PendingStartupPrompt[])
     : [];
+  const seedChatName = normalizeChatName(seed?.chatName ?? 'default');
+  const seedAgent = parseSeedAgent(seed?.agent);
+  const seedModel = normalizeChatModel(seed?.model);
 
   // Optional: clone chats/transcripts from an existing drone into this newly-created one.
   // Preserve provider/session continuation ids when present so the cloned drone can
@@ -6574,6 +6596,11 @@ async function provisionDroneFromPending(name: string) {
       for (const queued of startupQueuedPrompts) {
         const chatName = normalizeChatName(queued.chatName);
         const entry = d.chats[chatName] ?? { createdAt: nowIso() };
+        if (chatName === seedChatName && (seedAgent || Object.prototype.hasOwnProperty.call(seed ?? {}, 'model'))) {
+          if (seedAgent) entry.agent = seedAgent;
+          if (seedModel) entry.model = seedModel;
+          else delete entry.model;
+        }
         entry.pendingPrompts = Array.isArray(entry.pendingPrompts) ? entry.pendingPrompts : [];
         const row = startupPromptToPendingPrompt(queued);
         const existingIdx = entry.pendingPrompts.findIndex((p: any) => String(p?.id ?? '').trim() === row.id);
@@ -6612,10 +6639,8 @@ async function provisionDroneFromPending(name: string) {
 
   if (!seed) return;
 
-  const chatName = normalizeChatName(seed.chatName);
+  const chatName = seedChatName;
   const prompt = String(seed.prompt ?? '').trim();
-  const seedAgent = parseSeedAgent(seed.agent);
-  const seedModel = normalizeChatModel(seed.model);
   const seedPromptIdRaw = typeof (seed as any).promptId === 'string' ? String((seed as any).promptId).trim() : '';
   const seedPromptId =
     prompt && seedPromptIdRaw && isSafePromptId(seedPromptIdRaw)
@@ -9713,6 +9738,14 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           return;
         }
         const label = normalizePlaybookLabel(body?.label ?? '');
+        const agent = normalizePlaybookAgent(body?.agent);
+        let model: string | null = null;
+        try {
+          model = agent.kind === 'builtin' ? parseChatModelForUpdate(body?.model) : null;
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+          return;
+        }
         const messages = normalizePlaybookMessages(body?.messages);
         const artifacts = normalizePlaybookArtifacts(body?.artifacts);
         const actions = normalizePlaybookActions(body?.actions);
@@ -9731,6 +9764,8 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           regAny.playbooks[id] = {
             id,
             label,
+            agent,
+            ...(model ? { model } : {}),
             messages,
             artifacts,
             actions,
@@ -9767,6 +9802,14 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           return;
         }
         const label = normalizePlaybookLabel(body?.label ?? '');
+        const agent = normalizePlaybookAgent(body?.agent);
+        let model: string | null = null;
+        try {
+          model = agent.kind === 'builtin' ? parseChatModelForUpdate(body?.model) : null;
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+          return;
+        }
         const messages = normalizePlaybookMessages(body?.messages);
         const artifacts = normalizePlaybookArtifacts(body?.artifacts);
         const actions = normalizePlaybookActions(body?.actions);
@@ -9786,6 +9829,8 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           regAny.playbooks[playbookId] = {
             id: playbookId,
             label,
+            agent,
+            ...(model ? { model } : {}),
             messages,
             artifacts,
             actions,
@@ -9877,6 +9922,8 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           json(res, 409, { ok: false, error: 'playbook has no messages' });
           return;
         }
+        const playbookAgent = normalizePlaybookAgent(playbook.agent);
+        const playbookModel = normalizePlaybookModel(playbook.model, playbookAgent);
         const droneId = makeDroneIdentity();
         const name = allocateUntitledDisplayName(regAny);
         const at = nowIso();
@@ -9915,6 +9962,11 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             phase: 'starting',
             message: `Launching ${playbook.label}…`,
             environment: createdEnvironment,
+            seed: {
+              chatName: 'default',
+              agent: playbookAgent,
+              ...(playbookModel ? { model: playbookModel } : {}),
+            },
             startupQueuedPrompts,
           };
         });

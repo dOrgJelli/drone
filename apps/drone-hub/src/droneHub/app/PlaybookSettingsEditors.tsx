@@ -146,14 +146,54 @@ export function PlaybookActionListEditor({
                 placeholder="e.g. Fix bug"
               />
             </div>
-            <div className="flex flex-col gap-1">
-              <label className="text-[11px] text-[var(--muted-dim)]">Message</label>
-              <textarea
-                value={action.message}
-                onChange={(e) => onUpdate(action.id, { message: e.target.value })}
-                className="w-full min-h-[88px] rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.2)] px-3 py-2 text-[12px] leading-relaxed text-[var(--fg-secondary)] resize-y focus:outline-none focus:border-[var(--accent-muted)]"
-                placeholder="Message sent when this button is clicked from a run row..."
-              />
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <label className="text-[11px] text-[var(--muted-dim)]">Queued messages</label>
+                  <div className="text-[10px] text-[var(--muted-dim)] mt-1">Sent in order when this action button is clicked from a run row.</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onUpdate(action.id, { messages: [...action.messages, ''] })}
+                  disabled={action.messages.length >= 20}
+                  className="h-7 px-2 rounded text-[10px] font-semibold tracking-wide uppercase border bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)] disabled:opacity-40 disabled:cursor-not-allowed"
+                  style={{ fontFamily: 'var(--display)' }}
+                >
+                  Add message
+                </button>
+              </div>
+              {action.messages.length === 0 ? (
+                <div className="rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 py-2 text-[11px] text-[var(--muted-dim)]">
+                  No queued messages for this action.
+                </div>
+              ) : (
+                action.messages.map((message, messageIndex) => (
+                  <div key={`${action.id}:${messageIndex}`} className="flex items-start gap-2">
+                    <div className="text-[10px] text-[var(--muted-dim)] font-semibold w-5 text-right mt-2">{messageIndex + 1}</div>
+                    <textarea
+                      value={message}
+                      onChange={(e) => {
+                        const nextMessages = action.messages.slice();
+                        nextMessages[messageIndex] = e.target.value;
+                        onUpdate(action.id, { messages: nextMessages });
+                      }}
+                      className="flex-1 min-h-[88px] rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.2)] px-3 py-2 text-[12px] leading-relaxed text-[var(--fg-secondary)] resize-y focus:outline-none focus:border-[var(--accent-muted)]"
+                      placeholder="Message sent when this action button is clicked from a run row..."
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const nextMessages = action.messages.filter((_, idx) => idx !== messageIndex);
+                        onUpdate(action.id, { messages: nextMessages.length > 0 ? nextMessages : [''] });
+                      }}
+                      className="px-2 rounded text-[10px] font-semibold tracking-wide uppercase border bg-[var(--red-subtle)] border-[rgba(255,90,90,.28)] text-[var(--red)] hover:bg-[rgba(255,90,90,.18)] h-8 mt-1"
+                      style={{ fontFamily: 'var(--display)' }}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                ))
+              )}
             </div>
           </div>
         ))

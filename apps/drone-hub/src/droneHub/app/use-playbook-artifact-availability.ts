@@ -30,10 +30,15 @@ type UsePlaybookArtifactAvailabilityArgs = {
 export function usePlaybookArtifactAvailability({
   runs,
 }: UsePlaybookArtifactAvailabilityArgs): Record<string, { exists: boolean; path: string; name: string }> {
-  const [artifactBusyByKey, setArtifactBusyByKey] = React.useState<Record<string, true>>({});
   const [artifactAvailabilityByKey, setArtifactAvailabilityByKey] = React.useState<
     Record<string, { exists: boolean; path: string; name: string }>
   >({});
+  const artifactAvailabilityRef = React.useRef(artifactAvailabilityByKey);
+  const pendingArtifactKeysRef = React.useRef<Set<string>>(new Set());
+
+  React.useEffect(() => {
+    artifactAvailabilityRef.current = artifactAvailabilityByKey;
+  }, [artifactAvailabilityByKey]);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -45,7 +50,7 @@ export function usePlaybookArtifactAvailability({
       if (!normalizedArtifact || !resolvedPath) return;
       const key = playbookArtifactKey(run.id, normalizedArtifact);
       activeKeys.add(key);
-      setArtifactBusyByKey((prev) => (prev[key] ? prev : { ...prev, [key]: true }));
+      pendingArtifactKeysRef.current.add(key);
       try {
         const response = await fetch(
           `/api/drones/${encodeURIComponent(run.droneId)}/fs/file?path=${encodeURIComponent(resolvedPath)}`,
@@ -60,6 +65,7 @@ export function usePlaybookArtifactAvailability({
         if (cancelled) return;
         if (!response.ok) {
           setArtifactAvailabilityByKey((prev) => {
+            if (!(key in prev)) return prev;
             const next = { ...prev };
             delete next[key];
             return next;
@@ -67,21 +73,21 @@ export function usePlaybookArtifactAvailability({
           return;
         }
         const actualPath = typeof data?.path === 'string' && data.path.trim() ? data.path.trim() : resolvedPath;
-        setArtifactAvailabilityByKey((prev) => ({
-          ...prev,
-          [key]: {
-            exists: true,
-            path: actualPath,
-            name: artifactLabelFromPath(normalizedArtifact),
-          },
-        }));
-      } finally {
-        if (cancelled) return;
-        setArtifactBusyByKey((prev) => {
-          const next = { ...prev };
-          delete next[key];
-          return next;
+        const name = artifactLabelFromPath(normalizedArtifact);
+        setArtifactAvailabilityByKey((prev) => {
+          const existing = prev[key];
+          if (existing?.exists && existing.path === actualPath && existing.name === name) return prev;
+          return {
+            ...prev,
+            [key]: {
+              exists: true,
+              path: actualPath,
+              name,
+            },
+          };
         });
+      } finally {
+        pendingArtifactKeysRef.current.delete(key);
       }
     };
 
@@ -91,23 +97,28 @@ export function usePlaybookArtifactAvailability({
         if (!normalizedArtifact) continue;
         const key = playbookArtifactKey(run.id, normalizedArtifact);
         activeKeys.add(key);
-        if (artifactAvailabilityByKey[key] || artifactBusyByKey[key]) continue;
+        if (artifactAvailabilityRef.current[key] || pendingArtifactKeysRef.current.has(key)) continue;
         void probe(run, normalizedArtifact);
       }
     }
 
     setArtifactAvailabilityByKey((prev) => {
+      let changed = false;
       const next: typeof prev = {};
       for (const [key, value] of Object.entries(prev)) {
-        if (activeKeys.has(key)) next[key] = value;
+        if (activeKeys.has(key)) {
+          next[key] = value;
+        } else {
+          changed = true;
+        }
       }
-      return next;
+      return changed ? next : prev;
     });
 
     return () => {
       cancelled = true;
     };
-  }, [artifactAvailabilityByKey, artifactBusyByKey, runs]);
+  }, [runs]);
 
   return artifactAvailabilityByKey;
 }

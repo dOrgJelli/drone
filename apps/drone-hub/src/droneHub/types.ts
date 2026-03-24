@@ -1,3 +1,5 @@
+import type { ChatAgentConfig } from '../domain';
+
 export type DroneSummary = {
   id: string;
   name: string;
@@ -13,7 +15,7 @@ export type DroneSummary = {
     actions?: Array<{
       id: string;
       label: string;
-      message: string;
+      messages: string[];
     }>;
   } | null;
   createdAt: string;
@@ -517,12 +519,14 @@ export type CustomAgentProfile = { id: string; label: string; command: string };
 export type PlaybookDefinition = {
   id: string;
   label: string;
+  agent: ChatAgentConfig;
+  model?: string | null;
   messages: string[];
   artifacts: string[];
   actions: Array<{
     id: string;
     label: string;
-    message: string;
+    messages: string[];
   }>;
   createdAt: string;
   updatedAt?: string;
@@ -547,7 +551,7 @@ export type PlaybookRunSummary = {
   actions: Array<{
     id: string;
     label: string;
-    message: string;
+    messages: string[];
   }>;
   pendingCount: number;
   failedCount: number;
