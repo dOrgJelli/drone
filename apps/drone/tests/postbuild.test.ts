@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import path from 'node:path';
 
-const { fleetBundleArgs, playbookBundleArgs } = require('../scripts/postbuild.cjs');
+const { fleetBundleArgs, tasksBundleArgs } = require('../scripts/postbuild.cjs');
 
 describe('postbuild bundles', () => {
   test('bundles fleet for Node into dist/fleet.js', () => {
@@ -15,14 +15,14 @@ describe('postbuild bundles', () => {
     ]);
   });
 
-  test('bundles playbook for Node into dist/playbook.js', () => {
+  test('bundles tasks for Node into dist/tasks.js', () => {
     const root = path.resolve(__dirname, '..');
-    expect(playbookBundleArgs(root)).toEqual([
+    expect(tasksBundleArgs(root)).toEqual([
       'build',
-      path.join(root, 'src', 'playbook.ts'),
+      path.join(root, 'src', 'tasks.ts'),
       '--target=node',
       '--format=cjs',
-      `--outfile=${path.join(root, 'dist', 'playbook.js')}`,
+      `--outfile=${path.join(root, 'dist', 'tasks.js')}`,
     ]);
   });
 });
