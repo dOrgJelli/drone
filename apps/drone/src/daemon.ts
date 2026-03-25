@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import http from 'node:http';
@@ -15,6 +16,16 @@ import {
 } from './fleet/contracts';
 import { preferredTerminalSessionLogsRoot } from './host/session-logs';
 import { missingHostDependencyMessage } from './host/runtime';
+import {
+  filterTasksByTypeIds,
+  firstTaskTypeId,
+  normalizePendingTaskCreateRequest,
+  normalizeTaskStateSnapshot,
+  searchTasks,
+  taskSummaryForResponse,
+  type PendingTaskCreateRequest,
+  type TaskStateSnapshot,
+} from './task-state';
 
 const execFileAsync = promisify(execFile);
 
@@ -226,85 +237,21 @@ async function saveFleetPolicySnapshot(fleetDir: string, snapshot: FleetPolicySn
   await writeJsonFileAtomic(path.join(fleetDir, 'policy.json'), snapshot);
 }
 
-type PlaybookStateSnapshot = {
-  enabled: boolean;
-  actor: {
-    id: string | null;
-    name: string | null;
-  };
-  playbook: {
-    id: string | null;
-    label: string | null;
-  } | null;
-  repoPath: string | null;
-  findings: Array<{
-    id: string;
-    title: string;
-    prompt: string;
-    promptId: string;
-    messageId?: string;
-    chatName: string;
-    createdAt: string;
-    droneId?: string;
-    droneName?: string;
-  }>;
-  updatedAt: string;
-};
-
-function normalizePlaybookStateSnapshot(raw: any): PlaybookStateSnapshot {
-  const fallback: PlaybookStateSnapshot = {
-    enabled: false,
-    actor: { id: null, name: null },
-    playbook: null,
-    repoPath: null,
-    findings: [],
-    updatedAt: nowIso(),
-  };
-  return {
-    enabled: raw?.enabled === true,
-    actor: {
-      id: typeof raw?.actor?.id === 'string' && raw.actor.id.trim() ? raw.actor.id.trim() : null,
-      name: typeof raw?.actor?.name === 'string' && raw.actor.name.trim() ? raw.actor.name.trim() : null,
-    },
-    playbook:
-      raw?.playbook && typeof raw.playbook === 'object'
-        ? {
-            id: typeof raw.playbook.id === 'string' && raw.playbook.id.trim() ? raw.playbook.id.trim() : null,
-            label: typeof raw.playbook.label === 'string' && raw.playbook.label.trim() ? raw.playbook.label.trim() : null,
-          }
-        : null,
-    repoPath: typeof raw?.repoPath === 'string' && raw.repoPath.trim() ? raw.repoPath.trim() : null,
-    findings: Array.isArray(raw?.findings)
-      ? raw.findings
-          .map((item: any) => {
-            const id = String(item?.id ?? '').trim();
-            const title = String(item?.title ?? '').trim();
-            const promptId = String(item?.promptId ?? '').trim();
-            if (!id || !title || !promptId) return null;
-            return {
-              id,
-              title,
-              prompt: String(item?.prompt ?? ''),
-              promptId,
-              ...(typeof item?.messageId === 'string' && item.messageId.trim() ? { messageId: item.messageId.trim() } : {}),
-              chatName: typeof item?.chatName === 'string' && item.chatName.trim() ? item.chatName.trim() : 'default',
-              createdAt: typeof item?.createdAt === 'string' && item.createdAt.trim() ? item.createdAt.trim() : nowIso(),
-              ...(typeof item?.droneId === 'string' && item.droneId.trim() ? { droneId: item.droneId.trim() } : {}),
-              ...(typeof item?.droneName === 'string' && item.droneName.trim() ? { droneName: item.droneName.trim() } : {}),
-            };
-          })
-          .filter(Boolean)
-      : fallback.findings,
-    updatedAt: typeof raw?.updatedAt === 'string' && raw.updatedAt.trim() ? raw.updatedAt.trim() : fallback.updatedAt,
-  };
+async function loadTaskStateSnapshot(dataDir: string): Promise<TaskStateSnapshot> {
+  return normalizeTaskStateSnapshot(await readJsonFile(path.join(dataDir, 'tasks.json'), null));
 }
 
-async function loadPlaybookStateSnapshot(dataDir: string): Promise<PlaybookStateSnapshot> {
-  return normalizePlaybookStateSnapshot(await readJsonFile(path.join(dataDir, 'playbook.json'), null));
+async function saveTaskStateSnapshot(dataDir: string, snapshot: TaskStateSnapshot): Promise<void> {
+  await writeJsonFileAtomic(path.join(dataDir, 'tasks.json'), snapshot);
 }
 
-async function savePlaybookStateSnapshot(dataDir: string, snapshot: PlaybookStateSnapshot): Promise<void> {
-  await writeJsonFileAtomic(path.join(dataDir, 'playbook.json'), snapshot);
+async function loadPendingTaskCreates(dataDir: string): Promise<PendingTaskCreateRequest[]> {
+  const raw = await readJsonFile(path.join(dataDir, 'task-create-queue.json'), []);
+  return (Array.isArray(raw) ? raw : []).map(normalizePendingTaskCreateRequest).filter(Boolean) as PendingTaskCreateRequest[];
+}
+
+async function savePendingTaskCreates(dataDir: string, list: PendingTaskCreateRequest[]): Promise<void> {
+  await writeJsonFileAtomic(path.join(dataDir, 'task-create-queue.json'), list);
 }
 
 function normalizeFleetRequestState(raw: unknown): FleetRequestState | null {
@@ -876,20 +823,115 @@ async function main() {
         return;
       }
 
-      if (method === 'GET' && pathname === '/v1/playbook/findings') {
-        const snapshot = await loadPlaybookStateSnapshot(dataDir);
+      if (method === 'GET' && pathname === '/v1/tasks') {
+        const snapshot = await loadTaskStateSnapshot(dataDir);
         if (!snapshot.enabled || !snapshot.playbook?.id) {
           json(res, 409, { error: 'this drone was not created by a playbook' });
           return;
         }
-        json(res, 200, { ok: true, ...snapshot });
+        const typeIds = u.searchParams.getAll('type').map((item) => String(item ?? '').trim()).filter(Boolean);
+        json(res, 200, taskSummaryForResponse(snapshot, filterTasksByTypeIds(snapshot, typeIds)));
         return;
       }
 
-      if (method === 'POST' && pathname === '/v1/playbook/state') {
+      if (method === 'GET' && pathname === '/v1/tasks/search') {
+        const snapshot = await loadTaskStateSnapshot(dataDir);
+        if (!snapshot.enabled || !snapshot.playbook?.id) {
+          json(res, 409, { error: 'this drone was not created by a playbook' });
+          return;
+        }
+        const query = String(u.searchParams.get('q') ?? '').trim();
+        if (!query) {
+          json(res, 400, { error: 'missing search query' });
+          return;
+        }
+        const typeIds = u.searchParams.getAll('type').map((item) => String(item ?? '').trim()).filter(Boolean);
+        json(res, 200, {
+          ...taskSummaryForResponse(snapshot, []),
+          query,
+          tasks: searchTasks(snapshot, query, typeIds),
+        });
+        return;
+      }
+
+      if (method === 'POST' && pathname === '/v1/tasks') {
+        const snapshot = await loadTaskStateSnapshot(dataDir);
+        if (!snapshot.enabled || !snapshot.playbook?.id) {
+          json(res, 409, { error: 'this drone was not created by a playbook' });
+          return;
+        }
         const body = await readJson(req);
-        const snapshot = normalizePlaybookStateSnapshot(body);
-        await savePlaybookStateSnapshot(dataDir, snapshot);
+        const title = String(body?.title ?? '').trim();
+        const description = String(body?.description ?? '');
+        const requestedTypeId = String(body?.typeId ?? '').trim();
+        const defaultTypeId = firstTaskTypeId(snapshot);
+        const taskTypeId = requestedTypeId || defaultTypeId || '';
+        if (!title) {
+          json(res, 400, { error: 'missing task title' });
+          return;
+        }
+        if (!taskTypeId) {
+          json(res, 400, { error: 'missing task type' });
+          return;
+        }
+        if (!snapshot.taskTypes.some((item) => item.id === taskTypeId && item.active !== false)) {
+          json(res, 400, { error: `unknown task type: ${taskTypeId}` });
+          return;
+        }
+        const pending = await loadPendingTaskCreates(dataDir);
+        const request: PendingTaskCreateRequest = {
+          id: crypto.randomUUID(),
+          title,
+          description,
+          typeId: taskTypeId,
+          createdAt: nowIso(),
+        };
+        pending.push(request);
+        await savePendingTaskCreates(dataDir, pending.slice(-500));
+        json(res, 202, { ok: true, queued: true, request });
+        return;
+      }
+
+      if (method === 'GET' && pathname === '/v1/tasks/pending-creates') {
+        const snapshot = await loadTaskStateSnapshot(dataDir);
+        if (!snapshot.enabled || !snapshot.playbook?.id) {
+          json(res, 409, { error: 'this drone was not created by a playbook' });
+          return;
+        }
+        json(res, 200, {
+          ok: true,
+          actor: snapshot.actor,
+          playbook: snapshot.playbook,
+          repoPath: snapshot.repoPath,
+          requests: await loadPendingTaskCreates(dataDir),
+        });
+        return;
+      }
+
+      if (method === 'POST' && pathname.startsWith('/v1/tasks/pending-creates/') && pathname.endsWith('/ack')) {
+        const match = pathname.match(/^\/v1\/tasks\/pending-creates\/([^/]+)\/ack$/);
+        const requestId = match ? decodeURIComponent(match[1] ?? '').trim() : '';
+        if (!requestId) {
+          json(res, 400, { error: 'missing request id' });
+          return;
+        }
+        const pending = await loadPendingTaskCreates(dataDir);
+        const nextPending = pending.filter((item) => item.id !== requestId);
+        await savePendingTaskCreates(dataDir, nextPending);
+        json(res, 200, { ok: true, removed: pending.length !== nextPending.length });
+        return;
+      }
+
+      if (method === 'POST' && pathname === '/v1/tasks/state') {
+        const body = await readJson(req);
+        const snapshot = normalizeTaskStateSnapshot(body);
+        await saveTaskStateSnapshot(dataDir, snapshot);
+        const pending = await loadPendingTaskCreates(dataDir);
+        const knownTypeIds = new Set(snapshot.taskTypes.filter((item) => item.active !== false).map((item) => item.id));
+        const filteredPending = pending.filter((item) => knownTypeIds.size === 0 || knownTypeIds.has(item.typeId));
+        if (filteredPending.length !== pending.length) {
+          await savePendingTaskCreates(dataDir, filteredPending);
+        }
         json(res, 200, { ok: true, snapshot });
         return;
       }

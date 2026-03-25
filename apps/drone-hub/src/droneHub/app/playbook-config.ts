@@ -81,7 +81,17 @@ export function normalizePlaybookMessages(value: unknown): PlaybookMessageDefini
           ? normalizePlaybookMessageId((item as any).id, index)
           : normalizePlaybookMessageId('', index),
       prompt: rawPrompt,
-      captureFinding: item && typeof item === 'object' && !Array.isArray(item) ? (item as any).captureFinding === true : false,
+      createTask:
+        item && typeof item === 'object' && !Array.isArray(item)
+          ? (item as any).createTask === true || (item as any).captureFinding === true
+          : false,
+      taskTypeId:
+        item && typeof item === 'object' && !Array.isArray(item)
+          ? (() => {
+              const value = normalizePlaybookArtifactPath((item as any).taskTypeId ?? '').slice(0, 40);
+              return value || null;
+            })()
+          : null,
     });
     if (out.length >= PLAYBOOK_MAX_MESSAGES) break;
   }

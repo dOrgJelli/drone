@@ -13,13 +13,13 @@ function fleetBundleArgs(root) {
   ];
 }
 
-function playbookBundleArgs(root) {
+function tasksBundleArgs(root) {
   return [
     'build',
-    path.join(root, 'src', 'playbook.ts'),
+    path.join(root, 'src', 'tasks.ts'),
     '--target=node',
     '--format=cjs',
-    `--outfile=${path.join(root, 'dist', 'playbook.js')}`,
+    `--outfile=${path.join(root, 'dist', 'tasks.js')}`,
   ];
 }
 
@@ -50,16 +50,16 @@ async function chmodExecutableBestEffort(targetPath) {
 async function main() {
   const root = path.resolve(__dirname, '..');
   runOrThrow('bun', fleetBundleArgs(root), { cwd: root });
-  runOrThrow('bun', playbookBundleArgs(root), { cwd: root });
+  runOrThrow('bun', tasksBundleArgs(root), { cwd: root });
   await chmodExecutableBestEffort(path.join(root, 'dist', 'cli.js'));
   await chmodExecutableBestEffort(path.join(root, 'dist', 'daemon.js'));
   await chmodExecutableBestEffort(path.join(root, 'dist', 'fleet.js'));
-  await chmodExecutableBestEffort(path.join(root, 'dist', 'playbook.js'));
+  await chmodExecutableBestEffort(path.join(root, 'dist', 'tasks.js'));
 }
 
 module.exports = {
   fleetBundleArgs,
-  playbookBundleArgs,
+  tasksBundleArgs,
 };
 
 if (require.main === module) {
