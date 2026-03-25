@@ -518,9 +518,8 @@ export type CustomAgentProfile = { id: string; label: string; command: string };
 
 export type PlaybookMessageDefinition = {
   id: string;
+  name: string | null;
   prompt: string;
-  createTask: boolean;
-  taskTypeId: string | null;
 };
 
 export type PlaybookDefinition = {

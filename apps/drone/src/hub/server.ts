@@ -2245,9 +2245,8 @@ type PendingPhase = 'starting' | 'creating' | 'seeding' | 'error';
 
 type PlaybookMessageDefinition = {
   id: string;
+  name: string | null;
   prompt: string;
-  createTask: boolean;
-  taskTypeId: string | null;
 };
 
 type PlaybookDefinition = {
@@ -2274,6 +2273,7 @@ function nowIso(): string {
 
 const PLAYBOOK_LABEL_MAX_CHARS = 72;
 const PLAYBOOK_ACTION_LABEL_MAX_CHARS = 40;
+const PLAYBOOK_MESSAGE_NAME_MAX_CHARS = 80;
 const PLAYBOOK_MESSAGE_MAX_CHARS = 8_000;
 const PLAYBOOK_MAX_MESSAGES = 20;
 const PLAYBOOK_MAX_ACTIONS = 12;
@@ -2322,6 +2322,11 @@ function normalizePlaybookMessageId(raw: unknown, fallbackIndex: number): string
   return id || `message-${fallbackIndex + 1}`;
 }
 
+function normalizePlaybookMessageName(raw: unknown): string | null {
+  const name = String(raw ?? '').trim().slice(0, PLAYBOOK_MESSAGE_NAME_MAX_CHARS);
+  return name || null;
+}
+
 function normalizePlaybookMessages(raw: unknown): PlaybookMessageDefinition[] {
   const list = Array.isArray(raw) ? raw : [];
   const out: PlaybookMessageDefinition[] = [];
@@ -2337,15 +2342,11 @@ function normalizePlaybookMessages(raw: unknown): PlaybookMessageDefinition[] {
         item && typeof item === 'object' && !Array.isArray(item)
           ? normalizePlaybookMessageId((item as any).id, index)
           : normalizePlaybookMessageId('', index),
-      prompt,
-      createTask:
+      name:
         item && typeof item === 'object' && !Array.isArray(item)
-          ? (item as any).createTask === true || (item as any).captureFinding === true
-          : false,
-      taskTypeId:
-        item && typeof item === 'object' && !Array.isArray(item)
-          ? normalizeTaskTypeId((item as any).taskTypeId ?? '') || null
+          ? normalizePlaybookMessageName((item as any).name ?? '')
           : null,
+      prompt,
     });
     if (out.length >= PLAYBOOK_MAX_MESSAGES) break;
   }
@@ -3658,8 +3659,6 @@ type PendingPrompt = {
   at: string;
   prompt: string;
   messageId?: string;
-  createTask?: boolean;
-  taskTypeId?: string | null;
   cwd?: string | null;
   attachments?: ChatImageAttachmentRef[];
   automation?: PromptAutomationMeta;
@@ -3676,8 +3675,6 @@ type PendingStartupPrompt = {
   at: string;
   prompt: string;
   messageId?: string;
-  createTask?: boolean;
-  taskTypeId?: string | null;
   cwd?: string | null;
   state: PendingPromptState;
   error?: string;
@@ -3725,10 +3722,6 @@ function normalizePendingStartupPrompts(raw: unknown, chatNameFilter?: string): 
       ...(typeof (item as any).messageId === 'string' && String((item as any).messageId).trim()
         ? { messageId: String((item as any).messageId).trim() }
         : {}),
-      ...(((item as any).createTask === true || (item as any).captureFinding === true) ? { createTask: true } : {}),
-      ...(typeof (item as any).taskTypeId === 'string' && String((item as any).taskTypeId).trim()
-        ? { taskTypeId: normalizeTaskTypeId((item as any).taskTypeId) }
-        : {}),
       cwd:
         typeof (item as any).cwd === 'string' ? String((item as any).cwd) : (item as any).cwd === null ? null : undefined,
       state: normalizePendingPromptState((item as any).state),
@@ -3745,8 +3738,6 @@ function startupPromptToPendingPrompt(prompt: PendingStartupPrompt): PendingProm
     at: prompt.at,
     prompt: prompt.prompt,
     ...(prompt.messageId ? { messageId: prompt.messageId } : {}),
-    ...(prompt.createTask === true ? { createTask: true } : {}),
-    ...(typeof prompt.taskTypeId === 'string' && prompt.taskTypeId.trim() ? { taskTypeId: prompt.taskTypeId.trim() } : {}),
     ...(typeof prompt.cwd === 'string' || prompt.cwd === null ? { cwd: prompt.cwd } : {}),
     state: prompt.state,
     ...(prompt.error ? { error: prompt.error } : {}),
@@ -3812,10 +3803,6 @@ function pendingPromptsFromChatEntry(entry: any, opts?: { keepRecentlyCompleted?
       at: String(p?.at ?? '').trim(),
       prompt: normalizePendingPromptText(p?.prompt),
       ...(typeof p?.messageId === 'string' && String(p.messageId).trim() ? { messageId: String(p.messageId).trim() } : {}),
-      ...(((p as any)?.createTask === true || (p as any)?.captureFinding === true) ? { createTask: true } : {}),
-      ...(typeof (p as any)?.taskTypeId === 'string' && String((p as any).taskTypeId).trim()
-        ? { taskTypeId: normalizeTaskTypeId((p as any).taskTypeId) }
-        : {}),
       cwd: typeof p?.cwd === 'string' ? String(p.cwd) : p?.cwd === null ? null : undefined,
       attachments: normalizeChatImageAttachmentRefs(p?.attachments),
       automation: normalizePromptAutomationMeta((p as any)?.automation),
@@ -4035,8 +4022,6 @@ async function pushPendingStartupPrompt(
       at: String(opts.pending?.at ?? nowIso()),
       prompt: String(opts.pending?.prompt ?? ''),
       ...(typeof opts.pending?.messageId === 'string' && opts.pending.messageId.trim() ? { messageId: opts.pending.messageId.trim() } : {}),
-      ...(opts.pending?.createTask === true ? { createTask: true } : {}),
-      ...(typeof opts.pending?.taskTypeId === 'string' && opts.pending.taskTypeId.trim() ? { taskTypeId: normalizeTaskTypeId(opts.pending.taskTypeId) } : {}),
       ...(typeof opts.pending?.cwd === 'string' || opts.pending?.cwd === null ? { cwd: opts.pending.cwd } : {}),
       state: normalizePendingPromptState(opts.pending?.state),
       ...(typeof opts.pending?.error === 'string' ? { error: opts.pending.error } : {}),
@@ -5870,39 +5855,6 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
 
   const turns: any[] = Array.isArray(entry?.turns) ? entry.turns : [];
   const transcriptIds = new Set(turns.map((t: any) => String(t?.id ?? '').trim()).filter(Boolean));
-  const playbook = playbookMetaFromEntry(d?.playbook);
-  const tasksToCapture: TaskBoardCard[] = [];
-  const maybeCapturePlaybookTask = (pendingPrompt: any, outputRaw: unknown, createdAtRaw: unknown) => {
-    if (!playbook) return;
-    if (normalizeDroneEntryKind(d?.kind) !== 'playbook-run') return;
-    if ((pendingPrompt as any)?.createTask !== true) return;
-    const board = getTaskBoardStateFromRegistry(regAny);
-    const fallbackType = fallbackTaskTypeId(board.taskTypes);
-    const requestedTypeId = normalizeTaskTypeId((pendingPrompt as any)?.taskTypeId ?? '') || fallbackType;
-    const typeId = board.taskTypes.some((item) => item.id === requestedTypeId && item.active !== false) ? requestedTypeId : fallbackType;
-    const title = normalizeTaskTitle(outputRaw);
-    if (!title) return;
-    const createdAt = typeof createdAtRaw === 'string' && createdAtRaw.trim() ? createdAtRaw.trim() : nowIso();
-    tasksToCapture.push({
-      id: crypto.randomUUID(),
-      title,
-      description: String(outputRaw ?? '').trim(),
-      typeId,
-      createdAt,
-      updatedAt: createdAt,
-      repoPath: String(d?.repoPath ?? '').trim(),
-      droneId,
-      droneName: String(d?.name ?? droneId).trim() || droneId,
-      playbookId: playbook.id,
-      playbookLabel: playbook.label,
-      chatName: opts.chatName,
-      prompt: String((pendingPrompt as any)?.prompt ?? ''),
-      promptId: String((pendingPrompt as any)?.id ?? '').trim(),
-      ...(typeof (pendingPrompt as any)?.messageId === 'string' && String((pendingPrompt as any).messageId).trim()
-        ? { messageId: String((pendingPrompt as any).messageId).trim() }
-        : {}),
-    });
-  };
 
   const client = makeClient(hostPort, token);
   let changed = false;
@@ -6025,7 +5977,6 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
           ok: true,
           output,
         });
-        maybeCapturePlaybookTask(p, output, finishedAt);
         transcriptIds.add(id);
         pendingList[i] = { ...p, state: 'sent', updatedAt: nowIso() };
         changed = true;
@@ -6055,7 +6006,6 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
           ok: true,
           output,
         });
-        maybeCapturePlaybookTask(p, output, finishedAt);
         transcriptIds.add(id);
         pendingList[i] = { ...p, state: 'sent', updatedAt: nowIso() };
         changed = true;
@@ -6094,7 +6044,6 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
         ok: true,
         output: output || '(no output)',
       });
-      maybeCapturePlaybookTask(p, output || '(no output)', finishedAt);
       transcriptIds.add(id);
       pendingList[i] = { ...p, state: 'sent', updatedAt: nowIso() };
       changed = true;
@@ -6131,7 +6080,6 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
             ok: true,
             output,
           });
-          maybeCapturePlaybookTask(p, output, finishedAt);
           transcriptIds.add(id);
           pendingList[i] = { ...p, state: 'sent', error: undefined, updatedAt: nowIso() };
           changed = true;
@@ -6166,7 +6114,6 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
             ok: true,
             output,
           });
-          maybeCapturePlaybookTask(p, output, finishedAt);
           transcriptIds.add(id);
           pendingList[i] = { ...p, state: 'sent', error: undefined, updatedAt: nowIso() };
           changed = true;
@@ -6221,7 +6168,6 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
     d.chats = d.chats ?? {};
     d.chats[opts.chatName] = entry;
     regAny.drones[droneId] = d;
-    const tasksCaptured = tasksToCapture.slice();
     await updateRegistry((regLatest: any) => {
       const dLatest = regLatest?.drones?.[droneId];
       if (!dLatest) return;
@@ -6243,11 +6189,6 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
         cur.piSessionId = String((entry as any).piSessionId).trim();
       }
       dLatest.chats[opts.chatName] = cur;
-      if (tasksCaptured.length > 0) {
-        let board = getTaskBoardStateFromRegistry(regLatest);
-        for (const task of tasksCaptured) board = appendTaskToBoard(board, task);
-        persistTaskBoardState(regLatest, board);
-      }
       regLatest.drones = regLatest.drones ?? {};
       regLatest.drones[droneId] = dLatest;
     });
@@ -6255,11 +6196,6 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
     // Best-effort: session ids may have been established (codexThreadId/openCodeSessionId/piSessionId)
     // or a prior prompt may have completed/failed, unblocking queued follow-ups.
     enqueuePendingPromptPump(droneId, opts.chatName);
-    if (tasksCaptured.length > 0) {
-      const regLatest: any = await loadRegistry();
-      const latestDrone = regLatest?.drones?.[droneId] ?? null;
-      if (latestDrone) await syncTaskStateSnapshotToDrone(droneId, latestDrone);
-    }
   }
 }
 
@@ -10224,8 +10160,6 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           at,
           prompt: message.prompt,
           ...(message.id ? { messageId: message.id } : {}),
-          ...(message.createTask === true ? { createTask: true } : {}),
-          ...(typeof message.taskTypeId === 'string' && message.taskTypeId.trim() ? { taskTypeId: message.taskTypeId.trim() } : {}),
           state: 'queued' as const,
           updatedAt: at,
         }));

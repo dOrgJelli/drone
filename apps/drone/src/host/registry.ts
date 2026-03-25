@@ -27,9 +27,8 @@ type DroneRegistryPlaybookMeta = {
 
 type DroneRegistryPlaybookMessage = {
   id: string;
+  name?: string;
   prompt: string;
-  createTask?: boolean;
-  taskTypeId?: string;
 };
 
 type DroneRegistryPlaybookEntry = {
@@ -600,11 +599,10 @@ function normalizeV2Registry(input: DroneRegistry): DroneRegistry {
               if (!prompt.trim()) return null;
               return {
                 id: String((item as any).id ?? '').trim() || `message-${index + 1}`,
-                prompt,
-                ...(((item as any).createTask === true || (item as any).captureFinding === true) ? { createTask: true } : {}),
-                ...(typeof (item as any).taskTypeId === 'string' && String((item as any).taskTypeId).trim()
-                  ? { taskTypeId: String((item as any).taskTypeId).trim() }
+                ...(typeof (item as any).name === 'string' && String((item as any).name).trim()
+                  ? { name: String((item as any).name).trim() }
                   : {}),
+                prompt,
               };
             }
             const prompt = String(item ?? '');

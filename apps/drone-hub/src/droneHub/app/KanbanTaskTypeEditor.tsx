@@ -19,7 +19,7 @@ export function KanbanTaskTypeEditor({
     <div className="px-6 pb-4">
       <div className="rounded-[18px] border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] p-3">
         <div className="mb-3 flex items-center justify-between gap-3">
-          <div className="text-[11px] text-[var(--muted)]">Task types drive board filters and playbook task capture.</div>
+          <div className="text-[11px] text-[var(--muted)]">Task types drive board filters and task organization.</div>
           <button
             type="button"
             onClick={onAddTaskType}
