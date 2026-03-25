@@ -595,17 +595,14 @@ export function PlaybookRunsWorkspace({
                               <button
                                 type="button"
                                 onClick={() => toggleRunSummary(run.id)}
-                                className="block w-full text-left group"
+                                className="block w-full text-left"
                                 title={summaryExpanded ? 'Collapse summary' : 'Expand summary'}
                               >
                                 <div
-                                  className={`text-[11px] text-[var(--fg-secondary)] whitespace-pre-wrap leading-relaxed ${summaryExpanded ? '' : 'line-clamp-3'}`}
+                                  className={`text-[11px] text-[var(--fg-secondary)] whitespace-pre-wrap leading-relaxed ${summaryExpanded ? '' : 'line-clamp-2'}`}
                                 >
                                   {run.lastMessage || <span className="italic text-[var(--muted-dim)]">No output yet.</span>}
                                 </div>
-                                {!summaryExpanded && run.lastMessage && run.lastMessage.length > 120 && (
-                                  <span className="mt-1 inline-block text-[10px] text-[var(--accent)] opacity-0 transition-opacity group-hover:opacity-100">Show more</span>
-                                )}
                               </button>
                             </td>
                             <td className="px-4 py-3.5">
