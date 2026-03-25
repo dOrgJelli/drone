@@ -101,8 +101,8 @@ describeSocketSuite('playbook api', () => {
     expect(created.data?.playbook?.agent).toEqual({ kind: 'builtin', id: 'codex' });
     expect(created.data?.playbook?.model).toBe('gpt-5');
     expect(created.data?.playbook?.messages).toMatchObject([
-      { prompt: 'Find the biggest bug in this repo.', createTask: false, taskTypeId: null },
-      { prompt: 'Summarize the bug in one sentence.', createTask: false, taskTypeId: null },
+      { prompt: 'Find the biggest bug in this repo.', name: null },
+      { prompt: 'Summarize the bug in one sentence.', name: null },
     ]);
     expect(created.data?.playbook?.artifacts).toEqual(['reports/bug.md', 'reports/bug.json']);
     expect(created.data?.playbook?.actions).toHaveLength(2);
@@ -132,7 +132,7 @@ describeSocketSuite('playbook api', () => {
     expect(updated.data?.playbook?.label).toBe('Bug sweep v2');
     expect(updated.data?.playbook?.agent).toEqual({ kind: 'builtin', id: 'claude' });
     expect(updated.data?.playbook?.model).toBeNull();
-    expect(updated.data?.playbook?.messages).toMatchObject([{ prompt: 'Find the most severe bug in the current codebase.', createTask: false, taskTypeId: null }]);
+    expect(updated.data?.playbook?.messages).toMatchObject([{ prompt: 'Find the most severe bug in the current codebase.', name: null }]);
     expect(updated.data?.playbook?.artifacts).toEqual(['reports/severity.md']);
     expect(updated.data?.playbook?.actions).toHaveLength(1);
     expect(updated.data?.playbook?.actions?.[0]?.label).toBe('Fix now');
@@ -304,7 +304,6 @@ describeSocketSuite('playbook api', () => {
       {
         prompt: 'Find the biggest issue in this repo.',
         messageId: 'finding',
-        createTask: true,
         state: 'queued',
       },
       {

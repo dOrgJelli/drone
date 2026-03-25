@@ -4,6 +4,7 @@ import type { PlaybookDefinition, PlaybookMessageDefinition } from '../types';
 export const PLAYBOOK_LABEL_MAX_CHARS = 72;
 export const PLAYBOOK_ACTION_LABEL_MAX_CHARS = 40;
 export const PLAYBOOK_MESSAGE_MAX_CHARS = 8_000;
+export const PLAYBOOK_MESSAGE_NAME_MAX_CHARS = 80;
 export const PLAYBOOK_MODEL_MAX_CHARS = 160;
 export const PLAYBOOK_MAX_MESSAGES = 20;
 export const PLAYBOOK_MAX_ACTIONS = 12;
@@ -16,6 +17,11 @@ function normalizePlaybookMessagePrompt(value: unknown): string {
 function normalizePlaybookMessageId(value: unknown, fallbackIndex: number): string {
   const id = String(value ?? '').trim();
   return id || `message-${fallbackIndex + 1}`;
+}
+
+function normalizePlaybookMessageName(value: unknown): string | null {
+  const name = String(value ?? '').trim().slice(0, PLAYBOOK_MESSAGE_NAME_MAX_CHARS);
+  return name || null;
 }
 
 export function normalizePlaybookLabel(value: unknown): string {
@@ -80,18 +86,11 @@ export function normalizePlaybookMessages(value: unknown): PlaybookMessageDefini
         item && typeof item === 'object' && !Array.isArray(item)
           ? normalizePlaybookMessageId((item as any).id, index)
           : normalizePlaybookMessageId('', index),
-      prompt: rawPrompt,
-      createTask:
+      name:
         item && typeof item === 'object' && !Array.isArray(item)
-          ? (item as any).createTask === true || (item as any).captureFinding === true
-          : false,
-      taskTypeId:
-        item && typeof item === 'object' && !Array.isArray(item)
-          ? (() => {
-              const value = normalizePlaybookArtifactPath((item as any).taskTypeId ?? '').slice(0, 40);
-              return value || null;
-            })()
+          ? normalizePlaybookMessageName((item as any).name ?? '')
           : null,
+      prompt: rawPrompt,
     });
     if (out.length >= PLAYBOOK_MAX_MESSAGES) break;
   }
