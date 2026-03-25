@@ -237,7 +237,7 @@ describeSocketSuite('fleet daemon', () => {
     expect(capabilitiesData?.relationships?.assigned).toEqual([{ id: 'charlie', name: 'Charlie' }]);
   });
 
-  test('persists playbook findings snapshots for local listing', async () => {
+  test('persists scoped task snapshots for local listing and create queueing', async () => {
     const port = await allocatePort();
     const dataDir = path.join(tempRoot, `daemon-${port}`);
     fs.mkdirSync(dataDir, { recursive: true });
@@ -251,7 +251,7 @@ describeSocketSuite('fleet daemon', () => {
     const baseUrl = `http://127.0.0.1:${port}`;
     await waitForHealth(baseUrl, token, daemon);
 
-    const setResponse = await fetch(`${baseUrl}/v1/playbook/state`, {
+    const setResponse = await fetch(`${baseUrl}/v1/tasks/state`, {
       method: 'POST',
       headers: {
         authorization: `Bearer ${token}`,
@@ -262,15 +262,22 @@ describeSocketSuite('fleet daemon', () => {
         actor: { id: 'drone-alpha', name: 'Drone Alpha' },
         playbook: { id: 'bug-sweep', label: 'Bug sweep' },
         repoPath: '/tmp/repo-under-test',
-        findings: [
+        taskTypes: [
+          { id: 'bug', label: 'Bug', active: true },
+          { id: 'feature', label: 'Feature', active: true },
+        ],
+        tasks: [
           {
-            id: 'finding-1',
+            id: 'task-1',
             title: 'Crash when saving an empty draft',
-            prompt: 'Find one bug in this repo.',
-            promptId: 'prompt-1',
+            description: 'Repro: open the editor and press save immediately.',
+            typeId: 'bug',
+            typeLabel: 'Bug',
+            laneId: 'lane-1',
+            laneTitle: 'To do',
             messageId: 'message-1',
-            chatName: 'default',
             createdAt: '2026-03-24T00:00:00.000Z',
+            updatedAt: '2026-03-24T00:00:00.000Z',
             droneId: 'drone-alpha',
             droneName: 'Drone Alpha',
           },
@@ -279,20 +286,54 @@ describeSocketSuite('fleet daemon', () => {
     });
     expect(setResponse.status).toBe(200);
 
-    const listResponse = await fetch(`${baseUrl}/v1/playbook/findings`, {
+    const listResponse = await fetch(`${baseUrl}/v1/tasks`, {
       headers: { authorization: `Bearer ${token}` },
     });
     const listData: any = await listResponse.json();
     expect(listResponse.status).toBe(200);
     expect(listData?.playbook).toEqual({ id: 'bug-sweep', label: 'Bug sweep' });
     expect(listData?.repoPath).toBe('/tmp/repo-under-test');
-    expect(listData?.findings).toMatchObject([
+    expect(listData?.tasks).toMatchObject([
       {
-        id: 'finding-1',
+        id: 'task-1',
         title: 'Crash when saving an empty draft',
-        promptId: 'prompt-1',
+        typeId: 'bug',
         messageId: 'message-1',
       },
     ]);
+
+    const searchResponse = await fetch(`${baseUrl}/v1/tasks/search?q=${encodeURIComponent('save draft crash')}`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    const searchData: any = await searchResponse.json();
+    expect(searchResponse.status).toBe(200);
+    expect(searchData?.tasks?.[0]).toMatchObject({
+      id: 'task-1',
+      title: 'Crash when saving an empty draft',
+      typeId: 'bug',
+    });
+
+    const createResponse = await fetch(`${baseUrl}/v1/tasks`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        title: 'Toolbar button overlaps on mobile',
+        typeId: 'bug',
+        description: 'Seen at 390px width in Safari.',
+      }),
+    });
+    const createData: any = await createResponse.json();
+    expect(createResponse.status).toBe(202);
+    expect(createData?.queued).toBe(true);
+
+    const pendingResponse = await fetch(`${baseUrl}/v1/tasks/pending-creates`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    const pendingData: any = await pendingResponse.json();
+    expect(pendingResponse.status).toBe(200);
+    expect(pendingData?.requests).toMatchObject([{ title: 'Toolbar button overlaps on mobile', typeId: 'bug' }]);
   });
 });

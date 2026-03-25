@@ -23,13 +23,17 @@ import type { UiMenuSelectEntry } from '../../ui/menuSelect';
 import {
   createKanbanCard,
   createKanbanLane,
+  createKanbanTaskType,
+  fallbackTaskTypeId,
   moveKanbanCard,
   parsePastedKanbanCard,
   type KanbanBoardState,
   type KanbanCard,
   type KanbanLane,
+  type KanbanTaskType,
 } from './kanban-board-state';
 import { IconBoard, IconPlus, IconTrash } from './icons';
+import { KanbanTaskTypeEditor } from './KanbanTaskTypeEditor';
 import { SpawnContextToolbar } from './SpawnContextToolbar';
 
 type KanbanBoardWorkspaceProps = {
@@ -64,9 +68,10 @@ type SortableKanbanCardProps = {
   controlsLocked: boolean;
   selected: boolean;
   activeDragCardId: string | null;
+  taskTypeLabel: string;
   onToggleCard: (laneId: string, cardId: string) => void;
   onSelectCard: (laneId: string, cardId: string) => void;
-  onUpdateCard: (laneId: string, cardId: string, patch: { title?: string; description?: string }) => void;
+  onUpdateCard: (laneId: string, cardId: string, patch: { title?: string; description?: string; typeId?: string }) => void;
   onRemoveCard: (laneId: string, cardId: string) => void;
 };
 
@@ -75,9 +80,10 @@ type KanbanLaneCardsProps = {
   controlsLocked: boolean;
   selectedCardRef: KanbanCardRef | null;
   activeDragCardId: string | null;
+  taskTypeLabelById: Record<string, string>;
   onToggleCard: (laneId: string, cardId: string) => void;
   onSelectCard: (laneId: string, cardId: string) => void;
-  onUpdateCard: (laneId: string, cardId: string, patch: { title?: string; description?: string }) => void;
+  onUpdateCard: (laneId: string, cardId: string, patch: { title?: string; description?: string; typeId?: string }) => void;
   onRemoveCard: (laneId: string, cardId: string) => void;
 };
 
@@ -172,6 +178,7 @@ function SortableKanbanCard({
   controlsLocked,
   selected,
   activeDragCardId,
+  taskTypeLabel,
   onToggleCard,
   onSelectCard,
   onUpdateCard,
@@ -216,6 +223,9 @@ function SortableKanbanCard({
     >
       <div className="flex items-start gap-2">
         <div className="min-w-0 flex-1">
+          <div className="mb-2 inline-flex rounded-full bg-[rgba(255,255,255,.06)] px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]">
+            {taskTypeLabel}
+          </div>
           {selected ? (
             <input
               value={card.title}
@@ -258,6 +268,11 @@ function SortableKanbanCard({
       </div>
       {selected ? (
         <div className="mt-3">
+          {card.playbookLabel || card.droneName ? (
+            <div className="mb-2 text-[10px] text-[var(--muted-dim)]">
+              {card.playbookLabel ? `${card.playbookLabel}` : `Reported by ${card.droneName}`}
+            </div>
+          ) : null}
           <textarea
             value={card.description}
             onPointerDown={stopCardDragActivation}
@@ -277,11 +292,14 @@ function SortableKanbanCard({
   );
 }
 
-function DragOverlayKanbanCard({ card }: { card: KanbanCard }) {
+function DragOverlayKanbanCard({ card, taskTypeLabel }: { card: KanbanCard; taskTypeLabel: string }) {
   const snippet = descriptionSnippet(card.description);
 
   return (
     <article className="w-[264px] rounded-[16px] border border-[rgba(255,255,255,.16)] bg-[rgba(24,24,28,.92)] px-3.5 py-3 shadow-[0_18px_48px_rgba(0,0,0,.38)] backdrop-blur-sm">
+      <div className="mb-2 inline-flex rounded-full bg-[rgba(255,255,255,.06)] px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]">
+        {taskTypeLabel}
+      </div>
       <div className="text-[13px] font-medium text-[var(--fg)]">{card.title || 'Untitled task'}</div>
       {snippet ? <div className="mt-2 text-[11px] leading-5 text-[var(--muted-dim)]">{snippet}</div> : null}
     </article>
@@ -293,6 +311,7 @@ function KanbanLaneCards({
   controlsLocked,
   selectedCardRef,
   activeDragCardId,
+  taskTypeLabelById,
   onToggleCard,
   onSelectCard,
   onUpdateCard,
@@ -315,6 +334,7 @@ function KanbanLaneCards({
                 controlsLocked={controlsLocked}
                 selected={selectedCardRef?.laneId === lane.id && selectedCardRef?.cardId === card.id}
                 activeDragCardId={activeDragCardId}
+                taskTypeLabel={taskTypeLabelById[card.typeId] ?? card.typeId}
                 onToggleCard={onToggleCard}
                 onSelectCard={onSelectCard}
                 onUpdateCard={onUpdateCard}
@@ -346,21 +366,47 @@ export function KanbanBoardWorkspace({
 }: KanbanBoardWorkspaceProps) {
   const rootRef = React.useRef<HTMLDivElement | null>(null);
   const controlsLocked = boardLoading;
+  const [selectedTypeIds, setSelectedTypeIds] = React.useState<string[]>([]);
+  const [typesEditorOpen, setTypesEditorOpen] = React.useState(false);
   const [selectedCardRef, setSelectedCardRef] = React.useState<KanbanCardRef | null>(null);
   const [activeDragCardId, setActiveDragCardId] = React.useState<string | null>(null);
   const laneCount = board.lanes.length;
+  const activeTaskTypes = React.useMemo(
+    () => board.taskTypes.filter((item) => item.active !== false),
+    [board.taskTypes],
+  );
+  const selectedTypeIdSet = React.useMemo(
+    () => new Set(selectedTypeIds.filter((typeId) => activeTaskTypes.some((item) => item.id === typeId))),
+    [activeTaskTypes, selectedTypeIds],
+  );
+  const filteredSelectionActive = selectedTypeIdSet.size > 0 && selectedTypeIdSet.size < activeTaskTypes.length;
+  const boardInteractionLocked = controlsLocked || filteredSelectionActive;
+  const visibleBoard = React.useMemo(() => {
+    if (!filteredSelectionActive) return board;
+    return {
+      ...board,
+      lanes: board.lanes.map((lane) => ({
+        ...lane,
+        cards: lane.cards.filter((card) => selectedTypeIdSet.has(card.typeId)),
+      })),
+    };
+  }, [board, filteredSelectionActive, selectedTypeIdSet]);
+  const taskTypeLabelById = React.useMemo(
+    () => Object.fromEntries(board.taskTypes.map((item) => [item.id, item.label])),
+    [board.taskTypes],
+  );
   const cardCount = React.useMemo(
-    () => board.lanes.reduce((sum, lane) => sum + lane.cards.length, 0),
-    [board.lanes],
+    () => visibleBoard.lanes.reduce((sum, lane) => sum + lane.cards.length, 0),
+    [visibleBoard.lanes],
   );
   const activeDragCard = React.useMemo(() => {
     if (!activeDragCardId) return null;
-    for (const lane of board.lanes) {
+    for (const lane of visibleBoard.lanes) {
       const card = lane.cards.find((item) => item.id === activeDragCardId) ?? null;
       if (card) return card;
     }
     return null;
-  }, [activeDragCardId, board.lanes]);
+  }, [activeDragCardId, visibleBoard.lanes]);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
@@ -377,6 +423,15 @@ export function KanbanBoardWorkspace({
   React.useEffect(() => {
     if (selectedCardRef && !selectedCardEntry) setSelectedCardRef(null);
   }, [selectedCardEntry, selectedCardRef]);
+
+  React.useEffect(() => {
+    setSelectedTypeIds((prev) => prev.filter((typeId) => activeTaskTypes.some((item) => item.id === typeId)));
+  }, [activeTaskTypes]);
+
+  const defaultCreateTypeId = React.useMemo(() => {
+    if (selectedTypeIdSet.size === 1) return [...selectedTypeIdSet][0] ?? fallbackTaskTypeId(board.taskTypes);
+    return fallbackTaskTypeId(board.taskTypes);
+  }, [board.taskTypes, selectedTypeIdSet]);
 
   const selectCard = React.useCallback((laneIdRaw: string, cardIdRaw: string) => {
     const laneId = String(laneIdRaw ?? '').trim();
@@ -395,7 +450,7 @@ export function KanbanBoardWorkspace({
   const addLane = React.useCallback(() => {
     onBoardChange((prev) => ({
       ...prev,
-      lanes: [...prev.lanes, createKanbanLane({ title: `Lane ${prev.lanes.length + 1}` })],
+      lanes: [...prev.lanes, createKanbanLane({ title: `Lane ${prev.lanes.length + 1}` }, fallbackTaskTypeId(prev.taskTypes))],
     }));
   }, [onBoardChange]);
 
@@ -435,14 +490,18 @@ export function KanbanBoardWorkspace({
   const addCard = React.useCallback(
     (
       laneIdRaw: string,
-      seed?: Partial<Pick<ReturnType<typeof createKanbanCard>, 'title' | 'description'>>,
+      seed?: Partial<Pick<ReturnType<typeof createKanbanCard>, 'title' | 'description' | 'typeId'>>,
     ): ReturnType<typeof createKanbanCard> | null => {
       const laneId = String(laneIdRaw ?? '').trim();
       if (!laneId) return null;
+      const timestamp = new Date().toISOString();
       const nextCard = createKanbanCard({
         title: seed?.title ?? 'Untitled task',
         description: seed?.description ?? '',
-      });
+        typeId: seed?.typeId ?? defaultCreateTypeId,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }, defaultCreateTypeId);
       onBoardChange((prev) => ({
         ...prev,
         lanes: prev.lanes.map((lane) =>
@@ -457,11 +516,11 @@ export function KanbanBoardWorkspace({
       setSelectedCardRef({ laneId, cardId: nextCard.id });
       return nextCard;
     },
-    [onBoardChange],
+    [defaultCreateTypeId, onBoardChange],
   );
 
   const updateCard = React.useCallback(
-    (laneIdRaw: string, cardIdRaw: string, patch: { title?: string; description?: string }) => {
+    (laneIdRaw: string, cardIdRaw: string, patch: { title?: string; description?: string; typeId?: string }) => {
       const laneId = String(laneIdRaw ?? '').trim();
       const cardId = String(cardIdRaw ?? '').trim();
       if (!laneId || !cardId) return;
@@ -479,6 +538,8 @@ export function KanbanBoardWorkspace({
                         ...(Object.prototype.hasOwnProperty.call(patch, 'description')
                           ? { description: String(patch.description ?? '') }
                           : {}),
+                        ...(Object.prototype.hasOwnProperty.call(patch, 'typeId') ? { typeId: String(patch.typeId ?? '') } : {}),
+                        updatedAt: new Date().toISOString(),
                       }
                     : card,
                 ),
@@ -520,6 +581,7 @@ export function KanbanBoardWorkspace({
   const handleDragEnd = React.useCallback(
     (event: DragEndEvent) => {
       setActiveDragCardId(null);
+      if (filteredSelectionActive) return;
       const activeCardId = String(event.active.id ?? '').trim();
       const overId = String(event.over?.id ?? '').trim();
       if (!activeCardId || !event.over || !overId) return;
@@ -556,7 +618,7 @@ export function KanbanBoardWorkspace({
       );
       setSelectedCardRef({ laneId: toLaneId, cardId: activeCardId });
     },
-    [board, onBoardChange],
+    [board, filteredSelectionActive, onBoardChange],
   );
 
   const handleDragCancel = React.useCallback(() => {
@@ -596,8 +658,59 @@ export function KanbanBoardWorkspace({
         })
         .catch(() => {});
     },
-    [addCard, board.lanes, controlsLocked, onBoardChange, onSuggestCardTitleFromPaste],
+    [addCard, board.lanes, controlsLocked, defaultCreateTypeId, onBoardChange, onSuggestCardTitleFromPaste],
   );
+
+  const toggleTypeFilter = React.useCallback((typeIdRaw: string) => {
+    const typeId = String(typeIdRaw ?? '').trim();
+    if (!typeId) return;
+    setSelectedTypeIds((prev) => (prev.includes(typeId) ? prev.filter((item) => item !== typeId) : [...prev, typeId]));
+  }, []);
+
+  const clearTypeFilters = React.useCallback(() => {
+    setSelectedTypeIds([]);
+  }, []);
+
+  const addTaskType = React.useCallback(() => {
+    onBoardChange((prev) => ({
+      ...prev,
+      taskTypes: [...prev.taskTypes, createKanbanTaskType({ label: `Type ${prev.taskTypes.length + 1}` })],
+    }));
+    setTypesEditorOpen(true);
+  }, [onBoardChange]);
+
+  const updateTaskType = React.useCallback((taskTypeIdRaw: string, patch: Partial<KanbanTaskType>) => {
+    const taskTypeId = String(taskTypeIdRaw ?? '').trim();
+    if (!taskTypeId) return;
+    onBoardChange((prev) => ({
+      ...prev,
+      taskTypes: prev.taskTypes.map((taskType) =>
+        taskType.id === taskTypeId
+          ? {
+              ...taskType,
+              ...(Object.prototype.hasOwnProperty.call(patch, 'label') ? { label: String(patch.label ?? '') } : {}),
+              ...(Object.prototype.hasOwnProperty.call(patch, 'active') ? { active: patch.active !== false } : {}),
+            }
+          : taskType,
+      ),
+    }));
+  }, [onBoardChange]);
+
+  const removeTaskType = React.useCallback((taskTypeIdRaw: string) => {
+    const taskTypeId = String(taskTypeIdRaw ?? '').trim();
+    if (!taskTypeId) return;
+    if (board.taskTypes.length <= 1) return;
+    const fallbackType = fallbackTaskTypeId(board.taskTypes.filter((item) => item.id !== taskTypeId));
+    onBoardChange((prev) => ({
+      ...prev,
+      taskTypes: prev.taskTypes.filter((item) => item.id !== taskTypeId),
+      lanes: prev.lanes.map((lane) => ({
+        ...lane,
+        cards: lane.cards.map((card) => (card.typeId === taskTypeId ? { ...card, typeId: fallbackType, updatedAt: new Date().toISOString() } : card)),
+      })),
+    }));
+    setSelectedTypeIds((prev) => prev.filter((item) => item !== taskTypeId));
+  }, [board.taskTypes, onBoardChange]);
 
   return (
     <div
@@ -627,7 +740,7 @@ export function KanbanBoardWorkspace({
                   </span>
                 </div>
                 <div className="mt-1 text-[11px] text-[var(--muted)]">
-                  Paste plain text to add a task into the first lane. Drag cards to reorder them or move them between lanes.
+                  Paste plain text to add a task into the first lane. Filter by task type, or clear filters to drag tasks between lanes.
                 </div>
               </div>
             </div>
@@ -649,9 +762,9 @@ export function KanbanBoardWorkspace({
               <button
                 type="button"
                 onClick={addLane}
-                disabled={controlsLocked}
+                disabled={boardInteractionLocked}
                 className={`inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-[10px] font-semibold uppercase tracking-wide transition-all ${
-                  controlsLocked
+                  boardInteractionLocked
                     ? 'cursor-not-allowed bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] opacity-40'
                     : 'bg-[var(--fg)] text-[var(--panel)] hover:opacity-90'
                 }`}
@@ -660,6 +773,14 @@ export function KanbanBoardWorkspace({
               >
                 <IconPlus className="opacity-80" />
                 Lane
+              </button>
+              <button
+                type="button"
+                onClick={() => setTypesEditorOpen((prev) => !prev)}
+                className="inline-flex h-8 items-center justify-center rounded-full px-3 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)] transition-all hover:bg-[rgba(255,255,255,.04)] hover:text-[var(--fg)]"
+                style={{ fontFamily: 'var(--display)' }}
+              >
+                {typesEditorOpen ? 'Hide types' : 'Types'}
               </button>
               <button
                 type="button"
@@ -684,6 +805,38 @@ export function KanbanBoardWorkspace({
             controlsLocked={controlsLocked}
             repoContainerClassName="min-w-0"
           />
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={clearTypeFilters}
+              className={`inline-flex h-8 items-center rounded-full px-3 text-[10px] font-semibold uppercase tracking-wide transition-all ${
+                selectedTypeIdSet.size === 0
+                  ? 'bg-[var(--fg)] text-[var(--panel)]'
+                  : 'bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.07)] hover:text-[var(--fg)]'
+              }`}
+              style={{ fontFamily: 'var(--display)' }}
+            >
+              All
+            </button>
+            {activeTaskTypes.map((taskType) => {
+              const selected = selectedTypeIdSet.has(taskType.id);
+              return (
+                <button
+                  key={taskType.id}
+                  type="button"
+                  onClick={() => toggleTypeFilter(taskType.id)}
+                  className={`inline-flex h-8 items-center rounded-full px-3 text-[10px] font-semibold uppercase tracking-wide transition-all ${
+                    selected
+                      ? 'bg-[rgba(157,202,255,.18)] text-[#CBE2FF]'
+                      : 'bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.07)] hover:text-[var(--fg)]'
+                  }`}
+                  style={{ fontFamily: 'var(--display)' }}
+                >
+                  {taskType.label}
+                </button>
+              );
+            })}
+          </div>
           {(boardLoading || boardSaving || boardUpdatedAt || boardError) && (
             <div className="ml-auto text-[10px] text-[var(--muted-dim)]">
               {boardLoading ? (
@@ -700,6 +853,17 @@ export function KanbanBoardWorkspace({
             </div>
           )}
         </div>
+        {typesEditorOpen ? (
+          <KanbanTaskTypeEditor
+            taskTypes={board.taskTypes}
+            onAddTaskType={addTaskType}
+            onUpdateTaskType={updateTaskType}
+            onRemoveTaskType={removeTaskType}
+          />
+        ) : null}
+        {filteredSelectionActive ? (
+          <div className="px-6 pb-4 text-[10px] text-[var(--muted-dim)]">Drag-and-drop is disabled while task-type filters are active.</div>
+        ) : null}
       </div>
 
       <DndContext
@@ -711,7 +875,7 @@ export function KanbanBoardWorkspace({
       >
         <div className="flex-1 min-h-0 overflow-x-auto overflow-y-hidden px-6 py-6">
           <div className="flex h-full min-h-0 w-max items-start gap-6 pr-6">
-            {board.lanes.map((lane, laneIdx) => {
+            {visibleBoard.lanes.map((lane, laneIdx) => {
               const accent = laneAccent(laneIdx);
               return (
                 <section key={lane.id} className="flex h-full min-h-0 w-[300px] flex-col gap-3">
@@ -722,7 +886,7 @@ export function KanbanBoardWorkspace({
                         <input
                           value={lane.title}
                           onChange={(event) => updateLaneTitle(lane.id, event.target.value)}
-                          disabled={controlsLocked}
+                          disabled={boardInteractionLocked}
                           placeholder={`Lane ${laneIdx + 1}`}
                           className={`min-w-0 flex-1 bg-transparent font-medium focus:outline-none ${
                             controlsLocked ? 'cursor-not-allowed opacity-70' : ''
@@ -741,14 +905,14 @@ export function KanbanBoardWorkspace({
                     <button
                       type="button"
                       onClick={() => removeLane(lane.id)}
-                      disabled={controlsLocked || board.lanes.length <= 1}
+                      disabled={boardInteractionLocked || board.lanes.length <= 1}
                       className={`inline-flex h-7 w-7 items-center justify-center rounded-full transition-all ${
-                        controlsLocked || board.lanes.length <= 1
+                        boardInteractionLocked || board.lanes.length <= 1
                           ? 'cursor-not-allowed text-[var(--muted-dim)] opacity-30'
                           : 'text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.05)] hover:text-[var(--red)]'
                       }`}
                       title={
-                        controlsLocked ? 'Board is loading' : board.lanes.length <= 1 ? 'Keep at least one lane' : 'Delete lane'
+                        boardInteractionLocked ? 'Clear filters to edit lanes' : board.lanes.length <= 1 ? 'Keep at least one lane' : 'Delete lane'
                       }
                     >
                       <IconTrash className="opacity-80" />
@@ -758,9 +922,10 @@ export function KanbanBoardWorkspace({
                   <div className="flex-1 min-h-0 overflow-y-auto pr-1">
                     <KanbanLaneCards
                       lane={lane}
-                      controlsLocked={controlsLocked}
+                      controlsLocked={boardInteractionLocked}
                       selectedCardRef={selectedCardRef}
                       activeDragCardId={activeDragCardId}
+                      taskTypeLabelById={taskTypeLabelById}
                       onToggleCard={toggleCard}
                       onSelectCard={selectCard}
                       onUpdateCard={updateCard}
@@ -771,9 +936,9 @@ export function KanbanBoardWorkspace({
                   <button
                     type="button"
                     onClick={() => addCard(lane.id)}
-                    disabled={controlsLocked}
+                    disabled={boardInteractionLocked}
                     className={`inline-flex h-8 items-center gap-1.5 self-start rounded-full px-3 text-[10px] font-semibold uppercase tracking-wide transition-all ${
-                      controlsLocked
+                      boardInteractionLocked
                         ? 'cursor-not-allowed bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] opacity-40'
                         : 'bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.07)] hover:text-[var(--fg)]'
                     }`}
@@ -789,9 +954,9 @@ export function KanbanBoardWorkspace({
             <button
               type="button"
               onClick={addLane}
-              disabled={controlsLocked}
+              disabled={boardInteractionLocked}
               className={`inline-flex h-10 self-start items-center gap-1.5 rounded-full px-4 text-[10px] font-semibold uppercase tracking-wide transition-all ${
-                controlsLocked
+                boardInteractionLocked
                   ? 'cursor-not-allowed bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] opacity-40'
                   : 'bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.07)] hover:text-[var(--fg)]'
               }`}
@@ -803,7 +968,7 @@ export function KanbanBoardWorkspace({
           </div>
         </div>
         <DragOverlay>
-          {activeDragCard ? <DragOverlayKanbanCard card={activeDragCard} /> : null}
+          {activeDragCard ? <DragOverlayKanbanCard card={activeDragCard} taskTypeLabel={taskTypeLabelById[activeDragCard.typeId] ?? activeDragCard.typeId} /> : null}
         </DragOverlay>
       </DndContext>
     </div>

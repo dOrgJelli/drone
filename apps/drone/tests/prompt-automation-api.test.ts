@@ -179,7 +179,6 @@ describeSocketSuite('prompt automation api', () => {
       reg.pending = {};
       reg.drones = {};
       reg.archived = {};
-      reg.playbookFindings = {};
     });
   });
 
@@ -246,7 +245,7 @@ describeSocketSuite('prompt automation api', () => {
     expect(String(mockPromptJobs.get(promptId)?.state ?? '')).toBe('canceled');
   });
 
-  test('captures a playbook finding when a marked prompt reply completes', async () => {
+  test('captures a playbook task when a marked prompt reply completes', async () => {
     const droneId = 'playbook-finding-drone';
     const promptId = 'finding-prompt';
     const now = new Date().toISOString();
@@ -260,7 +259,16 @@ describeSocketSuite('prompt automation api', () => {
     });
     await updateRegistry((reg: any) => {
       reg.drones = reg.drones ?? {};
-      reg.playbookFindings = {};
+      reg.settings = {
+        kanbanBoard: {
+          taskTypes: [
+            { id: 'bug', label: 'Bug', active: true },
+            { id: 'feature', label: 'Feature', active: true },
+            { id: 'idea', label: 'Idea', active: true },
+          ],
+          lanes: [{ id: 'lane-1', title: 'To do', cards: [] }],
+        },
+      };
       reg.drones[droneId] = {
         id: droneId,
         name: 'playbook-finding-drone',
@@ -289,7 +297,8 @@ describeSocketSuite('prompt automation api', () => {
                 updatedAt: now,
                 prompt: 'Find one bug in this repo.',
                 messageId: 'message-1',
-                captureFinding: true,
+                createTask: true,
+                taskTypeId: 'bug',
                 state: 'sent',
               },
             ],
@@ -302,18 +311,18 @@ describeSocketSuite('prompt automation api', () => {
     expect(transcript.r.status).toBe(200);
 
     const reg = await loadRegistry();
-    const findingScopes = Object.values(reg.playbookFindings ?? {}) as Array<any>;
-    expect(findingScopes).toHaveLength(1);
-    expect(findingScopes[0]?.playbookId).toBe('bug-sweep');
-    expect(findingScopes[0]?.repoPath).toBe('/tmp/repo-under-test');
-    expect(findingScopes[0]?.findings).toMatchObject([
+    const lanes = (reg.settings?.kanbanBoard as any)?.lanes ?? [];
+    expect(lanes).toHaveLength(1);
+    expect(lanes[0]?.cards).toMatchObject([
       {
         playbookId: 'bug-sweep',
         playbookLabel: 'Bug sweep',
+        repoPath: '/tmp/repo-under-test',
         droneId,
         chatName: 'default',
         promptId,
         messageId: 'message-1',
+        typeId: 'bug',
         title: 'Crash when saving an empty draft',
       },
     ]);

@@ -4,6 +4,14 @@ import path from 'node:path';
 import dotenv from 'dotenv';
 
 import { loadRegistry, updateRegistry } from '../host/registry';
+import {
+  persistTaskBoardState,
+  sanitizeTaskBoardState,
+  type TaskBoardCard as KanbanBoardCard,
+  type TaskBoardLane as KanbanBoardLane,
+  type TaskBoardState as KanbanBoardSettings,
+  type TaskBoardTaskType as KanbanBoardTaskType,
+} from './task-board';
 
 let HUB_ENV_LOADED = false;
 export function loadHubEnv() {
@@ -101,19 +109,7 @@ export type EffectiveFilesystemSettings = {
   uploadMaxBytes: number;
   uploadMaxBytesSource: FilesystemSettingsSource;
 };
-export type KanbanBoardCard = {
-  id: string;
-  title: string;
-  description: string;
-};
-export type KanbanBoardLane = {
-  id: string;
-  title: string;
-  cards: KanbanBoardCard[];
-};
-export type KanbanBoardSettings = {
-  lanes: KanbanBoardLane[];
-};
+export type { KanbanBoardTaskType, KanbanBoardCard, KanbanBoardLane, KanbanBoardSettings };
 export type UiAutomationSleepUnit = 'seconds' | 'minutes' | 'hours' | 'days';
 export type UiAutomationConfig = {
   id: string;
@@ -149,7 +145,6 @@ const DEFAULT_SIDEBAR_GROUPING_MODE: SidebarGroupingMode = 'groups';
 export const FILESYSTEM_UPLOAD_MAX_BYTES_MIN = 1 * 1024 * 1024;
 export const FILESYSTEM_UPLOAD_MAX_BYTES_MAX = 8 * 1024 * 1024 * 1024;
 export const FILESYSTEM_UPLOAD_MAX_BYTES_DEFAULT = 2 * 1024 * 1024 * 1024;
-const DEFAULT_KANBAN_LANE_TITLES = ['To do', 'In progress', 'Review', 'Done'] as const;
 const UI_AUTOMATION_RUNS_MIN = 1;
 const UI_AUTOMATION_RUNS_MAX = 20;
 const UI_AUTOMATION_RUNS_DEFAULT = 5;
@@ -161,52 +156,6 @@ const UI_AUTOMATION_LABEL_MAX_CHARS = 72;
 const UI_AUTOMATION_PROMPT_MAX_CHARS = 8_000;
 const UI_AUTOMATION_ON_FAILURE_PROMPT_MAX_CHARS = 8_000;
 const UI_AUTOMATION_MAX_ITEMS = 40;
-
-function defaultKanbanLaneTitle(index: number): string {
-  return DEFAULT_KANBAN_LANE_TITLES[index] ?? `Lane ${index + 1}`;
-}
-
-function createKanbanEntityId(prefix: 'lane' | 'card'): string {
-  return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function createDefaultKanbanBoardSettings(): KanbanBoardSettings {
-  return {
-    lanes: DEFAULT_KANBAN_LANE_TITLES.map((title) => ({
-      id: createKanbanEntityId('lane'),
-      title,
-      cards: [],
-    })),
-  };
-}
-
-function sanitizeKanbanBoardSettings(value: unknown): KanbanBoardSettings {
-  const raw = value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-  const lanesRaw = Array.isArray(raw.lanes) ? raw.lanes : [];
-  const lanes: KanbanBoardLane[] = [];
-  for (let i = 0; i < lanesRaw.length; i += 1) {
-    const laneRaw = lanesRaw[i];
-    if (!laneRaw || typeof laneRaw !== 'object' || Array.isArray(laneRaw)) continue;
-    const laneRecord = laneRaw as Record<string, unknown>;
-    const cardsRaw = Array.isArray(laneRecord.cards) ? laneRecord.cards : [];
-    const cards: KanbanBoardCard[] = [];
-    for (const cardRaw of cardsRaw) {
-      if (!cardRaw || typeof cardRaw !== 'object' || Array.isArray(cardRaw)) continue;
-      const cardRecord = cardRaw as Record<string, unknown>;
-      cards.push({
-        id: String(cardRecord.id ?? '').trim() || createKanbanEntityId('card'),
-        title: String(cardRecord.title ?? '').trim(),
-        description: String(cardRecord.description ?? '').trim(),
-      });
-    }
-    lanes.push({
-      id: String(laneRecord.id ?? '').trim() || createKanbanEntityId('lane'),
-      title: String(laneRecord.title ?? '').trim() || defaultKanbanLaneTitle(i),
-      cards,
-    });
-  }
-  return lanes.length > 0 ? { lanes } : createDefaultKanbanBoardSettings();
-}
 
 export function parseLlmProvider(raw: unknown): LlmProviderId | null {
   const s = String(raw ?? '')
@@ -693,28 +642,16 @@ async function getStoredKanbanBoardSettings(): Promise<{ board: KanbanBoardSetti
   const raw = reg.settings?.kanbanBoard;
   const updatedAtRaw = raw?.updatedAt;
   return {
-    board: sanitizeKanbanBoardSettings(raw),
+    board: sanitizeTaskBoardState(raw),
     updatedAt: typeof updatedAtRaw === 'string' && updatedAtRaw.trim() ? updatedAtRaw : null,
   };
 }
 
 export async function upsertStoredKanbanBoardSettings(boardRaw: unknown): Promise<void> {
-  const board = sanitizeKanbanBoardSettings(boardRaw);
+  const board = sanitizeTaskBoardState(boardRaw);
   const updatedAt = new Date().toISOString();
   await updateRegistry((reg) => {
-    reg.settings ??= {};
-    reg.settings.kanbanBoard = {
-      lanes: board.lanes.map((lane) => ({
-        id: lane.id,
-        title: lane.title,
-        cards: lane.cards.map((card) => ({
-          id: card.id,
-          title: card.title,
-          description: card.description,
-        })),
-      })),
-      updatedAt,
-    };
+    persistTaskBoardState(reg, board, updatedAt);
   });
 }
 

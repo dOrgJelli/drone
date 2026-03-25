@@ -5,6 +5,7 @@ import { requestJson } from '../http';
 import type { CustomAgentProfile, PlaybookDefinition } from '../types';
 import { BUILTIN_AGENT_OPTIONS } from './app-config';
 import { makeId } from './helpers';
+import { createDefaultKanbanTaskTypes, type KanbanTaskType } from './kanban-board-state';
 import { PlaybookActionListEditor, PlaybookMessageListEditor, PlaybookTextListEditor } from './PlaybookSettingsEditors';
 import {
   createPlaybookDefinition,
@@ -69,7 +70,7 @@ function createEditablePlaybook(seed?: Partial<PlaybookDefinition>): EditablePla
     id: playbook.id || `local-${makeId()}`,
     agent: normalizePlaybookAgent(playbook.agent),
     model: playbook.model ?? null,
-    messages: playbook.messages.length > 0 ? playbook.messages : [{ id: `message-${makeId()}`, prompt: '', captureFinding: false }],
+    messages: playbook.messages.length > 0 ? playbook.messages : [{ id: `message-${makeId()}`, prompt: '', createTask: false, taskTypeId: null }],
     artifacts: playbook.artifacts ?? [],
     actions: playbook.actions ?? [],
   };
@@ -109,7 +110,8 @@ function patchEditablePlaybook(current: EditablePlaybook, patch: Partial<Playboo
             .map((item, index) => ({
               id: String(item?.id ?? '').trim() || `message-${index + 1}`,
               prompt: String(item?.prompt ?? '').slice(0, PLAYBOOK_MESSAGE_MAX_CHARS),
-              captureFinding: item?.captureFinding === true,
+              createTask: item?.createTask === true,
+              taskTypeId: typeof item?.taskTypeId === 'string' && String(item.taskTypeId).trim() ? String(item.taskTypeId).trim() : null,
             })),
         }
       : {}),
@@ -154,6 +156,13 @@ function validateEditablePlaybookForSave(playbook: EditablePlaybook): string | n
     return `"${label}" needs at least one message.`;
   }
 
+  const invalidTaskMessageIndex = playbook.messages.findIndex(
+    (message) => message.createTask === true && !String(message.taskTypeId ?? '').trim(),
+  );
+  if (invalidTaskMessageIndex >= 0) {
+    return `"${label}" has a task-creating message at row ${invalidTaskMessageIndex + 1} without a task type.`;
+  }
+
   const blankArtifactIndex = playbook.artifacts.findIndex((artifact) => !String(artifact ?? '').trim());
   if (blankArtifactIndex >= 0) {
     return `"${label}" has an empty artifact path at row ${blankArtifactIndex + 1}. Fill it in or delete it before saving.`;
@@ -178,6 +187,7 @@ export function PlaybookSettingsSection({
 }: PlaybookSettingsSectionProps) {
   const customAgents = useDroneHubUiStore((state) => state.customAgents);
   const [playbooks, setPlaybooks] = React.useState<EditablePlaybook[]>([]);
+  const [taskTypes, setTaskTypes] = React.useState<KanbanTaskType[]>(createDefaultKanbanTaskTypes());
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [savingById, setSavingById] = React.useState<Record<string, true>>({});
@@ -200,8 +210,12 @@ export function PlaybookSettingsSection({
     setLoading(true);
     setError(null);
     try {
-      const data = await requestJson<{ ok: true; playbooks: PlaybookDefinition[] }>('/api/playbooks');
+      const [data, boardData] = await Promise.all([
+        requestJson<{ ok: true; playbooks: PlaybookDefinition[] }>('/api/playbooks'),
+        requestJson<{ ok: true; kanbanBoard: { taskTypes?: KanbanTaskType[] } }>('/api/settings/kanban-board'),
+      ]);
       setPlaybooks((Array.isArray(data.playbooks) ? data.playbooks : []).map((item) => createEditablePlaybook(item)));
+      setTaskTypes(Array.isArray(boardData.kanbanBoard?.taskTypes) && boardData.kanbanBoard.taskTypes.length > 0 ? boardData.kanbanBoard.taskTypes : createDefaultKanbanTaskTypes());
     } catch (e: any) {
       setError(e?.message ?? String(e));
     } finally {
@@ -248,7 +262,7 @@ export function PlaybookSettingsSection({
       label: '',
       agent: { kind: 'builtin', id: 'cursor' },
       model: null,
-      messages: [{ id: `message-${makeId()}`, prompt: '', captureFinding: false }],
+      messages: [{ id: `message-${makeId()}`, prompt: '', createTask: false, taskTypeId: null }],
       artifacts: [],
       actions: [],
     });
@@ -508,10 +522,11 @@ export function PlaybookSettingsSection({
                     <div className="flex flex-col gap-2">
                       <PlaybookMessageListEditor
                         messages={playbook.messages}
+                        taskTypes={taskTypes}
                         addDisabled={playbook.messages.length >= PLAYBOOK_MAX_MESSAGES}
                         onAdd={() =>
                           updatePlaybook(playbook.clientId, {
-                            messages: [...playbook.messages, { id: `message-${makeId()}`, prompt: '', captureFinding: false }],
+                            messages: [...playbook.messages, { id: `message-${makeId()}`, prompt: '', createTask: false, taskTypeId: null }],
                           })
                         }
                         onUpdate={(messageId, patch) =>
@@ -522,7 +537,7 @@ export function PlaybookSettingsSection({
                         onDelete={(messageId) => {
                           const next = playbook.messages.filter((item) => item.id !== messageId);
                           updatePlaybook(playbook.clientId, {
-                            messages: next.length > 0 ? next : [{ id: `message-${makeId()}`, prompt: '', captureFinding: false }],
+                            messages: next.length > 0 ? next : [{ id: `message-${makeId()}`, prompt: '', createTask: false, taskTypeId: null }],
                           });
                         }}
                       />

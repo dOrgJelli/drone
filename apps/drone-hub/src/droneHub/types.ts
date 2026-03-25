@@ -519,7 +519,8 @@ export type CustomAgentProfile = { id: string; label: string; command: string };
 export type PlaybookMessageDefinition = {
   id: string;
   prompt: string;
-  captureFinding: boolean;
+  createTask: boolean;
+  taskTypeId: string | null;
 };
 
 export type PlaybookDefinition = {

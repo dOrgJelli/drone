@@ -157,32 +157,80 @@ export async function fleetRequestResolve(
   return await req(client, 'POST', `/v1/fleet/requests/${encodeURIComponent(id)}/resolve`, payload);
 }
 
-export async function playbookStateSet(
+export async function tasksStateSet(
   client: DroneClient,
   payload: {
     enabled: boolean;
     actor?: { id?: string | null; name?: string | null };
     playbook?: { id?: string | null; label?: string | null } | null;
     repoPath?: string | null;
-    findings?: Array<{
+    taskTypes?: Array<{
+      id?: string;
+      label?: string;
+      active?: boolean;
+    }>;
+    tasks?: Array<{
       id?: string;
       title?: string;
+      description?: string;
+      typeId?: string;
+      typeLabel?: string;
+      laneId?: string;
+      laneTitle?: string;
+      createdAt?: string;
+      updatedAt?: string;
+      droneId?: string;
+      droneName?: string;
+      playbookId?: string;
+      playbookLabel?: string;
+      chatName?: string;
       prompt?: string;
       promptId?: string;
       messageId?: string;
-      chatName?: string;
-      createdAt?: string;
-      droneId?: string;
-      droneName?: string;
     }>;
     updatedAt?: string;
   },
 ) {
-  return await req(client, 'POST', '/v1/playbook/state', payload);
+  return await req(client, 'POST', '/v1/tasks/state', payload);
 }
 
-export async function playbookFindings(client: DroneClient) {
-  return await req(client, 'GET', '/v1/playbook/findings');
+export async function tasksList(client: DroneClient, input?: { typeIds?: string[] }) {
+  const typeIds = Array.isArray(input?.typeIds) ? input.typeIds.map(String).map((item) => item.trim()).filter(Boolean) : [];
+  const qs =
+    typeIds.length > 0
+      ? `?${typeIds.map((item) => `type=${encodeURIComponent(item)}`).join('&')}`
+      : '';
+  return await req(client, 'GET', `/v1/tasks${qs}`);
+}
+
+export async function tasksSearch(client: DroneClient, input: { query: string; typeIds?: string[] }) {
+  const query = String(input?.query ?? '').trim();
+  const typeIds = Array.isArray(input?.typeIds) ? input.typeIds.map(String).map((item) => item.trim()).filter(Boolean) : [];
+  const params = [`q=${encodeURIComponent(query)}`, ...typeIds.map((item) => `type=${encodeURIComponent(item)}`)];
+  return await req(client, 'GET', `/v1/tasks/search?${params.join('&')}`);
+}
+
+export async function tasksCreate(
+  client: DroneClient,
+  payload: {
+    title: string;
+    typeId: string;
+    description?: string;
+  },
+) {
+  return await req(client, 'POST', '/v1/tasks', payload);
+}
+
+export async function tasksPendingCreateList(client: DroneClient) {
+  return await req(client, 'GET', '/v1/tasks/pending-creates');
+}
+
+export async function tasksPendingCreateAck(
+  client: DroneClient,
+  id: string,
+  payload?: { taskId?: string | null },
+) {
+  return await req(client, 'POST', `/v1/tasks/pending-creates/${encodeURIComponent(id)}/ack`, payload ?? {});
 }
 
 export async function terminalInput(client: DroneClient, payload: { session: string; data: string }) {

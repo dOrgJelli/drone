@@ -1,5 +1,6 @@
 import React from 'react';
 import type { PlaybookDefinition } from '../types';
+import type { KanbanTaskType } from './kanban-board-state';
 
 type PlaybookTextListEditorProps = {
   title: string;
@@ -86,6 +87,7 @@ export function PlaybookTextListEditor({
 
 type PlaybookMessageListEditorProps = {
   messages: PlaybookDefinition['messages'];
+  taskTypes: KanbanTaskType[];
   addDisabled?: boolean;
   onAdd: () => void;
   onUpdate: (messageId: string, patch: Partial<PlaybookDefinition['messages'][number]>) => void;
@@ -94,6 +96,7 @@ type PlaybookMessageListEditorProps = {
 
 export function PlaybookMessageListEditor({
   messages,
+  taskTypes,
   addDisabled,
   onAdd,
   onUpdate,
@@ -105,7 +108,7 @@ export function PlaybookMessageListEditor({
         <div>
           <label className="text-[11px] text-[var(--muted-dim)]">Run Messages</label>
           <div className="text-[10px] text-[var(--muted-dim)] mt-1">
-            Checked rows capture the reply as a finding title for future playbook runs.
+            Checked rows create tasks automatically from the reply, using the selected task type.
           </div>
         </div>
         <button
@@ -147,12 +150,36 @@ export function PlaybookMessageListEditor({
             <label className="inline-flex items-center gap-2 text-[11px] text-[var(--muted-dim)]">
               <input
                 type="checkbox"
-                checked={message.captureFinding === true}
-                onChange={(e) => onUpdate(message.id, { captureFinding: e.target.checked })}
+                checked={message.createTask === true}
+                onChange={(e) =>
+                  onUpdate(message.id, {
+                    createTask: e.target.checked,
+                    ...(e.target.checked
+                      ? { taskTypeId: message.taskTypeId ?? taskTypes.find((item) => item.active !== false)?.id ?? taskTypes[0]?.id ?? null }
+                      : {}),
+                  })
+                }
                 className="h-4 w-4 rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.2)]"
               />
-              Capture this reply as a finding title
+              Create a task from this reply
             </label>
+            {message.createTask === true ? (
+              <div className="grid grid-cols-1 sm:grid-cols-[96px_1fr] gap-2 items-center">
+                <label className="text-[11px] text-[var(--muted-dim)]">Task type</label>
+                <select
+                  value={message.taskTypeId ?? taskTypes.find((item) => item.active !== false)?.id ?? taskTypes[0]?.id ?? ''}
+                  onChange={(e) => onUpdate(message.id, { taskTypeId: e.target.value || null })}
+                  className="h-9 rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.2)] px-2 text-[12px] text-[var(--fg)] focus:outline-none focus:border-[var(--accent-muted)]"
+                >
+                  {taskTypes.map((taskType) => (
+                    <option key={taskType.id} value={taskType.id} disabled={taskType.active === false}>
+                      {taskType.label}
+                      {taskType.active === false ? ' (inactive)' : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
           </div>
         ))
       )}

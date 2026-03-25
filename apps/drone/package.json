@@ -5,7 +5,7 @@
   "bin": {
     "drone": "dist/cli.js",
     "fleet": "dist/fleet.js",
-    "playbook": "dist/playbook.js"
+    "tasks": "dist/tasks.js"
   },
   "main": "dist/cli.js",
   "type": "commonjs",
