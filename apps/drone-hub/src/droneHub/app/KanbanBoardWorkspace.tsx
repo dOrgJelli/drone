@@ -33,6 +33,7 @@ import {
   type KanbanTaskType,
 } from './kanban-board-state';
 import { IconBoard, IconPlus, IconTrash } from './icons';
+import { KanbanTaskDetailsDialog } from './KanbanTaskDetailsDialog';
 import { KanbanTaskTypeEditor } from './KanbanTaskTypeEditor';
 import { SpawnContextToolbar } from './SpawnContextToolbar';
 
@@ -48,6 +49,8 @@ type KanbanBoardWorkspaceProps = {
   onReloadBoard: () => void;
   onOpenCustomAgentModal: () => void;
   onSuggestCardTitleFromPaste: (description: string) => Promise<string | null>;
+  availableDroneIds: string[];
+  onOpenTaskDrone: (droneId: string) => void;
   onBoardChange: React.Dispatch<React.SetStateAction<KanbanBoardState>>;
   onClose: () => void;
 };
@@ -69,9 +72,7 @@ type SortableKanbanCardProps = {
   selected: boolean;
   activeDragCardId: string | null;
   taskTypeLabel: string;
-  onToggleCard: (laneId: string, cardId: string) => void;
-  onSelectCard: (laneId: string, cardId: string) => void;
-  onUpdateCard: (laneId: string, cardId: string, patch: { title?: string; description?: string; typeId?: string }) => void;
+  onOpenCard: (laneId: string, cardId: string) => void;
   onRemoveCard: (laneId: string, cardId: string) => void;
 };
 
@@ -81,9 +82,7 @@ type KanbanLaneCardsProps = {
   selectedCardRef: KanbanCardRef | null;
   activeDragCardId: string | null;
   taskTypeLabelById: Record<string, string>;
-  onToggleCard: (laneId: string, cardId: string) => void;
-  onSelectCard: (laneId: string, cardId: string) => void;
-  onUpdateCard: (laneId: string, cardId: string, patch: { title?: string; description?: string; typeId?: string }) => void;
+  onOpenCard: (laneId: string, cardId: string) => void;
   onRemoveCard: (laneId: string, cardId: string) => void;
 };
 
@@ -110,12 +109,6 @@ function cardCountLabel(count: number): string {
 
 function laneAccent(index: number): string {
   return LANE_ACCENTS[index % LANE_ACCENTS.length] ?? '#9DCAFF';
-}
-
-function descriptionSnippet(textRaw: string): string {
-  const normalized = String(textRaw ?? '').replace(/\s+/g, ' ').trim();
-  if (!normalized) return '';
-  return normalized.length > 92 ? `${normalized.slice(0, 89).trimEnd()}...` : normalized;
 }
 
 function findKanbanCardLocation(board: KanbanBoardState, cardIdRaw: string): KanbanCardLocation | null {
@@ -179,9 +172,7 @@ function SortableKanbanCard({
   selected,
   activeDragCardId,
   taskTypeLabel,
-  onToggleCard,
-  onSelectCard,
-  onUpdateCard,
+  onOpenCard,
   onRemoveCard,
 }: SortableKanbanCardProps) {
   const {
@@ -203,7 +194,6 @@ function SortableKanbanCard({
     }),
     [transform, transition],
   );
-  const snippet = descriptionSnippet(card.description);
 
   return (
     <article
@@ -213,7 +203,7 @@ function SortableKanbanCard({
       {...(controlsLocked ? {} : listeners)}
       onClick={(event) => {
         if (isCardControlTarget(event.target)) return;
-        onToggleCard(laneId, card.id);
+        onOpenCard(laneId, card.id);
       }}
       className={`rounded-[16px] border px-3.5 py-3 transition-all ${
         selected
@@ -226,27 +216,13 @@ function SortableKanbanCard({
           <div className="mb-2 inline-flex rounded-full bg-[rgba(255,255,255,.06)] px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]">
             {taskTypeLabel}
           </div>
-          {selected ? (
-            <input
-              value={card.title}
-              onPointerDown={stopCardDragActivation}
-              onFocus={() => onSelectCard(laneId, card.id)}
-              onChange={(event) => onUpdateCard(laneId, card.id, { title: event.target.value })}
-              disabled={controlsLocked}
-              placeholder="Task title"
-              className={`w-full bg-transparent text-[13px] font-medium focus:outline-none ${
-                controlsLocked ? 'cursor-not-allowed text-[var(--muted)] opacity-70' : 'text-[var(--fg)]'
-              }`}
-            />
-          ) : (
-            <div
-              className={`w-full bg-transparent text-left text-[13px] font-medium ${
-                controlsLocked ? 'cursor-not-allowed text-[var(--muted)] opacity-70' : 'text-[var(--fg)]'
-              }`}
-            >
-              {card.title || 'Untitled task'}
-            </div>
-          )}
+          <div
+            className={`w-full bg-transparent text-left text-[13px] font-medium ${
+              controlsLocked ? 'cursor-not-allowed text-[var(--muted)] opacity-70' : 'text-[var(--fg)]'
+            }`}
+          >
+            {card.title || 'Untitled task'}
+          </div>
         </div>
         <button
           type="button"
@@ -266,42 +242,17 @@ function SortableKanbanCard({
           <IconTrash className="opacity-80" />
         </button>
       </div>
-      {selected ? (
-        <div className="mt-3">
-          {card.playbookLabel || card.droneName ? (
-            <div className="mb-2 text-[10px] text-[var(--muted-dim)]">
-              {card.playbookLabel ? `${card.playbookLabel}` : `Reported by ${card.droneName}`}
-            </div>
-          ) : null}
-          <textarea
-            value={card.description}
-            onPointerDown={stopCardDragActivation}
-            onChange={(event) => onUpdateCard(laneId, card.id, { description: event.target.value })}
-            disabled={controlsLocked}
-            placeholder="Description"
-            rows={4}
-            className={`w-full resize-none bg-transparent text-[11px] leading-5 placeholder:text-[var(--muted-dim)] focus:outline-none ${
-              controlsLocked ? 'cursor-not-allowed text-[var(--muted-dim)] opacity-70' : 'text-[var(--muted)]'
-            }`}
-          />
-        </div>
-      ) : snippet ? (
-        <div className="mt-2 text-[11px] leading-5 text-[var(--muted-dim)]">{snippet}</div>
-      ) : null}
     </article>
   );
 }
 
 function DragOverlayKanbanCard({ card, taskTypeLabel }: { card: KanbanCard; taskTypeLabel: string }) {
-  const snippet = descriptionSnippet(card.description);
-
   return (
     <article className="w-[264px] rounded-[16px] border border-[rgba(255,255,255,.16)] bg-[rgba(24,24,28,.92)] px-3.5 py-3 shadow-[0_18px_48px_rgba(0,0,0,.38)] backdrop-blur-sm">
       <div className="mb-2 inline-flex rounded-full bg-[rgba(255,255,255,.06)] px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]">
         {taskTypeLabel}
       </div>
       <div className="text-[13px] font-medium text-[var(--fg)]">{card.title || 'Untitled task'}</div>
-      {snippet ? <div className="mt-2 text-[11px] leading-5 text-[var(--muted-dim)]">{snippet}</div> : null}
     </article>
   );
 }
@@ -312,9 +263,7 @@ function KanbanLaneCards({
   selectedCardRef,
   activeDragCardId,
   taskTypeLabelById,
-  onToggleCard,
-  onSelectCard,
-  onUpdateCard,
+  onOpenCard,
   onRemoveCard,
 }: KanbanLaneCardsProps) {
   const cardIds = React.useMemo(() => lane.cards.map((card) => card.id), [lane.cards]);
@@ -335,9 +284,7 @@ function KanbanLaneCards({
                 selected={selectedCardRef?.laneId === lane.id && selectedCardRef?.cardId === card.id}
                 activeDragCardId={activeDragCardId}
                 taskTypeLabel={taskTypeLabelById[card.typeId] ?? card.typeId}
-                onToggleCard={onToggleCard}
-                onSelectCard={onSelectCard}
-                onUpdateCard={onUpdateCard}
+                onOpenCard={onOpenCard}
                 onRemoveCard={onRemoveCard}
               />
             ))}
@@ -361,6 +308,8 @@ export function KanbanBoardWorkspace({
   onReloadBoard,
   onOpenCustomAgentModal,
   onSuggestCardTitleFromPaste,
+  availableDroneIds,
+  onOpenTaskDrone,
   onBoardChange,
   onClose,
 }: KanbanBoardWorkspaceProps) {
@@ -394,6 +343,10 @@ export function KanbanBoardWorkspace({
   const taskTypeLabelById = React.useMemo(
     () => Object.fromEntries(board.taskTypes.map((item) => [item.id, item.label])),
     [board.taskTypes],
+  );
+  const availableDroneIdSet = React.useMemo(
+    () => new Set(availableDroneIds.map((item) => String(item ?? '').trim()).filter(Boolean)),
+    [availableDroneIds],
   );
   const cardCount = React.useMemo(
     () => visibleBoard.lanes.reduce((sum, lane) => sum + lane.cards.length, 0),
@@ -433,18 +386,11 @@ export function KanbanBoardWorkspace({
     return fallbackTaskTypeId(board.taskTypes);
   }, [board.taskTypes, selectedTypeIdSet]);
 
-  const selectCard = React.useCallback((laneIdRaw: string, cardIdRaw: string) => {
+  const openCard = React.useCallback((laneIdRaw: string, cardIdRaw: string) => {
     const laneId = String(laneIdRaw ?? '').trim();
     const cardId = String(cardIdRaw ?? '').trim();
     if (!laneId || !cardId) return;
     setSelectedCardRef({ laneId, cardId });
-  }, []);
-
-  const toggleCard = React.useCallback((laneIdRaw: string, cardIdRaw: string) => {
-    const laneId = String(laneIdRaw ?? '').trim();
-    const cardId = String(cardIdRaw ?? '').trim();
-    if (!laneId || !cardId) return;
-    setSelectedCardRef((prev) => (prev?.laneId === laneId && prev.cardId === cardId ? null : { laneId, cardId }));
   }, []);
 
   const addLane = React.useCallback(() => {
@@ -616,7 +562,6 @@ export function KanbanBoardWorkspace({
           toIndex,
         }),
       );
-      setSelectedCardRef({ laneId: toLaneId, cardId: activeCardId });
     },
     [board, filteredSelectionActive, onBoardChange],
   );
@@ -711,6 +656,13 @@ export function KanbanBoardWorkspace({
     }));
     setSelectedTypeIds((prev) => prev.filter((item) => item !== taskTypeId));
   }, [board.taskTypes, onBoardChange]);
+
+  const handleOpenCreatorDrone = React.useCallback(() => {
+    const droneId = String(selectedCardEntry?.card.droneId ?? '').trim();
+    if (!droneId || !availableDroneIdSet.has(droneId)) return;
+    setSelectedCardRef(null);
+    onOpenTaskDrone(droneId);
+  }, [availableDroneIdSet, onOpenTaskDrone, selectedCardEntry]);
 
   return (
     <div
@@ -926,9 +878,7 @@ export function KanbanBoardWorkspace({
                       selectedCardRef={selectedCardRef}
                       activeDragCardId={activeDragCardId}
                       taskTypeLabelById={taskTypeLabelById}
-                      onToggleCard={toggleCard}
-                      onSelectCard={selectCard}
-                      onUpdateCard={updateCard}
+                      onOpenCard={openCard}
                       onRemoveCard={removeCard}
                     />
                   </div>
@@ -971,6 +921,25 @@ export function KanbanBoardWorkspace({
           {activeDragCard ? <DragOverlayKanbanCard card={activeDragCard} taskTypeLabel={taskTypeLabelById[activeDragCard.typeId] ?? activeDragCard.typeId} /> : null}
         </DragOverlay>
       </DndContext>
+      <KanbanTaskDetailsDialog
+        card={selectedCardEntry?.card ?? null}
+        laneTitle={selectedCardEntry?.lane.title ?? null}
+        taskTypes={board.taskTypes}
+        controlsLocked={controlsLocked}
+        creatorDroneAvailable={Boolean(
+          selectedCardEntry?.card.droneId && availableDroneIdSet.has(String(selectedCardEntry.card.droneId)),
+        )}
+        onClose={() => setSelectedCardRef(null)}
+        onUpdate={(patch) => {
+          if (!selectedCardEntry) return;
+          updateCard(selectedCardEntry.lane.id, selectedCardEntry.card.id, patch);
+        }}
+        onDelete={() => {
+          if (!selectedCardEntry) return;
+          removeCard(selectedCardEntry.lane.id, selectedCardEntry.card.id);
+        }}
+        onOpenCreatorDrone={handleOpenCreatorDrone}
+      />
     </div>
   );
 }
