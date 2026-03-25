@@ -210,6 +210,11 @@ export async function tasksSearch(client: DroneClient, input: { query: string; t
   return await req(client, 'GET', `/v1/tasks/search?${params.join('&')}`);
 }
 
+export async function tasksGet(client: DroneClient, taskId: string) {
+  const normalized = String(taskId ?? '').trim();
+  return await req(client, 'GET', `/v1/tasks/${encodeURIComponent(normalized)}`);
+}
+
 export async function tasksCreate(
   client: DroneClient,
   payload: {

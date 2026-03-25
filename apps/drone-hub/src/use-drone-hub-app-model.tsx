@@ -149,7 +149,6 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     selectedGroupMultiChat,
     kanbanBoardOpen,
     playbookRunsOpen,
-    kanbanBoard,
     selectedChat,
     draftChat,
     reposModalOpen,
@@ -185,7 +184,6 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setSelectedGroupMultiChat,
     setKanbanBoardOpen,
     setPlaybookRunsOpen,
-    setKanbanBoard,
     setGroupBroadcastExpanded,
     setSelectedChat,
     setDraftChat,
@@ -478,14 +476,15 @@ export function useDroneHubAppModel(): DroneHubAppModel {
   const droneIdentityByNameRef = React.useRef<Record<string, string>>({});
   const llmSettingsState = useLlmSettings(requestJson);
   const {
+    board,
     boardLoading,
     boardSaving,
     boardError,
     boardUpdatedAt,
     reloadBoard,
+    onBoardChange,
   } = useKanbanBoardSettings({
-    board: kanbanBoard,
-    setBoard: setKanbanBoard,
+    enabled: kanbanBoardOpen,
     requestJson,
   });
   useUiPreferencesSettings({ requestJson });
@@ -2566,8 +2565,8 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     onResetOnboarding: resetGuidedOnboardingDismissals,
     draftChat,
     kanbanBoardOpen,
-    kanbanBoard,
-    setKanbanBoard,
+    kanbanBoard: board,
+    onKanbanBoardChange: onBoardChange,
     boardLoading,
     boardSaving,
     boardError,

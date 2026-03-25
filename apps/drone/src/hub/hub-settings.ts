@@ -647,10 +647,30 @@ async function getStoredKanbanBoardSettings(): Promise<{ board: KanbanBoardSetti
   };
 }
 
-export async function upsertStoredKanbanBoardSettings(boardRaw: unknown): Promise<void> {
+export class KanbanBoardSettingsConflictError extends Error {
+  readonly board: KanbanBoardSettings;
+  readonly updatedAt: string | null;
+
+  constructor(board: KanbanBoardSettings, updatedAt: string | null) {
+    super('kanban board changed on the server');
+    this.name = 'KanbanBoardSettingsConflictError';
+    this.board = board;
+    this.updatedAt = updatedAt;
+  }
+}
+
+export async function upsertStoredKanbanBoardSettings(boardRaw: unknown, expectedUpdatedAtRaw?: unknown): Promise<void> {
   const board = sanitizeTaskBoardState(boardRaw);
   const updatedAt = new Date().toISOString();
+  const expectedUpdatedAt =
+    typeof expectedUpdatedAtRaw === 'string' && expectedUpdatedAtRaw.trim() ? expectedUpdatedAtRaw.trim() : null;
   await updateRegistry((reg) => {
+    const currentRaw = reg.settings?.kanbanBoard;
+    const currentUpdatedAt =
+      typeof currentRaw?.updatedAt === 'string' && currentRaw.updatedAt.trim() ? currentRaw.updatedAt.trim() : null;
+    if (expectedUpdatedAt !== undefined && expectedUpdatedAt !== currentUpdatedAt) {
+      throw new KanbanBoardSettingsConflictError(sanitizeTaskBoardState(currentRaw), currentUpdatedAt);
+    }
     persistTaskBoardState(reg, board, updatedAt);
   });
 }
