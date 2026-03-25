@@ -1942,6 +1942,15 @@ function normalizeDroneDisplayName(raw: any): string {
   if (/[\r\n]/.test(s)) throw new Error('invalid drone name (no newlines)');
   return s;
 }
+export function resolvePendingDroneDisplayName(pendingEntry: any, fallbackRaw: unknown): string {
+  return String(pendingEntry?.name ?? '').trim() || String(fallbackRaw ?? '').trim();
+}
+export function applyPendingDisplayNameToProvisionedDrone(droneEntry: any, pendingEntry: any, fallbackRaw: unknown): string {
+  const fallback = String(droneEntry?.name ?? '').trim() || String(fallbackRaw ?? '').trim();
+  const displayName = resolvePendingDroneDisplayName(pendingEntry, fallback);
+  if (displayName) droneEntry.name = displayName;
+  return displayName;
+}
 function droneDisplayNameExists(regAny: any, nameRaw: string): boolean {
   const name = String(nameRaw ?? '').trim();
   if (!name) return false;
@@ -6618,7 +6627,8 @@ async function provisionDroneFromPending(name: string) {
 
   const droneCli = resolveDroneCliPath();
   const repoArg = repoPath ? repoPath : '-';
-  const displayName = String(pending?.name ?? '').trim() || name;
+  const latestPendingForCreate: any = (await loadRegistry())?.pending?.[name] ?? pending;
+  const displayName = resolvePendingDroneDisplayName(latestPendingForCreate, String(pending?.name ?? '').trim() || name);
   const args: string[] = [droneCli, 'create', displayName, '--runtime', runtime, '--repo', repoArg, '--drone-id', pendingDroneId];
   if (group) args.push('--group', group);
   if (!build) args.push('--no-build');
@@ -6662,6 +6672,10 @@ async function provisionDroneFromPending(name: string) {
       const found = findDroneEntryByIdentity(regLatest, pendingDroneId);
       if (!found) return;
       const d = found.entry;
+      // A pending rename can land while provisioning is still running. Reapply the
+      // latest pending display name so the real drone entry never falls back to a
+      // stale Untitled* name from an earlier create/import call.
+      applyPendingDisplayNameToProvisionedDrone(d, pendingLatest, displayName);
       d.kind = pendingKind;
       d.visibility = pendingVisibility;
       if (pendingPlaybook) d.playbook = pendingPlaybook;
