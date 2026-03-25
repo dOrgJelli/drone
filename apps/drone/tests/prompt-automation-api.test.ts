@@ -245,7 +245,7 @@ describeSocketSuite('prompt automation api', () => {
     expect(String(mockPromptJobs.get(promptId)?.state ?? '')).toBe('canceled');
   });
 
-  test('captures a playbook task when a marked prompt reply completes', async () => {
+  test('playbook prompt replies do not create tasks automatically', async () => {
     const droneId = 'playbook-finding-drone';
     const promptId = 'finding-prompt';
     const now = new Date().toISOString();
@@ -297,8 +297,6 @@ describeSocketSuite('prompt automation api', () => {
                 updatedAt: now,
                 prompt: 'Find one bug in this repo.',
                 messageId: 'message-1',
-                createTask: true,
-                taskTypeId: 'bug',
                 state: 'sent',
               },
             ],
@@ -313,19 +311,7 @@ describeSocketSuite('prompt automation api', () => {
     const reg = await loadRegistry();
     const lanes = (reg.settings?.kanbanBoard as any)?.lanes ?? [];
     expect(lanes).toHaveLength(1);
-    expect(lanes[0]?.cards).toMatchObject([
-      {
-        playbookId: 'bug-sweep',
-        playbookLabel: 'Bug sweep',
-        repoPath: '/tmp/repo-under-test',
-        droneId,
-        chatName: 'default',
-        promptId,
-        messageId: 'message-1',
-        typeId: 'bug',
-        title: 'Crash when saving an empty draft',
-      },
-    ]);
+    expect(lanes[0]?.cards ?? []).toEqual([]);
   });
 
   test('stop endpoint ignores recently completed prompts that already exist in the transcript', async () => {
