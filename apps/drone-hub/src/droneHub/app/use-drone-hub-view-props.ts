@@ -385,7 +385,7 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
     kanbanBoardOpen,
     playbookRunsOpen,
     kanbanBoard,
-    setKanbanBoard,
+    onKanbanBoardChange,
     boardLoading,
     boardSaving,
     boardError,
@@ -617,7 +617,7 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
           onReloadBoard: reloadBoard,
           onOpenCustomAgentModal: () => setCustomAgentModalOpen(true),
           onSuggestCardTitleFromPaste: suggestKanbanCardTitleFromPaste,
-          onBoardChange: setKanbanBoard,
+          onBoardChange: onKanbanBoardChange,
           onClose: () => setKanbanBoardOpen(false),
         }
       : null,

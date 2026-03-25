@@ -1,34 +1,15 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, test } from 'bun:test';
-import { resetDroneRootDirForTests } from '../src/host/paths';
 import {
   resolveUiPreferencesSettingsResponse,
   upsertStoredUiPreferencesSettings,
 } from '../src/hub/hub-settings';
-
-async function withTempDroneDataDir<T>(fn: (droneDataDir: string) => Promise<T>): Promise<T> {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'drone-ui-preferences-'));
-  const droneDataDir = path.join(tempRoot, 'drone-data');
-  fs.mkdirSync(droneDataDir, { recursive: true });
-  const prevDroneDataDir = process.env.DRONE_DATA_DIR;
-  process.env.DRONE_DATA_DIR = droneDataDir;
-  resetDroneRootDirForTests();
-
-  try {
-    return await fn(droneDataDir);
-  } finally {
-    if (prevDroneDataDir == null) delete process.env.DRONE_DATA_DIR;
-    else process.env.DRONE_DATA_DIR = prevDroneDataDir;
-    resetDroneRootDirForTests();
-    fs.rmSync(tempRoot, { recursive: true, force: true });
-  }
-}
+import { withTempDroneDataDir } from './test-helpers';
 
 describe('ui preferences settings persistence', () => {
   test('returns defaults before anything is stored', async () => {
-    await withTempDroneDataDir(async () => {
+    await withTempDroneDataDir('drone-ui-preferences-', async () => {
       const resolved = await resolveUiPreferencesSettingsResponse();
       expect(resolved.updatedAt).toBeNull();
       expect(resolved.uiPreferences.sidebarGroupingMode).toBe('groups');
@@ -39,7 +20,7 @@ describe('ui preferences settings persistence', () => {
   });
 
   test('round-trips backend ui preferences and sanitizes invalid values', async () => {
-    await withTempDroneDataDir(async (droneDataDir) => {
+    await withTempDroneDataDir('drone-ui-preferences-', async (droneDataDir) => {
       await upsertStoredUiPreferencesSettings({
         sidebarGroupingMode: 'repos',
         sidebarGroupOrder: ['alpha', 'beta', 'alpha', '', '  '],

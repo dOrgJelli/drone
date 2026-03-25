@@ -313,6 +313,18 @@ describeSocketSuite('fleet daemon', () => {
       typeId: 'bug',
     });
 
+    const getResponse = await fetch(`${baseUrl}/v1/tasks/${encodeURIComponent('task-1')}`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    const getData: any = await getResponse.json();
+    expect(getResponse.status).toBe(200);
+    expect(getData?.task).toMatchObject({
+      id: 'task-1',
+      title: 'Crash when saving an empty draft',
+      typeId: 'bug',
+      messageId: 'message-1',
+    });
+
     const createResponse = await fetch(`${baseUrl}/v1/tasks`, {
       method: 'POST',
       headers: {

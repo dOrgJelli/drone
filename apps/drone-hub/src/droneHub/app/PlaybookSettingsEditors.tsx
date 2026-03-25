@@ -136,7 +136,8 @@ export function PlaybookMessageListEditor({
                 Delete
               </button>
             </div>
-            <textarea
+            <input
+              type="text"
               value={message.name ?? ''}
               onChange={(e) => onUpdate(message.id, { name: e.target.value || null })}
               className="w-full h-9 rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.2)] px-3 text-[12px] text-[var(--fg)] focus:outline-none focus:border-[var(--accent-muted)]"

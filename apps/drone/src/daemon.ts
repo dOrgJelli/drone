@@ -17,6 +17,7 @@ import {
 import { preferredTerminalSessionLogsRoot } from './host/session-logs';
 import { missingHostDependencyMessage } from './host/runtime';
 import {
+  findTaskById,
   filterTasksByTypeIds,
   firstTaskTypeId,
   normalizePendingTaskCreateRequest,
@@ -904,6 +905,25 @@ async function main() {
           playbook: snapshot.playbook,
           repoPath: snapshot.repoPath,
           requests: await loadPendingTaskCreates(dataDir),
+        });
+        return;
+      }
+
+      if (method === 'GET' && /^\/v1\/tasks\/[^/]+$/.test(pathname)) {
+        const snapshot = await loadTaskStateSnapshot(dataDir);
+        if (!snapshot.enabled || !snapshot.playbook?.id) {
+          json(res, 409, { error: 'this drone was not created by a playbook' });
+          return;
+        }
+        const taskId = decodeURIComponent(pathname.slice('/v1/tasks/'.length));
+        const task = findTaskById(snapshot, taskId);
+        if (!task) {
+          json(res, 404, { error: `task not found: ${taskId}` });
+          return;
+        }
+        json(res, 200, {
+          ...taskSummaryForResponse(snapshot, []),
+          task,
         });
         return;
       }

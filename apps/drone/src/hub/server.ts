@@ -149,6 +149,7 @@ import {
   collectProviderApiKeyDiagnostics,
   FILESYSTEM_UPLOAD_MAX_BYTES_MAX,
   FILESYSTEM_UPLOAD_MAX_BYTES_MIN,
+  KanbanBoardSettingsConflictError,
   hubLog,
   loadHubEnv,
   parseArchiveRetentionId,
@@ -9196,7 +9197,20 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             json(res, 400, { ok: false, error: e?.message ?? String(e) });
             return;
           }
-          await upsertStoredKanbanBoardSettings(body?.kanbanBoard);
+          try {
+            await upsertStoredKanbanBoardSettings(body?.kanbanBoard, body?.expectedUpdatedAt);
+          } catch (e: any) {
+            if (e instanceof KanbanBoardSettingsConflictError) {
+              json(res, 409, {
+                ok: false,
+                error: e.message,
+                kanbanBoard: e.board,
+                updatedAt: e.updatedAt,
+              });
+              return;
+            }
+            throw e;
+          }
           json(res, 200, await resolveKanbanBoardSettingsResponse());
           return;
         }

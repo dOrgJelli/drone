@@ -145,6 +145,12 @@ export function filterTasksByTypeIds(snapshot: TaskStateSnapshot, rawTypeIds: st
   return snapshot.tasks.filter((task) => typeIdSet.has(task.typeId));
 }
 
+export function findTaskById(snapshot: TaskStateSnapshot, taskIdRaw: string): TaskStateSnapshot['tasks'][number] | null {
+  const taskId = String(taskIdRaw ?? '').trim();
+  if (!taskId) return null;
+  return snapshot.tasks.find((task) => task.id === taskId) ?? null;
+}
+
 export function taskSummaryForResponse(snapshot: TaskStateSnapshot, tasks: TaskStateSnapshot['tasks']) {
   return {
     ok: true,
