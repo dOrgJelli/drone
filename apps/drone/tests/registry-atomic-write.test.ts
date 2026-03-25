@@ -71,8 +71,10 @@ describe('registry writes', () => {
       const writeStarted = new Promise<void>((resolve) => {
         fsPromises.writeFile = async (...args: any[]) => {
           const [targetPath, data, ...rest] = args;
-          const target = String(targetPath ?? '');
-          if (!intercepted && /registry\..*\.tmp$/.test(path.basename(target))) {
+          const target = path.resolve(String(targetPath ?? ''));
+          const isOwnRegistryTempWrite =
+            path.dirname(target) === path.resolve(preferredDir) && /registry\..*\.tmp$/.test(path.basename(target));
+          if (!intercepted && isOwnRegistryTempWrite) {
             intercepted = true;
             const text = typeof data === 'string' ? data : Buffer.from(data).toString('utf8');
             const partial = text.slice(0, Math.max(1, Math.floor(text.length / 3)));
