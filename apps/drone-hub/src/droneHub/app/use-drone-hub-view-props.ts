@@ -429,6 +429,7 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
     groupBroadcastSending,
     sendGroupBroadcastPrompt,
     uiDroneName,
+    drones,
     selectDroneCard,
     selectDroneChat,
     deleteDrone,
@@ -617,6 +618,11 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
           onReloadBoard: reloadBoard,
           onOpenCustomAgentModal: () => setCustomAgentModalOpen(true),
           onSuggestCardTitleFromPaste: suggestKanbanCardTitleFromPaste,
+          availableDroneIds: drones.map((drone: any) => String(drone?.id ?? '').trim()).filter(Boolean),
+          onOpenTaskDrone: (droneId: string) => {
+            setKanbanBoardOpen(false);
+            selectDroneCard(droneId);
+          },
           onBoardChange: onKanbanBoardChange,
           onClose: () => setKanbanBoardOpen(false),
         }

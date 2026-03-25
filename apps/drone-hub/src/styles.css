@@ -155,6 +155,175 @@ code, pre {
 }
 .animate-border-glow { animation: border-glow 2s ease-in-out infinite; }
 
+@keyframes card-enter {
+  from { opacity: 0; transform: translateY(8px) scale(.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.animate-card-enter {
+  animation: card-enter .28s cubic-bezier(.16,1,.3,1) both;
+}
+
+@keyframes shimmer-bar {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(200%); }
+}
+
+@keyframes accent-glow-pulse {
+  0%, 100% { box-shadow: 0 0 12px rgba(167, 139, 250, .12), 0 0 40px rgba(167, 139, 250, .04); }
+  50% { box-shadow: 0 0 20px rgba(167, 139, 250, .22), 0 0 60px rgba(167, 139, 250, .08); }
+}
+.animate-accent-glow { animation: accent-glow-pulse 2.5s ease-in-out infinite; }
+
+@keyframes status-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .45; }
+}
+
+/* ──────────────────────────────────────────────────────────
+   Kanban board refinements
+   ────────────────────────────────────────────────────────── */
+
+.dh-lane-column {
+  border-radius: 16px;
+  border: 1px solid var(--border-subtle);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.025) 0%, transparent 120px),
+    rgba(255,255,255,.015);
+  overflow: hidden;
+}
+
+.dh-lane-accent {
+  height: 3px;
+  border-radius: 0 0 2px 2px;
+}
+
+.dh-kanban-card {
+  position: relative;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,.06);
+  background:
+    linear-gradient(135deg, rgba(255,255,255,.035) 0%, rgba(255,255,255,.015) 100%);
+  transition: all .18s cubic-bezier(.16,1,.3,1);
+}
+.dh-kanban-card:hover {
+  border-color: rgba(255,255,255,.12);
+  background:
+    linear-gradient(135deg, rgba(255,255,255,.06) 0%, rgba(255,255,255,.025) 100%);
+  box-shadow: 0 4px 20px rgba(0,0,0,.18);
+  transform: translateY(-1px);
+}
+.dh-kanban-card.is-selected {
+  border-color: rgba(167, 139, 250, .28);
+  background:
+    linear-gradient(135deg, rgba(167, 139, 250, .08) 0%, rgba(255,255,255,.025) 100%);
+  box-shadow: 0 0 16px rgba(167, 139, 250, .08);
+}
+.dh-kanban-card.is-dragging {
+  opacity: .25;
+  transform: none;
+}
+
+.dh-kanban-card-accent {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 3px;
+  height: 100%;
+  border-radius: 14px 0 0 14px;
+  opacity: .5;
+  transition: opacity .15s;
+}
+.dh-kanban-card:hover .dh-kanban-card-accent {
+  opacity: .85;
+}
+
+/* ──────────────────────────────────────────────────────────
+   Playbook runs refinements
+   ────────────────────────────────────────────────────────── */
+
+.dh-run-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 999px;
+  padding: 3px 10px 3px 8px;
+  font-family: var(--display);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  border: 1px solid;
+}
+.dh-run-status-badge::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.dh-run-status-badge--running {
+  border-color: rgba(74, 222, 128, .3);
+  background: rgba(74, 222, 128, .08);
+  color: var(--green);
+}
+.dh-run-status-badge--running::before {
+  background: var(--green);
+  animation: status-blink 1.6s ease-in-out infinite;
+}
+.dh-run-status-badge--completed {
+  border-color: rgba(148, 163, 184, .22);
+  background: rgba(148, 163, 184, .06);
+  color: var(--muted);
+}
+.dh-run-status-badge--completed::before {
+  background: var(--muted);
+}
+.dh-run-status-badge--error {
+  border-color: rgba(255, 90, 90, .3);
+  background: rgba(255, 90, 90, .08);
+  color: var(--red);
+}
+.dh-run-status-badge--error::before {
+  background: var(--red);
+}
+.dh-run-status-badge--idle {
+  border-color: var(--border-subtle);
+  background: rgba(255,255,255,.03);
+  color: var(--muted-dim);
+}
+.dh-run-status-badge--idle::before {
+  background: var(--muted-dim);
+}
+
+.dh-selection-card {
+  position: relative;
+  transition: all .15s ease;
+}
+.dh-selection-card.is-active {
+  background: linear-gradient(135deg, rgba(167, 139, 250, .1) 0%, rgba(167, 139, 250, .04) 100%);
+  border-color: rgba(167, 139, 250, .22);
+  box-shadow: 0 0 20px rgba(167, 139, 250, .06);
+}
+.dh-selection-card:not(.is-active):hover {
+  background: rgba(255,255,255,.04);
+  border-color: rgba(255,255,255,.08);
+}
+
+.dh-runs-table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.dh-runs-table thead th {
+  font-family: var(--display);
+  background: linear-gradient(180deg, rgba(255,255,255,.04) 0%, rgba(255,255,255,.02) 100%);
+}
+.dh-runs-table tbody tr {
+  transition: background .12s ease;
+}
+.dh-runs-table tbody tr:hover {
+  background: rgba(255,255,255,.03);
+}
+
 /* ──────────────────────────────────────────────────────────
    Scrollbars
    ────────────────────────────────────────────────────────── */

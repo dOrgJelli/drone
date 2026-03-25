@@ -2611,6 +2611,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     deleteDrone,
     deletingDrones,
     parseJobsFromAgentMessage,
+    drones,
     dronesLoading,
     sidebarDrones,
     dronesError,
