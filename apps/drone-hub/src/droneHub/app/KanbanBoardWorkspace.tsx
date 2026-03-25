@@ -86,7 +86,7 @@ type KanbanLaneCardsProps = {
   onRemoveCard: (laneId: string, cardId: string) => void;
 };
 
-const LANE_ACCENTS = ['#D6D06B', '#75B3FF', '#F0B447', '#39D59C'] as const;
+const LANE_ACCENTS = ['#E0C84F', '#6AABFF', '#F5A623', '#34D399', '#C084FC', '#F472B6'] as const;
 
 function isEditablePasteTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -135,13 +135,21 @@ function EmptyKanbanLaneDropTarget({ laneId, controlsLocked }: { laneId: string;
   return (
     <div
       ref={setNodeRef}
-      className={`rounded-[14px] border px-3 py-5 text-[11px] text-[var(--muted-dim)] transition-all ${
+      className={`relative overflow-hidden rounded-[14px] border px-4 py-6 text-center text-[11px] text-[var(--muted-dim)] transition-all ${
         isOver
-          ? 'border-[rgba(157,202,255,.5)] bg-[rgba(157,202,255,.08)]'
-          : 'border-dashed border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)]'
+          ? 'border-[rgba(167,139,250,.45)] bg-[rgba(167,139,250,.08)]'
+          : 'border-dashed border-[rgba(255,255,255,.08)] bg-[rgba(255,255,255,.015)]'
       }`}
     >
-      Add a task or paste plain text on the board background.
+      {isOver && (
+        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,rgba(167,139,250,.1),transparent_70%)]" />
+      )}
+      <div className="relative">
+        <div className="mx-auto mb-2 flex h-8 w-8 items-center justify-center rounded-full bg-[rgba(255,255,255,.04)]">
+          <IconPlus className="opacity-30" />
+        </div>
+        <span>Drop a task here or click <strong className="text-[var(--muted)]">Add task</strong> below</span>
+      </div>
     </div>
   );
 }
@@ -156,11 +164,11 @@ function KanbanLaneEndDropTarget({ laneId, controlsLocked }: { laneId: string; c
   return (
     <div
       ref={setNodeRef}
-      className={`mx-3 h-4 rounded-full transition-all ${
-        isOver ? 'bg-[rgba(157,202,255,.22)]' : 'bg-transparent'
+      className={`mx-2 h-5 rounded-lg transition-all ${
+        isOver ? 'bg-[rgba(167,139,250,.14)]' : 'bg-transparent'
       }`}
     >
-      <div className={`mx-auto mt-[7px] h-0.5 rounded-full transition-all ${isOver ? 'w-full bg-[rgba(157,202,255,.9)]' : 'w-10 bg-[rgba(255,255,255,.07)]'}`} />
+      <div className={`mx-auto mt-[9px] h-0.5 rounded-full transition-all ${isOver ? 'w-3/4 bg-[var(--accent)]' : 'w-8 bg-[rgba(255,255,255,.06)]'}`} />
     </div>
   );
 }
@@ -195,6 +203,8 @@ function SortableKanbanCard({
     [transform, transition],
   );
 
+  const dragging = isDragging || activeDragCardId === card.id;
+
   return (
     <article
       ref={setNodeRef}
@@ -205,24 +215,26 @@ function SortableKanbanCard({
         if (isCardControlTarget(event.target)) return;
         onOpenCard(laneId, card.id);
       }}
-      className={`rounded-[16px] border px-3.5 py-3 transition-all ${
-        selected
-          ? 'border-[rgba(255,255,255,.16)] bg-[rgba(255,255,255,.08)]'
-          : 'border-[rgba(255,255,255,.05)] bg-[rgba(255,255,255,.03)] hover:bg-[rgba(255,255,255,.05)]'
-      } ${isDragging || activeDragCardId === card.id ? 'cursor-grabbing opacity-25' : controlsLocked ? '' : 'cursor-grab touch-none active:cursor-grabbing'}`}
+      className={`dh-kanban-card animate-card-enter px-4 py-3.5 ${
+        selected ? 'is-selected' : ''
+      } ${dragging ? 'is-dragging' : ''} ${controlsLocked ? '' : 'cursor-grab touch-none active:cursor-grabbing'}`}
     >
       <div className="flex items-start gap-2">
         <div className="min-w-0 flex-1">
-          <div className="mb-2 inline-flex rounded-full bg-[rgba(255,255,255,.06)] px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]">
+          <div className="mb-2.5 inline-flex items-center gap-1.5 rounded-md bg-[rgba(255,255,255,.05)] px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.07em] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+            <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--accent-muted)] opacity-60" />
             {taskTypeLabel}
           </div>
           <div
-            className={`w-full bg-transparent text-left text-[13px] font-medium ${
+            className={`w-full bg-transparent text-left text-[13px] font-medium leading-snug ${
               controlsLocked ? 'cursor-not-allowed text-[var(--muted)] opacity-70' : 'text-[var(--fg)]'
             }`}
           >
             {card.title || 'Untitled task'}
           </div>
+          {card.description && (
+            <div className="mt-1.5 text-[11px] text-[var(--muted-dim)] line-clamp-2 leading-relaxed">{card.description}</div>
+          )}
         </div>
         <button
           type="button"
@@ -232,10 +244,10 @@ function SortableKanbanCard({
           }}
           onPointerDown={stopCardDragActivation}
           disabled={controlsLocked}
-          className={`inline-flex h-7 w-7 items-center justify-center rounded-full transition-all ${
+          className={`mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg transition-all ${
             controlsLocked
-              ? 'cursor-not-allowed text-[var(--muted-dim)] opacity-30'
-              : 'text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.05)] hover:text-[var(--red)]'
+              ? 'cursor-not-allowed text-[var(--muted-dim)] opacity-20'
+              : 'text-[var(--muted-dim)] opacity-0 group-hover:opacity-100 hover:bg-[rgba(255,90,90,.12)] hover:text-[var(--red)]'
           }`}
           title={controlsLocked ? 'Board is loading' : 'Delete task'}
         >
@@ -248,11 +260,12 @@ function SortableKanbanCard({
 
 function DragOverlayKanbanCard({ card, taskTypeLabel }: { card: KanbanCard; taskTypeLabel: string }) {
   return (
-    <article className="w-[264px] rounded-[16px] border border-[rgba(255,255,255,.16)] bg-[rgba(24,24,28,.92)] px-3.5 py-3 shadow-[0_18px_48px_rgba(0,0,0,.38)] backdrop-blur-sm">
-      <div className="mb-2 inline-flex rounded-full bg-[rgba(255,255,255,.06)] px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]">
+    <article className="w-[272px] rounded-[14px] border border-[rgba(167,139,250,.3)] bg-[rgba(18,21,27,.95)] px-4 py-3.5 shadow-[0_24px_64px_rgba(0,0,0,.5),0_0_24px_rgba(167,139,250,.08)] backdrop-blur-md">
+      <div className="mb-2.5 inline-flex items-center gap-1.5 rounded-md bg-[rgba(255,255,255,.06)] px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.07em] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+        <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--accent)] opacity-80" />
         {taskTypeLabel}
       </div>
-      <div className="text-[13px] font-medium text-[var(--fg)]">{card.title || 'Untitled task'}</div>
+      <div className="text-[13px] font-medium leading-snug text-[var(--fg)]">{card.title || 'Untitled task'}</div>
     </article>
   );
 }
@@ -269,7 +282,7 @@ function KanbanLaneCards({
   const cardIds = React.useMemo(() => lane.cards.map((card) => card.id), [lane.cards]);
 
   return (
-    <div className="space-y-2 rounded-[18px] p-1">
+    <div className="space-y-2.5 p-1">
       <SortableContext items={cardIds} strategy={verticalListSortingStrategy}>
         {lane.cards.length === 0 ? (
           <EmptyKanbanLaneDropTarget laneId={lane.id} controlsLocked={controlsLocked} />
@@ -675,147 +688,157 @@ export function KanbanBoardWorkspace({
       }}
       className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden outline-none"
     >
-      <div className="flex-shrink-0 border-b border-[var(--border-subtle)] bg-[linear-gradient(180deg,rgba(255,255,255,.03),rgba(255,255,255,.01))]">
-        <div className="px-6 py-4">
-          <div className="flex items-start justify-between gap-4">
-            <div className="flex items-start gap-3 min-w-0">
-              <div className="mt-0.5 flex h-9 w-9 items-center justify-center rounded-full bg-[rgba(255,255,255,.05)] text-[var(--fg)]">
-                <IconBoard />
-              </div>
-              <div className="min-w-0">
-                <div className="flex items-center gap-2.5">
-                  <span className="text-sm font-semibold tracking-tight" style={{ fontFamily: 'var(--display)' }}>
-                    Task board
-                  </span>
-                  <span className="inline-flex items-center rounded-full bg-[rgba(255,255,255,.04)] px-2 py-1 text-[10px] font-medium text-[var(--muted-dim)]">
-                    {laneCountLabel(laneCount)} • {cardCountLabel(cardCount)}
-                  </span>
+      <div className="relative flex-shrink-0 border-b border-[var(--border-subtle)]">
+        <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(167,139,250,.04)_0%,transparent_80%)]" />
+        <div className="dh-noise relative">
+          <div className="px-6 py-5">
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex items-start gap-3.5 min-w-0">
+                <div className="mt-0.5 flex h-10 w-10 items-center justify-center rounded-xl bg-[rgba(167,139,250,.1)] text-[var(--accent)] shadow-[0_0_16px_rgba(167,139,250,.08)]">
+                  <IconBoard />
                 </div>
-                <div className="mt-1 text-[11px] text-[var(--muted)]">
-                  Paste plain text to add a task into the first lane. Filter by task type, or clear filters to drag tasks between lanes.
+                <div className="min-w-0">
+                  <div className="flex items-center gap-3">
+                    <span className="text-[15px] font-semibold tracking-tight text-[var(--fg)]" style={{ fontFamily: 'var(--display)' }}>
+                      Task Board
+                    </span>
+                    <span className="inline-flex items-center gap-1.5 rounded-md bg-[rgba(255,255,255,.04)] px-2.5 py-1 text-[10px] font-medium text-[var(--muted-dim)]" style={{ fontFamily: 'var(--code)' }}>
+                      {laneCount}<span className="opacity-40">L</span> {cardCount}<span className="opacity-40">T</span>
+                    </span>
+                  </div>
+                  <div className="mt-1.5 text-[11px] text-[var(--muted)] leading-relaxed max-w-[52ch]">
+                    Organize work across lanes. Paste text to create tasks, drag to reorder, filter by type.
+                  </div>
                 </div>
               </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={onReloadBoard}
-                disabled={boardLoading}
-                className={`inline-flex h-8 items-center justify-center rounded-full px-3 text-[10px] font-semibold uppercase tracking-wide transition-all ${
-                  boardLoading
-                    ? 'cursor-not-allowed bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] opacity-40'
-                    : 'bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.07)] hover:text-[var(--fg)]'
-                }`}
-                style={{ fontFamily: 'var(--display)' }}
-                title="Reload saved board from hub storage"
-              >
-                {boardLoading ? 'Loading' : 'Reload'}
-              </button>
-              <button
-                type="button"
-                onClick={addLane}
-                disabled={boardInteractionLocked}
-                className={`inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-[10px] font-semibold uppercase tracking-wide transition-all ${
-                  boardInteractionLocked
-                    ? 'cursor-not-allowed bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] opacity-40'
-                    : 'bg-[var(--fg)] text-[var(--panel)] hover:opacity-90'
-                }`}
-                style={{ fontFamily: 'var(--display)' }}
-                title="Add a new lane"
-              >
-                <IconPlus className="opacity-80" />
-                Lane
-              </button>
-              <button
-                type="button"
-                onClick={() => setTypesEditorOpen((prev) => !prev)}
-                className="inline-flex h-8 items-center justify-center rounded-full px-3 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)] transition-all hover:bg-[rgba(255,255,255,.04)] hover:text-[var(--fg)]"
-                style={{ fontFamily: 'var(--display)' }}
-              >
-                {typesEditorOpen ? 'Hide types' : 'Types'}
-              </button>
-              <button
-                type="button"
-                onClick={onClose}
-                className="inline-flex h-8 items-center justify-center rounded-full px-3 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)] transition-all hover:bg-[rgba(255,255,255,.04)] hover:text-[var(--fg)]"
-                style={{ fontFamily: 'var(--display)' }}
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-3 px-6 pb-4">
-          <SpawnContextToolbar
-            agentMenuEntries={spawnAgentMenuEntries}
-            spawnAgentConfig={spawnAgentConfig}
-            createRepoMenuEntries={createRepoMenuEntries}
-            onOpenCustomAgentModal={onOpenCustomAgentModal}
-            agentTitle="Choose default agent context for tasks on this board."
-            modelTitle="Set default model context for this board."
-            customButtonTitle="Manage custom agents"
-            controlsLocked={controlsLocked}
-            repoContainerClassName="min-w-0"
-          />
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={clearTypeFilters}
-              className={`inline-flex h-8 items-center rounded-full px-3 text-[10px] font-semibold uppercase tracking-wide transition-all ${
-                selectedTypeIdSet.size === 0
-                  ? 'bg-[var(--fg)] text-[var(--panel)]'
-                  : 'bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.07)] hover:text-[var(--fg)]'
-              }`}
-              style={{ fontFamily: 'var(--display)' }}
-            >
-              All
-            </button>
-            {activeTaskTypes.map((taskType) => {
-              const selected = selectedTypeIdSet.has(taskType.id);
-              return (
+              <div className="flex items-center gap-1.5">
                 <button
-                  key={taskType.id}
                   type="button"
-                  onClick={() => toggleTypeFilter(taskType.id)}
-                  className={`inline-flex h-8 items-center rounded-full px-3 text-[10px] font-semibold uppercase tracking-wide transition-all ${
-                    selected
-                      ? 'bg-[rgba(157,202,255,.18)] text-[#CBE2FF]'
-                      : 'bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.07)] hover:text-[var(--fg)]'
+                  onClick={onReloadBoard}
+                  disabled={boardLoading}
+                  className={`inline-flex h-8 items-center justify-center rounded-lg border px-3 text-[10px] font-semibold uppercase tracking-wide transition-all ${
+                    boardLoading
+                      ? 'cursor-not-allowed border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)] opacity-40'
+                      : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)] hover:border-[var(--border)] hover:bg-[rgba(255,255,255,.05)] hover:text-[var(--fg)]'
+                  }`}
+                  style={{ fontFamily: 'var(--display)' }}
+                  title="Reload saved board from hub storage"
+                >
+                  {boardLoading ? 'Loading' : 'Reload'}
+                </button>
+                <button
+                  type="button"
+                  onClick={addLane}
+                  disabled={boardInteractionLocked}
+                  className={`inline-flex h-8 items-center gap-1.5 rounded-lg px-3 text-[10px] font-semibold uppercase tracking-wide transition-all ${
+                    boardInteractionLocked
+                      ? 'cursor-not-allowed bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] opacity-40'
+                      : 'bg-[var(--accent)] text-[var(--accent-fg)] hover:brightness-110 shadow-[0_0_12px_rgba(167,139,250,.15)]'
+                  }`}
+                  style={{ fontFamily: 'var(--display)' }}
+                  title="Add a new lane"
+                >
+                  <IconPlus className="opacity-80" />
+                  Lane
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTypesEditorOpen((prev) => !prev)}
+                  className={`inline-flex h-8 items-center justify-center rounded-lg border px-3 text-[10px] font-semibold uppercase tracking-wide transition-all ${
+                    typesEditorOpen
+                      ? 'border-[var(--accent-muted)] bg-[rgba(167,139,250,.08)] text-[var(--accent)]'
+                      : 'border-transparent bg-transparent text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.04)] hover:text-[var(--fg)]'
                   }`}
                   style={{ fontFamily: 'var(--display)' }}
                 >
-                  {taskType.label}
+                  Types
                 </button>
-              );
-            })}
-          </div>
-          {(boardLoading || boardSaving || boardUpdatedAt || boardError) && (
-            <div className="ml-auto text-[10px] text-[var(--muted-dim)]">
-              {boardLoading ? (
-                <span>Loading saved board…</span>
-              ) : boardSaving ? (
-                <span>Saving board…</span>
-              ) : boardError ? (
-                <span className="text-[var(--red)]" title={boardError}>
-                  Sync error
-                </span>
-              ) : boardUpdatedAt ? (
-                <span title={boardUpdatedAt}>Saved {new Date(boardUpdatedAt).toLocaleString()}</span>
-              ) : null}
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="inline-flex h-8 items-center justify-center rounded-lg px-3 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)] transition-all hover:bg-[rgba(255,255,255,.04)] hover:text-[var(--fg)]"
+                  style={{ fontFamily: 'var(--display)' }}
+                >
+                  Close
+                </button>
+              </div>
             </div>
-          )}
+          </div>
+          <div className="flex flex-wrap items-center gap-3 px-6 pb-4">
+            <SpawnContextToolbar
+              agentMenuEntries={spawnAgentMenuEntries}
+              spawnAgentConfig={spawnAgentConfig}
+              createRepoMenuEntries={createRepoMenuEntries}
+              onOpenCustomAgentModal={onOpenCustomAgentModal}
+              agentTitle="Choose default agent context for tasks on this board."
+              modelTitle="Set default model context for this board."
+              customButtonTitle="Manage custom agents"
+              controlsLocked={controlsLocked}
+              repoContainerClassName="min-w-0"
+            />
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={clearTypeFilters}
+                className={`inline-flex h-8 items-center rounded-lg px-3 text-[10px] font-semibold uppercase tracking-wide transition-all ${
+                  selectedTypeIdSet.size === 0
+                    ? 'bg-[var(--fg)] text-[var(--panel)] shadow-[0_2px_8px_rgba(0,0,0,.2)]'
+                    : 'bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.07)] hover:text-[var(--fg)]'
+                }`}
+                style={{ fontFamily: 'var(--display)' }}
+              >
+                All
+              </button>
+              {activeTaskTypes.map((taskType) => {
+                const typeSelected = selectedTypeIdSet.has(taskType.id);
+                return (
+                  <button
+                    key={taskType.id}
+                    type="button"
+                    onClick={() => toggleTypeFilter(taskType.id)}
+                    className={`inline-flex h-8 items-center gap-1.5 rounded-lg px-3 text-[10px] font-semibold uppercase tracking-wide transition-all ${
+                      typeSelected
+                        ? 'bg-[rgba(167,139,250,.16)] text-[var(--accent)] border border-[rgba(167,139,250,.2)]'
+                        : 'bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] border border-transparent hover:bg-[rgba(255,255,255,.07)] hover:text-[var(--fg)]'
+                    }`}
+                    style={{ fontFamily: 'var(--display)' }}
+                  >
+                    {typeSelected && <span className="h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />}
+                    {taskType.label}
+                  </button>
+                );
+              })}
+            </div>
+            {(boardLoading || boardSaving || boardUpdatedAt || boardError) && (
+              <div className="ml-auto flex items-center gap-2 text-[10px] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--code)' }}>
+                {boardLoading ? (
+                  <span className="flex items-center gap-1.5"><span className="h-1.5 w-1.5 rounded-full bg-[var(--accent)] animate-pulse-dot" />Loading…</span>
+                ) : boardSaving ? (
+                  <span className="flex items-center gap-1.5"><span className="h-1.5 w-1.5 rounded-full bg-[var(--yellow)] animate-pulse-dot" />Saving…</span>
+                ) : boardError ? (
+                  <span className="flex items-center gap-1.5 text-[var(--red)]" title={boardError}><span className="h-1.5 w-1.5 rounded-full bg-[var(--red)]" />Sync error</span>
+                ) : boardUpdatedAt ? (
+                  <span title={boardUpdatedAt}>Saved {new Date(boardUpdatedAt).toLocaleString()}</span>
+                ) : null}
+              </div>
+            )}
+          </div>
+          {typesEditorOpen ? (
+            <KanbanTaskTypeEditor
+              taskTypes={board.taskTypes}
+              onAddTaskType={addTaskType}
+              onUpdateTaskType={updateTaskType}
+              onRemoveTaskType={removeTaskType}
+            />
+          ) : null}
+          {filteredSelectionActive ? (
+            <div className="mx-6 mb-4 flex items-center gap-2 rounded-lg border border-[rgba(255,178,36,.16)] bg-[rgba(255,178,36,.06)] px-3 py-2 text-[10px] text-[var(--yellow)]">
+              <span className="h-1 w-1 rounded-full bg-[var(--yellow)]" />
+              Drag-and-drop is disabled while task-type filters are active.
+            </div>
+          ) : null}
         </div>
-        {typesEditorOpen ? (
-          <KanbanTaskTypeEditor
-            taskTypes={board.taskTypes}
-            onAddTaskType={addTaskType}
-            onUpdateTaskType={updateTaskType}
-            onRemoveTaskType={removeTaskType}
-          />
-        ) : null}
-        {filteredSelectionActive ? (
-          <div className="px-6 pb-4 text-[10px] text-[var(--muted-dim)]">Drag-and-drop is disabled while task-type filters are active.</div>
-        ) : null}
+        <div className="dh-accent-bar" />
       </div>
 
       <DndContext
@@ -826,29 +849,31 @@ export function KanbanBoardWorkspace({
         onDragCancel={handleDragCancel}
       >
         <div className="flex-1 min-h-0 overflow-x-auto overflow-y-hidden px-6 py-6">
-          <div className="flex h-full min-h-0 w-max items-start gap-6 pr-6">
+          <div className="flex h-full min-h-0 w-max items-start gap-5 pr-6">
             {visibleBoard.lanes.map((lane, laneIdx) => {
               const accent = laneAccent(laneIdx);
               return (
-                <section key={lane.id} className="flex h-full min-h-0 w-[300px] flex-col gap-3">
-                  <div className="flex items-center justify-between gap-3 px-2">
+                <section key={lane.id} className="dh-lane-column flex h-full min-h-0 w-[300px] flex-col">
+                  <div className="dh-lane-accent" style={{ background: `linear-gradient(90deg, ${accent}, transparent)` }} />
+                  <div className="flex items-center justify-between gap-3 px-3.5 pt-3.5 pb-1">
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2 text-[12px] text-[var(--muted)]">
-                        <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: accent }} />
+                      <div className="flex items-center gap-2 text-[12px] text-[var(--fg)]">
+                        <span className="h-2 w-2 rounded-sm" style={{ backgroundColor: accent }} />
                         <input
                           value={lane.title}
                           onChange={(event) => updateLaneTitle(lane.id, event.target.value)}
                           disabled={boardInteractionLocked}
                           placeholder={`Lane ${laneIdx + 1}`}
-                          className={`min-w-0 flex-1 bg-transparent font-medium focus:outline-none ${
+                          className={`min-w-0 flex-1 bg-transparent font-semibold tracking-tight focus:outline-none ${
                             controlsLocked ? 'cursor-not-allowed opacity-70' : ''
                           }`}
+                          style={{ fontFamily: 'var(--display)' }}
                         />
                       </div>
-                      <div className="mt-1 flex items-center gap-2 text-[10px] text-[var(--muted-dim)]">
-                        <span>{lane.cards.length}</span>
+                      <div className="mt-1 flex items-center gap-2 px-4 text-[10px] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--code)' }}>
+                        <span>{lane.cards.length} task{lane.cards.length === 1 ? '' : 's'}</span>
                         {laneIdx === 0 ? (
-                          <span className="rounded-full bg-[rgba(255,255,255,.04)] px-2 py-0.5 text-[#9DCAFF]">
+                          <span className="rounded-md bg-[rgba(167,139,250,.1)] px-1.5 py-0.5 text-[9px] text-[var(--accent)]" style={{ fontFamily: 'var(--display)' }}>
                             Paste target
                           </span>
                         ) : null}
@@ -858,10 +883,10 @@ export function KanbanBoardWorkspace({
                       type="button"
                       onClick={() => removeLane(lane.id)}
                       disabled={boardInteractionLocked || board.lanes.length <= 1}
-                      className={`inline-flex h-7 w-7 items-center justify-center rounded-full transition-all ${
+                      className={`inline-flex h-7 w-7 items-center justify-center rounded-lg transition-all ${
                         boardInteractionLocked || board.lanes.length <= 1
-                          ? 'cursor-not-allowed text-[var(--muted-dim)] opacity-30'
-                          : 'text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.05)] hover:text-[var(--red)]'
+                          ? 'cursor-not-allowed text-[var(--muted-dim)] opacity-20'
+                          : 'text-[var(--muted-dim)] hover:bg-[rgba(255,90,90,.1)] hover:text-[var(--red)]'
                       }`}
                       title={
                         boardInteractionLocked ? 'Clear filters to edit lanes' : board.lanes.length <= 1 ? 'Keep at least one lane' : 'Delete lane'
@@ -871,7 +896,7 @@ export function KanbanBoardWorkspace({
                     </button>
                   </div>
 
-                  <div className="flex-1 min-h-0 overflow-y-auto pr-1">
+                  <div className="flex-1 min-h-0 overflow-y-auto px-2 pt-2 pb-1">
                     <KanbanLaneCards
                       lane={lane}
                       controlsLocked={boardInteractionLocked}
@@ -883,20 +908,22 @@ export function KanbanBoardWorkspace({
                     />
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() => addCard(lane.id)}
-                    disabled={boardInteractionLocked}
-                    className={`inline-flex h-8 items-center gap-1.5 self-start rounded-full px-3 text-[10px] font-semibold uppercase tracking-wide transition-all ${
-                      boardInteractionLocked
-                        ? 'cursor-not-allowed bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] opacity-40'
-                        : 'bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.07)] hover:text-[var(--fg)]'
-                    }`}
-                    style={{ fontFamily: 'var(--display)' }}
-                  >
-                    <IconPlus className="opacity-80" />
-                    Add task
-                  </button>
+                  <div className="px-3 pb-3 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => addCard(lane.id)}
+                      disabled={boardInteractionLocked}
+                      className={`inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-lg border border-dashed text-[10px] font-semibold uppercase tracking-wide transition-all ${
+                        boardInteractionLocked
+                          ? 'cursor-not-allowed border-[rgba(255,255,255,.06)] bg-transparent text-[var(--muted-dim)] opacity-40'
+                          : 'border-[rgba(255,255,255,.1)] bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)] hover:border-[var(--accent-muted)] hover:bg-[rgba(167,139,250,.06)] hover:text-[var(--accent)]'
+                      }`}
+                      style={{ fontFamily: 'var(--display)' }}
+                    >
+                      <IconPlus className="opacity-70" />
+                      Add task
+                    </button>
+                  </div>
                 </section>
               );
             })}
@@ -905,15 +932,15 @@ export function KanbanBoardWorkspace({
               type="button"
               onClick={addLane}
               disabled={boardInteractionLocked}
-              className={`inline-flex h-10 self-start items-center gap-1.5 rounded-full px-4 text-[10px] font-semibold uppercase tracking-wide transition-all ${
+              className={`inline-flex h-full min-h-[200px] w-[80px] flex-col items-center justify-center gap-2 rounded-2xl border border-dashed transition-all ${
                 boardInteractionLocked
-                  ? 'cursor-not-allowed bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] opacity-40'
-                  : 'bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.07)] hover:text-[var(--fg)]'
+                  ? 'cursor-not-allowed border-[rgba(255,255,255,.06)] text-[var(--muted-dim)] opacity-30'
+                  : 'border-[rgba(255,255,255,.08)] text-[var(--muted-dim)] hover:border-[var(--accent-muted)] hover:bg-[rgba(167,139,250,.04)] hover:text-[var(--accent)]'
               }`}
               style={{ fontFamily: 'var(--display)' }}
             >
-              <IconPlus className="opacity-80" />
-              Add lane
+              <IconPlus className="opacity-60" />
+              <span className="text-[9px] font-semibold uppercase tracking-widest">Lane</span>
             </button>
           </div>
         </div>
