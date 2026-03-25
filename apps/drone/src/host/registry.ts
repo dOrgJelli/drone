@@ -25,6 +25,29 @@ type DroneRegistryPlaybookMeta = {
   }>;
 };
 
+type DroneRegistryPlaybookRunQueueGate = {
+  queueItemId: string;
+  playbookId: string;
+  chatName: string;
+  initialPromptIds: string[];
+  releasedAt?: string;
+};
+
+type DroneRegistryPlaybookRunQueueItem = {
+  id: string;
+  playbookId: string;
+  playbookLabel: string;
+  repoPath: string;
+  requestedCount: number;
+  launchedCount: number;
+  inFlightCount: number;
+  serializeFirstMessageGroup: boolean;
+  pullHostBranchBeforeCreate: boolean;
+  createdAt: string;
+  updatedAt: string;
+  error?: string;
+};
+
 type DroneRegistryPlaybookMessage = {
   id: string;
   name?: string;
@@ -256,6 +279,7 @@ type DroneRegistryV1 = {
         disabledRepoKeys?: string[];
         updatedAt?: string;
       };
+      playbookQueueGate?: DroneRegistryPlaybookRunQueueGate;
     }
   >;
   archived?: Record<
@@ -329,6 +353,7 @@ type DroneRegistryV1 = {
         disabledRepoKeys?: string[];
         updatedAt?: string;
       };
+      playbookQueueGate?: DroneRegistryPlaybookRunQueueGate;
     }
   >;
 };
@@ -344,6 +369,9 @@ export type DroneRegistry = {
   repos?: DroneRegistryV1['repos'];
   groups?: DroneRegistryV1['groups'];
   archived?: Record<string, DroneRegistryArchivedEntry>;
+  playbookRunQueue?: {
+    items?: DroneRegistryPlaybookRunQueueItem[];
+  };
   /**
    * Hub-side, short-lived entries for drones that are being provisioned.
    *
