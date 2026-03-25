@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { installFleetCliScript } from '../src/host/runtime';
+import { installFleetCliScript, installPlaybookCliScript } from '../src/host/runtime';
 
 describe('installFleetCliScript', () => {
   test('installs a fleet wrapper on PATH that points at the in-container runtime', () => {
@@ -8,6 +8,17 @@ describe('installFleetCliScript', () => {
     expect(script).toContain('/usr/local/bin/fleet');
     expect(script).toContain('#!/usr/bin/env bash');
     expect(script).toContain("exec node '/dvm-data/drone/dist/fleet.js' \"$@\"");
+    expect(script).toContain('chmod 755');
+  });
+});
+
+describe('installPlaybookCliScript', () => {
+  test('installs a playbook wrapper on PATH that points at the in-container runtime', () => {
+    const script = installPlaybookCliScript();
+    expect(script).toContain('mkdir -p');
+    expect(script).toContain('/usr/local/bin/playbook');
+    expect(script).toContain('#!/usr/bin/env bash');
+    expect(script).toContain("exec node '/dvm-data/drone/dist/playbook.js' \"$@\"");
     expect(script).toContain('chmod 755');
   });
 });
