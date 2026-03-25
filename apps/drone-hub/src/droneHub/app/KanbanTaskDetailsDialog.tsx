@@ -34,11 +34,8 @@ export function KanbanTaskDetailsDialog({
     setEditingDescription(false);
   }, [cardId]);
 
-  if (!card) return null;
-  const activeTaskTypes = taskTypes.filter((item) => item.active !== false || item.id === card.typeId);
-  const hasDescription = Boolean(card.description?.trim());
-
   React.useEffect(() => {
+    if (!card) return;
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       if (editingDescription) {
@@ -51,7 +48,7 @@ export function KanbanTaskDetailsDialog({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose, editingDescription]);
+  }, [cardId, onClose, editingDescription]);
 
   React.useEffect(() => {
     if (editingDescription && textareaRef.current) {
@@ -59,6 +56,10 @@ export function KanbanTaskDetailsDialog({
       textareaRef.current.selectionStart = textareaRef.current.value.length;
     }
   }, [editingDescription]);
+
+  if (!card) return null;
+  const activeTaskTypes = taskTypes.filter((item) => item.active !== false || item.id === card.typeId);
+  const hasDescription = Boolean(card.description?.trim());
 
   return (
     <div
