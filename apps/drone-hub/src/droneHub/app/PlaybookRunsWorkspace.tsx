@@ -1,10 +1,16 @@
 import React from 'react';
 import { timeAgo } from '../../domain';
 import { requestJson } from '../http';
-import type { PlaybookDefinition, PlaybookRunSummary } from '../types';
+import type { PlaybookDefinition, PlaybookRunQueueSummary, PlaybookRunSummary } from '../types';
 import { fetchJson, useNowMs, usePoll } from './hooks';
 import { IconBoard, IconChevron, IconSpinner, IconTrash } from './icons';
 import { normalizePlaybookArtifactPath } from './playbook-config';
+import {
+  normalizePlaybookRunLaunchCount,
+  PlaybookRunLaunchControls,
+  PlaybookRunQueueSection,
+  playbookRunsRepoLabel,
+} from './playbook-runs-ui';
 import { useDroneHubUiStore } from './use-drone-hub-ui-store';
 import { playbookArtifactKey, usePlaybookArtifactAvailability } from './use-playbook-artifact-availability';
 
@@ -19,17 +25,6 @@ type PlaybookRunsWorkspaceProps = {
   onOpenRun: (droneId: string, chatName: string) => void;
   onOpenArtifact: (droneId: string, chatName: string, path: string, name: string) => void;
 };
-
-function repoLabel(repoPathRaw: string): string {
-  const repoPath = String(repoPathRaw ?? '').trim();
-  if (!repoPath) return 'All repos';
-  const parts = repoPath.split(/[\\/]/).filter(Boolean);
-  return parts[parts.length - 1] || repoPath;
-}
-
-function runCountLabel(count: number): string {
-  return `${count} run${count === 1 ? '' : 's'}`;
-}
 
 export function PlaybookRunsWorkspace({
   initialRepoPath,
@@ -49,6 +44,8 @@ export function PlaybookRunsWorkspace({
   const selectedRepoPath = useDroneHubUiStore((s) => s.playbookRunsSelectedRepoPath);
   const setStoredSelectedRepoPath = useDroneHubUiStore((s) => s.setPlaybookRunsSelectedRepoPath);
   const [launchPendingCountById, setLaunchPendingCountById] = React.useState<Record<string, number>>({});
+  const [launchCountInput, setLaunchCountInput] = React.useState('1');
+  const [serializeFirstMessageGroup, setSerializeFirstMessageGroup] = React.useState(false);
   const [actionBusyByKey, setActionBusyByKey] = React.useState<Record<string, true>>({});
   const [actionError, setActionError] = React.useState<string | null>(null);
   const [expandedSummaryByRunId, setExpandedSummaryByRunId] = React.useState<Record<string, true>>({});
@@ -98,7 +95,7 @@ export function PlaybookRunsWorkspace({
     5000,
     [],
   );
-  const { value: runsResp, error: runsError, loading: runsLoading } = usePoll<{ ok: true; runs: PlaybookRunSummary[] }>(
+  const { value: runsResp, error: runsError, loading: runsLoading } = usePoll<{ ok: true; runs: PlaybookRunSummary[]; queue: PlaybookRunQueueSummary[] }>(
     () => fetchJson(`/api/playbook-runs${runsQuery}`),
     2000,
     [runsQuery],
@@ -107,6 +104,7 @@ export function PlaybookRunsWorkspace({
 
   const playbooks = Array.isArray(playbooksResp?.playbooks) ? playbooksResp.playbooks : [];
   const runs = Array.isArray(runsResp?.runs) ? runsResp.runs : [];
+  const queue = Array.isArray(runsResp?.queue) ? runsResp.queue : [];
   const artifactAvailabilityByKey = usePlaybookArtifactAvailability({ runs });
 
   React.useEffect(() => {
@@ -147,6 +145,20 @@ export function PlaybookRunsWorkspace({
       ),
     [runs, selectedPlaybookId, selectedRepoPath],
   );
+  const filteredQueue = React.useMemo(
+    () =>
+      queue.filter(
+        (item) =>
+          (!selectedPlaybookId || item.playbookId === selectedPlaybookId) &&
+          (!selectedRepoPath || item.repoPath === selectedRepoPath),
+      ),
+    [queue, selectedPlaybookId, selectedRepoPath],
+  );
+  const totalQueuedCount = React.useMemo(
+    () => filteredQueue.reduce((sum, item) => sum + Math.max(0, item.remainingCount + item.inFlightCount), 0),
+    [filteredQueue],
+  );
+  const normalizedLaunchCount = React.useMemo(() => normalizePlaybookRunLaunchCount(launchCountInput), [launchCountInput]);
   const selectedPlaybookPendingLaunchCount = selectedPlaybook ? launchPendingCountById[selectedPlaybook.id] ?? 0 : 0;
   const runDisabled = !selectedPlaybook || !selectedRepoPath;
   const runDisabledReason = !selectedPlaybook
@@ -154,8 +166,12 @@ export function PlaybookRunsWorkspace({
     : !selectedRepoPath
       ? 'Select a repo to launch the selected playbook.'
       : selectedPlaybookPendingLaunchCount > 0
-        ? `Starting ${selectedPlaybookPendingLaunchCount} run${selectedPlaybookPendingLaunchCount === 1 ? '' : 's'}. Click again to queue another.`
-        : 'Run the selected playbook.';
+        ? `Submitting ${selectedPlaybookPendingLaunchCount} queued run${selectedPlaybookPendingLaunchCount === 1 ? '' : 's'}.`
+        : serializeFirstMessageGroup
+          ? `Queue ${normalizedLaunchCount} run${normalizedLaunchCount === 1 ? '' : 's'} in serial mode.`
+          : normalizedLaunchCount > 1
+            ? `Queue ${normalizedLaunchCount} runs immediately.`
+            : 'Run the selected playbook.';
 
   const runPlaybook = React.useCallback(
     async (playbook: PlaybookDefinition) => {
@@ -163,9 +179,10 @@ export function PlaybookRunsWorkspace({
         setActionError('Choose a repo before launching a playbook.');
         return;
       }
+      const requestedCount = normalizePlaybookRunLaunchCount(launchCountInput);
       setLaunchPendingCountById((prev) => ({
         ...prev,
-        [playbook.id]: (prev[playbook.id] ?? 0) + 1,
+        [playbook.id]: (prev[playbook.id] ?? 0) + requestedCount,
       }));
       setActionError(null);
       setRefreshNonce((prev) => prev + 1);
@@ -176,6 +193,8 @@ export function PlaybookRunsWorkspace({
           body: JSON.stringify({
             repoPath: selectedRepoPath,
             pullHostBranchBeforeCreate,
+            count: requestedCount,
+            serializeFirstMessageGroup,
           }),
         });
         setRefreshNonce((prev) => prev + 1);
@@ -184,19 +203,62 @@ export function PlaybookRunsWorkspace({
       } finally {
         setLaunchPendingCountById((prev) => {
           const current = prev[playbook.id] ?? 0;
-          if (current <= 1) {
+          if (current <= requestedCount) {
             const next = { ...prev };
             delete next[playbook.id];
             return next;
           }
           const next = { ...prev };
-          next[playbook.id] = current - 1;
+          next[playbook.id] = current - requestedCount;
           return next;
         });
       }
     },
-    [pullHostBranchBeforeCreate, selectedRepoPath],
+    [launchCountInput, pullHostBranchBeforeCreate, selectedRepoPath, serializeFirstMessageGroup],
   );
+
+  const removeQueuedRun = React.useCallback(async (queueItemId: string) => {
+    setActionBusyByKey((prev) => ({ ...prev, [`queue:${queueItemId}`]: true }));
+    setActionError(null);
+    try {
+      await requestJson(`/api/playbook-runs/queue/${encodeURIComponent(queueItemId)}`, {
+        method: 'DELETE',
+      });
+      setRefreshNonce((prev) => prev + 1);
+    } catch (e: any) {
+      setActionError(e?.message ?? String(e));
+    } finally {
+      setActionBusyByKey((prev) => {
+        const next = { ...prev };
+        delete next[`queue:${queueItemId}`];
+        return next;
+      });
+    }
+  }, []);
+
+  const clearQueuedRuns = React.useCallback(async () => {
+    setActionBusyByKey((prev) => ({ ...prev, 'queue:clear': true }));
+    setActionError(null);
+    try {
+      await requestJson('/api/playbook-runs/queue/clear', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          ...(selectedPlaybookId ? { playbookId: selectedPlaybookId } : {}),
+          ...(selectedRepoPath ? { repoPath: selectedRepoPath } : {}),
+        }),
+      });
+      setRefreshNonce((prev) => prev + 1);
+    } catch (e: any) {
+      setActionError(e?.message ?? String(e));
+    } finally {
+      setActionBusyByKey((prev) => {
+        const next = { ...prev };
+        delete next['queue:clear'];
+        return next;
+      });
+    }
+  }, [selectedPlaybookId, selectedRepoPath]);
 
   const sendRunAction = React.useCallback(async (run: PlaybookRunSummary, action: PlaybookDefinition['actions'][number]) => {
     const key = `${run.id}:${action.id}`;
@@ -401,7 +463,7 @@ export function PlaybookRunsWorkspace({
                           >
                             <div className="flex items-center justify-between gap-2">
                               <div className="min-w-0">
-                                <div className="text-[11px] font-semibold text-[var(--fg)] truncate">{repoLabel(repoPath)}</div>
+                                <div className="text-[11px] font-semibold text-[var(--fg)] truncate">{playbookRunsRepoLabel(repoPath)}</div>
                               </div>
                               <div className="rounded-md bg-[rgba(255,255,255,.05)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--muted)]" style={{ fontFamily: 'var(--code)' }}>
                                 {repoRunCountByPath[repoPath] ?? 0}
@@ -415,49 +477,35 @@ export function PlaybookRunsWorkspace({
                 </div>
               </div>
 
-              <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[rgba(255,255,255,.015)] px-3 py-2.5">
-                <div className="flex items-center gap-3 min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5 min-w-0">
-                    <span className="text-[9px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)] shrink-0" style={{ fontFamily: 'var(--display)' }}>Playbook</span>
-                    <span className="text-[11px] font-semibold text-[var(--fg)] truncate">{selectedPlaybook?.label || <span className="text-[var(--muted-dim)] font-normal">—</span>}</span>
-                  </div>
-                  <span className="text-[var(--border)] shrink-0">·</span>
-                  <div className="flex items-center gap-1.5 min-w-0">
-                    <span className="text-[9px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)] shrink-0" style={{ fontFamily: 'var(--display)' }}>Repo</span>
-                    <span className="text-[11px] font-semibold text-[var(--fg)] truncate">{selectedRepoPath ? repoLabel(selectedRepoPath) : <span className="text-[var(--muted-dim)] font-normal">—</span>}</span>
-                  </div>
-                </div>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  <span className="inline-flex" title={runDisabledReason}>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (selectedPlaybook) void runPlaybook(selectedPlaybook);
-                      }}
-                      disabled={runDisabled}
-                      className={`h-8 px-4 rounded-lg text-[10px] font-semibold tracking-wide uppercase transition-all ${
-                        runDisabled
-                          ? 'opacity-30 cursor-not-allowed bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)]'
-                          : 'bg-[var(--accent)] text-[var(--accent-fg)] hover:brightness-110 shadow-[0_2px_8px_rgba(167,139,250,.18)]'
-                      }`}
-                      style={{ fontFamily: 'var(--display)' }}
-                    >
-                      Run
-                    </button>
-                  </span>
-                  {selectedPlaybook && (
-                    <button
-                      type="button"
-                      onClick={() => onOpenPlaybookSettings(selectedPlaybook.id)}
-                      className="h-8 px-3 rounded-lg text-[10px] font-semibold tracking-wide uppercase border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)] hover:border-[var(--border)] hover:bg-[rgba(255,255,255,.05)] hover:text-[var(--fg)]"
-                      style={{ fontFamily: 'var(--display)' }}
-                    >
-                      Edit
-                    </button>
-                  )}
-                </div>
-              </div>
+              <PlaybookRunLaunchControls
+                selectedPlaybook={selectedPlaybook}
+                selectedRepoPath={selectedRepoPath}
+                totalQueuedCount={totalQueuedCount}
+                launchCountInput={launchCountInput}
+                normalizedLaunchCount={normalizedLaunchCount}
+                serializeFirstMessageGroup={serializeFirstMessageGroup}
+                runDisabled={runDisabled}
+                runDisabledReason={runDisabledReason}
+                onLaunchCountInputChange={setLaunchCountInput}
+                onToggleSerializeFirstMessageGroup={() => setSerializeFirstMessageGroup((prev) => !prev)}
+                onRun={() => {
+                  if (selectedPlaybook) void runPlaybook(selectedPlaybook);
+                }}
+                onEditSelectedPlaybook={() => {
+                  if (selectedPlaybook) onOpenPlaybookSettings(selectedPlaybook.id);
+                }}
+              />
             </section>
+
+            <PlaybookRunQueueSection
+              queue={filteredQueue}
+              selectedPlaybookLabel={selectedPlaybook?.label ?? null}
+              selectedRepoPath={selectedRepoPath}
+              nowMs={nowMs}
+              actionBusyByKey={actionBusyByKey}
+              onClearQueuedRuns={() => void clearQueuedRuns()}
+              onRemoveQueuedRun={(queueItemId) => void removeQueuedRun(queueItemId)}
+            />
 
             <section className="flex flex-col gap-4">
               <div className="flex items-center gap-2.5">
@@ -471,7 +519,7 @@ export function PlaybookRunsWorkspace({
                   {filteredRuns.length}
                 </span>
                 <span className="text-[10px] text-[var(--muted-dim)]">
-                  {selectedPlaybook?.label || 'All playbooks'} · {selectedRepoPath ? repoLabel(selectedRepoPath) : 'All repos'}
+                  {selectedPlaybook?.label || 'All playbooks'} · {selectedRepoPath ? playbookRunsRepoLabel(selectedRepoPath) : 'All repos'}
                 </span>
                 <div className="flex-1 h-px bg-[linear-gradient(90deg,var(--border-subtle),transparent)]" />
               </div>
@@ -488,7 +536,7 @@ export function PlaybookRunsWorkspace({
                   <div className="text-[12px] text-[var(--muted)]">No runs found</div>
                   <div className="mt-1 text-[11px] text-[var(--muted-dim)]">
                     {selectedPlaybook?.label || 'the current playbook filter'} in{' '}
-                    {selectedRepoPath ? repoLabel(selectedRepoPath) : 'the current repo filter'}
+                    {selectedRepoPath ? playbookRunsRepoLabel(selectedRepoPath) : 'the current repo filter'}
                   </div>
                 </div>
               ) : (
@@ -520,7 +568,7 @@ export function PlaybookRunsWorkspace({
                               >
                                 {run.playbookLabel}
                               </button>
-                              <div className="text-[10px] text-[var(--muted-dim)] mt-1" style={{ fontFamily: 'var(--code)' }}>{repoLabel(run.repoPath)}</div>
+                              <div className="text-[10px] text-[var(--muted-dim)] mt-1" style={{ fontFamily: 'var(--code)' }}>{playbookRunsRepoLabel(run.repoPath)}</div>
                             </td>
                             <td className="px-4 py-3.5">
                               <div className={`dh-run-status-badge ${statusClass(run.status)}`}>

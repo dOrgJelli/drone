@@ -184,42 +184,44 @@ describeSocketSuite('playbook api', () => {
     const runs = await apiFetch(`/api/playbook-runs?repoPath=${encodeURIComponent(repoPath)}`);
     expect(runs.r.status).toBe(200);
     expect(Array.isArray(runs.data?.runs)).toBe(true);
+    expect(Array.isArray(runs.data?.queue)).toBe(true);
+    expect(runs.data?.queue).toHaveLength(0);
     expect(runs.data?.runs).toHaveLength(1);
-	    expect(runs.data?.runs?.[0]).toMatchObject({
-	      id: droneId,
-	      droneId,
-	      playbookId,
-	      playbookLabel: 'Bug finder',
-	      chatName: 'default',
+    expect(runs.data?.runs?.[0]).toMatchObject({
+      id: droneId,
+      droneId,
+      playbookId,
+      playbookLabel: 'Bug finder',
+      chatName: 'default',
       repoPath,
-	      kind: 'playbook-run',
-	      visibility: 'hidden',
-	      status: 'starting',
-	      artifacts: ['reports/finding.md'],
-	      actions: [{ label: 'Fix issue', messages: ['Fix the issue you found.'] }],
-	      pendingCount: 2,
-	    });
+      kind: 'playbook-run',
+      visibility: 'hidden',
+      status: 'starting',
+      artifacts: ['reports/finding.md'],
+      actions: [{ label: 'Fix issue', messages: ['Fix the issue you found.'] }],
+      pendingCount: 2,
+    });
 
     const updated = await apiFetch(`/api/playbooks/${encodeURIComponent(playbookId)}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-	        label: 'Bug finder v2',
-	        messages: ['Find a different issue.'],
-	        artifacts: ['reports/new-finding.md'],
-	        actions: [{ label: 'Fix different issue', messages: ['Fix the different issue you found.'] }],
-	      }),
+        label: 'Bug finder v2',
+        messages: ['Find a different issue.'],
+        artifacts: ['reports/new-finding.md'],
+        actions: [{ label: 'Fix different issue', messages: ['Fix the different issue you found.'] }],
+      }),
     });
     expect(updated.r.status).toBe(200);
 
     const runsAfterEdit = await apiFetch(`/api/playbook-runs?repoPath=${encodeURIComponent(repoPath)}`);
     expect(runsAfterEdit.r.status).toBe(200);
-	    expect(runsAfterEdit.data?.runs?.[0]).toMatchObject({
-	      id: droneId,
-	      playbookLabel: 'Bug finder',
-	      artifacts: ['reports/finding.md'],
-	      actions: [{ label: 'Fix issue', messages: ['Fix the issue you found.'] }],
-	    });
+    expect(runsAfterEdit.data?.runs?.[0]).toMatchObject({
+      id: droneId,
+      playbookLabel: 'Bug finder',
+      artifacts: ['reports/finding.md'],
+      actions: [{ label: 'Fix issue', messages: ['Fix the issue you found.'] }],
+    });
 
     const drones = await apiFetch('/api/drones');
     expect(drones.r.status).toBe(200);
@@ -232,15 +234,15 @@ describeSocketSuite('playbook api', () => {
       kind: 'playbook-run',
       visibility: 'hidden',
       repoPath,
-	      playbook: {
-	        id: playbookId,
-	        label: 'Bug finder',
-	        messageCount: 2,
-	        chatName: 'default',
-	        artifacts: ['reports/finding.md'],
-	        actions: [{ label: 'Fix issue', messages: ['Fix the issue you found.'] }],
-	      },
-	    });
+      playbook: {
+        id: playbookId,
+        label: 'Bug finder',
+        messageCount: 2,
+        chatName: 'default',
+        artifacts: ['reports/finding.md'],
+        actions: [{ label: 'Fix issue', messages: ['Fix the issue you found.'] }],
+      },
+    });
 
     const reg = await loadRegistry();
     expect(reg.pending?.[droneId]?.kind).toBe('playbook-run');
@@ -250,14 +252,14 @@ describeSocketSuite('playbook api', () => {
       agent: { kind: 'builtin', id: 'codex' },
       model: 'gpt-5-mini',
     });
-	    expect(reg.pending?.[droneId]?.playbook).toMatchObject({
-	      id: playbookId,
-	      label: 'Bug finder',
-	      messageCount: 2,
-	      chatName: 'default',
-	      artifacts: ['reports/finding.md'],
-	      actions: [{ label: 'Fix issue', messages: ['Fix the issue you found.'] }],
-	    });
+    expect(reg.pending?.[droneId]?.playbook).toMatchObject({
+      id: playbookId,
+      label: 'Bug finder',
+      messageCount: 2,
+      chatName: 'default',
+      artifacts: ['reports/finding.md'],
+      actions: [{ label: 'Fix issue', messages: ['Fix the issue you found.'] }],
+    });
     expect(reg.pending?.[droneId]?.startupQueuedPrompts).toHaveLength(2);
     expect(reg.pending?.[droneId]?.startupQueuedPrompts?.map((item: any) => item.prompt)).toEqual([
       'Find the biggest issue in this repo.',
@@ -312,5 +314,68 @@ describeSocketSuite('playbook api', () => {
         state: 'queued',
       },
     ]);
+  });
+
+  test('queues batched playbook launches and supports clearing the queue', async () => {
+    const repoPath = path.join(tempRoot, 'repo-queued-playbook-runs');
+    fs.mkdirSync(repoPath, { recursive: true });
+
+    const created = await apiFetch('/api/playbooks', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        label: 'Queued launch',
+        agent: { kind: 'builtin', id: 'codex' },
+        messages: ['Find one issue.', 'Summarize it.'],
+      }),
+    });
+    expect(created.r.status).toBe(201);
+    const playbookId = String(created.data?.playbook?.id ?? '');
+    expect(playbookId).toBeTruthy();
+
+    const queued = await apiFetch(`/api/playbooks/${encodeURIComponent(playbookId)}/run`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        repoPath,
+        pullHostBranchBeforeCreate: false,
+        count: 3,
+        serializeFirstMessageGroup: true,
+      }),
+    });
+    expect(queued.r.status).toBe(202);
+    expect(queued.data?.queued).toBe(true);
+    expect(queued.data?.queueItem).toMatchObject({
+      playbookId,
+      playbookLabel: 'Queued launch',
+      repoPath,
+      requestedCount: 3,
+      serializeFirstMessageGroup: true,
+    });
+
+    await Bun.sleep(75);
+
+    const listed = await apiFetch(`/api/playbook-runs?repoPath=${encodeURIComponent(repoPath)}`);
+    expect(listed.r.status).toBe(200);
+    expect(Array.isArray(listed.data?.queue)).toBe(true);
+    expect(listed.data?.queue).toHaveLength(1);
+    expect(listed.data?.queue?.[0]).toMatchObject({
+      playbookId,
+      repoPath,
+      requestedCount: 3,
+      serializeFirstMessageGroup: true,
+    });
+
+    const cleared = await apiFetch('/api/playbook-runs/queue/clear', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ playbookId, repoPath }),
+    });
+    expect(cleared.r.status).toBe(200);
+    expect(Number(cleared.data?.removed ?? 0)).toBeGreaterThan(0);
+
+    const afterClear = await apiFetch(`/api/playbook-runs?repoPath=${encodeURIComponent(repoPath)}`);
+    expect(afterClear.r.status).toBe(200);
+    expect(afterClear.data?.queue).toHaveLength(0);
   });
 });
