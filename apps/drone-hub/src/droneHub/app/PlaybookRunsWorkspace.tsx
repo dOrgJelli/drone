@@ -243,28 +243,23 @@ export function PlaybookRunsWorkspace({
 
   return (
     <div className="flex-1 min-h-0 overflow-y-auto">
-      <div className="w-full min-h-full px-4 py-5 sm:px-5 sm:py-6 lg:px-6 lg:py-8 flex flex-col gap-5">
+      <div className="w-full min-h-full px-4 py-4 sm:px-5 lg:px-6 flex flex-col gap-4">
         <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--panel-alt)] overflow-hidden shadow-[0_8px_32px_rgba(0,0,0,.12)]">
           <div className="relative border-b border-[var(--border)] overflow-hidden">
-            <div className="absolute inset-0 bg-[linear-gradient(135deg,rgba(167,139,250,.05)_0%,transparent_50%)]" />
-            <div className="dh-noise relative px-6 py-5 flex flex-wrap items-start justify-between gap-4">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[rgba(167,139,250,.1)] text-[var(--accent)]">
-                    <IconBoard className="opacity-80" />
-                  </div>
-                  <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--accent)] font-semibold" style={{ fontFamily: 'var(--display)' }}>
-                    Playbook Runs
-                  </div>
+            <div className="absolute inset-0 bg-[linear-gradient(135deg,rgba(167,139,250,.04)_0%,transparent_50%)]" />
+            <div className="relative px-5 py-3 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[rgba(167,139,250,.1)] text-[var(--accent)]">
+                  <IconBoard className="opacity-80" />
                 </div>
-                <p className="text-[12px] text-[var(--muted)] mt-2 max-w-[64ch] leading-relaxed">
-                  Launch repo-scoped runs, monitor status in real-time, and jump into any run chat directly.
-                </p>
+                <div className="text-[11px] uppercase tracking-[0.1em] text-[var(--accent)] font-semibold" style={{ fontFamily: 'var(--display)' }}>
+                  Playbook Runs
+                </div>
               </div>
               <button
                 type="button"
                 onClick={onClose}
-                className="h-8 px-3 rounded-lg text-[10px] font-semibold tracking-wide uppercase border bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)] hover:border-[var(--border)] hover:bg-[rgba(255,255,255,.05)] hover:text-[var(--fg)]"
+                className="h-7 px-2.5 rounded-md text-[10px] font-semibold tracking-wide uppercase border bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)] hover:border-[var(--border)] hover:bg-[rgba(255,255,255,.05)] hover:text-[var(--fg)]"
                 style={{ fontFamily: 'var(--display)' }}
               >
                 Back
@@ -274,61 +269,44 @@ export function PlaybookRunsWorkspace({
           </div>
 
           {(actionError || playbooksError || runsError) && (
-            <div className="mx-5 mt-4 flex items-center gap-2 rounded-lg border border-[rgba(255,90,90,.2)] bg-[rgba(255,90,90,.06)] px-4 py-2.5 text-[11px] text-[var(--red)]">
+            <div className="mx-4 mt-3 flex items-center gap-2 rounded-lg border border-[rgba(255,90,90,.2)] bg-[rgba(255,90,90,.06)] px-3 py-2 text-[11px] text-[var(--red)]">
               <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--red)]" />
               {actionError || playbooksError || runsError}
             </div>
           )}
 
-          <div className="px-5 py-5 flex flex-col gap-6">
-            <section className="flex flex-col gap-4">
-              <div className="flex items-center gap-2.5">
-                <div className="flex h-6 w-6 items-center justify-center rounded-md bg-[rgba(255,255,255,.04)]">
-                  <IconBoard className="opacity-50" />
-                </div>
-                <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--fg-secondary)]" style={{ fontFamily: 'var(--display)' }}>
-                  Launch
-                </div>
-                <div className="flex-1 h-px bg-[linear-gradient(90deg,var(--border-subtle),transparent)]" />
-              </div>
-              <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1.35fr)_minmax(280px,0.85fr)] gap-4">
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                  <div className="rounded-xl border border-[var(--border-subtle)] bg-[rgba(255,255,255,.015)] overflow-hidden">
-                    <div className="px-4 py-3 border-b border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)]">
+          <div className="px-4 py-4 flex flex-col gap-4">
+            <section className="flex flex-col gap-3">
+              <div className="flex items-center gap-3">
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 flex-1 min-w-0">
+                  <div className="rounded-lg border border-[var(--border-subtle)] bg-[rgba(255,255,255,.015)] overflow-hidden">
+                    <div className="px-3 py-2 border-b border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)]">
                       <div className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
                         Playbooks
                       </div>
-                      <div className="text-[11px] text-[var(--muted)] mt-1 leading-relaxed">
-                        Select to focus runs and enable launch.
-                      </div>
                     </div>
                     {playbooksLoading ? (
-                      <div className="px-4 py-6 flex flex-col items-center gap-2 text-center">
+                      <div className="px-3 py-4 flex items-center gap-2">
                         <IconSpinner className="text-[var(--accent)] opacity-60" />
-                        <div className="text-[11px] text-[var(--muted-dim)]">Loading playbooks...</div>
+                        <div className="text-[11px] text-[var(--muted-dim)]">Loading...</div>
                       </div>
                     ) : playbooks.length === 0 ? (
-                      <div className="px-4 py-6 text-center">
-                        <div className="text-[11px] text-[var(--muted-dim)]">
-                          No playbooks yet.<br />Create one in <strong className="text-[var(--muted)]">Settings &gt; Playbooks</strong>.
-                        </div>
+                      <div className="px-3 py-4 text-[11px] text-[var(--muted-dim)]">
+                        No playbooks yet. Create one in Settings &gt; Playbooks.
                       </div>
                     ) : (
-                      <div className="max-h-[360px] overflow-y-auto">
+                      <div className="max-h-[260px] overflow-y-auto">
                         <button
                           type="button"
                           onClick={() => setSelectedPlaybookId('')}
                           aria-pressed={selectedPlaybookId === ''}
-                          className={`dh-selection-card w-full px-4 py-3.5 text-left border-b border-[var(--border-subtle)] ${
+                          className={`dh-selection-card w-full px-3 py-2.5 text-left border-b border-[var(--border-subtle)] ${
                             selectedPlaybookId === '' ? 'is-active' : ''
                           }`}
                         >
-                          <div className="flex items-center justify-between gap-3">
-                            <div>
-                              <div className="text-[12px] font-semibold text-[var(--fg)]">All playbooks</div>
-                              <div className="text-[10px] text-[var(--muted-dim)] mt-1">Show runs for every playbook.</div>
-                            </div>
-                            <div className="rounded-md bg-[rgba(255,255,255,.05)] px-2 py-1 text-[10px] font-semibold text-[var(--muted)]" style={{ fontFamily: 'var(--code)' }}>
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="text-[11px] font-semibold text-[var(--fg)]">All playbooks</div>
+                            <div className="rounded-md bg-[rgba(255,255,255,.05)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--muted)]" style={{ fontFamily: 'var(--code)' }}>
                               {runsForSelectedRepo.length}
                             </div>
                           </div>
@@ -345,42 +323,38 @@ export function PlaybookRunsWorkspace({
                                 type="button"
                                 onClick={() => setSelectedPlaybookId((current) => (current === playbook.id ? '' : playbook.id))}
                                 aria-pressed={active}
-                                className={`dh-selection-card flex-1 px-4 py-3.5 text-left ${active ? 'is-active' : ''}`}
+                                className={`dh-selection-card flex-1 px-3 py-2.5 text-left ${active ? 'is-active' : ''}`}
                               >
-                                <div className="flex items-start justify-between gap-3">
-                                  <div className="min-w-0">
-                                    <div className="flex items-center gap-2">
-                                      <div className="text-[12px] font-semibold text-[var(--fg)]">{playbook.label || 'Untitled playbook'}</div>
-                                      {pendingLaunchCount > 0 && (
-                                        <span className="flex items-center gap-1 rounded-md bg-[rgba(74,222,128,.1)] px-1.5 py-0.5 text-[9px] font-semibold text-[var(--green)]" style={{ fontFamily: 'var(--display)' }}>
-                                          <span className="h-1 w-1 rounded-full bg-[var(--green)] animate-pulse-dot" />
-                                          Starting {pendingLaunchCount}
-                                        </span>
-                                      )}
-                                    </div>
-                                    <div className="text-[10px] text-[var(--muted-dim)] mt-1" style={{ fontFamily: 'var(--code)' }}>
-                                      {playbook.messages.length} msg{playbook.messages.length === 1 ? '' : 's'}
-                                      {playbook.actions.length > 0 ? ` · ${playbook.actions.length} action${playbook.actions.length === 1 ? '' : 's'}` : ''}
+                                <div className="flex items-center justify-between gap-2">
+                                  <div className="min-w-0 flex items-center gap-2">
+                                    <div className="text-[11px] font-semibold text-[var(--fg)] truncate">{playbook.label || 'Untitled playbook'}</div>
+                                    {pendingLaunchCount > 0 && (
+                                      <span className="flex items-center gap-1 rounded-md bg-[rgba(74,222,128,.1)] px-1.5 py-0.5 text-[9px] font-semibold text-[var(--green)] shrink-0" style={{ fontFamily: 'var(--display)' }}>
+                                        <span className="h-1 w-1 rounded-full bg-[var(--green)] animate-pulse-dot" />
+                                        {pendingLaunchCount}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="flex items-center gap-1.5 shrink-0">
+                                    <span className="text-[9px] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--code)' }}>
+                                      {playbook.messages.length}msg
+                                    </span>
+                                    <div className="rounded-md bg-[rgba(255,255,255,.05)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--muted)]" style={{ fontFamily: 'var(--code)' }}>
+                                      {playbookRunCountById[playbook.id] ?? 0}
                                     </div>
                                   </div>
-                                  <div className="rounded-md bg-[rgba(255,255,255,.05)] px-2 py-1 text-[10px] font-semibold text-[var(--muted)]" style={{ fontFamily: 'var(--code)' }}>
-                                    {playbookRunCountById[playbook.id] ?? 0}
-                                  </div>
-                                </div>
-                                <div className="mt-2 text-[11px] text-[var(--muted-dim)] whitespace-pre-wrap line-clamp-2 leading-relaxed">
-                                  {playbook.messages[0]?.prompt ?? 'No prompt yet.'}
                                 </div>
                               </button>
                               <button
                                 type="button"
                                 onClick={() => onOpenPlaybookSettings(playbook.id)}
-                                className={`shrink-0 px-3.5 flex items-center text-[10px] font-semibold uppercase tracking-wide border-l transition-all ${
+                                className={`shrink-0 px-2.5 flex items-center text-[10px] font-semibold uppercase tracking-wide border-l transition-all ${
                                   active
                                     ? 'border-[rgba(167,139,250,.15)] text-[var(--accent)] hover:bg-[rgba(167,139,250,.08)]'
                                     : 'border-[var(--border-subtle)] text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.03)] hover:text-[var(--fg-secondary)]'
                                 }`}
                                 style={{ fontFamily: 'var(--display)' }}
-                                title={`Open "${playbook.label || 'Untitled playbook'}" in Settings > Playbooks`}
+                                title={`Edit "${playbook.label || 'Untitled playbook'}"`}
                               >
                                 Edit
                               </button>
@@ -391,30 +365,24 @@ export function PlaybookRunsWorkspace({
                     )}
                   </div>
 
-                  <div className="rounded-xl border border-[var(--border-subtle)] bg-[rgba(255,255,255,.015)] overflow-hidden">
-                    <div className="px-4 py-3 border-b border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)]">
+                  <div className="rounded-lg border border-[var(--border-subtle)] bg-[rgba(255,255,255,.015)] overflow-hidden">
+                    <div className="px-3 py-2 border-b border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)]">
                       <div className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
                         Repos
                       </div>
-                      <div className="text-[11px] text-[var(--muted)] mt-1 leading-relaxed">
-                        Pick a repo to filter runs and set launch target.
-                      </div>
                     </div>
-                    <div className="max-h-[360px] overflow-y-auto">
+                    <div className="max-h-[260px] overflow-y-auto">
                       <button
                         type="button"
                         onClick={() => setSelectedRepoPath('')}
                         aria-pressed={selectedRepoPath === ''}
-                        className={`dh-selection-card w-full px-4 py-3.5 text-left border-b border-[var(--border-subtle)] ${
+                        className={`dh-selection-card w-full px-3 py-2.5 text-left border-b border-[var(--border-subtle)] ${
                           selectedRepoPath === '' ? 'is-active' : ''
                         }`}
                       >
-                        <div className="flex items-center justify-between gap-3">
-                          <div>
-                            <div className="text-[12px] font-semibold text-[var(--fg)]">All repos</div>
-                            <div className="text-[10px] text-[var(--muted-dim)] mt-1">Show runs across every registered repo.</div>
-                          </div>
-                          <div className="rounded-md bg-[rgba(255,255,255,.05)] px-2 py-1 text-[10px] font-semibold text-[var(--muted)]" style={{ fontFamily: 'var(--code)' }}>
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-[11px] font-semibold text-[var(--fg)]">All repos</div>
+                          <div className="rounded-md bg-[rgba(255,255,255,.05)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--muted)]" style={{ fontFamily: 'var(--code)' }}>
                             {runsForSelectedPlaybook.length}
                           </div>
                         </div>
@@ -427,18 +395,15 @@ export function PlaybookRunsWorkspace({
                             type="button"
                             onClick={() => setSelectedRepoPath((current) => (current === repoPath ? '' : repoPath))}
                             aria-pressed={active}
-                            className={`dh-selection-card w-full px-4 py-3.5 text-left border-b border-[var(--border-subtle)] last:border-b-0 ${
+                            className={`dh-selection-card w-full px-3 py-2.5 text-left border-b border-[var(--border-subtle)] last:border-b-0 ${
                               active ? 'is-active' : ''
                             }`}
                           >
-                            <div className="flex items-start justify-between gap-3">
+                            <div className="flex items-center justify-between gap-2">
                               <div className="min-w-0">
-                                <div className="text-[12px] font-semibold text-[var(--fg)]">{repoLabel(repoPath)}</div>
-                                <div className="mt-1 truncate text-[10px] text-[var(--muted-dim)]" title={repoPath} style={{ fontFamily: 'var(--code)' }}>
-                                  {repoPath}
-                                </div>
+                                <div className="text-[11px] font-semibold text-[var(--fg)] truncate">{repoLabel(repoPath)}</div>
                               </div>
-                              <div className="rounded-md bg-[rgba(255,255,255,.05)] px-2 py-1 text-[10px] font-semibold text-[var(--muted)]" style={{ fontFamily: 'var(--code)' }}>
+                              <div className="rounded-md bg-[rgba(255,255,255,.05)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--muted)]" style={{ fontFamily: 'var(--code)' }}>
                                 {repoRunCountByPath[repoPath] ?? 0}
                               </div>
                             </div>
@@ -448,72 +413,48 @@ export function PlaybookRunsWorkspace({
                     </div>
                   </div>
                 </div>
+              </div>
 
-                <div className="rounded-xl border border-[var(--border-subtle)] bg-[rgba(255,255,255,.015)] p-5 flex flex-col gap-4">
-                  <div>
-                    <div className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
-                      Current Selection
-                    </div>
-                    <div className="text-[11px] text-[var(--muted)] mt-1">
-                      Configure and launch your next run.
-                    </div>
+              <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[rgba(255,255,255,.015)] px-3 py-2.5">
+                <div className="flex items-center gap-3 min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="text-[9px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)] shrink-0" style={{ fontFamily: 'var(--display)' }}>Playbook</span>
+                    <span className="text-[11px] font-semibold text-[var(--fg)] truncate">{selectedPlaybook?.label || <span className="text-[var(--muted-dim)] font-normal">—</span>}</span>
                   </div>
-                  <div className="rounded-xl border border-[var(--border-subtle)] bg-[rgba(0,0,0,.12)] overflow-hidden">
-                    <div className="px-4 py-3.5 border-b border-[var(--border-subtle)]">
-                      <div className="text-[9px] font-semibold uppercase tracking-[0.1em] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
-                        Playbook
-                      </div>
-                      <div className="text-[13px] font-semibold text-[var(--fg)] mt-1">
-                        {selectedPlaybook?.label || <span className="text-[var(--muted-dim)] italic font-normal">None selected</span>}
-                      </div>
-                      <div className="text-[11px] text-[var(--muted-dim)] mt-1.5 whitespace-pre-wrap line-clamp-2 leading-relaxed">
-                        {selectedPlaybook
-                          ? selectedPlaybook.messages[0]?.prompt || 'No prompt yet.'
-                          : 'Pick a playbook row to enable launch.'}
-                      </div>
-                    </div>
-                    <div className="px-4 py-3.5">
-                      <div className="text-[9px] font-semibold uppercase tracking-[0.1em] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
-                        Repo
-                      </div>
-                      <div className="text-[13px] font-semibold text-[var(--fg)] mt-1">
-                        {selectedRepoPath ? repoLabel(selectedRepoPath) : <span className="text-[var(--muted-dim)] italic font-normal">None selected</span>}
-                      </div>
-                      <div className="text-[10px] text-[var(--muted-dim)] mt-1" title={selectedRepoPath || undefined} style={{ fontFamily: 'var(--code)' }}>
-                        {selectedRepoPath || 'Pick a repo row to set the launch target.'}
-                      </div>
-                    </div>
+                  <span className="text-[var(--border)] shrink-0">·</span>
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="text-[9px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)] shrink-0" style={{ fontFamily: 'var(--display)' }}>Repo</span>
+                    <span className="text-[11px] font-semibold text-[var(--fg)] truncate">{selectedRepoPath ? repoLabel(selectedRepoPath) : <span className="text-[var(--muted-dim)] font-normal">—</span>}</span>
                   </div>
-                  <div className="flex flex-wrap items-center gap-2 mt-auto">
-                    <span className="inline-flex" title={runDisabledReason}>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (selectedPlaybook) void runPlaybook(selectedPlaybook);
-                        }}
-                        disabled={runDisabled}
-                        className={`h-10 px-5 rounded-lg text-[10px] font-semibold tracking-wide uppercase transition-all ${
-                          runDisabled
-                            ? 'opacity-30 cursor-not-allowed bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)]'
-                            : 'bg-[var(--accent)] text-[var(--accent-fg)] hover:brightness-110 animate-accent-glow shadow-[0_2px_12px_rgba(167,139,250,.2)]'
-                        }`}
-                        style={{ fontFamily: 'var(--display)' }}
-                      >
-                        {selectedPlaybook ? `Run ${selectedPlaybook.label || 'Playbook'}` : 'Run Playbook'}
-                      </button>
-                    </span>
-                    {selectedPlaybook && (
-                      <button
-                        type="button"
-                        onClick={() => onOpenPlaybookSettings(selectedPlaybook.id)}
-                        className="h-10 px-4 rounded-lg text-[10px] font-semibold tracking-wide uppercase border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)] hover:border-[var(--border)] hover:bg-[rgba(255,255,255,.05)] hover:text-[var(--fg)]"
-                        style={{ fontFamily: 'var(--display)' }}
-                      >
-                        Edit Playbook
-                      </button>
-                    )}
-                  </div>
-                  {runDisabled && <div className="text-[10px] text-[var(--muted-dim)] leading-relaxed">{runDisabledReason}</div>}
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <span className="inline-flex" title={runDisabledReason}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (selectedPlaybook) void runPlaybook(selectedPlaybook);
+                      }}
+                      disabled={runDisabled}
+                      className={`h-8 px-4 rounded-lg text-[10px] font-semibold tracking-wide uppercase transition-all ${
+                        runDisabled
+                          ? 'opacity-30 cursor-not-allowed bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)]'
+                          : 'bg-[var(--accent)] text-[var(--accent-fg)] hover:brightness-110 shadow-[0_2px_8px_rgba(167,139,250,.18)]'
+                      }`}
+                      style={{ fontFamily: 'var(--display)' }}
+                    >
+                      Run
+                    </button>
+                  </span>
+                  {selectedPlaybook && (
+                    <button
+                      type="button"
+                      onClick={() => onOpenPlaybookSettings(selectedPlaybook.id)}
+                      className="h-8 px-3 rounded-lg text-[10px] font-semibold tracking-wide uppercase border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)] hover:border-[var(--border)] hover:bg-[rgba(255,255,255,.05)] hover:text-[var(--fg)]"
+                      style={{ fontFamily: 'var(--display)' }}
+                    >
+                      Edit
+                    </button>
+                  )}
                 </div>
               </div>
             </section>
