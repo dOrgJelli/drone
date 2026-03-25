@@ -1,5 +1,7 @@
 import React from 'react';
 import type { KanbanCard, KanbanTaskType } from './kanban-board-state';
+import { MarkdownMessage } from '../chat/MarkdownMessage';
+import { IconPencil } from './icons';
 
 type KanbanTaskDetailsDialogProps = {
   card: KanbanCard | null;
@@ -24,19 +26,39 @@ export function KanbanTaskDetailsDialog({
   onDelete,
   onOpenCreatorDrone,
 }: KanbanTaskDetailsDialogProps) {
+  const [editingDescription, setEditingDescription] = React.useState(false);
+  const textareaRef = React.useRef<HTMLTextAreaElement | null>(null);
+  const cardId = card?.id ?? null;
+
+  React.useEffect(() => {
+    setEditingDescription(false);
+  }, [cardId]);
+
   if (!card) return null;
   const activeTaskTypes = taskTypes.filter((item) => item.active !== false || item.id === card.typeId);
+  const hasDescription = Boolean(card.description?.trim());
 
   React.useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
+      if (editingDescription) {
+        setEditingDescription(false);
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
       onClose();
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose]);
+  }, [onClose, editingDescription]);
+
+  React.useEffect(() => {
+    if (editingDescription && textareaRef.current) {
+      textareaRef.current.focus();
+      textareaRef.current.selectionStart = textareaRef.current.value.length;
+    }
+  }, [editingDescription]);
 
   return (
     <div
@@ -109,15 +131,52 @@ export function KanbanTaskDetailsDialog({
           </div>
 
           <div className="flex flex-col gap-2">
-            <label className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>Description</label>
-            <textarea
-              value={card.description}
-              onChange={(event) => onUpdate({ description: event.target.value })}
-              disabled={controlsLocked}
-              placeholder="Add task details, context, acceptance criteria..."
-              rows={10}
-              className="min-h-[200px] rounded-lg border border-[var(--border-subtle)] bg-[rgba(0,0,0,.2)] px-4 py-3 text-[12px] leading-relaxed text-[var(--fg-secondary)] resize-y transition-colors focus:outline-none focus:border-[var(--accent-muted)] focus:bg-[rgba(0,0,0,.28)] disabled:cursor-not-allowed disabled:opacity-60"
-            />
+            <div className="flex items-center justify-between">
+              <label className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>Description</label>
+              {!controlsLocked && (
+                <button
+                  type="button"
+                  onClick={() => setEditingDescription((prev) => !prev)}
+                  className={`inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[10px] font-semibold uppercase tracking-wide transition-all ${
+                    editingDescription
+                      ? 'bg-[rgba(167,139,250,.12)] text-[var(--accent)] border border-[rgba(167,139,250,.2)]'
+                      : 'text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.05)] hover:text-[var(--fg)]'
+                  }`}
+                  style={{ fontFamily: 'var(--display)' }}
+                >
+                  <IconPencil className="opacity-70" />
+                  {editingDescription ? 'Preview' : 'Edit'}
+                </button>
+              )}
+            </div>
+            {editingDescription ? (
+              <textarea
+                ref={textareaRef}
+                value={card.description}
+                onChange={(event) => onUpdate({ description: event.target.value })}
+                disabled={controlsLocked}
+                placeholder="Markdown supported — add task details, context, acceptance criteria..."
+                rows={10}
+                className="min-h-[200px] rounded-lg border border-[var(--border-subtle)] bg-[rgba(0,0,0,.2)] px-4 py-3 text-[12px] leading-relaxed text-[var(--fg-secondary)] resize-y transition-colors focus:outline-none focus:border-[var(--accent-muted)] focus:bg-[rgba(0,0,0,.28)] disabled:cursor-not-allowed disabled:opacity-60"
+                style={{ fontFamily: 'var(--code)' }}
+              />
+            ) : hasDescription ? (
+              <div
+                className="min-h-[80px] max-h-[360px] overflow-y-auto rounded-lg border border-[var(--border-subtle)] bg-[rgba(0,0,0,.12)] px-4 py-3"
+                onClick={() => { if (!controlsLocked) setEditingDescription(true); }}
+              >
+                <MarkdownMessage text={card.description} className="dh-markdown--agent text-[12.5px]" />
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => { if (!controlsLocked) setEditingDescription(true); }}
+                disabled={controlsLocked}
+                className="flex min-h-[80px] items-center justify-center rounded-lg border border-dashed border-[rgba(255,255,255,.08)] bg-[rgba(0,0,0,.08)] px-4 py-6 text-[11px] text-[var(--muted-dim)] transition-all hover:border-[var(--accent-muted)] hover:bg-[rgba(167,139,250,.04)] hover:text-[var(--accent)] disabled:cursor-not-allowed disabled:hover:border-[rgba(255,255,255,.08)] disabled:hover:bg-[rgba(0,0,0,.08)] disabled:hover:text-[var(--muted-dim)]"
+              >
+                Click to add a description (Markdown supported)
+              </button>
+            )}
           </div>
 
           <div className="rounded-xl border border-[var(--border-subtle)] bg-[rgba(255,255,255,.015)] px-4 py-3.5">

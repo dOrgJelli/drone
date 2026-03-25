@@ -215,26 +215,23 @@ function SortableKanbanCard({
         if (isCardControlTarget(event.target)) return;
         onOpenCard(laneId, card.id);
       }}
-      className={`dh-kanban-card animate-card-enter px-4 py-3.5 ${
+      className={`dh-kanban-card group animate-card-enter px-3.5 py-2.5 ${
         selected ? 'is-selected' : ''
       } ${dragging ? 'is-dragging' : ''} ${controlsLocked ? '' : 'cursor-grab touch-none active:cursor-grabbing'}`}
     >
-      <div className="flex items-start gap-2">
+      <div className="flex items-center gap-2">
         <div className="min-w-0 flex-1">
-          <div className="mb-2.5 inline-flex items-center gap-1.5 rounded-md bg-[rgba(255,255,255,.05)] px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.07em] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
-            <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--accent-muted)] opacity-60" />
-            {taskTypeLabel}
-          </div>
           <div
-            className={`w-full bg-transparent text-left text-[13px] font-medium leading-snug ${
+            className={`w-full bg-transparent text-left text-[12.5px] font-medium leading-snug ${
               controlsLocked ? 'cursor-not-allowed text-[var(--muted)] opacity-70' : 'text-[var(--fg)]'
             }`}
           >
             {card.title || 'Untitled task'}
           </div>
-          {card.description && (
-            <div className="mt-1.5 text-[11px] text-[var(--muted-dim)] line-clamp-2 leading-relaxed">{card.description}</div>
-          )}
+          <div className="mt-1 inline-flex items-center gap-1.5 rounded-md bg-[rgba(255,255,255,.04)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.06em] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+            <span className="inline-block h-1 w-1 rounded-full bg-[var(--accent-muted)] opacity-50" />
+            {taskTypeLabel}
+          </div>
         </div>
         <button
           type="button"
@@ -244,7 +241,7 @@ function SortableKanbanCard({
           }}
           onPointerDown={stopCardDragActivation}
           disabled={controlsLocked}
-          className={`mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg transition-all ${
+          className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition-all ${
             controlsLocked
               ? 'cursor-not-allowed text-[var(--muted-dim)] opacity-20'
               : 'text-[var(--muted-dim)] opacity-0 group-hover:opacity-100 hover:bg-[rgba(255,90,90,.12)] hover:text-[var(--red)]'
@@ -260,12 +257,12 @@ function SortableKanbanCard({
 
 function DragOverlayKanbanCard({ card, taskTypeLabel }: { card: KanbanCard; taskTypeLabel: string }) {
   return (
-    <article className="w-[272px] rounded-[14px] border border-[rgba(167,139,250,.3)] bg-[rgba(18,21,27,.95)] px-4 py-3.5 shadow-[0_24px_64px_rgba(0,0,0,.5),0_0_24px_rgba(167,139,250,.08)] backdrop-blur-md">
-      <div className="mb-2.5 inline-flex items-center gap-1.5 rounded-md bg-[rgba(255,255,255,.06)] px-2 py-1 text-[9px] font-semibold uppercase tracking-[0.07em] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
-        <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--accent)] opacity-80" />
+    <article className="w-[272px] rounded-[14px] border border-[rgba(167,139,250,.3)] bg-[rgba(18,21,27,.95)] px-3.5 py-2.5 shadow-[0_24px_64px_rgba(0,0,0,.5),0_0_24px_rgba(167,139,250,.08)] backdrop-blur-md">
+      <div className="text-[12.5px] font-medium leading-snug text-[var(--fg)]">{card.title || 'Untitled task'}</div>
+      <div className="mt-1 inline-flex items-center gap-1.5 rounded-md bg-[rgba(255,255,255,.06)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.06em] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+        <span className="inline-block h-1 w-1 rounded-full bg-[var(--accent)] opacity-80" />
         {taskTypeLabel}
       </div>
-      <div className="text-[13px] font-medium leading-snug text-[var(--fg)]">{card.title || 'Untitled task'}</div>
     </article>
   );
 }
@@ -282,7 +279,7 @@ function KanbanLaneCards({
   const cardIds = React.useMemo(() => lane.cards.map((card) => card.id), [lane.cards]);
 
   return (
-    <div className="space-y-2.5 p-1">
+    <div className="space-y-2 p-1">
       <SortableContext items={cardIds} strategy={verticalListSortingStrategy}>
         {lane.cards.length === 0 ? (
           <EmptyKanbanLaneDropTarget laneId={lane.id} controlsLocked={controlsLocked} />
