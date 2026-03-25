@@ -575,10 +575,17 @@ export function DroneCanvasDock({
     () => String(draftRepoLabel ?? '').trim(),
     [draftRepoLabel],
   );
-  const { createDraftShortcutBinding, focusPrimaryChatInputShortcutBinding } = useDroneHubUiStore(
+  const {
+    createDraftShortcutBinding,
+    focusPrimaryChatInputShortcutBinding,
+    showCanvasLastMessagePreviews,
+    setShowCanvasLastMessagePreviews,
+  } = useDroneHubUiStore(
     useShallow((s) => ({
       createDraftShortcutBinding: s.shortcutBindings.createDraftDrone,
       focusPrimaryChatInputShortcutBinding: s.shortcutBindings.focusPrimaryChatInput,
+      showCanvasLastMessagePreviews: s.showCanvasLastMessagePreviews,
+      setShowCanvasLastMessagePreviews: s.setShowCanvasLastMessagePreviews,
     })),
   );
 
@@ -2019,6 +2026,19 @@ export function DroneCanvasDock({
           </label>
         </div>
         <div className="flex items-center gap-1 ml-auto">
+          <label
+            className="inline-flex items-center gap-1.5 h-7 px-2 rounded border border-[var(--border-subtle)] text-[10px] font-semibold text-[var(--muted)] hover:text-[var(--fg-secondary)] hover:bg-[var(--hover)] transition-colors cursor-pointer"
+            style={{ fontFamily: 'var(--display)' }}
+            title="Show the latest agent reply above canvas nodes."
+          >
+            <input
+              type="checkbox"
+              checked={showCanvasLastMessagePreviews}
+              onChange={(event) => setShowCanvasLastMessagePreviews(event.target.checked)}
+              className="h-3.5 w-3.5 accent-[var(--accent)]"
+            />
+            Last msgs
+          </label>
           <span className="px-2 text-[10px] font-mono text-[var(--muted-dim)]" title="Selected chats">
             {selectedDroneIds.length} sel
           </span>
@@ -2215,7 +2235,7 @@ export function DroneCanvasDock({
                     {unreadIndicator}
                   </span>
                 ) : null}
-                {lastAgentSnippet ? (
+                {showCanvasLastMessagePreviews && lastAgentSnippet ? (
                   <span
                     className="pointer-events-none absolute left-0 bottom-full mb-[18px] z-[1] inline-flex max-w-[280px] rounded-[4px] border border-[var(--border-subtle)] bg-[rgba(10,14,22,.96)] px-2 py-1 text-[10px] leading-[1.35] text-[var(--muted)] shadow-[0_6px_14px_rgba(0,0,0,.35)]"
                     title={lastAgentSnippet}

@@ -8,6 +8,7 @@ describe('drone hub ui store migration', () => {
       {
         sidebarGroupingMode: 'repos',
         autoDelete: true,
+        showCanvasLastMessagePreviews: true,
         automations: [
           {
             id: 'automation-a',
@@ -23,6 +24,7 @@ describe('drone hub ui store migration', () => {
     expect(migrated).toMatchObject({
       sidebarGroupingMode: 'repos',
       autoDelete: true,
+      showCanvasLastMessagePreviews: true,
     });
     expect(Array.isArray(migrated.automations)).toBe(true);
     expect((migrated.automations ?? [])[0]).toMatchObject({

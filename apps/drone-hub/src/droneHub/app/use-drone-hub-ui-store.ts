@@ -84,6 +84,7 @@ type DroneHubUiState = {
   outputView: OutputView;
   fsExplorerView: FsExplorerView;
   transcriptInlineImages: boolean;
+  showCanvasLastMessagePreviews: boolean;
   automations: AutomationConfig[];
   transcriptInlineImageOverrides: Record<string, boolean>;
   spawnAgentKey: string;
@@ -139,6 +140,7 @@ type DroneHubUiState = {
   setOutputView: (next: Updater<OutputView>) => void;
   setFsExplorerView: (next: Updater<FsExplorerView>) => void;
   setTranscriptInlineImages: (next: Updater<boolean>) => void;
+  setShowCanvasLastMessagePreviews: (next: Updater<boolean>) => void;
   setAutomations: (next: Updater<AutomationConfig[]>) => void;
   addAutomation: (seed?: Partial<AutomationConfig>) => string;
   updateAutomation: (id: string, patch: Partial<AutomationConfig>) => void;
@@ -190,6 +192,7 @@ type DroneHubUiPersistedState = Pick<
   | 'outputView'
   | 'fsExplorerView'
   | 'transcriptInlineImages'
+  | 'showCanvasLastMessagePreviews'
   | 'automations'
   | 'spawnAgentKey'
   | 'spawnModel'
@@ -429,6 +432,7 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
       outputView: 'screen',
       fsExplorerView: 'list',
       transcriptInlineImages: false,
+      showCanvasLastMessagePreviews: false,
       automations: [],
       transcriptInlineImageOverrides: {},
       spawnAgentKey: 'builtin:cursor',
@@ -530,6 +534,8 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
       setFsExplorerView: (next) => set((s) => ({ fsExplorerView: resolveNext(s.fsExplorerView, next) })),
       setTranscriptInlineImages: (next) =>
         set((s) => ({ transcriptInlineImages: resolveNext(s.transcriptInlineImages, next) })),
+      setShowCanvasLastMessagePreviews: (next) =>
+        set((s) => ({ showCanvasLastMessagePreviews: resolveNext(s.showCanvasLastMessagePreviews, next) })),
       setAutomations: (next) =>
         set((s) => ({
           automations: normalizeAutomationConfigs(resolveNext(s.automations, next)),
@@ -640,6 +646,7 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
         outputView: state.outputView,
         fsExplorerView: state.fsExplorerView,
         transcriptInlineImages: state.transcriptInlineImages,
+        showCanvasLastMessagePreviews: state.showCanvasLastMessagePreviews,
         automations: state.automations,
         spawnAgentKey: state.spawnAgentKey,
         spawnModel: state.spawnModel,
@@ -706,6 +713,9 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
           transcriptInlineImages: normalizeBoolean(
             persisted.transcriptInlineImages ?? currentState.transcriptInlineImages,
           ),
+          showCanvasLastMessagePreviews: normalizeBoolean(
+            persisted.showCanvasLastMessagePreviews ?? currentState.showCanvasLastMessagePreviews,
+          ),
           automations: normalizeAutomationConfigs(
             (persisted as any).automations ?? currentState.automations,
           ),
@@ -757,6 +767,7 @@ export function useDroneHubAppModelUiState() {
       headerOverflowOpen: s.headerOverflowOpen,
       outputView: s.outputView,
       fsExplorerView: s.fsExplorerView,
+      showCanvasLastMessagePreviews: s.showCanvasLastMessagePreviews,
       spawnAgentKey: s.spawnAgentKey,
       spawnModel: s.spawnModel,
       pullHostBranchBeforeCreate: s.pullHostBranchBeforeCreate,
@@ -800,6 +811,7 @@ export function useDroneHubAppModelUiState() {
       setHeaderOverflowOpen: s.setHeaderOverflowOpen,
       setOutputView: s.setOutputView,
       setFsExplorerView: s.setFsExplorerView,
+      setShowCanvasLastMessagePreviews: s.setShowCanvasLastMessagePreviews,
       setSpawnAgentKey: s.setSpawnAgentKey,
       setSpawnModel: s.setSpawnModel,
       setPullHostBranchBeforeCreate: s.setPullHostBranchBeforeCreate,
