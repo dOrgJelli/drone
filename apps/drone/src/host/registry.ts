@@ -28,7 +28,8 @@ type DroneRegistryPlaybookMeta = {
 type DroneRegistryPlaybookMessage = {
   id: string;
   prompt: string;
-  captureFinding?: boolean;
+  createTask?: boolean;
+  taskTypeId?: string;
 };
 
 type DroneRegistryPlaybookEntry = {
@@ -45,21 +46,6 @@ type DroneRegistryPlaybookEntry = {
   }>;
   createdAt: string;
   updatedAt?: string;
-};
-
-type DroneRegistryPlaybookFinding = {
-  id: string;
-  playbookId: string;
-  playbookLabel: string;
-  repoPath: string;
-  droneId: string;
-  droneName?: string;
-  chatName: string;
-  promptId: string;
-  messageId?: string;
-  prompt: string;
-  title: string;
-  createdAt: string;
 };
 
 type DroneRegistryChatEntry = {
@@ -127,6 +113,11 @@ type DroneRegistryV1 = {
       updatedAt?: string;
     };
     kanbanBoard?: {
+      taskTypes?: Array<{
+        id?: string;
+        label?: string;
+        active?: boolean;
+      }>;
       lanes?: Array<{
         id?: string;
         title?: string;
@@ -134,6 +125,18 @@ type DroneRegistryV1 = {
           id?: string;
           title?: string;
           description?: string;
+          typeId?: string;
+          createdAt?: string;
+          updatedAt?: string;
+          repoPath?: string;
+          droneId?: string;
+          droneName?: string;
+          playbookId?: string;
+          playbookLabel?: string;
+          chatName?: string;
+          prompt?: string;
+          promptId?: string;
+          messageId?: string;
         }>;
       }>;
       updatedAt?: string;
@@ -172,16 +175,6 @@ type DroneRegistryV1 = {
    */
   skills?: Record<string, unknown>;
   playbooks?: Record<string, DroneRegistryPlaybookEntry>;
-  playbookFindings?: Record<
-    string,
-    {
-      playbookId: string;
-      playbookLabel: string;
-      repoPath: string;
-      findings: DroneRegistryPlaybookFinding[];
-      updatedAt?: string;
-    }
-  >;
   /**
    * Host-side list of repositories the user has "registered" with `drone repo`.
    * This is stored in the same registry file so the Hub UI can render it.
@@ -349,7 +342,6 @@ export type DroneRegistry = {
   settings?: DroneRegistryV1['settings'];
   skills?: Record<string, unknown>;
   playbooks?: Record<string, DroneRegistryPlaybookEntry>;
-  playbookFindings?: DroneRegistryV1['playbookFindings'];
   repos?: DroneRegistryV1['repos'];
   groups?: DroneRegistryV1['groups'];
   archived?: Record<string, DroneRegistryArchivedEntry>;
@@ -585,7 +577,6 @@ function hasMeaningfulRegistryData(reg: DroneRegistry): boolean {
   if (countRecordEntries(reg.archived) > 0) return true;
   if (countRecordEntries(reg.skills) > 0) return true;
   if (countRecordEntries(reg.playbooks) > 0) return true;
-  if (countRecordEntries((reg as any).playbookFindings) > 0) return true;
   if (countRecordEntries(reg.repos) > 0) return true;
   if (countRecordEntries(reg.groups) > 0) return true;
   if (countRecordEntries(reg.settings) > 0) return true;
@@ -610,7 +601,10 @@ function normalizeV2Registry(input: DroneRegistry): DroneRegistry {
               return {
                 id: String((item as any).id ?? '').trim() || `message-${index + 1}`,
                 prompt,
-                ...((item as any).captureFinding === true ? { captureFinding: true } : {}),
+                ...(((item as any).createTask === true || (item as any).captureFinding === true) ? { createTask: true } : {}),
+                ...(typeof (item as any).taskTypeId === 'string' && String((item as any).taskTypeId).trim()
+                  ? { taskTypeId: String((item as any).taskTypeId).trim() }
+                  : {}),
               };
             }
             const prompt = String(item ?? '');
@@ -649,47 +643,7 @@ function normalizeV2Registry(input: DroneRegistry): DroneRegistry {
       updatedAt: typeof entry.updatedAt === 'string' && entry.updatedAt.trim() ? entry.updatedAt : undefined,
     };
   }
-  input.playbookFindings = input.playbookFindings ?? {};
-  for (const [key, entryAny] of Object.entries(input.playbookFindings ?? {})) {
-    const entry = entryAny as any;
-    if (!entry || typeof entry !== 'object') continue;
-    const playbookId = typeof entry.playbookId === 'string' ? entry.playbookId.trim() : '';
-    const repoPath = typeof entry.repoPath === 'string' ? entry.repoPath.trim() : '';
-    const findings = Array.isArray(entry.findings)
-      ? entry.findings
-          .map((item: any) => {
-            const id = String(item?.id ?? '').trim();
-            const title = String(item?.title ?? '').trim();
-            const promptId = String(item?.promptId ?? '').trim();
-            const chatName = typeof item?.chatName === 'string' && item.chatName.trim() ? item.chatName.trim() : 'default';
-            const createdAt =
-              typeof item?.createdAt === 'string' && item.createdAt.trim() ? item.createdAt.trim() : new Date().toISOString();
-            if (!id || !title || !promptId) return null;
-            return {
-              id,
-              playbookId: String(item?.playbookId ?? playbookId).trim() || playbookId,
-              playbookLabel: String(item?.playbookLabel ?? entry.playbookLabel ?? playbookId).trim() || playbookId,
-              repoPath: String(item?.repoPath ?? repoPath).trim(),
-              droneId: String(item?.droneId ?? '').trim(),
-              ...(typeof item?.droneName === 'string' && item.droneName.trim() ? { droneName: item.droneName.trim() } : {}),
-              chatName,
-              promptId,
-              ...(typeof item?.messageId === 'string' && item.messageId.trim() ? { messageId: item.messageId.trim() } : {}),
-              prompt: String(item?.prompt ?? ''),
-              title,
-              createdAt,
-            };
-          })
-          .filter(Boolean)
-      : [];
-    (input.playbookFindings as any)[key] = {
-      playbookId,
-      playbookLabel: String(entry.playbookLabel ?? playbookId).trim() || playbookId,
-      repoPath,
-      findings: findings.slice(-500),
-      updatedAt: typeof entry.updatedAt === 'string' && entry.updatedAt.trim() ? entry.updatedAt : undefined,
-    };
-  }
+  delete (input as any).playbookFindings;
   for (const [key, entryAny] of Object.entries(input.drones ?? {})) {
     const entry = entryAny as any;
     if (!entry || typeof entry !== 'object') continue;
@@ -843,7 +797,6 @@ function migrateV1ToV2(v1: DroneRegistryV1): DroneRegistry {
     settings: v1.settings,
     skills: v1.skills,
     playbooks: {},
-    playbookFindings: {},
     repos: v1.repos,
     groups: v1.groups,
     archived: {},

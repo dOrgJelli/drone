@@ -1,7 +1,25 @@
+export type KanbanTaskType = {
+  id: string;
+  label: string;
+  active: boolean;
+};
+
 export type KanbanCard = {
   id: string;
   title: string;
   description: string;
+  typeId: string;
+  createdAt?: string;
+  updatedAt?: string;
+  repoPath?: string;
+  droneId?: string;
+  droneName?: string;
+  playbookId?: string;
+  playbookLabel?: string;
+  chatName?: string;
+  prompt?: string;
+  promptId?: string;
+  messageId?: string;
 };
 
 export type KanbanLane = {
@@ -11,6 +29,7 @@ export type KanbanLane = {
 };
 
 export type KanbanBoardState = {
+  taskTypes: KanbanTaskType[];
   lanes: KanbanLane[];
 };
 
@@ -22,41 +41,136 @@ export type MoveKanbanCardInput = {
 };
 
 const DEFAULT_KANBAN_LANE_TITLES = ['To do', 'In progress', 'Review', 'Done'] as const;
+const DEFAULT_TASK_TYPES = [
+  { id: 'bug', label: 'Bug', active: true },
+  { id: 'feature', label: 'Feature', active: true },
+  { id: 'idea', label: 'Idea', active: true },
+] as const;
 const PASTED_TEXT_INLINE_TITLE_MAX_CHARS = 24;
 
 function defaultKanbanLaneTitle(index: number): string {
   return DEFAULT_KANBAN_LANE_TITLES[index] ?? `Lane ${index + 1}`;
 }
 
-function createKanbanId(prefix: 'lane' | 'card'): string {
+function createKanbanId(prefix: 'lane' | 'card' | 'type'): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export function createKanbanCard(seed?: Partial<Pick<KanbanCard, 'title' | 'description'>>): KanbanCard {
+export function normalizeTaskTypeId(value: unknown): string {
+  const cleaned = String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
+  return cleaned;
+}
+
+export function createDefaultKanbanTaskTypes(): KanbanTaskType[] {
+  return DEFAULT_TASK_TYPES.map((item) => ({ ...item }));
+}
+
+export function fallbackTaskTypeId(taskTypes: KanbanTaskType[]): string {
+  return taskTypes.find((item) => item.active !== false)?.id ?? taskTypes[0]?.id ?? 'idea';
+}
+
+export function createKanbanTaskType(seed?: Partial<KanbanTaskType>): KanbanTaskType {
+  const label = String(seed?.label ?? '').trim() || 'Untitled type';
+  return {
+    id: normalizeTaskTypeId(seed?.id ?? label) || createKanbanId('type'),
+    label,
+    active: seed?.active !== false,
+  };
+}
+
+export function sanitizeKanbanTaskTypes(value: unknown): KanbanTaskType[] {
+  const list = Array.isArray(value) ? value : [];
+  const out: KanbanTaskType[] = [];
+  const seen = new Set<string>();
+  for (const item of list) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const label = String((item as any).label ?? '').trim();
+    const id = normalizeTaskTypeId((item as any).id ?? label);
+    if (!id || !label || seen.has(id)) continue;
+    seen.add(id);
+    out.push({
+      id,
+      label,
+      active: (item as any).active !== false,
+    });
+  }
+  return out.length > 0 ? out : createDefaultKanbanTaskTypes();
+}
+
+export function createKanbanCard(
+  seed?: Partial<
+    Pick<
+      KanbanCard,
+      | 'title'
+      | 'description'
+      | 'typeId'
+      | 'createdAt'
+      | 'updatedAt'
+      | 'repoPath'
+      | 'droneId'
+      | 'droneName'
+      | 'playbookId'
+      | 'playbookLabel'
+      | 'chatName'
+      | 'prompt'
+      | 'promptId'
+      | 'messageId'
+    >
+  >,
+  fallbackTypeIdRaw: string = 'idea',
+): KanbanCard {
+  const fallbackTypeId = normalizeTaskTypeId(fallbackTypeIdRaw) || 'idea';
+  const typeId = normalizeTaskTypeId(seed?.typeId) || fallbackTypeId;
   return {
     id: createKanbanId('card'),
     title: String(seed?.title ?? '').trim(),
     description: String(seed?.description ?? '').trim(),
+    typeId,
+    ...(typeof seed?.createdAt === 'string' && seed.createdAt.trim() ? { createdAt: seed.createdAt.trim() } : {}),
+    ...(typeof seed?.updatedAt === 'string' && seed.updatedAt.trim() ? { updatedAt: seed.updatedAt.trim() } : {}),
+    ...(typeof seed?.repoPath === 'string' && seed.repoPath.trim() ? { repoPath: seed.repoPath.trim() } : {}),
+    ...(typeof seed?.droneId === 'string' && seed.droneId.trim() ? { droneId: seed.droneId.trim() } : {}),
+    ...(typeof seed?.droneName === 'string' && seed.droneName.trim() ? { droneName: seed.droneName.trim() } : {}),
+    ...(typeof seed?.playbookId === 'string' && seed.playbookId.trim() ? { playbookId: seed.playbookId.trim() } : {}),
+    ...(typeof seed?.playbookLabel === 'string' && seed.playbookLabel.trim() ? { playbookLabel: seed.playbookLabel.trim() } : {}),
+    ...(typeof seed?.chatName === 'string' && seed.chatName.trim() ? { chatName: seed.chatName.trim() } : {}),
+    ...(typeof seed?.prompt === 'string' && seed.prompt ? { prompt: seed.prompt } : {}),
+    ...(typeof seed?.promptId === 'string' && seed.promptId.trim() ? { promptId: seed.promptId.trim() } : {}),
+    ...(typeof seed?.messageId === 'string' && seed.messageId.trim() ? { messageId: seed.messageId.trim() } : {}),
   };
 }
 
-export function createKanbanLane(seed?: Partial<Pick<KanbanLane, 'title' | 'cards'>>): KanbanLane {
+export function createKanbanLane(
+  seed?: Partial<Pick<KanbanLane, 'title' | 'cards'>>,
+  fallbackTypeIdRaw: string = 'idea',
+): KanbanLane {
   const cards = Array.isArray(seed?.cards) ? seed.cards : [];
   return {
     id: createKanbanId('lane'),
     title: String(seed?.title ?? '').trim() || defaultKanbanLaneTitle(0),
-    cards: cards.map((card) => createKanbanCard(card)),
+    cards: cards.map((card) => createKanbanCard(card, fallbackTypeIdRaw)),
   };
 }
 
 export function createDefaultKanbanBoardState(): KanbanBoardState {
+  const taskTypes = createDefaultKanbanTaskTypes();
+  const fallbackTypeId = fallbackTaskTypeId(taskTypes);
   return {
-    lanes: DEFAULT_KANBAN_LANE_TITLES.map((title) => createKanbanLane({ title })),
+    taskTypes,
+    lanes: DEFAULT_KANBAN_LANE_TITLES.map((title) => createKanbanLane({ title }, fallbackTypeId)),
   };
 }
 
 export function sanitizeKanbanBoardState(value: unknown): KanbanBoardState {
   const raw = value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  const taskTypes = sanitizeKanbanTaskTypes(raw.taskTypes);
+  const fallbackTypeId = fallbackTaskTypeId(taskTypes);
   const lanesRaw = Array.isArray(raw.lanes) ? raw.lanes : [];
   const lanes: KanbanLane[] = [];
   for (let i = 0; i < lanesRaw.length; i += 1) {
@@ -73,6 +187,18 @@ export function sanitizeKanbanBoardState(value: unknown): KanbanBoardState {
         id: String(cardRecord.id ?? '').trim() || createKanbanId('card'),
         title: String(cardRecord.title ?? '').trim(),
         description: String(cardRecord.description ?? '').trim(),
+        typeId: normalizeTaskTypeId(cardRecord.typeId) || fallbackTypeId,
+        ...(typeof cardRecord.createdAt === 'string' && cardRecord.createdAt.trim() ? { createdAt: cardRecord.createdAt.trim() } : {}),
+        ...(typeof cardRecord.updatedAt === 'string' && cardRecord.updatedAt.trim() ? { updatedAt: cardRecord.updatedAt.trim() } : {}),
+        ...(typeof cardRecord.repoPath === 'string' && cardRecord.repoPath.trim() ? { repoPath: cardRecord.repoPath.trim() } : {}),
+        ...(typeof cardRecord.droneId === 'string' && cardRecord.droneId.trim() ? { droneId: cardRecord.droneId.trim() } : {}),
+        ...(typeof cardRecord.droneName === 'string' && cardRecord.droneName.trim() ? { droneName: cardRecord.droneName.trim() } : {}),
+        ...(typeof cardRecord.playbookId === 'string' && cardRecord.playbookId.trim() ? { playbookId: cardRecord.playbookId.trim() } : {}),
+        ...(typeof cardRecord.playbookLabel === 'string' && cardRecord.playbookLabel.trim() ? { playbookLabel: cardRecord.playbookLabel.trim() } : {}),
+        ...(typeof cardRecord.chatName === 'string' && cardRecord.chatName.trim() ? { chatName: cardRecord.chatName.trim() } : {}),
+        ...(typeof cardRecord.prompt === 'string' && cardRecord.prompt ? { prompt: cardRecord.prompt } : {}),
+        ...(typeof cardRecord.promptId === 'string' && cardRecord.promptId.trim() ? { promptId: cardRecord.promptId.trim() } : {}),
+        ...(typeof cardRecord.messageId === 'string' && cardRecord.messageId.trim() ? { messageId: cardRecord.messageId.trim() } : {}),
       });
     }
     lanes.push({
@@ -81,7 +207,7 @@ export function sanitizeKanbanBoardState(value: unknown): KanbanBoardState {
       cards,
     });
   }
-  return lanes.length > 0 ? { lanes } : createDefaultKanbanBoardState();
+  return lanes.length > 0 ? { taskTypes, lanes } : createDefaultKanbanBoardState();
 }
 
 function fallbackTitleFromText(textRaw: string): string {
@@ -150,6 +276,10 @@ export function moveKanbanCard(board: KanbanBoardState, input: MoveKanbanCardInp
   const card = sourceLane.cards[sourceIndex] ?? null;
   if (!card) return board;
 
+  const movedCard = {
+    ...card,
+    updatedAt: new Date().toISOString(),
+  };
   const sourceCards = sourceLane.cards.filter((item) => item.id !== cardId);
   const unclampedTargetIndex = fromLaneId === toLaneId && sourceIndex < toIndexRaw ? toIndexRaw - 1 : toIndexRaw;
   const targetIndex = Math.max(0, Math.min(targetLane.cards.length, unclampedTargetIndex));
@@ -159,7 +289,7 @@ export function moveKanbanCard(board: KanbanBoardState, input: MoveKanbanCardInp
     lanes: board.lanes.map((lane) => {
       if (lane.id === fromLaneId && lane.id === toLaneId) {
         const nextCards = sourceCards.slice();
-        nextCards.splice(targetIndex, 0, card);
+        nextCards.splice(targetIndex, 0, movedCard);
         return { ...lane, cards: nextCards };
       }
       if (lane.id === fromLaneId) {
@@ -167,7 +297,7 @@ export function moveKanbanCard(board: KanbanBoardState, input: MoveKanbanCardInp
       }
       if (lane.id === toLaneId) {
         const nextCards = lane.cards.slice();
-        nextCards.splice(targetIndex, 0, card);
+        nextCards.splice(targetIndex, 0, movedCard);
         return { ...lane, cards: nextCards };
       }
       return lane;

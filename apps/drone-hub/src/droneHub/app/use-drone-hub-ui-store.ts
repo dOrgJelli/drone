@@ -29,6 +29,7 @@ import {
   type KanbanBoardState,
 } from './kanban-board-state';
 import { normalizeSidebarGroupOrder } from './sidebar-group-order';
+import { mergeSeenModelIds, normalizeSeenModelIds } from './spawn-model-history';
 
 type Updater<T> = T | ((prev: T) => T);
 
@@ -89,6 +90,7 @@ type DroneHubUiState = {
   transcriptInlineImageOverrides: Record<string, boolean>;
   spawnAgentKey: string;
   spawnModel: string;
+  seenModelIds: string[];
   pullHostBranchBeforeCreate: boolean;
   customAgents: CustomAgentProfile[];
   customAgentModalOpen: boolean;
@@ -149,6 +151,7 @@ type DroneHubUiState = {
   setTranscriptInlineImageOverride: (messageId: string, next: boolean | null) => void;
   setSpawnAgentKey: (next: Updater<string>) => void;
   setSpawnModel: (next: Updater<string>) => void;
+  rememberSeenModels: (models: Iterable<string | null | undefined>) => void;
   setPullHostBranchBeforeCreate: (next: Updater<boolean>) => void;
   setCustomAgents: (next: Updater<CustomAgentProfile[]>) => void;
   setCustomAgentModalOpen: (next: Updater<boolean>) => void;
@@ -196,6 +199,7 @@ type DroneHubUiPersistedState = Pick<
   | 'automations'
   | 'spawnAgentKey'
   | 'spawnModel'
+  | 'seenModelIds'
   | 'pullHostBranchBeforeCreate'
   | 'customAgents'
   | 'shortcutBindings'
@@ -437,6 +441,7 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
       transcriptInlineImageOverrides: {},
       spawnAgentKey: 'builtin:cursor',
       spawnModel: '',
+      seenModelIds: [],
       pullHostBranchBeforeCreate: true,
       customAgents: [],
       customAgentModalOpen: false,
@@ -594,6 +599,14 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
         }),
       setSpawnAgentKey: (next) => set((s) => ({ spawnAgentKey: resolveNext(s.spawnAgentKey, next) })),
       setSpawnModel: (next) => set((s) => ({ spawnModel: resolveNext(s.spawnModel, next) })),
+      rememberSeenModels: (models) =>
+        set((s) => {
+          const next = mergeSeenModelIds(s.seenModelIds, models);
+          if (next.length === s.seenModelIds.length && next.every((id, index) => id === s.seenModelIds[index])) {
+            return s;
+          }
+          return { seenModelIds: next };
+        }),
       setPullHostBranchBeforeCreate: (next) =>
         set((s) => ({ pullHostBranchBeforeCreate: resolveNext(s.pullHostBranchBeforeCreate, next) })),
       setCustomAgents: (next) => set((s) => ({ customAgents: resolveNext(s.customAgents, next) })),
@@ -619,7 +632,7 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
     }),
     {
       name: 'droneHub.ui',
-      version: 8,
+      version: 9,
       storage: createJSONStorage(() => localStorage),
       migrate: (persistedState, version) => migrateDroneHubUiPersistedState(persistedState, version),
       partialize: (state): DroneHubUiPersistedState => ({
@@ -650,6 +663,7 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
         automations: state.automations,
         spawnAgentKey: state.spawnAgentKey,
         spawnModel: state.spawnModel,
+        seenModelIds: state.seenModelIds,
         pullHostBranchBeforeCreate: state.pullHostBranchBeforeCreate,
         customAgents: state.customAgents,
         shortcutBindings: state.shortcutBindings,
@@ -719,6 +733,9 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
           automations: normalizeAutomationConfigs(
             (persisted as any).automations ?? currentState.automations,
           ),
+          seenModelIds: normalizeSeenModelIds(
+            persisted.seenModelIds ?? currentState.seenModelIds,
+          ),
           pullHostBranchBeforeCreate: normalizeBoolean(
             persisted.pullHostBranchBeforeCreate ?? currentState.pullHostBranchBeforeCreate,
           ),
@@ -770,6 +787,7 @@ export function useDroneHubAppModelUiState() {
       showCanvasLastMessagePreviews: s.showCanvasLastMessagePreviews,
       spawnAgentKey: s.spawnAgentKey,
       spawnModel: s.spawnModel,
+      seenModelIds: s.seenModelIds,
       pullHostBranchBeforeCreate: s.pullHostBranchBeforeCreate,
       customAgents: s.customAgents,
       customAgentModalOpen: s.customAgentModalOpen,
@@ -814,6 +832,7 @@ export function useDroneHubAppModelUiState() {
       setShowCanvasLastMessagePreviews: s.setShowCanvasLastMessagePreviews,
       setSpawnAgentKey: s.setSpawnAgentKey,
       setSpawnModel: s.setSpawnModel,
+      rememberSeenModels: s.rememberSeenModels,
       setPullHostBranchBeforeCreate: s.setPullHostBranchBeforeCreate,
       setCustomAgents: s.setCustomAgents,
       setCustomAgentModalOpen: s.setCustomAgentModalOpen,
