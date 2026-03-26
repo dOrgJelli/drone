@@ -216,6 +216,31 @@ import {
   FLEET_CAPABILITY_READ,
   FLEET_CAPABILITY_SEND,
 } from '../fleet/contracts';
+import {
+  applyDroneDisplayNameAcrossLifecycleEntries,
+  findDroneEntryByIdentity,
+  findDroneIdByRef,
+  findDroneLifecycleEntriesByIdentity,
+  normalizeDroneIdentity,
+  resolveStableDroneOrPendingIdFromRef,
+} from './drone-lifecycle-registry';
+import {
+  resolveDroneContainerNameByIdentity,
+  resolveDroneFromRegistryRef,
+  resolveDroneNameByIdentity,
+  resolveDroneOrPendingForReadRef,
+  setDroneHubMetaByIdentity,
+  type ResolvedDrone,
+  type ResolvedOrPendingDrone,
+} from './drone-lifecycle-service';
+import {
+  createPendingDroneStateHelpers,
+  type PendingPhase,
+  type PendingPromptState,
+  type PendingStartupPrompt,
+} from './drone-pending-state';
+import { createDronePendingPromptStore, type PendingPrompt } from './drone-pending-prompts';
+import { createDroneProvisioningController } from './drone-provisioning';
 
 const HUB_API_LOADED_AT = new Date().toISOString();
 const HUB_API_BUILD_ID = crypto.randomBytes(6).toString('hex');
@@ -461,43 +486,6 @@ async function withLockedDroneContainers<T>(
   });
 }
 
-type ResolvedDrone = { id: string; drone: any };
-type ResolvedOrPendingDrone =
-  | { kind: 'real'; id: string; drone: any }
-  | { kind: 'pending'; id: string; pending: any };
-
-function findDroneIdByRef(regAny: any, refRaw: string): { kind: 'real' | 'pending'; id: string } | null {
-  const ref = String(refRaw ?? '').trim();
-  if (!ref) return null;
-  if (regAny?.drones?.[ref]) return { kind: 'real', id: ref };
-  if (regAny?.pending?.[ref]) return { kind: 'pending', id: ref };
-  const stableRef = normalizeDroneIdentity(ref);
-  if (stableRef) {
-    for (const [id, d] of Object.entries(regAny?.drones ?? {})) {
-      if (normalizeDroneIdentity((d as any)?.id) === stableRef) return { kind: 'real', id: String(id) };
-    }
-    for (const [id, d] of Object.entries(regAny?.pending ?? {})) {
-      if (normalizeDroneIdentity((d as any)?.id) === stableRef) return { kind: 'pending', id: String(id) };
-    }
-  }
-  for (const [id, d] of Object.entries(regAny?.drones ?? {})) {
-    if (String((d as any)?.name ?? '').trim() === ref) return { kind: 'real', id: String(id) };
-  }
-  for (const [id, d] of Object.entries(regAny?.pending ?? {})) {
-    if (String((d as any)?.name ?? '').trim() === ref) return { kind: 'pending', id: String(id) };
-  }
-  return null;
-}
-
-function resolveStableDroneOrPendingIdFromRef(regAny: any, refRaw: unknown): string | null {
-  const ref = String(refRaw ?? '').trim();
-  if (!ref) return null;
-  const found = findDroneIdByRef(regAny, ref);
-  if (!found) return normalizeDroneIdentity(ref) || null;
-  const entry = found.kind === 'real' ? regAny?.drones?.[found.id] : regAny?.pending?.[found.id];
-  return normalizeDroneIdentity((entry as any)?.id) || normalizeDroneIdentity(found.id) || String(found.id).trim() || null;
-}
-
 function normalizeFleetAssignedRefsForSummary(regAny: any, actorIdRaw: unknown, assignedRaw: unknown): string[] {
   const actorId = normalizeDroneIdentity(actorIdRaw);
   if (!Array.isArray(assignedRaw)) return [];
@@ -510,53 +498,16 @@ function normalizeFleetAssignedRefsForSummary(regAny: any, actorIdRaw: unknown, 
   );
 }
 
-async function resolveDroneFromRegistry(
-  droneRef: string,
-  onStillStarting: () => void,
-  onUnknown: () => void,
-): Promise<ResolvedDrone | null> {
-  const regAny: any = await loadRegistry();
-  const found = findDroneIdByRef(regAny, droneRef);
-  if (!found) {
-    onUnknown();
-    return null;
-  }
-  if (found.kind === 'pending' && !regAny?.drones?.[found.id]) {
-    onStillStarting();
-    return null;
-  }
-  const drone = regAny?.drones?.[found.id] ?? null;
-  if (!drone) {
-    onUnknown();
-    return null;
-  }
-  return { id: found.id, drone };
-}
-
 async function resolveDroneOrRespond(res: http.ServerResponse, droneRef: string): Promise<ResolvedDrone | null> {
   const ref = String(droneRef ?? '').trim();
-  return resolveDroneFromRegistry(
-    ref,
-    () => {
+  return resolveDroneFromRegistryRef(ref, {
+    onStillStarting: () => {
       json(res, 409, { ok: false, error: `drone "${ref}" is still starting` });
     },
-    () => {
+    onUnknown: () => {
       json(res, 404, { ok: false, error: `unknown drone: ${ref}` });
     },
-  );
-}
-
-async function resolveDroneOrPendingForRead(droneRef: string): Promise<ResolvedOrPendingDrone | null> {
-  const ref = String(droneRef ?? '').trim();
-  if (!ref) return null;
-  const regAny: any = await loadRegistry();
-  const found = findDroneIdByRef(regAny, ref);
-  if (!found) return null;
-  const real = regAny?.drones?.[found.id] ?? null;
-  if (real) return { kind: 'real', id: found.id, drone: real };
-  const pending = regAny?.pending?.[found.id] ?? null;
-  if (pending) return { kind: 'pending', id: found.id, pending };
-  return null;
+  });
 }
 
 function sortedEnvEntries(varsRaw: unknown, source: 'repo' | 'drone'): Array<{ key: string; value: string; source: 'repo' | 'drone' }> {
@@ -625,15 +576,14 @@ function droneEnvironmentPayload(regAny: any, opts: {
 }
 
 async function resolveDroneOrRejectUpgrade(socket: any, droneRef: string): Promise<ResolvedDrone | null> {
-  return resolveDroneFromRegistry(
-    droneRef,
-    () => {
+  return resolveDroneFromRegistryRef(droneRef, {
+    onStillStarting: () => {
       rejectWebSocketUpgrade(socket, 409, 'Conflict');
     },
-    () => {
+    onUnknown: () => {
       rejectWebSocketUpgrade(socket, 404, 'Not Found');
     },
-  );
+  });
 }
 
 const FLEET_AUDIT_MAX_EVENTS = 500;
@@ -673,7 +623,7 @@ async function appendFleetAuditEvent(event: {
 
 
 async function listFleetMessagesForTarget(targetId: string, chatNameRaw: unknown) {
-  const resolved = await resolveDroneOrPendingForRead(targetId);
+  const resolved = await resolveDroneOrPendingForReadRef(targetId);
   if (!resolved) throw new Error(`unknown drone: ${targetId}`);
   const chatName = normalizeChatName(chatNameRaw);
   if (resolved.kind === 'pending') return [];
@@ -2061,15 +2011,6 @@ function normalizeDroneDisplayName(raw: any): string {
   if (/[\r\n]/.test(s)) throw new Error('invalid drone name (no newlines)');
   return s;
 }
-export function resolvePendingDroneDisplayName(pendingEntry: any, fallbackRaw: unknown): string {
-  return String(pendingEntry?.name ?? '').trim() || String(fallbackRaw ?? '').trim();
-}
-export function applyPendingDisplayNameToProvisionedDrone(droneEntry: any, pendingEntry: any, fallbackRaw: unknown): string {
-  const fallback = String(droneEntry?.name ?? '').trim() || String(fallbackRaw ?? '').trim();
-  const displayName = resolvePendingDroneDisplayName(pendingEntry, fallback);
-  if (displayName) droneEntry.name = displayName;
-  return displayName;
-}
 function droneDisplayNameExists(regAny: any, nameRaw: string): boolean {
   const name = String(nameRaw ?? '').trim();
   if (!name) return false;
@@ -2284,8 +2225,6 @@ type TranscriptTurn = {
   attachments?: ChatImageAttachmentRef[];
   automation?: PromptAutomationMeta;
 };
-
-type PendingPhase = 'starting' | 'creating' | 'seeding' | 'error';
 
 type PlaybookMessageDefinition = {
   id: string;
@@ -2601,74 +2540,22 @@ function summarizePlaybookRunEntry(args: {
   };
 }
 
-function normalizeDroneIdentity(raw: unknown): string {
-  const id = typeof raw === 'string' ? raw.trim() : '';
-  if (!id) return '';
-  if (id.length > 128) return '';
-  return id;
-}
-
 function makeDroneIdentity(): string {
   return crypto.randomUUID();
-}
-
-function findDroneEntryByIdentity(regAny: any, droneId: string): { key: string; entry: any } | null {
-  const byId = normalizeDroneIdentity(droneId);
-  if (!byId) return null;
-  for (const [key, entry] of Object.entries(regAny?.drones ?? {})) {
-    if (normalizeDroneIdentity((entry as any)?.id) === byId) {
-      return { key: String(key), entry };
-    }
-  }
-  return null;
-}
-
-async function resolveDroneNameByIdentity(droneId: string): Promise<string | null> {
-  const regAny: any = await loadRegistry();
-  const found = findDroneEntryByIdentity(regAny, droneId);
-  if (!found) return null;
-  const entryName = String(found.entry?.name ?? '').trim();
-  if (entryName) return entryName;
-  const keyName = String(found.key ?? '').trim();
-  return keyName || null;
-}
-
-async function resolveDroneContainerNameByIdentity(droneId: string): Promise<string | null> {
-  const regAny: any = await loadRegistry();
-  const found = findDroneEntryByIdentity(regAny, droneId);
-  if (!found) return null;
-  const cn = String((found.entry as any)?.containerName ?? (found.entry as any)?.name ?? found.key ?? '').trim();
-  return cn || null;
-}
-
-async function setDroneHubMetaByIdentity(
-  opts: {
-    droneId: string;
-    hub: null | { phase: 'starting' | 'seeding' | 'error'; message?: string; promptId?: string };
-  }
-) {
-  await updateRegistry((regAny: any) => {
-    const found = findDroneEntryByIdentity(regAny, opts.droneId);
-    if (!found) return;
-    const d: any = found.entry;
-    if (!opts.hub) {
-      delete d.hub;
-    } else {
-      d.hub = {
-        phase: opts.hub.phase,
-        message: opts.hub.message,
-        updatedAt: nowIso(),
-        ...(opts.hub.promptId ? { promptId: opts.hub.promptId } : {}),
-      };
-    }
-    regAny.drones = regAny.drones ?? {};
-    regAny.drones[found.key] = d;
-  });
 }
 
 function normalizeChatName(raw: any): string {
   return String(raw ?? 'default').trim() || 'default';
 }
+
+const {
+  applyPendingDisplayNameToProvisionedDrone,
+  normalizePendingPromptText,
+  normalizePendingPromptState,
+  normalizePendingStartupPrompts,
+  resolvePendingDroneDisplayName,
+  startupPromptToPendingPrompt,
+} = createPendingDroneStateHelpers({ normalizeChatName, nowIso });
 
 const CHAT_NAME_MAX_LEN = 64;
 
@@ -3186,28 +3073,6 @@ async function cliSupportsModelFlag(opts: { bin: string; runtime: DroneRuntime; 
   return supported;
 }
 
-async function updatePendingDrone(
-  droneIdRaw: string,
-  patch: Partial<{
-    phase: PendingPhase;
-    message: string;
-    error: string;
-    updatedAt: string;
-  }>
-) {
-  await updateRegistry((regAny: any) => {
-    const droneId = normalizeDroneIdentity(droneIdRaw);
-    const pending = droneId ? regAny?.pending?.[droneId] : null;
-    if (!pending) return;
-    regAny.pending = regAny.pending ?? {};
-    regAny.pending[droneId] = {
-      ...pending,
-      ...patch,
-      updatedAt: patch.updatedAt ?? nowIso(),
-    };
-  });
-}
-
 async function enqueueTranscriptPrompt(opts: {
   id?: string;
   drone: any;
@@ -3505,13 +3370,6 @@ async function sendPromptToChat(opts: {
   });
 }
 
-const PROVISIONING_TASKS = new Map<string, Promise<void>>();
-
-const PROVISION_QUEUE: string[] = [];
-const PROVISION_QUEUED = new Set<string>();
-let PROVISION_ACTIVE = 0;
-let PROVISION_PUMPING = false;
-
 // Reconcile pending prompt completion (drone daemon → registry transcript turns).
 //
 // Without this, the Hub can show a stale "typing" badge for drones whose pending prompts
@@ -3522,28 +3380,6 @@ const RECONCILE_QUEUED = new Set<string>();
 let RECONCILE_ACTIVE = 0;
 let RECONCILE_PUMPING = false;
 
-function enqueueProvisioningForAllPending(regAny: any) {
-  try {
-    const pending = regAny?.pending && typeof regAny.pending === 'object' ? Object.entries(regAny.pending) : [];
-    for (const [idRaw, p] of pending as any[]) {
-      const id = normalizeDroneIdentity(idRaw);
-      if (!id) continue;
-      const phase = String(p?.phase ?? 'starting').trim();
-      if (phase === 'error') continue;
-      enqueueProvisioning(id);
-    }
-  } catch {
-    // ignore (best-effort)
-  }
-}
-
-function provisionConcurrencyLimit(): number {
-  const raw = String(process.env.DRONE_HUB_PROVISION_CONCURRENCY ?? '').trim();
-  const n = raw ? Number(raw) : NaN;
-  if (Number.isFinite(n) && n >= 1) return Math.max(1, Math.min(16, Math.floor(n)));
-  return 3;
-}
-
 function reconcileConcurrencyLimit(): number {
   const raw = String(process.env.DRONE_HUB_RECONCILE_CONCURRENCY ?? '').trim();
   const n = raw ? Number(raw) : NaN;
@@ -3551,70 +3387,6 @@ function reconcileConcurrencyLimit(): number {
   // Default a bit higher so "Responding" clears quickly even with many drones.
   // You can override via DRONE_HUB_RECONCILE_CONCURRENCY.
   return 6;
-}
-
-function removeFromArrayInPlace<T>(arr: T[], pred: (v: T) => boolean): number {
-  let removed = 0;
-  for (let i = arr.length - 1; i >= 0; i--) {
-    if (pred(arr[i]!)) {
-      arr.splice(i, 1);
-      removed += 1;
-    }
-  }
-  return removed;
-}
-
-function pumpProvisionQueue() {
-  if (PROVISION_PUMPING) return;
-  PROVISION_PUMPING = true;
-  try {
-    const limit = provisionConcurrencyLimit();
-    while (PROVISION_ACTIVE < limit && PROVISION_QUEUE.length > 0) {
-      const name = PROVISION_QUEUE.shift();
-      if (!name) break;
-      PROVISION_QUEUED.delete(name);
-      if (PROVISIONING_TASKS.has(name)) continue;
-      PROVISION_ACTIVE += 1;
-      const p = provisionDroneFromPending(name)
-        .catch(async (e: any) => {
-          // Best-effort: if provisioning throws unexpectedly, surface it in pending state.
-          const msg = e?.message ?? String(e);
-          await updatePendingDrone(name, { phase: 'error', message: 'Failed to start', error: msg });
-        })
-        .finally(() => {
-          PROVISION_ACTIVE -= 1;
-          PROVISIONING_TASKS.delete(name);
-          // Keep draining.
-          pumpProvisionQueue();
-        });
-      PROVISIONING_TASKS.set(name, p);
-      // Fire-and-forget: backend-driven async provisioning.
-      void p;
-    }
-  } finally {
-    PROVISION_PUMPING = false;
-  }
-}
-
-function enqueueProvisioning(name: string) {
-  const n = String(name ?? '').trim();
-  if (!n) return;
-  if (PROVISIONING_TASKS.has(n)) return;
-  if (PROVISION_QUEUED.has(n)) return;
-  PROVISION_QUEUED.add(n);
-  PROVISION_QUEUE.push(n);
-  pumpProvisionQueue();
-}
-
-function dequeueProvisioning(name: string) {
-  const n = String(name ?? '').trim();
-  if (!n) return;
-  if (PROVISION_QUEUED.has(n)) {
-    PROVISION_QUEUED.delete(n);
-    removeFromArrayInPlace(PROVISION_QUEUE, (x) => String(x) === n);
-  }
-  // If it's already actively provisioning, we cannot safely cancel the spawned process here.
-  // Deleting pending will still prevent it from being promoted into `drones` if provisioning checks registry.
 }
 
 function pumpReconcileQueue() {
@@ -3696,35 +3468,6 @@ function looksLikeRepoUnavailableError(msg: string): boolean {
   );
 }
 
-type PendingPromptState = 'queued' | 'sending' | 'sent' | 'failed';
-
-type PendingPrompt = {
-  id: string;
-  at: string;
-  prompt: string;
-  messageId?: string;
-  cwd?: string | null;
-  attachments?: ChatImageAttachmentRef[];
-  automation?: PromptAutomationMeta;
-  // Prompts submitted while automation lane is active are intentionally held until automation finishes.
-  blockedByAutomation?: boolean;
-  state: PendingPromptState;
-  error?: string;
-  updatedAt?: string;
-};
-
-type PendingStartupPrompt = {
-  id: string;
-  chatName: string;
-  at: string;
-  prompt: string;
-  messageId?: string;
-  cwd?: string | null;
-  state: PendingPromptState;
-  error?: string;
-  updatedAt?: string;
-};
-
 const STOPPED_BY_USER_ERROR = 'Stopped by user.';
 const STOPPED_BEFORE_SUBMISSION_ERROR = 'Stopped before submission.';
 const STOPPED_BY_ARCHIVE_ERROR = 'Stopped because the drone was archived.';
@@ -3733,137 +3476,6 @@ const STOPPED_BY_LIFECYCLE_STOP_ERROR = 'Stopped because the drone was stopped.'
 const STOPPED_BY_LIFECYCLE_RESTART_ERROR = 'Stopped because the drone was restarted.';
 
 // NOTE: Pending prompts are executed in the drone daemon (tmux-backed) and are restart-resumable.
-
-function normalizePendingPromptState(raw: unknown): PendingPromptState {
-  const value = String(raw ?? '').trim();
-  if (value === 'queued' || value === 'sending' || value === 'sent' || value === 'failed') return value;
-  return 'queued';
-}
-
-function normalizePendingPromptText(raw: unknown): string {
-  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-    return String((raw as any).prompt ?? (raw as any).message ?? '');
-  }
-  return String(raw ?? '');
-}
-
-function normalizePendingStartupPrompts(raw: unknown, chatNameFilter?: string): PendingStartupPrompt[] {
-  const list = Array.isArray(raw) ? raw : [];
-  const out: PendingStartupPrompt[] = [];
-  const chatFilter = chatNameFilter ? normalizeChatName(chatNameFilter) : '';
-  for (const item of list) {
-    if (!item || typeof item !== 'object') continue;
-    const id = String((item as any).id ?? '').trim();
-    const prompt = normalizePendingPromptText((item as any).prompt);
-    const chatName = normalizeChatName((item as any).chatName);
-    if (!id || !prompt.trim()) continue;
-    if (chatFilter && chatName !== chatFilter) continue;
-    out.push({
-      id,
-      chatName,
-      at: typeof (item as any).at === 'string' ? String((item as any).at) : nowIso(),
-      prompt,
-      ...(typeof (item as any).messageId === 'string' && String((item as any).messageId).trim()
-        ? { messageId: String((item as any).messageId).trim() }
-        : {}),
-      cwd:
-        typeof (item as any).cwd === 'string' ? String((item as any).cwd) : (item as any).cwd === null ? null : undefined,
-      state: normalizePendingPromptState((item as any).state),
-      error: typeof (item as any).error === 'string' ? String((item as any).error) : undefined,
-      updatedAt: typeof (item as any).updatedAt === 'string' ? String((item as any).updatedAt) : undefined,
-    });
-  }
-  return out.slice(-80);
-}
-
-function startupPromptToPendingPrompt(prompt: PendingStartupPrompt): PendingPrompt {
-  return {
-    id: prompt.id,
-    at: prompt.at,
-    prompt: prompt.prompt,
-    ...(prompt.messageId ? { messageId: prompt.messageId } : {}),
-    ...(typeof prompt.cwd === 'string' || prompt.cwd === null ? { cwd: prompt.cwd } : {}),
-    state: prompt.state,
-    ...(prompt.error ? { error: prompt.error } : {}),
-    updatedAt: prompt.updatedAt ?? nowIso(),
-  };
-}
-
-const RECENT_COMPLETED_PENDING_PROMPT_GRACE_MS = 2 * 60_000;
-
-function parseRecentPendingPromptIsoMs(raw: unknown): number {
-  const text = typeof raw === 'string' ? raw.trim() : '';
-  if (!text) return 0;
-  const ms = Date.parse(text);
-  return Number.isFinite(ms) ? ms : 0;
-}
-
-function pruneCompletedPendingPrompts(
-  list: PendingPrompt[],
-  turnsRaw: unknown,
-  opts?: { keepRecentlyCompleted?: boolean; nowMs?: number },
-): PendingPrompt[] {
-  const turns = Array.isArray(turnsRaw) ? turnsRaw : [];
-  const turnById = new Map<string, any>();
-  for (const turn of turns) {
-    const id = String((turn as any)?.id ?? '').trim();
-    if (!id) continue;
-    turnById.set(id, turn);
-  }
-  if (turnById.size === 0) return list;
-
-  const keepRecentlyCompleted = opts?.keepRecentlyCompleted === true;
-  const nowMs = typeof opts?.nowMs === 'number' && Number.isFinite(opts.nowMs) ? opts.nowMs : Date.now();
-
-  return list.filter((item) => {
-    if (item.state === 'failed') return true;
-    const turn = turnById.get(item.id);
-    if (!turn) return true;
-    if (!keepRecentlyCompleted) return false;
-
-    const completedMs = Math.max(
-      parseRecentPendingPromptIsoMs((turn as any)?.completedAt),
-      parseRecentPendingPromptIsoMs((turn as any)?.promptAt),
-      parseRecentPendingPromptIsoMs((turn as any)?.at),
-      parseRecentPendingPromptIsoMs((item as any)?.updatedAt),
-      parseRecentPendingPromptIsoMs((item as any)?.at),
-    );
-    if (!completedMs) return false;
-    return nowMs - completedMs <= RECENT_COMPLETED_PENDING_PROMPT_GRACE_MS;
-  });
-}
-
-function transcriptTurnIdsFromEntry(entry: any): Set<string> {
-  const turns = Array.isArray(entry?.turns) ? entry.turns : [];
-  return new Set(turns.map((turn: any) => String(turn?.id ?? '').trim()).filter(Boolean));
-}
-
-function pendingPromptsFromChatEntry(entry: any, opts?: { keepRecentlyCompleted?: boolean }): PendingPrompt[] {
-  const list = Array.isArray(entry?.pendingPrompts) ? entry.pendingPrompts : [];
-  return pruneCompletedPendingPrompts(
-    list
-    .map((p: any) => ({
-      id: String(p?.id ?? '').trim(),
-      at: String(p?.at ?? '').trim(),
-      prompt: normalizePendingPromptText(p?.prompt),
-      ...(typeof p?.messageId === 'string' && String(p.messageId).trim() ? { messageId: String(p.messageId).trim() } : {}),
-      cwd: typeof p?.cwd === 'string' ? String(p.cwd) : p?.cwd === null ? null : undefined,
-      attachments: normalizeChatImageAttachmentRefs(p?.attachments),
-      automation: normalizePromptAutomationMeta((p as any)?.automation),
-      blockedByAutomation: Boolean((p as any)?.blockedByAutomation),
-      state:
-        p?.state === 'sent' || p?.state === 'failed' || p?.state === 'sending' || p?.state === 'queued'
-          ? (p.state as PendingPromptState)
-          : 'sending',
-      error: typeof p?.error === 'string' ? p.error : undefined,
-      updatedAt: typeof p?.updatedAt === 'string' ? p.updatedAt : undefined,
-    }))
-    .filter((p: PendingPrompt) => p.id && p.prompt.trim())
-    .slice(-60),
-    entry?.turns,
-    { keepRecentlyCompleted: opts?.keepRecentlyCompleted === true },
-  );
-}
 
 function normalizeChatImageAttachmentRefs(raw: unknown): ChatImageAttachmentRef[] {
   const list = Array.isArray(raw) ? raw : [];
@@ -3931,14 +3543,28 @@ function normalizePromptAutomationMeta(raw: unknown): PromptAutomationMeta | und
   };
 }
 
-function isSafePromptId(raw: string): boolean {
-  const s = String(raw ?? '').trim();
-  if (!s) return false;
-  if (s.length > 96) return false;
-  // IMPORTANT: prompt ids are used as filenames in the drone daemon (jobs/<id>.json).
-  // Keep this extremely strict to avoid traversal/injection.
-  return /^[A-Za-z0-9._-]+$/.test(s);
-}
+const {
+  cancelQueuedPendingPrompt,
+  claimQueuedPendingPromptForSending,
+  isSafePromptId,
+  pendingPromptsFromChatEntry,
+  pruneCompletedPendingPrompts,
+  readPendingPrompts,
+  readPendingStartupPrompts,
+  transcriptTurnIdsFromEntry,
+  pushPendingPrompt,
+  pushPendingStartupPrompt,
+  updatePendingPrompt,
+} = createDronePendingPromptStore({
+  normalizeChatImageAttachmentRefs,
+  normalizeChatName,
+  normalizePendingPromptState,
+  normalizePendingPromptText,
+  normalizePendingStartupPrompts,
+  normalizePromptAutomationMeta,
+  nowIso,
+  startupPromptToPendingPrompt,
+});
 
 function promptJobTmuxSessionName(promptIdRaw: string): string {
   // Keep this aligned with daemon.ts `promptSessionName`.
@@ -3996,198 +3622,6 @@ async function recoverStalePromptJobSession(opts: { droneId: string; droneEntry:
     await sleepMs(250);
   }
   return { job, jobState };
-}
-
-async function readPendingPrompts(opts: { droneId: string; chatName: string }): Promise<PendingPrompt[]> {
-  const regAny: any = await loadRegistry();
-  const droneId = normalizeDroneIdentity(opts.droneId);
-  const d = droneId ? regAny?.drones?.[droneId] : null;
-  if (!d) {
-    if (droneId && regAny?.pending?.[droneId] && !regAny?.drones?.[droneId]) throw new Error(`drone "${droneId}" is still starting`);
-    throw new Error(`unknown drone: ${opts.droneId}`);
-  }
-  const chatName = opts.chatName || 'default';
-  const entry = d?.chats?.[chatName];
-  return pendingPromptsFromChatEntry(entry, { keepRecentlyCompleted: true }).slice(-50);
-}
-
-async function readPendingStartupPrompts(opts: { droneId: string; chatName: string }): Promise<PendingPrompt[]> {
-  const regAny: any = await loadRegistry();
-  const droneId = normalizeDroneIdentity(opts.droneId);
-  const pending = droneId ? regAny?.pending?.[droneId] : null;
-  if (!pending) return [];
-  return normalizePendingStartupPrompts((pending as any)?.startupQueuedPrompts, opts.chatName).map(startupPromptToPendingPrompt);
-}
-
-async function pushPendingPrompt(opts: { droneId: string; chatName: string; pending: PendingPrompt }): Promise<void> {
-  await updateRegistry((regAny: any) => {
-    const droneId = normalizeDroneIdentity(opts.droneId);
-    const d = droneId ? regAny?.drones?.[droneId] : null;
-    if (!d) throw new Error(`unknown drone: ${opts.droneId}`);
-    d.chats = d.chats ?? {};
-    const chatName = opts.chatName || 'default';
-    const entry = d.chats[chatName] ?? { createdAt: nowIso() };
-    entry.pendingPrompts = Array.isArray(entry.pendingPrompts) ? entry.pendingPrompts : [];
-    const id = String(opts.pending?.id ?? '').trim();
-    if (!id) return;
-    const existingIdx = entry.pendingPrompts.findIndex((p: any) => String(p?.id ?? '').trim() === id);
-    if (existingIdx === -1) {
-      entry.pendingPrompts.push(opts.pending);
-    } else {
-      // Idempotency: refresh the existing row without duplicating.
-      const cur = entry.pendingPrompts[existingIdx] ?? {};
-      entry.pendingPrompts[existingIdx] = { ...cur, ...opts.pending, updatedAt: opts.pending.updatedAt ?? nowIso() };
-    }
-    // Keep bounded.
-    entry.pendingPrompts = entry.pendingPrompts.slice(-60);
-    d.chats[chatName] = entry;
-    regAny.drones = regAny.drones ?? {};
-    regAny.drones[droneId] = d;
-  });
-}
-
-async function pushPendingStartupPrompt(
-  opts: { droneId: string; chatName: string; pending: PendingPrompt },
-): Promise<'queued' | 'active' | 'missing'> {
-  return await updateRegistry((regAny: any) => {
-    const droneId = normalizeDroneIdentity(opts.droneId);
-    const pendingDrone = droneId ? regAny?.pending?.[droneId] : null;
-    if (!pendingDrone) return regAny?.drones?.[droneId] ? 'active' : 'missing';
-    if (regAny?.drones?.[droneId]) return 'active';
-
-    const chatName = normalizeChatName(opts.chatName);
-    const list = normalizePendingStartupPrompts((pendingDrone as any)?.startupQueuedPrompts);
-    const id = String(opts.pending?.id ?? '').trim();
-    if (!id) return 'missing';
-
-    const next: PendingStartupPrompt = {
-      id,
-      chatName,
-      at: String(opts.pending?.at ?? nowIso()),
-      prompt: String(opts.pending?.prompt ?? ''),
-      ...(typeof opts.pending?.messageId === 'string' && opts.pending.messageId.trim() ? { messageId: opts.pending.messageId.trim() } : {}),
-      ...(typeof opts.pending?.cwd === 'string' || opts.pending?.cwd === null ? { cwd: opts.pending.cwd } : {}),
-      state: normalizePendingPromptState(opts.pending?.state),
-      ...(typeof opts.pending?.error === 'string' ? { error: opts.pending.error } : {}),
-      updatedAt: String(opts.pending?.updatedAt ?? nowIso()),
-    };
-    if (!next.prompt.trim()) return 'missing';
-
-    const existingIdx = list.findIndex((entry) => entry.id === id);
-    if (existingIdx === -1) {
-      list.push(next);
-    } else {
-      const cur = list[existingIdx] ?? next;
-      list[existingIdx] = { ...cur, ...next, updatedAt: next.updatedAt ?? nowIso() };
-    }
-
-    (pendingDrone as any).startupQueuedPrompts = list.slice(-80);
-    pendingDrone.updatedAt = nowIso();
-    regAny.pending = regAny.pending ?? {};
-    regAny.pending[droneId] = pendingDrone;
-    return 'queued';
-  });
-}
-
-async function updatePendingPrompt(opts: {
-  droneId: string;
-  chatName: string;
-  id: string;
-  patch: Partial<Pick<PendingPrompt, 'state' | 'error' | 'updatedAt'>>;
-}): Promise<void> {
-  await updateRegistry((regAny: any) => {
-    const droneId = normalizeDroneIdentity(opts.droneId);
-    const droneKey = droneId;
-    const d = droneId ? regAny?.drones?.[droneId] : null;
-    if (!d) return;
-    const chatName = opts.chatName || 'default';
-    const entry = d?.chats?.[chatName];
-    const list = Array.isArray(entry?.pendingPrompts) ? entry.pendingPrompts : [];
-    const idx = list.findIndex((p: any) => String(p?.id ?? '').trim() === opts.id);
-    if (idx === -1) return;
-    const cur = list[idx] ?? {};
-    list[idx] = { ...cur, ...opts.patch, updatedAt: opts.patch.updatedAt ?? nowIso() };
-    entry.pendingPrompts = list;
-    d.chats = d.chats ?? {};
-    d.chats[chatName] = entry;
-    regAny.drones = regAny.drones ?? {};
-    regAny.drones[droneKey] = d;
-  });
-}
-
-async function claimQueuedPendingPromptForSending(opts: { droneId: string; chatName: string; id: string }): Promise<boolean> {
-  const claimed = await updateRegistry((regAny: any) => {
-    const droneId = normalizeDroneIdentity(opts.droneId);
-    const d = droneId ? regAny?.drones?.[droneId] : null;
-    if (!d) return false;
-    const chatName = opts.chatName || 'default';
-    const entry = d?.chats?.[chatName];
-    const list = Array.isArray(entry?.pendingPrompts) ? entry.pendingPrompts : [];
-    const idx = list.findIndex((p: any) => String(p?.id ?? '').trim() === opts.id);
-    if (idx < 0) return false;
-    const cur = list[idx] ?? {};
-    if (String(cur?.state ?? '') !== 'queued') return false;
-    list[idx] = { ...cur, state: 'sending', error: undefined, updatedAt: nowIso() };
-    entry.pendingPrompts = list;
-    d.chats = d.chats ?? {};
-    d.chats[chatName] = entry;
-    regAny.drones = regAny.drones ?? {};
-    regAny.drones[droneId] = d;
-    return true;
-  });
-  return Boolean(claimed);
-}
-
-type CancelQueuedPendingPromptStatus = 'cancelled' | 'already-submitted' | 'not-found';
-
-type CancelQueuedPendingPromptResult = {
-  status: CancelQueuedPendingPromptStatus;
-  pendingState?: PendingPromptState | null;
-};
-
-async function cancelQueuedPendingPrompt(opts: {
-  droneId: string;
-  chatName: string;
-  promptId: string;
-}): Promise<CancelQueuedPendingPromptResult> {
-  const droneId = normalizeDroneIdentity(opts.droneId);
-  const chatName = normalizeChatName(opts.chatName);
-  const promptId = String(opts.promptId ?? '').trim();
-  if (!droneId || !chatName || !promptId) return { status: 'not-found', pendingState: null };
-
-  const result = await updateRegistry((regAny: any) => {
-    const d = regAny?.drones?.[droneId] ?? null;
-    if (!d) return { status: 'not-found' as const, pendingState: null as PendingPromptState | null };
-    const entry = d?.chats?.[chatName] ?? null;
-    const list = Array.isArray(entry?.pendingPrompts) ? entry.pendingPrompts : [];
-    const idx = list.findIndex((p: any) => String(p?.id ?? '').trim() === promptId);
-    if (idx < 0) return { status: 'not-found' as const, pendingState: null as PendingPromptState | null };
-    const item = list[idx] ?? {};
-    const state = String(item?.state ?? '').trim() as PendingPromptState;
-    if (state === 'queued') {
-      list.splice(idx, 1);
-      entry.pendingPrompts = list;
-      d.chats = d.chats ?? {};
-      d.chats[chatName] = entry;
-      regAny.drones = regAny.drones ?? {};
-      regAny.drones[droneId] = d;
-      return { status: 'cancelled' as const, pendingState: 'queued' as const };
-    }
-    return { status: 'already-submitted' as const, pendingState: state || null };
-  });
-
-  if (result?.status === 'cancelled' || result?.status === 'already-submitted') {
-    return { status: result.status, pendingState: result.pendingState ?? null };
-  }
-
-  const regAny: any = await loadRegistry();
-  const turns = Array.isArray(regAny?.drones?.[droneId]?.chats?.[chatName]?.turns)
-    ? regAny.drones[droneId].chats[chatName].turns
-    : [];
-  if (turns.some((t: any) => String(t?.id ?? '').trim() === promptId)) {
-    return { status: 'already-submitted', pendingState: 'sent' };
-  }
-  return { status: 'not-found', pendingState: null };
 }
 
 type StopChatResponseResult = {
@@ -6590,370 +6024,34 @@ async function createOrEnqueuePromptUnified(opts: {
   return { kind: 'error', status: 404, error: `unknown drone: ${droneId}` };
 }
 
-async function provisionDroneFromPending(name: string) {
-  const regAny: any = await loadRegistry();
-  const pending = regAny?.pending?.[name];
-  if (!pending) return;
-  const pendingDroneId = normalizeDroneIdentity(pending?.id);
-  if (!pendingDroneId) {
-    await updatePendingDrone(name, { phase: 'error', message: 'Failed to start', error: 'missing pending drone identity' });
-    return;
-  }
-  if (regAny?.drones?.[name]) {
-    // Drone already exists; clear pending to avoid duplicates.
-    await updateRegistry((regLatest: any) => {
-      if (regLatest?.pending?.[name]) delete regLatest.pending[name];
-    });
-    return;
-  }
-
-  const repoPath = String(pending.repoPath ?? '').trim();
-  const group = typeof pending.group === 'string' ? pending.group.trim() : '';
-  const runtime = normalizeDroneRuntime((pending as any)?.runtime);
-  const build = Boolean(pending.build);
-  const containerPort = typeof pending.containerPort === 'number' && Number.isFinite(pending.containerPort) ? pending.containerPort : null;
-  const cloneFrom = typeof pending.cloneFrom === 'string' ? pending.cloneFrom.trim() : '';
-  const cloneChats = pending.cloneChats !== false;
-  const cloneSource =
-    cloneFrom
-      ? findDroneEntryByIdentity(regAny, cloneFrom)
-      : null;
-  const cloneSourceContainerName = cloneSource
-    ? String((cloneSource.entry as any)?.containerName ?? (cloneSource.entry as any)?.name ?? cloneSource.key ?? '').trim()
-    : '';
-  const cloneSourceRuntime = cloneSource ? normalizeDroneRuntime((cloneSource.entry as any)?.runtime) : 'container';
-  if (cloneFrom && runtime === 'container' && cloneSourceRuntime !== 'container') {
-    await updatePendingDrone(name, {
-      phase: 'error',
-      message: 'Failed to start',
-      error: `clone source must use container runtime: ${cloneFrom}`,
-    });
-    return;
-  }
-  if (cloneFrom && runtime === 'container' && !cloneSourceContainerName) {
-    await updatePendingDrone(name, { phase: 'error', message: 'Failed to start', error: `clone source not found: ${cloneFrom}` });
-    return;
-  }
-
-  await updatePendingDrone(name, {
-    phase: 'creating',
-    message: runtime === 'host' ? 'Starting host runtime…' : 'Creating container…',
-  });
-
-  const droneCli = resolveDroneCliPath();
-  const repoArg = repoPath ? repoPath : '-';
-  const latestPendingForCreate: any = (await loadRegistry())?.pending?.[name] ?? pending;
-  const displayName = resolvePendingDroneDisplayName(latestPendingForCreate, String(pending?.name ?? '').trim() || name);
-  const args: string[] = [droneCli, 'create', displayName, '--runtime', runtime, '--repo', repoArg, '--drone-id', pendingDroneId];
-  if (group) args.push('--group', group);
-  if (!build) args.push('--no-build');
-  if (containerPort != null) args.push('--container-port', String(containerPort));
-  if (runtime === 'container' && cloneSourceContainerName) args.push('--clone-container', cloneSourceContainerName);
-  if (runtime === 'container' && !repoPath) args.push('--cwd', NON_REPO_HOME_CWD, '--mkdir');
-
-  const r = await runNodeCli(args);
-  if (r.code !== 0) {
-    const errText = (r.stderr || r.stdout || `drone create failed (exit ${r.code})`).trim();
-    // If the container already exists (often due to a prior partial run),
-    // try to import it into the registry and continue.
-    if (runtime === 'container' && /already exists/i.test(errText)) {
-      await updatePendingDrone(name, { phase: 'creating', message: 'Container exists; importing…' });
-      const impArgs: string[] = [droneCli, 'import', displayName, '--runtime', 'container', '--repo', repoArg, '--drone-id', pendingDroneId];
-      if (group) impArgs.push('--group', group);
-      if (containerPort != null) impArgs.push('--container-port', String(containerPort));
-      if (!repoPath) impArgs.push('--cwd', NON_REPO_HOME_CWD, '--mkdir');
-      const imp = await runNodeCli(impArgs);
-      if (imp.code !== 0) {
-        const impErr = (imp.stderr || imp.stdout || `drone import failed (exit ${imp.code})`).trim();
-        await updatePendingDrone(name, { phase: 'error', message: 'Failed to start', error: `${errText}\n\nImport also failed:\n${impErr}` });
-        return;
-      }
-      // Import succeeded; proceed to seeding step below.
-    } else {
-      await updatePendingDrone(name, { phase: 'error', message: 'Failed to start', error: errText });
-      return;
-    }
-  }
-
-  try {
-    await updateRegistry((regLatest: any) => {
-      const pendingLatest = regLatest?.pending?.[name] ?? null;
-      const fleetMeta = pendingLatest?.fleet && typeof pendingLatest.fleet === 'object' ? pendingLatest.fleet : null;
-      const environment = pendingLatest?.environment ?? null;
-      const pendingKind = normalizeDroneEntryKind(pendingLatest?.kind);
-      const pendingVisibility = normalizeDroneEntryVisibility(pendingLatest?.visibility);
-      const pendingPlaybook = playbookMetaFromEntry(pendingLatest?.playbook);
-      const cloneSourceLatest = cloneFrom ? findDroneEntryByIdentity(regLatest, cloneFrom)?.entry : null;
-      const found = findDroneEntryByIdentity(regLatest, pendingDroneId);
-      if (!found) return;
-      const d = found.entry;
-      // A pending rename can land while provisioning is still running. Reapply the
-      // latest pending display name so the real drone entry never falls back to a
-      // stale Untitled* name from an earlier create/import call.
-      applyPendingDisplayNameToProvisionedDrone(d, pendingLatest, displayName);
-      d.kind = pendingKind;
-      d.visibility = pendingVisibility;
-      if (pendingPlaybook) d.playbook = pendingPlaybook;
-      else delete d.playbook;
-      if (fleetMeta) {
-        const current = fleetActorConfig(d);
-        setFleetActorConfig(d, {
-          createdBy:
-            typeof fleetMeta.createdBy === 'string' && fleetMeta.createdBy.trim()
-              ? String(fleetMeta.createdBy).trim()
-              : current.createdBy,
-          createdAt:
-            typeof fleetMeta.createdAt === 'string' && fleetMeta.createdAt.trim()
-              ? String(fleetMeta.createdAt).trim()
-              : current.createdAt,
-          enabled: fleetMeta.enabled === true,
-          capabilities: sanitizeFleetCapabilities(fleetMeta.capabilities),
-          readScopes: sanitizeFleetReadScopes(fleetMeta.readScopes),
-          assigned: fleetMeta.assigned,
-          quotas: sanitizeFleetQuotas(fleetMeta.quotas),
-        });
-      }
-      if (environment && typeof environment === 'object') {
-        d.environment = {
-          vars: normalizeEnvVarMap((environment as any)?.vars),
-          useRepoVars: (environment as any)?.useRepoVars === true,
-          disabledRepoKeys: normalizeDisabledRepoKeys((environment as any)?.disabledRepoKeys),
-          updatedAt: typeof (environment as any)?.updatedAt === 'string' ? String((environment as any).updatedAt).trim() || null : null,
-        };
-      }
-      if (cloneSourceLatest && typeof cloneSourceLatest === 'object') {
-        const cloneSourceCwd =
-          typeof (cloneSourceLatest as any)?.cwd === 'string'
-            ? String((cloneSourceLatest as any).cwd).trim()
-            : '';
-        const cloneSourceRepoPath =
-          typeof (cloneSourceLatest as any)?.repoPath === 'string'
-            ? String((cloneSourceLatest as any).repoPath).trim()
-            : '';
-        const cloneSourceRepo = (cloneSourceLatest as any)?.repo;
-        if (cloneSourceCwd) d.cwd = cloneSourceCwd;
-        if (cloneSourceRepoPath && !String((d as any)?.repoPath ?? '').trim()) d.repoPath = cloneSourceRepoPath;
-        if (cloneSourceRepo && typeof cloneSourceRepo === 'object') {
-          try {
-            d.repo = JSON.parse(JSON.stringify(cloneSourceRepo));
-          } catch {
-            d.repo = { ...(cloneSourceRepo as any) };
-          }
-        }
-      }
-      regLatest.drones[found.key] = d;
-    });
-  } catch {
-    // ignore (best-effort lineage persistence)
-  }
-
-  // For fresh repo-attached creates, seed the container with the host repo before we enqueue any seed prompt.
-  // For clone flows, preserve the source container's actual repo contents instead of reseeding from host.
-  if (repoPath && runtime === 'container' && !cloneFrom) {
-    await setDroneHubMetaByIdentity({
-      droneId: pendingDroneId,
-      hub: { phase: 'seeding', message: 'Seeding repo…' },
-    });
-    try {
-      const repoRoot = await gitTopLevel(repoPath);
-      const baseRef = await gitCurrentBranchOrSha(repoRoot);
-      const repoSeedContainer = await resolveDroneContainerNameByIdentity(pendingDroneId);
-      if (!repoSeedContainer) throw new Error('drone disappeared during repo seed');
-
-      await dvmRepoSeed({
-        container: repoSeedContainer,
-        hostPath: repoRoot,
-        dest: '/work/repo',
-        baseRef: 'HEAD',
-        branch: 'dvm/work',
-        clean: true,
-        timeoutMs: defaultRepoSeedTimeoutMs(),
-      });
-
-      // Persist canonical repo root + baseRef for future pulls.
-      await updateRegistry((reg2: any) => {
-        const found = findDroneEntryByIdentity(reg2, pendingDroneId);
-        if (!found) return;
-        const d = found.entry;
-        d.repoPath = repoRoot;
-        // Default repo-attached drones to operate inside the container repo.
-        d.cwd = '/work/repo';
-        d.repo = d.repo ?? {};
-        d.repo.dest = '/work/repo';
-        d.repo.branch = 'dvm/work';
-        d.repo.baseRef = baseRef;
-        d.repo.seededAt = nowIso();
-        reg2.drones = reg2.drones ?? {};
-        reg2.drones[found.key] = d;
-      });
-
-      await setDroneHubMetaByIdentity({ droneId: pendingDroneId, hub: null });
-    } catch (e: any) {
-      const msg = e?.message ?? String(e);
-      await setDroneHubMetaByIdentity({
-        droneId: pendingDroneId,
-        hub: { phase: 'error', message: `Repo seed failed: ${msg}` },
-      });
-      return;
-    }
-  }
-
-  // Move from pending → drones and optionally seed.
-  const pendingTransition = await updateRegistry((regLatest: any) => {
-    const pendingEntry = regLatest?.pending?.[name] ?? pending ?? null;
-    const seed = pendingEntry?.seed ?? null;
-    const startupQueuedPrompts = normalizePendingStartupPrompts((pendingEntry as any)?.startupQueuedPrompts);
-    if (regLatest?.pending?.[name]) delete regLatest.pending[name];
-    return { seed, startupQueuedPrompts };
-  });
-  const seed = pendingTransition?.seed ?? null;
-  const startupQueuedPrompts = Array.isArray(pendingTransition?.startupQueuedPrompts)
-    ? (pendingTransition.startupQueuedPrompts as PendingStartupPrompt[])
-    : [];
-  const seedChatName = normalizeChatName(seed?.chatName ?? 'default');
-  const seedAgent = parseSeedAgent(seed?.agent);
-  const seedModel = normalizeChatModel(seed?.model);
-
-  // Optional: clone chats/transcripts from an existing drone into this newly-created one.
-  // Preserve provider/session continuation ids when present so the cloned drone can
-  // continue the exact same conversation. Transcript bootstrap remains as a fallback
-  // for chats that only have stored turns and no resumable session identifier.
-  if (cloneFrom && cloneChats) {
-    try {
-      await updateRegistry((reg3Any: any) => {
-        const src = reg3Any?.drones?.[cloneFrom];
-        const dstFound = findDroneEntryByIdentity(reg3Any, pendingDroneId);
-        if (!dstFound) return;
-        const dst = dstFound.entry;
-        const srcChats = src?.chats && typeof src.chats === 'object' ? src.chats : null;
-        if (!src || !srcChats) return;
-        const cloned: any = {};
-        for (const [chatName, entryRaw] of Object.entries(srcChats)) {
-          const entry = cloneChatEntryForDroneClone(entryRaw);
-          const agent = inferChatAgent(entry, dst);
-          const model = normalizeChatModel(entry?.model);
-          const createdAt = typeof entry?.createdAt === 'string' && entry.createdAt.trim() ? String(entry.createdAt) : nowIso();
-          entry.createdAt = createdAt;
-          entry.agent = agent;
-          if (model) entry.model = model;
-          else delete entry.model;
-          cloned[String(chatName)] = entry;
-        }
-        dst.chats = dst.chats ?? {};
-        dst.chats = { ...dst.chats, ...cloned };
-        reg3Any.drones = reg3Any.drones ?? {};
-        reg3Any.drones[dstFound.key] = dst;
-      });
-    } catch {
-      // ignore (best-effort)
-    }
-  }
-
-  if (startupQueuedPrompts.length > 0) {
-    const touchedChats = await updateRegistry((reg4Any: any) => {
-      const found = findDroneEntryByIdentity(reg4Any, pendingDroneId);
-      if (!found) return [] as string[];
-      const d: any = found.entry;
-      d.chats = d.chats ?? {};
-      const touched = new Set<string>();
-      for (const queued of startupQueuedPrompts) {
-        const chatName = normalizeChatName(queued.chatName);
-        const entry = d.chats[chatName] ?? { createdAt: nowIso() };
-        if (chatName === seedChatName && (seedAgent || Object.prototype.hasOwnProperty.call(seed ?? {}, 'model'))) {
-          if (seedAgent) entry.agent = seedAgent;
-          if (seedModel) entry.model = seedModel;
-          else delete entry.model;
-        }
-        entry.pendingPrompts = Array.isArray(entry.pendingPrompts) ? entry.pendingPrompts : [];
-        const row = startupPromptToPendingPrompt(queued);
-        const existingIdx = entry.pendingPrompts.findIndex((p: any) => String(p?.id ?? '').trim() === row.id);
-        if (existingIdx === -1) {
-          entry.pendingPrompts.push(row);
-        } else {
-          const cur = entry.pendingPrompts[existingIdx] ?? {};
-          entry.pendingPrompts[existingIdx] = { ...cur, ...row, updatedAt: row.updatedAt ?? nowIso() };
-        }
-        entry.pendingPrompts = entry.pendingPrompts.slice(-60);
-        d.chats[chatName] = entry;
-        touched.add(chatName);
-      }
-      reg4Any.drones = reg4Any.drones ?? {};
-      reg4Any.drones[found.key] = d;
-      return Array.from(touched.values());
-    });
-
-    for (const chatName of touchedChats) {
-      enqueuePendingPromptPump(pendingDroneId, String(chatName));
-    }
-  }
-
-  try {
-    const regAfterCreate: any = await loadRegistry();
-    const createdDrone = findDroneEntryByIdentity(regAfterCreate, pendingDroneId)?.entry ?? null;
-    if (createdDrone) {
-      await syncTaskStateSnapshotToDrone(pendingDroneId, createdDrone);
-      await syncSkillLibraryForDrone({ droneId: pendingDroneId, droneEntry: createdDrone });
-    }
-  } catch (e: any) {
-    hubLog('warn', 'skill sync failed after drone creation', {
-      droneId: pendingDroneId,
-      error: String(e?.message ?? String(e)),
-    });
-  }
-
-  if (!seed) return;
-
-  const chatName = seedChatName;
-  const prompt = String(seed.prompt ?? '').trim();
-  const seedPromptIdRaw = typeof (seed as any).promptId === 'string' ? String((seed as any).promptId).trim() : '';
-  const seedPromptId =
-    prompt && seedPromptIdRaw && isSafePromptId(seedPromptIdRaw)
-      ? seedPromptIdRaw
-      : prompt
-        ? crypto.randomBytes(9).toString('hex')
-        : undefined;
-
-  if (!seedAgent && !seedModel && !prompt) return;
-
-  // Mark hub state on the real drone entry so the UI can show progress during seeding.
-  await setDroneHubMetaByIdentity({
-    droneId: pendingDroneId,
-    hub: {
-      phase: 'seeding',
-      message: prompt ? 'Seeding initial message…' : 'Configuring agent…',
-      ...(seedPromptId ? { promptId: seedPromptId } : {}),
-    },
-  });
-  try {
-    if (seedAgent || seedModel) {
-      await ensureChatEntry({ droneId: pendingDroneId, chatName });
-      await setChatAgentConfig({
-        droneId: pendingDroneId,
-        chatName,
-        ...(seedAgent ? { agent: seedAgent } : {}),
-        setModel: true,
-        model: seedModel,
-      });
-    }
-    if (prompt) {
-      // Use the same pending-prompt mechanism as normal chat sends so the UI can show
-      // the user's seed message immediately, then replace it with the final transcript turn.
-      const cwd = typeof seed.cwd === 'string' ? seed.cwd : null;
-      // Initial seed prompts can race daemon startup on cold containers; allow longer readiness wait.
-      const seedPromptWaitMs = Math.max(defaultDaemonReadyTimeoutMs(), 120_000);
-      await enqueuePrompt({ id: seedPromptId, droneId: pendingDroneId, chatName, prompt, cwd, waitForDaemonMs: seedPromptWaitMs });
-      // Once the prompt is enqueued, switch from "seeding" to the normal busy/pending-prompt UI.
-      await setDroneHubMetaByIdentity({ droneId: pendingDroneId, hub: null });
-      return;
-    }
-    await setDroneHubMetaByIdentity({ droneId: pendingDroneId, hub: null });
-  } catch (e: any) {
-    await setDroneHubMetaByIdentity({
-      droneId: pendingDroneId,
-      hub: { phase: 'error', message: e?.message ?? String(e) },
-    });
-  }
-}
+const { dequeueProvisioning, enqueueProvisioning, enqueueProvisioningForAllPending } = createDroneProvisioningController({
+  NON_REPO_HOME_CWD,
+  applyPendingDisplayNameToProvisionedDrone,
+  cloneChatEntryForDroneClone,
+  defaultDaemonReadyTimeoutMs,
+  defaultRepoSeedTimeoutMs,
+  ensureChatEntry,
+  enqueuePrompt,
+  enqueuePendingPromptPump,
+  hubLog,
+  inferChatAgent,
+  isSafePromptId,
+  normalizeChatModel,
+  normalizeChatName,
+  normalizeDroneEntryKind,
+  normalizeDroneEntryVisibility,
+  normalizePendingStartupPrompts,
+  nowIso,
+  parseSeedAgent,
+  playbookMetaFromEntry,
+  resolveDroneCliPath,
+  resolvePendingDroneDisplayName,
+  runNodeCli,
+  setChatAgentConfig,
+  startupPromptToPendingPrompt,
+  syncSkillLibraryForDrone,
+  syncTaskStateSnapshotToDrone,
+});
 
 function resolveDroneCliPath(): string {
   // Prefer built CLI when available. In source/dev mode, fall back to src/cli.ts.
@@ -15254,8 +14352,9 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           json(res, 404, { ok: false, error: `unknown drone: ${droneRef}` });
           return;
         }
-        const droneId = found.id;
-        const currentEntry = (found.kind === 'real' ? regSnapshot?.drones?.[droneId] : regSnapshot?.pending?.[droneId]) ?? null;
+        const foundKey = found.id;
+        const currentEntry = (found.kind === 'real' ? regSnapshot?.drones?.[foundKey] : regSnapshot?.pending?.[foundKey]) ?? null;
+        const droneId = normalizeDroneIdentity((currentEntry as any)?.id) || normalizeDroneIdentity(foundKey) || foundKey;
         const oldName = String(currentEntry?.name ?? droneRef).trim() || droneRef;
 
         let body: any = null;
@@ -15326,28 +14425,20 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           return;
         }
         const renamed = await updateRegistry((regAny: any) => {
+          const lifecycle = findDroneLifecycleEntriesByIdentity(regAny, droneId);
+          if (!lifecycle) return { ok: false, status: 404, error: `unknown drone: ${droneId}` };
           for (const [k, v] of Object.entries(regAny?.drones ?? {})) {
-            const id = String(k);
+            const id = normalizeDroneIdentity((v as any)?.id) || String(k);
             if (id === droneId) continue;
             if (String((v as any)?.name ?? '').trim() === newName) return { ok: false, status: 409, error: `drone already exists: ${newName}` };
           }
           for (const [k, v] of Object.entries(regAny?.pending ?? {})) {
-            const id = String(k);
+            const id = normalizeDroneIdentity((v as any)?.id) || String(k);
             if (id === droneId) continue;
             if (String((v as any)?.name ?? '').trim() === newName) return { ok: false, status: 409, error: `pending drone already exists: ${newName}` };
           }
-          const d = regAny?.drones?.[droneId];
-          const pending = regAny?.pending?.[droneId];
-          if (!d && !pending) return { ok: false, status: 404, error: `unknown drone: ${droneId}` };
-          const target = d ?? pending;
-          if (!target) return { ok: false, status: 404, error: `unknown drone: ${droneId}` };
-          target.name = newName;
-          if (d) {
-            regAny.drones = regAny.drones ?? {};
-            regAny.drones[droneId] = d;
-          } else {
-            regAny.pending = regAny.pending ?? {};
-            regAny.pending[droneId] = target;
+          if (!applyDroneDisplayNameAcrossLifecycleEntries(regAny, droneId, newName)) {
+            return { ok: false, status: 404, error: `unknown drone: ${droneId}` };
           }
           return { ok: true, id: droneId, oldName, newName, renamed: true };
         });
@@ -15444,7 +14535,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
       // GET /api/drones/:id/env
       if (method === 'GET' && parts.length === 4 && parts[0] === 'api' && parts[1] === 'drones' && parts[3] === 'env') {
         const droneRef = decodeURIComponent(parts[2]);
-        const resolved = await resolveDroneOrPendingForRead(droneRef);
+        const resolved = await resolveDroneOrPendingForReadRef(droneRef);
         if (!resolved) {
           json(res, 404, { ok: false, error: `unknown drone: ${droneRef}` });
           return;
@@ -15458,7 +14549,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
       // POST /api/drones/:id/env
       if (method === 'POST' && parts.length === 4 && parts[0] === 'api' && parts[1] === 'drones' && parts[3] === 'env') {
         const droneRef = decodeURIComponent(parts[2]);
-        const resolved = await resolveDroneOrPendingForRead(droneRef);
+        const resolved = await resolveDroneOrPendingForReadRef(droneRef);
         if (!resolved) {
           json(res, 404, { ok: false, error: `unknown drone: ${droneRef}` });
           return;
@@ -15496,7 +14587,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         });
 
         const regAny: any = await loadRegistry();
-        const refreshed = await resolveDroneOrPendingForRead(resolved.id);
+        const refreshed = await resolveDroneOrPendingForReadRef(resolved.id);
         if (!refreshed) {
           json(res, 404, { ok: false, error: `unknown drone: ${resolved.id}` });
           return;
@@ -16861,7 +15952,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         }
 
         try {
-          const resolved = await resolveDroneOrPendingForRead(droneRef);
+          const resolved = await resolveDroneOrPendingForReadRef(droneRef);
           if (!resolved) {
             json(res, 404, { ok: false, error: `unknown drone: ${droneRef}` });
             return;
@@ -17008,7 +16099,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         const droneRef = decodeURIComponent(parts[2]);
         const chatName = normalizeChatName(decodeURIComponent(parts[4]));
         try {
-          const resolved = await resolveDroneOrPendingForRead(droneRef);
+          const resolved = await resolveDroneOrPendingForReadRef(droneRef);
           if (!resolved) {
             json(res, 404, { ok: false, error: `unknown drone: ${droneRef}` });
             return;
@@ -17253,7 +16344,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         const tailLines = tailRaw != null ? Number(tailRaw) : 200;
 
         try {
-          const resolved = await resolveDroneOrPendingForRead(droneRef);
+          const resolved = await resolveDroneOrPendingForReadRef(droneRef);
           if (!resolved) {
             json(res, 404, { ok: false, error: `unknown drone: ${droneRef}` });
             return;
@@ -17849,7 +16940,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         const droneRef = decodeURIComponent(parts[2]);
         const chatName = decodeURIComponent(parts[4]) || 'default';
         try {
-          const resolved = await resolveDroneOrPendingForRead(droneRef);
+          const resolved = await resolveDroneOrPendingForReadRef(droneRef);
           if (!resolved) {
             json(res, 404, { ok: false, error: `unknown drone: ${droneRef}` });
             return;

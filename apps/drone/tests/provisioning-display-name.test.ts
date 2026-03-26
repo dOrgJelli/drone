@@ -1,5 +1,14 @@
 import { describe, expect, test } from 'bun:test';
-import { applyPendingDisplayNameToProvisionedDrone, resolvePendingDroneDisplayName } from '../src/hub/server';
+import { createPendingDroneStateHelpers } from '../src/hub/drone-pending-state';
+
+const {
+  applyPendingDisplayNameToProvisionedDrone,
+  normalizePendingStartupPrompts,
+  resolvePendingDroneDisplayName,
+} = createPendingDroneStateHelpers({
+  normalizeChatName: (raw: any) => String(raw ?? 'default').trim() || 'default',
+  nowIso: () => '2026-03-25T18:00:00.000Z',
+});
 
 describe('pending provisioning display name helpers', () => {
   test('prefers the latest pending rename over a stale created drone name', () => {
@@ -23,5 +32,28 @@ describe('pending provisioning display name helpers', () => {
 
   test('falls back when the pending entry has no valid name yet', () => {
     expect(resolvePendingDroneDisplayName({ name: '   ' }, 'Untitled 25')).toBe('Untitled 25');
+  });
+
+  test('normalizes startup pending prompts with chat filtering', () => {
+    const prompts = normalizePendingStartupPrompts(
+      [
+        { id: 'one', chatName: ' default ', prompt: { message: 'first' }, state: 'sending' },
+        { id: 'two', chatName: 'ops', prompt: 'second', state: 'weird' },
+        { id: '', chatName: 'default', prompt: 'ignored' },
+      ],
+      'default',
+    );
+
+    expect(prompts).toEqual([
+      {
+        id: 'one',
+        chatName: 'default',
+        at: '2026-03-25T18:00:00.000Z',
+        prompt: 'first',
+        state: 'sending',
+        error: undefined,
+        updatedAt: undefined,
+      },
+    ]);
   });
 });

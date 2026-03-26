@@ -420,4 +420,62 @@ describeSocketSuite('chat management api', () => {
     expect(newRef.data?.ok).toBe(true);
     expect(newRef.data?.pending).toEqual([]);
   });
+
+  test('renames both real and pending lifecycle entries when provisioning overlaps auto-rename', async () => {
+    const droneId = 'split-rename';
+    const now = new Date().toISOString();
+    await updateRegistry((reg: any) => {
+      reg.drones = reg.drones ?? {};
+      reg.pending = reg.pending ?? {};
+      reg.drones[droneId] = {
+        id: droneId,
+        name: 'Untitled 25',
+        hostPort: 1,
+        token: 'mock-token',
+        containerPort: 7777,
+        repoPath: '',
+        createdAt: now,
+        chats: {
+          default: {
+            createdAt: now,
+            agent: { kind: 'builtin', id: 'cursor' },
+            turns: [],
+            pendingPrompts: [],
+          },
+        },
+      };
+      reg.pending[droneId] = {
+        id: droneId,
+        name: 'Untitled 25',
+        runtime: 'host',
+        repoPath: '',
+        containerPort: 7777,
+        build: false,
+        createdAt: now,
+        updatedAt: now,
+        phase: 'creating',
+        message: 'Creating...',
+      };
+    });
+
+    const renamed = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/rename`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ newName: 'task-delete-cli', source: 'draft-auto-rename' }),
+    });
+    expect(renamed.r.status).toBe(200);
+    expect(renamed.data?.ok).toBe(true);
+    expect(renamed.data?.newName).toBe('task-delete-cli');
+
+    const regAny: any = await loadRegistry();
+    expect(String(regAny?.drones?.[droneId]?.name ?? '')).toBe('task-delete-cli');
+    expect(String(regAny?.pending?.[droneId]?.name ?? '')).toBe('task-delete-cli');
+
+    const oldRef = await apiFetch(`/api/drones/${encodeURIComponent('Untitled 25')}/chats/default/pending`);
+    expect(oldRef.r.status).toBe(404);
+
+    const newRef = await apiFetch(`/api/drones/${encodeURIComponent('task-delete-cli')}/chats/default/pending`);
+    expect(newRef.r.status).toBe(200);
+    expect(newRef.data?.ok).toBe(true);
+  });
 });
