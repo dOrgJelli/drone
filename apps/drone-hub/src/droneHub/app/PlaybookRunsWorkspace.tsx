@@ -105,7 +105,11 @@ export function PlaybookRunsWorkspace({
   const playbooks = Array.isArray(playbooksResp?.playbooks) ? playbooksResp.playbooks : [];
   const runs = Array.isArray(runsResp?.runs) ? runsResp.runs : [];
   const queue = Array.isArray(runsResp?.queue) ? runsResp.queue : [];
-  const artifactAvailabilityByKey = usePlaybookArtifactAvailability({ runs });
+  const visibleRuns = React.useMemo(
+    () => runs.filter((run) => !deletingDrones[run.droneId]),
+    [deletingDrones, runs],
+  );
+  const artifactAvailabilityByKey = usePlaybookArtifactAvailability({ runs: visibleRuns });
 
   React.useEffect(() => {
     if (playbooksLoading) return;
@@ -119,8 +123,8 @@ export function PlaybookRunsWorkspace({
     [playbooks, selectedPlaybookId],
   );
   const runsForSelectedRepo = React.useMemo(
-    () => (selectedRepoPath ? runs.filter((run) => run.repoPath === selectedRepoPath) : runs),
-    [runs, selectedRepoPath],
+    () => (selectedRepoPath ? visibleRuns.filter((run) => run.repoPath === selectedRepoPath) : visibleRuns),
+    [selectedRepoPath, visibleRuns],
   );
   const playbookRunCountById = React.useMemo(() => {
     const next: Record<string, number> = {};
@@ -128,8 +132,8 @@ export function PlaybookRunsWorkspace({
     return next;
   }, [runsForSelectedRepo]);
   const runsForSelectedPlaybook = React.useMemo(
-    () => (selectedPlaybookId ? runs.filter((run) => run.playbookId === selectedPlaybookId) : runs),
-    [runs, selectedPlaybookId],
+    () => (selectedPlaybookId ? visibleRuns.filter((run) => run.playbookId === selectedPlaybookId) : visibleRuns),
+    [selectedPlaybookId, visibleRuns],
   );
   const repoRunCountByPath = React.useMemo(() => {
     const next: Record<string, number> = {};
@@ -138,12 +142,12 @@ export function PlaybookRunsWorkspace({
   }, [runsForSelectedPlaybook]);
   const filteredRuns = React.useMemo(
     () =>
-      runs.filter(
+      visibleRuns.filter(
         (run) =>
           (!selectedPlaybookId || run.playbookId === selectedPlaybookId) &&
           (!selectedRepoPath || run.repoPath === selectedRepoPath),
       ),
-    [runs, selectedPlaybookId, selectedRepoPath],
+    [selectedPlaybookId, selectedRepoPath, visibleRuns],
   );
   const filteredQueue = React.useMemo(
     () =>
@@ -490,9 +494,6 @@ export function PlaybookRunsWorkspace({
                 onToggleSerializeFirstMessageGroup={() => setSerializeFirstMessageGroup((prev) => !prev)}
                 onRun={() => {
                   if (selectedPlaybook) void runPlaybook(selectedPlaybook);
-                }}
-                onEditSelectedPlaybook={() => {
-                  if (selectedPlaybook) onOpenPlaybookSettings(selectedPlaybook.id);
                 }}
               />
             </section>
