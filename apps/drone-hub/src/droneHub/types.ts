@@ -564,3 +564,20 @@ export type PlaybookRunSummary = {
   runsCompleted: number;
   statusError: string | null;
 };
+
+export type PlaybookRunQueueSummary = {
+  id: string;
+  playbookId: string;
+  playbookLabel: string;
+  repoPath: string;
+  requestedCount: number;
+  launchedCount: number;
+  inFlightCount: number;
+  remainingCount: number;
+  serializeFirstMessageGroup: boolean;
+  pullHostBranchBeforeCreate: boolean;
+  createdAt: string;
+  updatedAt: string;
+  state: 'queued' | 'waiting' | 'launching' | 'error';
+  error?: string;
+};

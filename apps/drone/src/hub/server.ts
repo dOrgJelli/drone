@@ -1129,6 +1129,7 @@ async function runFleetReconcilerCycle(): Promise<void> {
   if (FLEET_RECONCILE_BUSY) return;
   FLEET_RECONCILE_BUSY = true;
   try {
+    await drainPlaybookRunLaunchQueue();
     const regAny: any = await loadRegistry();
     for (const [actorId, actorEntry] of Object.entries(regAny?.drones ?? {})) {
       let daemon: Awaited<ReturnType<typeof resolveDroneDaemonClientForEntry>> | null = null;
@@ -2249,6 +2250,30 @@ type PlaybookDefinition = {
 };
 
 type PlaybookRunStatus = 'starting' | 'running' | 'completed' | 'failed';
+type PlaybookRunQueueState = 'queued' | 'waiting' | 'launching' | 'error';
+
+type PlaybookRunQueueItem = {
+  id: string;
+  playbookId: string;
+  playbookLabel: string;
+  repoPath: string;
+  requestedCount: number;
+  launchedCount: number;
+  inFlightCount: number;
+  serializeFirstMessageGroup: boolean;
+  pullHostBranchBeforeCreate: boolean;
+  createdAt: string;
+  updatedAt: string;
+  error?: string;
+};
+
+type PlaybookRunQueueGate = {
+  queueItemId: string;
+  playbookId: string;
+  chatName: string;
+  initialPromptIds: string[];
+  releasedAt?: string;
+};
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -2540,10 +2565,356 @@ function summarizePlaybookRunEntry(args: {
   };
 }
 
+const PLAYBOOK_RUN_QUEUE_BATCH_MIN = 1;
+const PLAYBOOK_RUN_QUEUE_BATCH_MAX = 50;
+
+function normalizePlaybookRunQueueItem(raw: unknown): PlaybookRunQueueItem | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const item = raw as Record<string, unknown>;
+  const id = String(item.id ?? '').trim();
+  const playbookId = String(item.playbookId ?? '').trim();
+  const playbookLabel = String(item.playbookLabel ?? '').trim();
+  const repoPath = String(item.repoPath ?? '').trim();
+  const requestedCount = Math.max(
+    PLAYBOOK_RUN_QUEUE_BATCH_MIN,
+    Math.min(PLAYBOOK_RUN_QUEUE_BATCH_MAX, Math.floor(Number(item.requestedCount ?? 1) || 1)),
+  );
+  const launchedCount = Math.max(0, Math.min(requestedCount, Math.floor(Number(item.launchedCount ?? 0) || 0)));
+  const maxInflight = Math.max(0, requestedCount - launchedCount);
+  const inFlightCount = Math.max(0, Math.min(maxInflight, Math.floor(Number(item.inFlightCount ?? 0) || 0)));
+  if (!id || !playbookId || !playbookLabel || !repoPath) return null;
+  return {
+    id,
+    playbookId,
+    playbookLabel,
+    repoPath,
+    requestedCount,
+    launchedCount,
+    inFlightCount,
+    serializeFirstMessageGroup: item.serializeFirstMessageGroup === true,
+    pullHostBranchBeforeCreate: item.pullHostBranchBeforeCreate === true,
+    createdAt: typeof item.createdAt === 'string' && item.createdAt.trim() ? item.createdAt.trim() : nowIso(),
+    updatedAt: typeof item.updatedAt === 'string' && item.updatedAt.trim() ? item.updatedAt.trim() : nowIso(),
+    ...(typeof item.error === 'string' && item.error.trim() ? { error: item.error.trim() } : {}),
+  };
+}
+
+function normalizePlaybookRunQueueItems(raw: unknown): PlaybookRunQueueItem[] {
+  const list = Array.isArray(raw) ? raw : [];
+  const out: PlaybookRunQueueItem[] = [];
+  const seen = new Set<string>();
+  for (const item of list) {
+    const normalized = normalizePlaybookRunQueueItem(item);
+    if (!normalized || seen.has(normalized.id)) continue;
+    seen.add(normalized.id);
+    out.push(normalized);
+  }
+  return out.sort((a, b) => parseIsoOrZero(a.createdAt) - parseIsoOrZero(b.createdAt) || a.id.localeCompare(b.id));
+}
+
+function readPlaybookRunQueueItems(regAny: any): PlaybookRunQueueItem[] {
+  return normalizePlaybookRunQueueItems(regAny?.playbookRunQueue?.items);
+}
+
+function writePlaybookRunQueueItems(regAny: any, itemsRaw: PlaybookRunQueueItem[]): void {
+  const items = normalizePlaybookRunQueueItems(itemsRaw).filter((item) => item.requestedCount - item.launchedCount > 0 || item.inFlightCount > 0);
+  if (items.length === 0) {
+    if (regAny && typeof regAny === 'object') delete regAny.playbookRunQueue;
+    return;
+  }
+  regAny.playbookRunQueue = { items };
+}
+
+function normalizePlaybookRunQueueGate(raw: unknown): PlaybookRunQueueGate | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const gate = raw as Record<string, unknown>;
+  const queueItemId = String(gate.queueItemId ?? '').trim();
+  const playbookId = String(gate.playbookId ?? '').trim();
+  const chatName = normalizeChatName(gate.chatName ?? 'default');
+  const initialPromptIds = Array.isArray(gate.initialPromptIds)
+    ? Array.from(new Set(gate.initialPromptIds.map((item) => String(item ?? '').trim()).filter(Boolean))).slice(0, 120)
+    : [];
+  if (!queueItemId || !playbookId) return null;
+  return {
+    queueItemId,
+    playbookId,
+    chatName,
+    initialPromptIds,
+    ...(typeof gate.releasedAt === 'string' && gate.releasedAt.trim() ? { releasedAt: gate.releasedAt.trim() } : {}),
+  };
+}
+
+function isPlaybookRunQueueGateReleasedForDroneEntry(droneEntry: any, gate: PlaybookRunQueueGate): boolean {
+  if (typeof gate.releasedAt === 'string' && gate.releasedAt.trim()) return true;
+  if (String(droneEntry?.hub?.phase ?? '').trim().toLowerCase() === 'error') return true;
+  if (gate.initialPromptIds.length === 0) return true;
+  const chatEntry = droneEntry?.chats?.[gate.chatName] ?? null;
+  if (!chatEntry) return false;
+  const turnIds = transcriptTurnIdsFromEntry(chatEntry);
+  const failedIds = new Set(
+    pendingPromptsFromChatEntry(chatEntry, { keepRecentlyCompleted: true })
+      .filter((item) => item.state === 'failed')
+      .map((item) => item.id),
+  );
+  return gate.initialPromptIds.every((promptId) => turnIds.has(promptId) || failedIds.has(promptId));
+}
+
+function reconcilePlaybookRunQueueGates(regAny: any): boolean {
+  let changed = false;
+  for (const pendingEntry of Object.values(regAny?.pending ?? {})) {
+    if (normalizeDroneEntryKind((pendingEntry as any)?.kind) !== 'playbook-run') continue;
+    const gate = normalizePlaybookRunQueueGate((pendingEntry as any)?.playbookQueueGate);
+    if (!gate || gate.releasedAt) continue;
+    if (String((pendingEntry as any)?.phase ?? '').trim().toLowerCase() === 'error') {
+      (pendingEntry as any).playbookQueueGate = { ...gate, releasedAt: nowIso() };
+      changed = true;
+    }
+  }
+  for (const droneEntry of Object.values(regAny?.drones ?? {})) {
+    if (normalizeDroneEntryKind((droneEntry as any)?.kind) !== 'playbook-run') continue;
+    const gate = normalizePlaybookRunQueueGate((droneEntry as any)?.playbookQueueGate);
+    if (!gate || gate.releasedAt) continue;
+    if (isPlaybookRunQueueGateReleasedForDroneEntry(droneEntry, gate)) {
+      (droneEntry as any).playbookQueueGate = { ...gate, releasedAt: nowIso() };
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function hasActivePlaybookRunQueueGate(regAny: any, playbookIdRaw: unknown): boolean {
+  const playbookId = String(playbookIdRaw ?? '').trim();
+  if (!playbookId) return false;
+  for (const pendingEntry of Object.values(regAny?.pending ?? {})) {
+    if (normalizeDroneEntryKind((pendingEntry as any)?.kind) !== 'playbook-run') continue;
+    const gate = normalizePlaybookRunQueueGate((pendingEntry as any)?.playbookQueueGate);
+    if (!gate || gate.playbookId !== playbookId || gate.releasedAt) continue;
+    return true;
+  }
+  for (const droneEntry of Object.values(regAny?.drones ?? {})) {
+    if (normalizeDroneEntryKind((droneEntry as any)?.kind) !== 'playbook-run') continue;
+    const gate = normalizePlaybookRunQueueGate((droneEntry as any)?.playbookQueueGate);
+    if (!gate || gate.playbookId !== playbookId || gate.releasedAt) continue;
+    return true;
+  }
+  return false;
+}
+
+function summarizePlaybookRunQueueItems(regAny: any): Array<
+  PlaybookRunQueueItem & {
+    remainingCount: number;
+    state: PlaybookRunQueueState;
+  }
+> {
+  return readPlaybookRunQueueItems(regAny).map((item) => {
+    const remainingCount = Math.max(0, item.requestedCount - item.launchedCount - item.inFlightCount);
+    const state: PlaybookRunQueueState = item.error
+      ? 'error'
+      : item.inFlightCount > 0
+        ? 'launching'
+        : item.serializeFirstMessageGroup && hasActivePlaybookRunQueueGate(regAny, item.playbookId)
+          ? 'waiting'
+          : 'queued';
+    return {
+      ...item,
+      remainingCount,
+      state,
+    };
+  });
+}
 function makeDroneIdentity(): string {
   return crypto.randomUUID();
 }
 
+async function startPlaybookRunLaunch(opts: {
+  playbookId: string;
+  repoPath: string;
+  pullHostBranchBeforeCreate: boolean;
+  queueItemId?: string | null;
+  serializeFirstMessageGroup?: boolean;
+}): Promise<{
+  ok: true;
+  droneId: string;
+  playbookId: string;
+  playbookLabel: string;
+  chatName: string;
+  repoPath: string;
+  phase: 'starting';
+}> {
+  const playbookId = String(opts.playbookId ?? '').trim();
+  if (!playbookId) throw new Error('missing playbook id');
+  let repoPath = String(opts.repoPath ?? '').trim();
+  if (!repoPath) throw new Error('missing repoPath');
+  if (!path.isAbsolute(repoPath)) throw new Error('invalid repoPath (expected absolute path)');
+  if (opts.pullHostBranchBeforeCreate) {
+    const pulled = await gitPullHostBranchBeforeCreate(repoPath);
+    repoPath = pulled.repoRoot;
+  }
+  const droneCli = resolveDroneCliPath();
+  if (!(await fileExists(droneCli))) throw new Error(`drone CLI not found at ${droneCli}`);
+  const regAny: any = await loadRegistry();
+  const playbook = normalizePlaybookDefinitions(regAny).find((item) => item.id === playbookId) ?? null;
+  if (!playbook) throw new Error(`unknown playbook: ${playbookId}`);
+  if (playbook.messages.length === 0) throw new Error('playbook has no messages');
+  const playbookAgent = normalizePlaybookAgent(playbook.agent);
+  const playbookModel = normalizePlaybookModel(playbook.model, playbookAgent);
+  const droneId = makeDroneIdentity();
+  const name = allocateUntitledDisplayName(regAny);
+  const at = nowIso();
+  const runtime: DroneRuntime = 'container';
+  const containerPort = 7777;
+  const createdEnvironment = deriveCreatedDroneEnvironmentConfig(regAny, { repoPath, runtime });
+  const startupQueuedPrompts = playbook.messages.map((message, index) => ({
+    id: `${droneId.replace(/[^A-Za-z0-9._-]+/g, '').slice(0, 24)}-${String(index + 1).padStart(2, '0')}`,
+    chatName: 'default',
+    at,
+    prompt: message.prompt,
+    ...(message.id ? { messageId: message.id } : {}),
+    state: 'queued' as const,
+    updatedAt: at,
+  }));
+  const queueGate =
+    opts.serializeFirstMessageGroup && opts.queueItemId
+      ? {
+          queueItemId: String(opts.queueItemId).trim(),
+          playbookId: playbook.id,
+          chatName: 'default',
+          initialPromptIds: startupQueuedPrompts.map((item) => item.id),
+        }
+      : null;
+  await updateRegistry((regLatest: any) => {
+    regLatest.pending = regLatest.pending ?? {};
+    regLatest.pending[droneId] = {
+      id: droneId,
+      name,
+      kind: 'playbook-run',
+      visibility: 'hidden',
+      playbook: {
+        id: playbook.id,
+        label: playbook.label,
+        messageCount: playbook.messages.length,
+        chatName: 'default',
+        artifacts: playbook.artifacts,
+        actions: playbook.actions,
+      },
+      repoPath,
+      runtime,
+      containerPort,
+      build: false,
+      createdAt: at,
+      updatedAt: at,
+      phase: 'starting',
+      message: `Launching ${playbook.label}…`,
+      environment: createdEnvironment,
+      seed: {
+        chatName: 'default',
+        agent: playbookAgent,
+        ...(playbookModel ? { model: playbookModel } : {}),
+      },
+      startupQueuedPrompts,
+      ...(queueGate ? { playbookQueueGate: queueGate } : {}),
+    };
+  });
+  enqueueProvisioning(droneId);
+  return {
+    ok: true,
+    droneId,
+    playbookId: playbook.id,
+    playbookLabel: playbook.label,
+    chatName: 'default',
+    repoPath,
+    phase: 'starting',
+  };
+}
+
+async function drainPlaybookRunLaunchQueue(): Promise<void> {
+  const plans = await updateRegistry((regLatest: any) => {
+    reconcilePlaybookRunQueueGates(regLatest);
+    const items = readPlaybookRunQueueItems(regLatest);
+    const claimedSerialPlaybookIds = new Set<string>();
+    const plansLocal: Array<{
+      queueItemId: string;
+      playbookId: string;
+      repoPath: string;
+      pullHostBranchBeforeCreate: boolean;
+      serializeFirstMessageGroup: boolean;
+    }> = [];
+    for (const item of items) {
+      const remainingCount = Math.max(0, item.requestedCount - item.launchedCount - item.inFlightCount);
+      if (remainingCount <= 0 || item.error) continue;
+      const blockedBySerialGate =
+        item.serializeFirstMessageGroup &&
+        (claimedSerialPlaybookIds.has(item.playbookId) || hasActivePlaybookRunQueueGate(regLatest, item.playbookId));
+      if (blockedBySerialGate) continue;
+      const claimCount = item.serializeFirstMessageGroup ? 1 : remainingCount;
+      item.inFlightCount += claimCount;
+      item.updatedAt = nowIso();
+      if (item.serializeFirstMessageGroup) claimedSerialPlaybookIds.add(item.playbookId);
+      for (let index = 0; index < claimCount; index += 1) {
+        plansLocal.push({
+          queueItemId: item.id,
+          playbookId: item.playbookId,
+          repoPath: item.repoPath,
+          pullHostBranchBeforeCreate: item.pullHostBranchBeforeCreate,
+          serializeFirstMessageGroup: item.serializeFirstMessageGroup,
+        });
+      }
+    }
+    writePlaybookRunQueueItems(regLatest, items);
+    return plansLocal;
+  });
+  for (const plan of plans) {
+    try {
+      await startPlaybookRunLaunch({
+        playbookId: plan.playbookId,
+        repoPath: plan.repoPath,
+        pullHostBranchBeforeCreate: plan.pullHostBranchBeforeCreate,
+        queueItemId: plan.queueItemId,
+        serializeFirstMessageGroup: plan.serializeFirstMessageGroup,
+      });
+      await updateRegistry((regLatest: any) => {
+        const items = readPlaybookRunQueueItems(regLatest);
+        const nextItems = items
+          .map((item) => {
+            if (item.id !== plan.queueItemId) return item;
+            const nextInflight = Math.max(0, item.inFlightCount - 1);
+            const nextLaunched = Math.min(item.requestedCount, item.launchedCount + 1);
+            return {
+              ...item,
+              inFlightCount: nextInflight,
+              launchedCount: nextLaunched,
+              updatedAt: nowIso(),
+              error: undefined,
+            };
+          })
+          .filter((item) => item.requestedCount - item.launchedCount > 0 || item.inFlightCount > 0);
+        writePlaybookRunQueueItems(regLatest, nextItems);
+      });
+    } catch (error: any) {
+      const message = error?.message ?? String(error);
+      await updateRegistry((regLatest: any) => {
+        const items = readPlaybookRunQueueItems(regLatest);
+        const nextItems = items.map((item) =>
+          item.id === plan.queueItemId
+            ? {
+                ...item,
+                inFlightCount: Math.max(0, item.inFlightCount - 1),
+                updatedAt: nowIso(),
+                error: message,
+              }
+            : item,
+        );
+        writePlaybookRunQueueItems(regLatest, nextItems);
+      });
+      hubLog('warn', 'playbook run queue launch failed', {
+        queueItemId: plan.queueItemId,
+        playbookId: plan.playbookId,
+        repoPath: plan.repoPath,
+        error: message,
+      });
+    }
+  }
+}
 function normalizeChatName(raw: any): string {
   return String(raw ?? 'default').trim() || 'default';
 }
@@ -6040,6 +6411,7 @@ const { dequeueProvisioning, enqueueProvisioning, enqueueProvisioningForAllPendi
   normalizeChatName,
   normalizeDroneEntryKind,
   normalizeDroneEntryVisibility,
+  normalizePlaybookRunQueueGate,
   normalizePendingStartupPrompts,
   nowIso,
   parseSeedAgent,
@@ -9271,26 +9643,11 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           return;
         }
         const pullHostBranchBeforeCreate = parsePullHostBranchBeforeCreate(body?.pullHostBranchBeforeCreate);
-        if (pullHostBranchBeforeCreate) {
-          try {
-            const pulled = await gitPullHostBranchBeforeCreate(repoPath);
-            repoPath = pulled.repoRoot;
-          } catch (e: any) {
-            const pullError = formatPullHostBranchBeforeCreateError(e);
-            json(res, pullError.status, {
-              ok: false,
-              error: `Failed to pull host branch before launching playbook: ${pullError.message}`,
-              code: 'host_branch_pull_before_playbook_run_failed',
-              reason: pullError.reason,
-            });
-            return;
-          }
-        }
-        const droneCli = resolveDroneCliPath();
-        if (!(await fileExists(droneCli))) {
-          json(res, 500, { ok: false, error: `drone CLI not found at ${droneCli}` });
-          return;
-        }
+        const requestedCount = Math.max(
+          PLAYBOOK_RUN_QUEUE_BATCH_MIN,
+          Math.min(PLAYBOOK_RUN_QUEUE_BATCH_MAX, Math.floor(Number(body?.count ?? 1) || 1)),
+        );
+        const serializeFirstMessageGroup = body?.serializeFirstMessageGroup === true;
         const regAny: any = await loadRegistry();
         const playbook = normalizePlaybookDefinitions(regAny).find((item) => item.id === playbookId) ?? null;
         if (!playbook) {
@@ -9301,64 +9658,67 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           json(res, 409, { ok: false, error: 'playbook has no messages' });
           return;
         }
-        const playbookAgent = normalizePlaybookAgent(playbook.agent);
-        const playbookModel = normalizePlaybookModel(playbook.model, playbookAgent);
-        const droneId = makeDroneIdentity();
-        const name = allocateUntitledDisplayName(regAny);
-        const at = nowIso();
-        const runtime: DroneRuntime = 'container';
-        const containerPort = 7777;
-        const createdEnvironment = deriveCreatedDroneEnvironmentConfig(regAny, { repoPath, runtime });
-        const startupQueuedPrompts = playbook.messages.map((message, index) => ({
-          id: `${droneId.replace(/[^A-Za-z0-9._-]+/g, '').slice(0, 24)}-${String(index + 1).padStart(2, '0')}`,
-          chatName: 'default',
-          at,
-          prompt: message.prompt,
-          ...(message.id ? { messageId: message.id } : {}),
-          state: 'queued' as const,
-          updatedAt: at,
-        }));
-        await updateRegistry((regLatest: any) => {
-          regLatest.pending = regLatest.pending ?? {};
-          regLatest.pending[droneId] = {
-            id: droneId,
-            name,
-            kind: 'playbook-run',
-            visibility: 'hidden',
-            playbook: {
-              id: playbook.id,
-              label: playbook.label,
-              messageCount: playbook.messages.length,
-              chatName: 'default',
-              artifacts: playbook.artifacts,
-              actions: playbook.actions,
-            },
-            repoPath,
-            runtime,
-            containerPort,
-            build: false,
-            createdAt: at,
-            updatedAt: at,
-            phase: 'starting',
-            message: `Launching ${playbook.label}…`,
-            environment: createdEnvironment,
-            seed: {
-              chatName: 'default',
-              agent: playbookAgent,
-              ...(playbookModel ? { model: playbookModel } : {}),
-            },
-            startupQueuedPrompts,
-          };
-        });
-        enqueueProvisioning(droneId);
-        json(res, 202, {
-          ok: true,
-          droneId,
+        const shouldQueue = serializeFirstMessageGroup || requestedCount > 1;
+        if (!shouldQueue) {
+          try {
+            json(
+              res,
+              202,
+              await startPlaybookRunLaunch({
+                playbookId: playbook.id,
+                repoPath,
+                pullHostBranchBeforeCreate,
+              }),
+            );
+            return;
+          } catch (e: any) {
+            if (pullHostBranchBeforeCreate) {
+              const pullError = formatPullHostBranchBeforeCreateError(e);
+              json(res, pullError.status, {
+                ok: false,
+                error: `Failed to pull host branch before launching playbook: ${pullError.message}`,
+                code: 'host_branch_pull_before_playbook_run_failed',
+                reason: pullError.reason,
+              });
+              return;
+            }
+            json(res, /unknown playbook/i.test(e?.message ?? '') ? 404 : /playbook has no messages/i.test(e?.message ?? '') ? 409 : 500, {
+              ok: false,
+              error: e?.message ?? String(e),
+            });
+            return;
+          }
+        }
+        const queueItem = {
+          id: crypto.randomUUID(),
           playbookId: playbook.id,
           playbookLabel: playbook.label,
-          chatName: 'default',
           repoPath,
-          phase: 'starting',
+          requestedCount,
+          launchedCount: 0,
+          inFlightCount: 0,
+          serializeFirstMessageGroup,
+          pullHostBranchBeforeCreate,
+          createdAt: nowIso(),
+          updatedAt: nowIso(),
+        } satisfies PlaybookRunQueueItem;
+        await updateRegistry((regLatest: any) => {
+          const items = readPlaybookRunQueueItems(regLatest);
+          items.push(queueItem);
+          writePlaybookRunQueueItems(regLatest, items);
+        });
+        void runFleetReconcilerCycle();
+        json(res, 202, {
+          ok: true,
+          queued: true,
+          queueItem: {
+            ...queueItem,
+            remainingCount: queueItem.requestedCount,
+            state: serializeFirstMessageGroup ? 'waiting' : 'queued',
+          },
+          playbookId: playbook.id,
+          playbookLabel: playbook.label,
+          repoPath,
         });
         return;
       }
@@ -9411,7 +9771,65 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         const runs = Array.from(byId.values()).sort(
           (a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt) || Date.parse(b.createdAt) - Date.parse(a.createdAt),
         );
-        json(res, 200, { ok: true, runs });
+        const queue = summarizePlaybookRunQueueItems(regAny).filter((item) => !repoPath || item.repoPath === repoPath);
+        json(res, 200, { ok: true, runs, queue });
+        return;
+      }
+
+      // DELETE /api/playbook-runs/queue/:id
+      if (method === 'DELETE' && parts.length === 4 && parts[0] === 'api' && parts[1] === 'playbook-runs' && parts[2] === 'queue') {
+        const queueItemId = String(decodeURIComponent(parts[3] ?? '')).trim();
+        if (!queueItemId) {
+          json(res, 400, { ok: false, error: 'missing queue item id' });
+          return;
+        }
+        const removed = await updateRegistry((regLatest: any) => {
+          const items = readPlaybookRunQueueItems(regLatest);
+          const nextItems = items.map((item) => {
+            if (item.id !== queueItemId) return item;
+            return {
+              ...item,
+              requestedCount: Math.min(item.requestedCount, item.launchedCount + item.inFlightCount),
+              updatedAt: nowIso(),
+            };
+          });
+          writePlaybookRunQueueItems(regLatest, nextItems);
+          return items.some((item) => item.id === queueItemId);
+        });
+        if (removed) void runFleetReconcilerCycle();
+        json(res, removed ? 200 : 404, removed ? { ok: true, removed: true, id: queueItemId } : { ok: false, error: `unknown queue item: ${queueItemId}` });
+        return;
+      }
+
+      // POST /api/playbook-runs/queue/clear
+      if (method === 'POST' && parts.length === 4 && parts[0] === 'api' && parts[1] === 'playbook-runs' && parts[2] === 'queue' && parts[3] === 'clear') {
+        let body: any = null;
+        try {
+          body = await readJsonBody(req);
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+          return;
+        }
+        const playbookId = typeof body?.playbookId === 'string' ? body.playbookId.trim() : '';
+        const repoPath = typeof body?.repoPath === 'string' ? body.repoPath.trim() : '';
+        const removed = await updateRegistry((regLatest: any) => {
+          const items = readPlaybookRunQueueItems(regLatest);
+          let removedCount = 0;
+          const nextItems = items.map((item) => {
+            if (playbookId && item.playbookId !== playbookId) return item;
+            if (repoPath && item.repoPath !== repoPath) return item;
+            removedCount += 1;
+            return {
+              ...item,
+              requestedCount: Math.min(item.requestedCount, item.launchedCount + item.inFlightCount),
+              updatedAt: nowIso(),
+            };
+          });
+          writePlaybookRunQueueItems(regLatest, nextItems);
+          return removedCount;
+        });
+        if (removed > 0) void runFleetReconcilerCycle();
+        json(res, 200, { ok: true, removed, ...(playbookId ? { playbookId } : {}), ...(repoPath ? { repoPath } : {}) });
         return;
       }
 
