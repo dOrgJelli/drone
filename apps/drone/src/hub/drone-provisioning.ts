@@ -39,7 +39,7 @@ type DroneProvisioningControllerDeps = {
   normalizeChatName: (raw: any) => string;
   normalizeDroneEntryKind: (raw: unknown) => 'standard' | 'playbook-run';
   normalizeDroneEntryVisibility: (raw: unknown) => 'visible' | 'hidden';
-  normalizePlaybookRunQueueGate: (raw: unknown) => any | null;
+  normalizePlaybookRunQueueGate?: (raw: unknown) => any | null;
   normalizePendingStartupPrompts: (raw: unknown, chatNameFilter?: string) => PendingStartupPrompt[];
   nowIso: () => string;
   parseSeedAgent: (raw: any) => any | null;
@@ -178,7 +178,7 @@ export function createDroneProvisioningController(deps: DroneProvisioningControl
         const pendingKind = deps.normalizeDroneEntryKind(pendingLatest?.kind);
         const pendingVisibility = deps.normalizeDroneEntryVisibility(pendingLatest?.visibility);
         const pendingPlaybook = deps.playbookMetaFromEntry(pendingLatest?.playbook);
-        const pendingPlaybookQueueGate = deps.normalizePlaybookRunQueueGate(pendingLatest?.playbookQueueGate);
+        const pendingPlaybookQueueGate = deps.normalizePlaybookRunQueueGate?.(pendingLatest?.playbookQueueGate) ?? null;
         const cloneSourceLatest = cloneFrom ? findDroneEntryByIdentity(regLatest, cloneFrom)?.entry : null;
         const found = findDroneEntryByIdentity(regLatest, pendingDroneId);
         if (!found) return;
