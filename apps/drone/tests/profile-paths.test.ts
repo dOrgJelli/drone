@@ -8,6 +8,7 @@ import {
   profileManifestPath,
   profilesRootDir,
   readActiveProfileName,
+  resolveDroneRootFromActiveProfile,
   writeActiveProfileName,
 } from '../src/host/profiles';
 
@@ -39,8 +40,12 @@ describe('profile-backed drone paths', () => {
   test('activates a named profile and resolves droneRootDir to that profile root', async () => {
     await writeActiveProfileName(TEST_PROFILE_NAME);
 
+    const expectedProfileRoot = profileDroneRootDir(TEST_PROFILE_NAME);
+    const explicitDroneDataDir = process.env.DRONE_DATA_DIR?.trim();
+
     expect(await readActiveProfileName()).toBe(TEST_PROFILE_NAME);
-    expect(droneRootDir()).toBe(profileDroneRootDir(TEST_PROFILE_NAME));
+    expect(resolveDroneRootFromActiveProfile()).toBe(expectedProfileRoot);
+    expect(droneRootDir()).toBe(explicitDroneDataDir ? path.resolve(explicitDroneDataDir) : expectedProfileRoot);
   });
 
   test('clearing the active profile removes the manifest', async () => {

@@ -2949,21 +2949,23 @@ function summarizePlaybookRunQueueItems(regAny: any): Array<
     state: PlaybookRunQueueState;
   }
 > {
-  return readPlaybookRunQueueItems(regAny).map((item) => {
-    const remainingCount = Math.max(0, item.requestedCount - item.launchedCount - item.inFlightCount);
-    const state: PlaybookRunQueueState = item.error
-      ? 'error'
-      : item.inFlightCount > 0
-        ? 'launching'
-        : item.serializeFirstMessageGroup && hasActivePlaybookRunQueueGate(regAny, item.playbookId)
-          ? 'waiting'
-          : 'queued';
-    return {
-      ...item,
-      remainingCount,
-      state,
-    };
-  });
+  return readPlaybookRunQueueItems(regAny)
+    .map((item) => {
+      const remainingCount = Math.max(0, item.requestedCount - item.launchedCount - item.inFlightCount);
+      const state: PlaybookRunQueueState = item.error
+        ? 'error'
+        : item.inFlightCount > 0
+          ? 'launching'
+          : item.serializeFirstMessageGroup && hasActivePlaybookRunQueueGate(regAny, item.playbookId)
+            ? 'waiting'
+            : 'queued';
+      return {
+        ...item,
+        remainingCount,
+        state,
+      };
+    })
+    .filter((item) => item.remainingCount > 0 || Boolean(item.error));
 }
 function makeDroneIdentity(): string {
   return crypto.randomUUID();
