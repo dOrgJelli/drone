@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
+  clearWelcomeDismissedAtForScope,
   dismissWelcomeForScope,
   hubSetupStatePath,
   readHubSetupState,
@@ -56,5 +57,17 @@ describe('hub setup state', () => {
     const state = await readHubSetupState();
     expect(state?.welcomeDismissedAtByScope[namedDefaultScope]).toBeTruthy();
     expect(state?.welcomeDismissedAtByScope[freshScope]).toBeUndefined();
+  });
+
+  test('clearing a scope removes only that profile dismissal', async () => {
+    const defaultScope = resolveHubSetupScopeKey('default');
+    const freshScope = resolveHubSetupScopeKey('fresh');
+
+    await dismissWelcomeForScope(defaultScope);
+    await dismissWelcomeForScope(freshScope);
+    await clearWelcomeDismissedAtForScope(freshScope);
+
+    expect(await readWelcomeDismissedAtForScope(defaultScope)).not.toBeNull();
+    expect(await readWelcomeDismissedAtForScope(freshScope)).toBeNull();
   });
 });

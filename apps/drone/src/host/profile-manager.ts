@@ -17,6 +17,7 @@ import {
 } from './profiles';
 import { dvmRemove } from './dvm';
 import { normalizeDroneRuntime } from './runtime';
+import { clearWelcomeDismissedAtForScope, resolveHubSetupScopeKey } from './setup-state';
 
 export type HubLaunchEnvSnapshot = {
   llmProvider: 'openai' | 'gemini' | null;
@@ -485,6 +486,7 @@ export async function deleteProfile(nameRaw: string, opts?: { allowDeleteActive?
 
   const { removedContainers, removedHostRoots, stoppedHub } = await deleteProfileResources(profileName);
   await fs.rm(profileRootDir(profileName), { recursive: true, force: true });
+  await clearWelcomeDismissedAtForScope(resolveHubSetupScopeKey(profileName));
   return {
     deleted: profileName,
     stoppedHub,

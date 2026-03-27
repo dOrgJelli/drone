@@ -1,5 +1,5 @@
 import React from 'react';
-import { persistProfileStorageIdOverride } from '../../profile-storage';
+import { clearProfileScopedStorage, persistProfileStorageIdOverride } from '../../profile-storage';
 import type { ProfileSettingsResponse } from './settings-types';
 
 type RequestJsonFn = <T>(url: string, init?: RequestInit) => Promise<T>;
@@ -119,6 +119,7 @@ export function useProfileSettings(requestJson: RequestJsonFn): UseProfileSettin
         const data = await requestJson<ProfileSettingsResponse>(`/api/settings/profiles/${encodeURIComponent(name)}`, {
           method: 'DELETE',
         });
+        clearProfileScopedStorage(name);
         applyResponse(data);
         const removedContainers = Array.isArray(data.removedContainers) ? data.removedContainers.length : 0;
         const removedHostRoots = Array.isArray(data.removedHostRoots) ? data.removedHostRoots.length : 0;
