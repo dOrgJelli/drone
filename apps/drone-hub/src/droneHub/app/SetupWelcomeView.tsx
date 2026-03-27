@@ -59,7 +59,7 @@ export function SetupWelcomeView({
                   </div>
                 )}
 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
                   <div className="rounded-2xl border border-[var(--border-subtle)] bg-[rgba(255,255,255,.03)] px-4 py-4">
                     <div className="text-[10px] uppercase tracking-[0.1em] text-[var(--muted-dim)] font-semibold">Active profile</div>
                     <div className="mt-2 text-[22px] font-semibold text-[var(--fg)]" style={{ fontFamily: 'var(--display)' }}>
@@ -75,6 +75,13 @@ export function SetupWelcomeView({
                       {blockers.length}
                     </div>
                     <div className="mt-1 text-[11px] text-[var(--muted-dim)]">Things that will stop important flows from working.</div>
+                  </div>
+                  <div className="rounded-2xl border border-[var(--border-subtle)] bg-[rgba(255,255,255,.03)] px-4 py-4">
+                    <div className="text-[10px] uppercase tracking-[0.1em] text-[var(--muted-dim)] font-semibold">Warnings</div>
+                    <div className="mt-2 text-[22px] font-semibold text-[var(--fg)]" style={{ fontFamily: 'var(--display)' }}>
+                      {recommended.length}
+                    </div>
+                    <div className="mt-1 text-[11px] text-[var(--muted-dim)]">Recommended improvements that are not hard blockers.</div>
                   </div>
                   <div className="rounded-2xl border border-[var(--border-subtle)] bg-[rgba(255,255,255,.03)] px-4 py-4">
                     <div className="text-[10px] uppercase tracking-[0.1em] text-[var(--muted-dim)] font-semibold">Profile contents</div>
