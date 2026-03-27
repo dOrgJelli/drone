@@ -1,4 +1,5 @@
 import React from 'react';
+import { formatProfileDisplayName } from './profile-display';
 import type { SetupStatusResponse } from './settings-types';
 
 type SetupWelcomeViewProps = {
@@ -68,7 +69,11 @@ export function SetupWelcomeView({
                   <div className="rounded-2xl border border-[var(--border-subtle)] bg-[rgba(255,255,255,.03)] px-4 py-4">
                     <div className="text-[10px] uppercase tracking-[0.1em] text-[var(--muted-dim)] font-semibold">Active profile</div>
                     <div className="mt-2 text-[22px] font-semibold text-[var(--fg)]" style={{ fontFamily: 'var(--display)' }}>
-                      {setupStatus?.activeProfile ?? (showingLegacyMigration ? 'Legacy mode' : 'default')}
+                      {setupStatus?.activeProfile
+                        ? formatProfileDisplayName(setupStatus.activeProfile)
+                        : showingLegacyMigration
+                          ? 'Legacy Mode'
+                          : 'Default'}
                     </div>
                     <div className="mt-1 text-[11px] text-[var(--muted-dim)]">
                       {showingLegacyMigration
