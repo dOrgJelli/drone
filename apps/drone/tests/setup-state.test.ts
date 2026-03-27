@@ -40,22 +40,21 @@ afterEach(() => {
 });
 
 describe('hub setup state', () => {
-  test('tracks welcome dismissal separately for legacy and profile scopes', async () => {
-    const legacyScope = resolveHubSetupScopeKey(null);
-    const defaultScope = resolveHubSetupScopeKey('default');
+  test('tracks welcome dismissal separately for default and named profile scopes', async () => {
+    const implicitDefaultScope = resolveHubSetupScopeKey(null);
+    const namedDefaultScope = resolveHubSetupScopeKey('default');
     const freshScope = resolveHubSetupScopeKey('fresh');
 
-    expect(await readWelcomeDismissedAtForScope(legacyScope)).toBeNull();
-    expect(await readWelcomeDismissedAtForScope(defaultScope)).toBeNull();
+    expect(implicitDefaultScope).toBe(namedDefaultScope);
+    expect(await readWelcomeDismissedAtForScope(namedDefaultScope)).toBeNull();
 
-    await dismissWelcomeForScope(defaultScope);
+    await dismissWelcomeForScope(namedDefaultScope);
 
-    expect(await readWelcomeDismissedAtForScope(legacyScope)).toBeNull();
-    expect(await readWelcomeDismissedAtForScope(defaultScope)).not.toBeNull();
+    expect(await readWelcomeDismissedAtForScope(namedDefaultScope)).not.toBeNull();
     expect(await readWelcomeDismissedAtForScope(freshScope)).toBeNull();
 
     const state = await readHubSetupState();
-    expect(state?.welcomeDismissedAtByScope[defaultScope]).toBeTruthy();
-    expect(state?.welcomeDismissedAtByScope[legacyScope]).toBeUndefined();
+    expect(state?.welcomeDismissedAtByScope[namedDefaultScope]).toBeTruthy();
+    expect(state?.welcomeDismissedAtByScope[freshScope]).toBeUndefined();
   });
 });

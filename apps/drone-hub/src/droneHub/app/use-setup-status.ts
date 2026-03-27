@@ -8,10 +8,8 @@ export type UseSetupStatusResult = {
   setupStatusLoading: boolean;
   setupStatusError: string | null;
   dismissingWelcome: boolean;
-  migratingLegacy: boolean;
   reloadSetupStatus: () => Promise<void>;
   dismissWelcome: () => Promise<void>;
-  migrateLegacyToDefault: () => Promise<void>;
 };
 
 export function useSetupStatus(requestJson: RequestJsonFn): UseSetupStatusResult {
@@ -19,7 +17,6 @@ export function useSetupStatus(requestJson: RequestJsonFn): UseSetupStatusResult
   const [setupStatusLoading, setSetupStatusLoading] = React.useState(false);
   const [setupStatusError, setSetupStatusError] = React.useState<string | null>(null);
   const [dismissingWelcome, setDismissingWelcome] = React.useState(false);
-  const [migratingLegacy, setMigratingLegacy] = React.useState(false);
 
   const reloadSetupStatus = React.useCallback(async () => {
     setSetupStatusLoading(true);
@@ -61,31 +58,12 @@ export function useSetupStatus(requestJson: RequestJsonFn): UseSetupStatusResult
     }
   }, [requestJson]);
 
-  const migrateLegacyToDefault = React.useCallback(async () => {
-    setMigratingLegacy(true);
-    setSetupStatusError(null);
-    try {
-      await requestJson('/api/settings/profiles/migrate-legacy', {
-        method: 'POST',
-      });
-      if (typeof window !== 'undefined') {
-        window.location.reload();
-      }
-    } catch (e: any) {
-      setSetupStatusError(e?.message ?? String(e));
-    } finally {
-      setMigratingLegacy(false);
-    }
-  }, [requestJson]);
-
   return {
     setupStatus,
     setupStatusLoading,
     setupStatusError,
     dismissingWelcome,
-    migratingLegacy,
     reloadSetupStatus,
     dismissWelcome,
-    migrateLegacyToDefault,
   };
 }

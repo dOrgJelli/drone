@@ -3,6 +3,7 @@ import * as path from 'path';
 
 const PROFILE_MANIFEST_VERSION = 1;
 const PROFILE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
+export const DEFAULT_PROFILE_NAME = 'default';
 
 type ProfileManifest = {
   version: 1;
@@ -23,10 +24,6 @@ export function profilesRootDir(): string {
 
 export function profileManifestPath(): string {
   return path.join(profilesRootDir(), 'manifest.json');
-}
-
-export function legacyDefaultDvmRootDir(): string {
-  return path.join(repoDataRootDir(), 'dvm');
 }
 
 function normalizeProfileName(raw: unknown): string | null {
@@ -62,7 +59,11 @@ export function profileDvmRootDir(profileNameRaw: string): string {
   return path.join(profilesRootDir(), profileName, 'dvm');
 }
 
-export function resolveDvmRootFromActiveProfile(): string | null {
+export function defaultProfileDvmRootDir(): string {
+  return profileDvmRootDir(DEFAULT_PROFILE_NAME);
+}
+
+export function resolveDvmRootFromActiveProfile(): string {
   const activeProfile = readActiveProfileNameSync();
-  return activeProfile ? profileDvmRootDir(activeProfile) : null;
+  return activeProfile ? profileDvmRootDir(activeProfile) : defaultProfileDvmRootDir();
 }

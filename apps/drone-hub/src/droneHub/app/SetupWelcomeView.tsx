@@ -7,9 +7,7 @@ type SetupWelcomeViewProps = {
   setupStatusLoading: boolean;
   setupStatusError: string | null;
   dismissingWelcome: boolean;
-  migratingLegacy: boolean;
   onDismissWelcome: () => void;
-  onMigrateLegacyToDefault: () => void;
   onReload: () => void;
   onOpenProfiles: () => void;
   onOpenGeneralSettings: () => void;
@@ -26,9 +24,7 @@ export function SetupWelcomeView({
   setupStatusLoading,
   setupStatusError,
   dismissingWelcome,
-  migratingLegacy,
   onDismissWelcome,
-  onMigrateLegacyToDefault,
   onReload,
   onOpenProfiles,
   onOpenGeneralSettings,
@@ -36,8 +32,6 @@ export function SetupWelcomeView({
   const dependencies = setupStatus?.dependencies ?? [];
   const blockers = dependencies.filter((item) => item.blocking && item.status !== 'ready');
   const recommended = dependencies.filter((item) => !item.blocking && item.status !== 'ready');
-  const legacy = setupStatus?.legacy ?? null;
-  const showingLegacyMigration = setupStatus?.mode === 'legacy' && Boolean(legacy?.hasLegacyData);
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -55,7 +49,7 @@ export function SetupWelcomeView({
                     Bring this profile online before you start flying.
                   </div>
                   <div className="max-w-[64ch] text-[13px] leading-relaxed text-[var(--muted)]">
-                    This screen tracks machine dependencies, fresh-profile state, and any remaining legacy installs that still need to be migrated into an isolated profile.
+                    This screen tracks machine dependencies and whether the active profile is still empty. It is meant to catch fresh installs and fresh profiles before users hit confusing failures later.
                   </div>
                 </div>
 
@@ -69,18 +63,10 @@ export function SetupWelcomeView({
                   <div className="rounded-2xl border border-[var(--border-subtle)] bg-[rgba(255,255,255,.03)] px-4 py-4">
                     <div className="text-[10px] uppercase tracking-[0.1em] text-[var(--muted-dim)] font-semibold">Active profile</div>
                     <div className="mt-2 text-[22px] font-semibold text-[var(--fg)]" style={{ fontFamily: 'var(--display)' }}>
-                      {setupStatus?.activeProfile
-                        ? formatProfileDisplayName(setupStatus.activeProfile)
-                        : showingLegacyMigration
-                          ? 'Legacy Mode'
-                          : 'Default'}
+                      {setupStatus?.activeProfile ? formatProfileDisplayName(setupStatus.activeProfile) : 'Default'}
                     </div>
                     <div className="mt-1 text-[11px] text-[var(--muted-dim)]">
-                      {showingLegacyMigration
-                        ? 'Existing install without profiles'
-                        : setupStatus?.profile.isFresh
-                          ? 'Fresh profile'
-                          : 'Returning profile'}
+                      {setupStatus?.profile.isFresh ? 'Fresh profile' : 'Returning profile'}
                     </div>
                   </div>
                   <div className="rounded-2xl border border-[var(--border-subtle)] bg-[rgba(255,255,255,.03)] px-4 py-4">
@@ -101,44 +87,19 @@ export function SetupWelcomeView({
                   </div>
                 </div>
 
-                {showingLegacyMigration && legacy && (
-                  <div className="rounded-2xl border border-[rgba(255,214,102,.2)] bg-[rgba(255,214,102,.08)] px-4 py-4">
-                    <div className="text-[12px] font-semibold text-[var(--fg-secondary)]">Legacy data detected</div>
-                    <div className="mt-2 text-[12px] leading-relaxed text-[var(--muted)]">
-                      Drone is currently running from the old shared data roots. Since this repo only has one active user, the intended migration path is the one-time repo script instead of an in-product conversion flow.
-                    </div>
-                    <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-[11px] text-[var(--muted-dim)]">
-                      <div className="rounded-xl border border-[var(--border-subtle)] bg-[rgba(0,0,0,.12)] px-3 py-3">
-                        <div className="font-semibold text-[var(--fg-secondary)]">Legacy Drone root</div>
-                        <div className="mt-2 break-all">{legacy.droneDataDir}</div>
-                      </div>
-                      <div className="rounded-xl border border-[var(--border-subtle)] bg-[rgba(0,0,0,.12)] px-3 py-3">
-                        <div className="font-semibold text-[var(--fg-secondary)]">Legacy DVM root</div>
-                        <div className="mt-2 break-all">{legacy.dvmDataDir}</div>
-                      </div>
-                    </div>
-                    <div className="mt-3 rounded-xl border border-[var(--border-subtle)] bg-[rgba(0,0,0,.18)] px-3 py-3">
-                      <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--muted-dim)] font-semibold">Run from repo root</div>
-                      <div className="mt-2 font-mono text-[12px] text-[var(--fg-secondary)] break-all">bun run migrate:legacy-profile -- --name default</div>
-                    </div>
-                  </div>
-                )}
-
                 <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
                     onClick={onDismissWelcome}
-                    disabled={dismissingWelcome || migratingLegacy || setupStatusLoading}
+                    disabled={dismissingWelcome || setupStatusLoading}
                     className={`h-10 px-4 rounded text-[11px] font-semibold tracking-wide uppercase border transition-all ${
-                      dismissingWelcome || migratingLegacy || setupStatusLoading
+                      dismissingWelcome || setupStatusLoading
                         ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
-                        : showingLegacyMigration
-                          ? 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]'
-                          : 'bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-fg)] hover:shadow-[var(--glow-accent)] hover:brightness-110'
+                        : 'bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-fg)] hover:shadow-[var(--glow-accent)] hover:brightness-110'
                     }`}
                     style={{ fontFamily: 'var(--display)' }}
                   >
-                    {dismissingWelcome ? 'Opening…' : showingLegacyMigration ? 'Keep legacy mode' : 'Continue to Hub'}
+                    {dismissingWelcome ? 'Opening…' : 'Continue to Hub'}
                   </button>
                   <button
                     type="button"
@@ -183,11 +144,7 @@ export function SetupWelcomeView({
                   </div>
                   <div className="rounded-2xl border border-[var(--border-subtle)] bg-[rgba(0,0,0,.14)] px-4 py-4">
                     <div className="text-[11px] font-semibold text-[var(--fg-secondary)]">2. Choose your profile strategy</div>
-                    <div className="mt-1 text-[11px] text-[var(--muted-dim)]">
-                      {showingLegacyMigration
-                        ? 'Run the one-time legacy migration script, then restart the Hub and continue in profile mode.'
-                        : 'Keep this profile empty for onboarding tests or start creating drones and repos here.'}
-                    </div>
+                    <div className="mt-1 text-[11px] text-[var(--muted-dim)]">Keep this profile empty for onboarding tests or start creating drones and repos here.</div>
                   </div>
                   <div className="rounded-2xl border border-[var(--border-subtle)] bg-[rgba(0,0,0,.14)] px-4 py-4">
                     <div className="text-[11px] font-semibold text-[var(--fg-secondary)]">3. Optional base image</div>
@@ -240,24 +197,18 @@ export function SetupWelcomeView({
                   Current profile
                 </div>
                 <div className="mt-2 text-[12px] text-[var(--muted)]">
-                  {showingLegacyMigration
-                    ? 'Legacy mode means Drone is still reading the old shared roots instead of an isolated profile.'
-                    : setupStatus?.profile.isFresh
+                  {setupStatus?.profile.isFresh
                     ? 'This profile is still empty, so it is ideal for onboarding and first-run flow testing.'
                     : 'This profile already contains saved Hub state, so it behaves like a returning workspace.'}
                 </div>
               </div>
               <div className="rounded-2xl border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-4 py-4">
                 <div className="text-[11px] font-semibold text-[var(--fg-secondary)]">Drone data root</div>
-                <div className="mt-2 text-[11px] text-[var(--muted-dim)] break-all">
-                  {(showingLegacyMigration ? legacy?.droneDataDir : setupStatus?.profile.droneDataDir) ?? 'Loading…'}
-                </div>
+                <div className="mt-2 text-[11px] text-[var(--muted-dim)] break-all">{setupStatus?.profile.droneDataDir ?? 'Loading…'}</div>
               </div>
               <div className="rounded-2xl border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-4 py-4">
                 <div className="text-[11px] font-semibold text-[var(--fg-secondary)]">DVM data root</div>
-                <div className="mt-2 text-[11px] text-[var(--muted-dim)] break-all">
-                  {(showingLegacyMigration ? legacy?.dvmDataDir : setupStatus?.profile.dvmDataDir) ?? 'Loading…'}
-                </div>
+                <div className="mt-2 text-[11px] text-[var(--muted-dim)] break-all">{setupStatus?.profile.dvmDataDir ?? 'Loading…'}</div>
               </div>
               <div className="rounded-2xl border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-4 py-4">
                 <div className="text-[11px] font-semibold text-[var(--fg-secondary)]">Recommended next move</div>

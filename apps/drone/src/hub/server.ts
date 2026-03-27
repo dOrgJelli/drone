@@ -18,7 +18,6 @@ import {
   deleteProfile as deleteManagedProfile,
   ensureDefaultProfileForFirstRun,
   listProfilesState,
-  migrateLegacyToDefaultProfile,
   type HubState as ManagedHubState,
   renameProfile as renameManagedProfile,
   useProfile as useManagedProfile,
@@ -440,11 +439,7 @@ function profileSettingsErrorStatus(error: unknown): number {
   if (
     /unknown profile/i.test(message) ||
     /cannot delete active profile/i.test(message) ||
-    /already exists/i.test(message) ||
-    /legacy migration is only available in legacy mode/i.test(message) ||
-    /no legacy drone or dvm data found to migrate/i.test(message) ||
-    /default profile already has .* data/i.test(message) ||
-    /legacy data is still present; run bun run migrate:legacy-profile/i.test(message)
+    /already exists/i.test(message)
   ) {
     return 409;
   }
@@ -527,12 +522,11 @@ async function resolveSetupStatusResponse(): Promise<any> {
   ];
   const hasBlockingDependency = dependencies.some((item) => item.blocking && item.status !== 'ready');
   const isFreshProfile = droneCount === 0 && repoCount === 0;
-  const hasLegacyMigrationPrompt = profileState.mode === 'legacy' && profileState.legacy.hasLegacyData;
   return {
     ok: true,
     firstHubStartedAt: setupState.firstHubStartedAt,
     welcomeDismissedAt,
-    shouldShowWelcome: !welcomeDismissedAt && (hasBlockingDependency || isFreshProfile || hasLegacyMigrationPrompt),
+    shouldShowWelcome: !welcomeDismissedAt && (hasBlockingDependency || isFreshProfile),
     activeProfile: profileState.activeProfile,
     mode: profileState.mode,
     profile: {
@@ -543,16 +537,8 @@ async function resolveSetupStatusResponse(): Promise<any> {
       droneDataDir: profileState.droneDataDir,
       dvmDataDir: profileState.dvmDataDir,
     },
-    legacy: profileState.legacy,
     dependencies,
   };
-}
-
-async function assertLegacyMigrationScriptNotRequiredForProfileMode(): Promise<void> {
-  const profileState = await listProfilesState();
-  if (profileState.mode === 'legacy' && profileState.legacy.hasLegacyData) {
-    throw new Error('legacy data is still present; run bun run migrate:legacy-profile -- --name default before entering profile mode');
-  }
 }
 
 const DRONE_OP_LOCKS = new Map<string, Promise<void>>();
@@ -9006,7 +8992,6 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             return;
           }
           try {
-            await assertLegacyMigrationScriptNotRequiredForProfileMode();
             const created = await createManagedProfile(body?.name, { use: false, stopCurrentHub: false });
             json(res, 201, {
               ok: true,
@@ -9031,7 +9016,6 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           }
           const previousRootDir = droneRootPath();
           try {
-            await assertLegacyMigrationScriptNotRequiredForProfileMode();
             const currentHubState = await readManagedHubStateAtRootOrFallback(previousRootDir, req);
             const activated = await useManagedProfile(body?.name, {
               stopCurrentHub: false,
@@ -9046,33 +9030,6 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               ...(await listProfilesState()),
               activeProfile: activated.activeProfile,
               activatedProfile: activated.activeProfile,
-              reloadRequired: true,
-            });
-          } catch (e: any) {
-            json(res, profileSettingsErrorStatus(e), { ok: false, error: e?.message ?? String(e) });
-          }
-          return;
-        }
-      }
-
-      if (pathname === '/api/settings/profiles/migrate-legacy') {
-        if (method === 'POST') {
-          const previousRootDir = droneRootPath();
-          try {
-            const currentHubState = await readManagedHubStateAtRootOrFallback(previousRootDir, req);
-            const migrated = await migrateLegacyToDefaultProfile({
-              stopCurrentHub: false,
-              syncRunningHubState: {
-                state: currentHubState,
-                apiToken,
-                previousRootDir,
-              },
-            });
-            json(res, 200, {
-              ok: true,
-              ...(await listProfilesState()),
-              activatedProfile: migrated.activeProfile,
-              migratedFromLegacy: migrated.migratedFromLegacy,
               reloadRequired: true,
             });
           } catch (e: any) {

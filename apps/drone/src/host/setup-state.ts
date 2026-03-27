@@ -1,8 +1,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { repoDataRootDir } from './profiles';
+import { DEFAULT_PROFILE_NAME, repoDataRootDir } from './profiles';
 
-export type HubSetupScopeKey = 'legacy' | `profile:${string}`;
+export type HubSetupScopeKey = `profile:${string}`;
 
 export type HubSetupState = {
   version: 2;
@@ -38,11 +38,11 @@ function normalizeDismissedMap(raw: unknown): Record<string, string> {
 function parseHubSetupStateV1(raw: Record<string, unknown>): HubSetupState | null {
   const firstHubStartedAt = normalizeIsoTimestamp(raw.firstHubStartedAt);
   if (!firstHubStartedAt) return null;
-  const legacyDismissedAt = normalizeIsoTimestamp(raw.welcomeDismissedAt);
+  const dismissedAt = normalizeIsoTimestamp(raw.welcomeDismissedAt);
   return {
     version: HUB_SETUP_STATE_VERSION,
     firstHubStartedAt,
-    welcomeDismissedAtByScope: legacyDismissedAt ? { legacy: legacyDismissedAt } : {},
+    welcomeDismissedAtByScope: dismissedAt ? { [`profile:${DEFAULT_PROFILE_NAME}`]: dismissedAt } : {},
   };
 }
 
@@ -64,8 +64,8 @@ function parseHubSetupState(raw: unknown): HubSetupState | null {
 }
 
 export function resolveHubSetupScopeKey(activeProfile: string | null | undefined): HubSetupScopeKey {
-  const profile = typeof activeProfile === 'string' ? activeProfile.trim() : '';
-  return profile ? `profile:${profile}` : 'legacy';
+  const profile = typeof activeProfile === 'string' ? activeProfile.trim() : DEFAULT_PROFILE_NAME;
+  return `profile:${profile}`;
 }
 
 export async function readHubSetupState(): Promise<HubSetupState | null> {
