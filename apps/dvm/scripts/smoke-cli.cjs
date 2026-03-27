@@ -38,7 +38,22 @@ function expectedPreferredRoot(appRoot) {
   const explicit = String(process.env.DVM_DATA_DIR || '').trim();
   if (explicit) return path.resolve(explicit);
   const repoRoot = path.resolve(appRoot, '..', '..');
-  return path.join(repoRoot, 'data', 'dvm');
+  const activeProfile = readActiveProfile(repoRoot);
+  return path.join(repoRoot, 'data', 'profiles', activeProfile, 'dvm');
+}
+
+function readActiveProfile(repoRoot) {
+  const manifestPath = path.join(repoRoot, 'data', 'profiles', 'manifest.json');
+  try {
+    const raw = fs.readFileSync(manifestPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    const activeProfile = String(parsed?.activeProfile || '')
+      .trim()
+      .toLowerCase();
+    return activeProfile || 'default';
+  } catch {
+    return 'default';
+  }
 }
 
 function main() {
