@@ -18,9 +18,10 @@ import {
   useProfile as useManagedProfile,
 } from './host/profile-manager';
 import {
+  DEFAULT_PROFILE_NAME,
+  defaultProfileDroneRootDir,
+  defaultProfileDvmRootDir,
   ensureProfileDirs,
-  legacyDefaultDroneRootDir,
-  legacyDefaultDvmRootDir,
   listProfiles,
   normalizeProfileName,
   profileDroneRootDir,
@@ -656,27 +657,6 @@ async function dirHasEntries(targetPath: string): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-async function moveTreeIfNeeded(sourcePath: string, targetPath: string): Promise<boolean> {
-  if (!(await pathExists(sourcePath))) return false;
-  if (await dirHasEntries(targetPath)) return false;
-  await fs.mkdir(path.dirname(targetPath), { recursive: true });
-  try {
-    await fs.rename(sourcePath, targetPath);
-    return true;
-  } catch {
-    await fs.cp(sourcePath, targetPath, { recursive: true });
-    await fs.rm(sourcePath, { recursive: true, force: true });
-    return true;
-  }
-}
-
-async function migrateLegacyRootsToDefaultProfileIfNeeded(profileName: string): Promise<void> {
-  if (profileName !== 'default') return;
-  await ensureProfileDirs(profileName);
-  await moveTreeIfNeeded(legacyDefaultDroneRootDir(), profileDroneRootDir(profileName));
-  await moveTreeIfNeeded(legacyDefaultDvmRootDir(), profileDvmRootDir(profileName));
 }
 
 async function stopHubAtRootIfRunning(rootDir: string): Promise<boolean> {
@@ -2000,16 +1980,16 @@ async function profileListCommand() {
 }
 
 async function profileCurrentCommand() {
-  const activeProfile = await readActiveProfileName();
+  const activeProfile = (await readActiveProfileName()) ?? DEFAULT_PROFILE_NAME;
   // eslint-disable-next-line no-console
   console.log(
     JSON.stringify(
       {
         ok: true,
         activeProfile,
-        mode: activeProfile ? 'profile' : 'legacy',
-        droneDataDir: activeProfile ? profileDroneRootDir(activeProfile) : legacyDefaultDroneRootDir(),
-        dvmDataDir: activeProfile ? profileDvmRootDir(activeProfile) : legacyDefaultDvmRootDir(),
+        mode: 'profile',
+        droneDataDir: activeProfile ? profileDroneRootDir(activeProfile) : defaultProfileDroneRootDir(),
+        dvmDataDir: activeProfile ? profileDvmRootDir(activeProfile) : defaultProfileDvmRootDir(),
       },
       null,
       2,
@@ -2017,22 +1997,13 @@ async function profileCurrentCommand() {
   );
 }
 
-async function assertLegacyMigrationScriptNotRequiredForProfileMode(): Promise<void> {
-  const profileState = await listProfilesState();
-  if (profileState.mode === 'legacy' && profileState.legacy.hasLegacyData) {
-    throw new Error('legacy data is still present; run bun run migrate:legacy-profile -- --name default before entering profile mode');
-  }
-}
-
 async function profileCreateCommand(nameRaw: string, options: { use?: boolean }) {
-  await assertLegacyMigrationScriptNotRequiredForProfileMode();
   const result = await createManagedProfile(nameRaw, { use: options.use, stopCurrentHub: true });
   // eslint-disable-next-line no-console
   console.log(JSON.stringify({ ok: true, ...result }, null, 2));
 }
 
 async function profileUseCommand(nameRaw: string) {
-  await assertLegacyMigrationScriptNotRequiredForProfileMode();
   const result = await useManagedProfile(nameRaw, { stopCurrentHub: true });
   // eslint-disable-next-line no-console
   console.log(JSON.stringify({ ok: true, ...result }, null, 2));

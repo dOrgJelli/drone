@@ -568,12 +568,8 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
             setupStatusLoading: setupStatusState.setupStatusLoading,
             setupStatusError: setupStatusState.setupStatusError,
             dismissingWelcome: setupStatusState.dismissingWelcome,
-            migratingLegacy: setupStatusState.migratingLegacy,
             onDismissWelcome: () => {
               void setupStatusState.dismissWelcome();
-            },
-            onMigrateLegacyToDefault: () => {
-              void setupStatusState.migrateLegacyToDefault();
             },
             onReload: () => {
               void setupStatusState.reloadSetupStatus();

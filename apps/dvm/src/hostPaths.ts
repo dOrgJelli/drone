@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { legacyDefaultDvmRootDir, readActiveProfileNameSync, resolveDvmRootFromActiveProfile } from './profiles';
+import { DEFAULT_PROFILE_NAME, readActiveProfileNameSync, resolveDvmRootFromActiveProfile } from './profiles';
 
 const DVM_STATE_ENTRY_NAMES = [
   'base.json',
@@ -17,9 +17,7 @@ function repoRootDir(): string {
 function configuredDvmRootDir(): string {
   const explicit = process.env.DVM_DATA_DIR?.trim();
   if (explicit) return path.resolve(explicit);
-  const activeProfileRoot = resolveDvmRootFromActiveProfile();
-  if (activeProfileRoot) return activeProfileRoot;
-  return legacyDefaultDvmRootDir();
+  return resolveDvmRootFromActiveProfile();
 }
 
 function xdgDvmRootDir(): string {
@@ -155,7 +153,7 @@ export function dvmRootDir(): string {
   if (cachedDvmRootDir) return cachedDvmRootDir;
   const rootDir = configuredDvmRootDir();
   const activeProfile = readActiveProfileNameSync();
-  if (!activeProfile || activeProfile === 'default') {
+  if (!activeProfile || activeProfile === DEFAULT_PROFILE_NAME) {
     migrateLegacyDvmRootIfNeeded(rootDir);
   } else {
     fs.mkdirSync(rootDir, { recursive: true });

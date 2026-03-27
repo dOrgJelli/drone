@@ -4,6 +4,7 @@ import path from 'node:path';
 
 export const PROFILE_MANIFEST_VERSION = 1;
 export const PROFILE_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
+export const DEFAULT_PROFILE_NAME = 'default';
 
 type ProfileManifest = {
   version: 1;
@@ -24,14 +25,6 @@ export function profilesRootDir(): string {
 
 export function profileManifestPath(): string {
   return path.join(profilesRootDir(), 'manifest.json');
-}
-
-export function legacyDefaultDroneRootDir(): string {
-  return path.join(repoDataRootDir(), 'drone');
-}
-
-export function legacyDefaultDvmRootDir(): string {
-  return path.join(repoDataRootDir(), 'dvm');
 }
 
 export function normalizeProfileName(raw: unknown): string | null {
@@ -89,12 +82,24 @@ export function profileRootDir(profileNameRaw: string): string {
   return path.join(profilesRootDir(), profileName);
 }
 
+export function defaultProfileRootDir(): string {
+  return profileRootDir(DEFAULT_PROFILE_NAME);
+}
+
 export function profileDroneRootDir(profileNameRaw: string): string {
   return path.join(profileRootDir(profileNameRaw), 'drone');
 }
 
+export function defaultProfileDroneRootDir(): string {
+  return profileDroneRootDir(DEFAULT_PROFILE_NAME);
+}
+
 export function profileDvmRootDir(profileNameRaw: string): string {
   return path.join(profileRootDir(profileNameRaw), 'dvm');
+}
+
+export function defaultProfileDvmRootDir(): string {
+  return profileDvmRootDir(DEFAULT_PROFILE_NAME);
 }
 
 export async function ensureProfileDirs(profileNameRaw: string): Promise<{ profileName: string; rootDir: string; droneDir: string; dvmDir: string }> {
@@ -124,12 +129,12 @@ export async function listProfiles(): Promise<string[]> {
   }
 }
 
-export function resolveDroneRootFromActiveProfile(): string | null {
+export function resolveDroneRootFromActiveProfile(): string {
   const activeProfile = readActiveProfileNameSync();
-  return activeProfile ? profileDroneRootDir(activeProfile) : null;
+  return activeProfile ? profileDroneRootDir(activeProfile) : defaultProfileDroneRootDir();
 }
 
-export function resolveDvmRootFromActiveProfile(): string | null {
+export function resolveDvmRootFromActiveProfile(): string {
   const activeProfile = readActiveProfileNameSync();
-  return activeProfile ? profileDvmRootDir(activeProfile) : null;
+  return activeProfile ? profileDvmRootDir(activeProfile) : defaultProfileDvmRootDir();
 }

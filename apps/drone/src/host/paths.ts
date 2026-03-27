@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { legacyDefaultDroneRootDir, readActiveProfileNameSync, resolveDroneRootFromActiveProfile } from './profiles';
+import { DEFAULT_PROFILE_NAME, readActiveProfileNameSync, resolveDroneRootFromActiveProfile } from './profiles';
 
 const DRONE_STATE_ENTRY_NAMES = [
   'hub.json',
@@ -20,9 +20,7 @@ function repoRootDir(): string {
 function configuredDroneRootDir(): string {
   const explicit = process.env.DRONE_DATA_DIR?.trim();
   if (explicit) return path.resolve(explicit);
-  const activeProfileRoot = resolveDroneRootFromActiveProfile();
-  if (activeProfileRoot) return activeProfileRoot;
-  return legacyDefaultDroneRootDir();
+  return resolveDroneRootFromActiveProfile();
 }
 
 function xdgDroneRootDir(): string {
@@ -149,7 +147,7 @@ export function droneRootDir(): string {
   if (cachedDroneRootDir) return cachedDroneRootDir;
   const rootDir = configuredDroneRootDir();
   const activeProfile = readActiveProfileNameSync();
-  if (!activeProfile || activeProfile === 'default') {
+  if (!activeProfile || activeProfile === DEFAULT_PROFILE_NAME) {
     migrateLegacyDroneRootIfNeeded(rootDir);
   } else {
     fs.mkdirSync(rootDir, { recursive: true });

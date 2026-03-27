@@ -100,24 +100,15 @@ export type ProfileSettingsProfile = {
 export type ProfileSettingsResponse = {
   ok: true;
   activeProfile: string | null;
-  mode: 'profile' | 'legacy';
+  mode: 'profile';
   droneDataDir: string;
   dvmDataDir: string;
   profiles: ProfileSettingsProfile[];
-  legacy: {
-    hasLegacyDroneData: boolean;
-    hasLegacyDvmData: boolean;
-    hasLegacyData: boolean;
-    droneDataDir: string;
-    dvmDataDir: string;
-    canMigrateToDefault: boolean;
-  };
   createdProfile?: string;
   activatedProfile?: string;
   deletedProfile?: string;
   renamedFrom?: string;
   renamedTo?: string;
-  migratedFromLegacy?: boolean;
   removedContainers?: string[];
   removedHostRoots?: string[];
   reloadRequired?: boolean;
@@ -140,7 +131,7 @@ export type SetupStatusResponse = {
   welcomeDismissedAt: string | null;
   shouldShowWelcome: boolean;
   activeProfile: string | null;
-  mode: 'profile' | 'legacy';
+  mode: 'profile';
   profile: {
     activeProfile: string | null;
     droneCount: number;
@@ -148,14 +139,6 @@ export type SetupStatusResponse = {
     isFresh: boolean;
     droneDataDir: string;
     dvmDataDir: string;
-  };
-  legacy: {
-    hasLegacyDroneData: boolean;
-    hasLegacyDvmData: boolean;
-    hasLegacyData: boolean;
-    droneDataDir: string;
-    dvmDataDir: string;
-    canMigrateToDefault: boolean;
   };
   dependencies: SetupDependencyCheck[];
 };

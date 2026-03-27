@@ -14,14 +14,12 @@ export type UseProfileSettingsResult = {
   activatingProfileName: string | null;
   renamingProfileName: string | null;
   deletingProfileName: string | null;
-  migratingLegacy: boolean;
   setCreateProfileDraft: React.Dispatch<React.SetStateAction<string>>;
   loadProfileSettings: () => Promise<void>;
   createProfile: () => Promise<void>;
   activateProfile: (name: string) => Promise<void>;
   renameProfile: (name: string, nextName: string) => Promise<void>;
   deleteProfile: (name: string) => Promise<void>;
-  migrateLegacyToDefault: () => Promise<void>;
 };
 
 export function useProfileSettings(requestJson: RequestJsonFn): UseProfileSettingsResult {
@@ -34,7 +32,6 @@ export function useProfileSettings(requestJson: RequestJsonFn): UseProfileSettin
   const [activatingProfileName, setActivatingProfileName] = React.useState<string | null>(null);
   const [renamingProfileName, setRenamingProfileName] = React.useState<string | null>(null);
   const [deletingProfileName, setDeletingProfileName] = React.useState<string | null>(null);
-  const [migratingLegacy, setMigratingLegacy] = React.useState(false);
 
   const applyResponse = React.useCallback((data: ProfileSettingsResponse) => {
     setProfileSettings(data);
@@ -169,27 +166,6 @@ export function useProfileSettings(requestJson: RequestJsonFn): UseProfileSettin
     [applyResponse, requestJson],
   );
 
-  const migrateLegacyToDefault = React.useCallback(async () => {
-    setMigratingLegacy(true);
-    setProfileSettingsError(null);
-    setProfileSettingsNotice(null);
-    try {
-      const data = await requestJson<ProfileSettingsResponse>('/api/settings/profiles/migrate-legacy', {
-        method: 'POST',
-      });
-      applyResponse(data);
-      if (data.reloadRequired && typeof window !== 'undefined') {
-        window.location.reload();
-        return;
-      }
-      setProfileSettingsNotice(`Migrated legacy data into profile ${data.activatedProfile ?? 'default'}.`);
-    } catch (e: any) {
-      setProfileSettingsError(e?.message ?? String(e));
-    } finally {
-      setMigratingLegacy(false);
-    }
-  }, [applyResponse, requestJson]);
-
   return {
     profileSettings,
     profileSettingsLoading,
@@ -200,13 +176,11 @@ export function useProfileSettings(requestJson: RequestJsonFn): UseProfileSettin
     activatingProfileName,
     renamingProfileName,
     deletingProfileName,
-    migratingLegacy,
     setCreateProfileDraft,
     loadProfileSettings,
     createProfile,
     activateProfile,
     renameProfile,
     deleteProfile,
-    migrateLegacyToDefault,
   };
 }

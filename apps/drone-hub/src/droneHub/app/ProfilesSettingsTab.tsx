@@ -13,13 +13,11 @@ export function ProfilesSettingsTab({ profile }: { profile: UseProfileSettingsRe
     activatingProfileName,
     renamingProfileName,
     deletingProfileName,
-    migratingLegacy,
     setCreateProfileDraft,
     createProfile,
     activateProfile,
     renameProfile,
     deleteProfile,
-    migrateLegacyToDefault,
   } = profile;
   const [editingName, setEditingName] = React.useState<string | null>(null);
   const [renameDrafts, setRenameDrafts] = React.useState<Record<string, string>>({});
@@ -27,16 +25,13 @@ export function ProfilesSettingsTab({ profile }: { profile: UseProfileSettingsRe
   const profileList = profileSettings?.profiles ?? [];
   const activeProfileName = profileSettings?.activeProfile ?? null;
   const createProfileDraftTrimmed = String(createProfileDraft ?? '').trim();
-  const legacy = profileSettings?.legacy ?? null;
-  const legacyRequiresScript = profileSettings?.mode === 'legacy' && Boolean(legacy?.hasLegacyData);
 
   const isBusy =
     profileSettingsLoading ||
     creatingProfile ||
     Boolean(activatingProfileName) ||
     Boolean(renamingProfileName) ||
-    Boolean(deletingProfileName) ||
-    migratingLegacy;
+    Boolean(deletingProfileName);
 
   return (
     <div className="flex flex-col gap-4">
@@ -50,25 +45,6 @@ export function ProfilesSettingsTab({ profile }: { profile: UseProfileSettingsRe
           {profileSettingsNotice}
         </div>
       )}
-      {legacyRequiresScript && legacy && (
-        <div className="rounded border border-[rgba(255,214,102,.2)] bg-[rgba(255,214,102,.08)] px-4 py-4 flex flex-col gap-3">
-          <div>
-            <div className="text-[12px] font-semibold text-[var(--fg-secondary)]">Legacy data detected</div>
-            <div className="mt-1 text-[12px] leading-relaxed text-[var(--muted)]">
-              This install is still using the old shared Drone/DVM roots. Use the one-time repo migration script first, then come back here to manage normal profiles.
-            </div>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-[11px] text-[var(--muted-dim)]">
-            <div className="rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.12)] px-3 py-3 break-all">Drone: {legacy.droneDataDir}</div>
-            <div className="rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.12)] px-3 py-3 break-all">DVM: {legacy.dvmDataDir}</div>
-          </div>
-          <div className="rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.18)] px-3 py-3">
-            <div className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]">Run from repo root</div>
-            <div className="mt-2 font-mono text-[12px] text-[var(--fg-secondary)] break-all">bun run migrate:legacy-profile -- --name default</div>
-          </div>
-        </div>
-      )}
-
       <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,320px)_minmax(0,1fr)] gap-4">
         <div className="rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.12)] px-4 py-4 flex flex-col gap-4">
           <div className="flex flex-col gap-2">
@@ -76,12 +52,10 @@ export function ProfilesSettingsTab({ profile }: { profile: UseProfileSettingsRe
               Active profile
             </div>
             <div className="text-[20px] font-semibold text-[var(--fg)]" style={{ fontFamily: 'var(--display)' }}>
-              {activeProfileName ? formatProfileDisplayName(activeProfileName) : 'Legacy Mode'}
+              {activeProfileName ? formatProfileDisplayName(activeProfileName) : 'Default'}
             </div>
             <div className="text-[11px] text-[var(--muted-dim)] leading-relaxed">
-              {profileSettings?.mode === 'legacy' && legacy?.hasLegacyData
-                ? 'Legacy mode is still using the old shared roots. Run the one-time migration script before entering profile mode.'
-                : 'Profiles isolate drone state, repo registrations, Hub onboarding state, and DVM base-image config.'}
+              Profiles isolate drone state, repo registrations, Hub onboarding state, and DVM base-image config.
             </div>
           </div>
 
@@ -98,14 +72,14 @@ export function ProfilesSettingsTab({ profile }: { profile: UseProfileSettingsRe
               onChange={(e) => setCreateProfileDraft(e.target.value)}
               className="h-10 rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.15)] px-3 text-[13px] text-[var(--fg)] placeholder:text-[var(--muted-dim)] focus:outline-none focus:border-[var(--accent-muted)] transition-colors"
               placeholder="Enter profile name"
-              disabled={isBusy || legacyRequiresScript}
+              disabled={isBusy}
             />
             <button
               type="button"
               onClick={() => void createProfile()}
-              disabled={!createProfileDraftTrimmed || isBusy || legacyRequiresScript}
+              disabled={!createProfileDraftTrimmed || isBusy}
               className={`h-10 px-3 rounded text-[11px] font-semibold tracking-wide uppercase border transition-all ${
-                !createProfileDraftTrimmed || isBusy || legacyRequiresScript
+                !createProfileDraftTrimmed || isBusy
                   ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
                   : 'bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-fg)] hover:shadow-[var(--glow-accent)] hover:brightness-110'
               }`}
@@ -139,7 +113,7 @@ export function ProfilesSettingsTab({ profile }: { profile: UseProfileSettingsRe
                 const deleting = deletingProfileName === item.name;
                 const editing = editingName === item.name;
                 const renameDraft = renameDrafts[item.name] ?? item.name;
-                const rowBusy = (isBusy || legacyRequiresScript) && !editing;
+                const rowBusy = isBusy && !editing;
                 return (
                   <div
                     key={item.name}

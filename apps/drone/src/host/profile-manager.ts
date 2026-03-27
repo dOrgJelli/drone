@@ -3,9 +3,10 @@ import path from 'node:path';
 import * as dvmPackage from 'dvm';
 import { resetDroneRootDirCache } from './paths';
 import {
+  DEFAULT_PROFILE_NAME,
+  defaultProfileDroneRootDir,
+  defaultProfileDvmRootDir,
   ensureProfileDirs,
-  legacyDefaultDroneRootDir,
-  legacyDefaultDvmRootDir,
   listProfiles,
   normalizeProfileName,
   profileDroneRootDir,
@@ -61,20 +62,10 @@ export type ProfileSummary = {
 
 export type ProfileListState = {
   activeProfile: string | null;
-  mode: 'profile' | 'legacy';
+  mode: 'profile';
   droneDataDir: string;
   dvmDataDir: string;
   profiles: ProfileSummary[];
-  legacy: LegacyProfileState;
-};
-
-export type LegacyProfileState = {
-  hasLegacyDroneData: boolean;
-  hasLegacyDvmData: boolean;
-  hasLegacyData: boolean;
-  droneDataDir: string;
-  dvmDataDir: string;
-  canMigrateToDefault: boolean;
 };
 
 export type CreateProfileResult = {
@@ -109,12 +100,8 @@ export type RenameProfileResult = {
   dvmDataDir: string;
 };
 
-export type MigrateLegacyToDefaultProfileResult = UseProfileResult & {
-  migratedFromLegacy: boolean;
-};
-
 function droneDir(rootDir?: string): string {
-  return rootDir ? path.resolve(rootDir) : legacyDefaultDroneRootDir();
+  return rootDir ? path.resolve(rootDir) : defaultProfileDroneRootDir();
 }
 
 function hubStatePath(rootDir?: string): string {
@@ -285,20 +272,6 @@ async function dirHasEntries(targetPath: string): Promise<boolean> {
   }
 }
 
-async function moveTreeIfNeeded(sourcePath: string, targetPath: string): Promise<boolean> {
-  if (!(await pathExists(sourcePath))) return false;
-  if (await dirHasEntries(targetPath)) return false;
-  await fs.mkdir(path.dirname(targetPath), { recursive: true });
-  try {
-    await fs.rename(sourcePath, targetPath);
-    return true;
-  } catch {
-    await fs.cp(sourcePath, targetPath, { recursive: true });
-    await fs.rm(sourcePath, { recursive: true, force: true });
-    return true;
-  }
-}
-
 async function moveTreeRequired(sourcePath: string, targetPath: string): Promise<void> {
   await fs.mkdir(path.dirname(targetPath), { recursive: true });
   try {
@@ -308,13 +281,6 @@ async function moveTreeRequired(sourcePath: string, targetPath: string): Promise
     await fs.cp(sourcePath, targetPath, { recursive: true });
     await fs.rm(sourcePath, { recursive: true, force: true });
   }
-}
-
-async function migrateLegacyRootsToDefaultProfileIfNeeded(profileName: string): Promise<void> {
-  if (profileName !== 'default') return;
-  await ensureProfileDirs(profileName);
-  await moveTreeIfNeeded(legacyDefaultDroneRootDir(), profileDroneRootDir(profileName));
-  await moveTreeIfNeeded(legacyDefaultDvmRootDir(), profileDvmRootDir(profileName));
 }
 
 async function stopHubAtRootIfRunning(rootDir: string): Promise<boolean> {
@@ -410,16 +376,13 @@ async function syncRunningHubStateForProfile(profileName: string, sync: HubState
 }
 
 export async function listProfilesState(): Promise<ProfileListState> {
-  const activeProfile = await readActiveProfileName();
+  const activeProfile = (await readActiveProfileName()) ?? DEFAULT_PROFILE_NAME;
   const profiles = await listProfiles();
-  const hasLegacyDroneData = await dirHasEntries(legacyDefaultDroneRootDir());
-  const hasLegacyDvmData = await dirHasEntries(legacyDefaultDvmRootDir());
-  const hasLegacyData = hasLegacyDroneData || hasLegacyDvmData;
   return {
     activeProfile,
-    mode: activeProfile ? 'profile' : 'legacy',
-    droneDataDir: activeProfile ? profileDroneRootDir(activeProfile) : legacyDefaultDroneRootDir(),
-    dvmDataDir: activeProfile ? profileDvmRootDir(activeProfile) : legacyDefaultDvmRootDir(),
+    mode: 'profile',
+    droneDataDir: profileDroneRootDir(activeProfile),
+    dvmDataDir: profileDvmRootDir(activeProfile),
     profiles: profiles.map((name) => ({
       name,
       active: name === activeProfile,
@@ -427,14 +390,6 @@ export async function listProfilesState(): Promise<ProfileListState> {
       droneDataDir: profileDroneRootDir(name),
       dvmDataDir: profileDvmRootDir(name),
     })),
-    legacy: {
-      hasLegacyDroneData,
-      hasLegacyDvmData,
-      hasLegacyData,
-      droneDataDir: legacyDefaultDroneRootDir(),
-      dvmDataDir: legacyDefaultDvmRootDir(),
-      canMigrateToDefault: !activeProfile && hasLegacyData,
-    },
   };
 }
 
@@ -447,55 +402,29 @@ export async function ensureDefaultProfileForFirstRun(): Promise<{
   if (String(process.env.DRONE_DATA_DIR ?? '').trim() || String(process.env.DVM_DATA_DIR ?? '').trim()) {
     return { bootstrapped: false, activeProfile: null };
   }
-  if (await dirHasEntries(legacyDefaultDroneRootDir())) return { bootstrapped: false, activeProfile: null };
-  if (await dirHasEntries(legacyDefaultDvmRootDir())) return { bootstrapped: false, activeProfile: null };
   const profiles = await listProfiles();
-  if (profiles.length > 0) return { bootstrapped: false, activeProfile: null };
-  await createProfile('default', { use: true, stopCurrentHub: false });
-  return { bootstrapped: true, activeProfile: 'default' };
-}
-
-export async function migrateLegacyToDefaultProfile(opts?: {
-  stopCurrentHub?: boolean;
-  syncRunningHubState?: HubStateSync | null;
-}): Promise<MigrateLegacyToDefaultProfileResult> {
-  const activeProfile = await readActiveProfileName();
-  if (activeProfile) {
-    throw new Error(`legacy migration is only available in legacy mode (active profile: ${activeProfile})`);
+  if (profiles.includes(DEFAULT_PROFILE_NAME)) {
+    await writeActiveProfileName(DEFAULT_PROFILE_NAME);
+    resetActiveProfileCaches();
+    return { bootstrapped: true, activeProfile: DEFAULT_PROFILE_NAME };
   }
-
-  const hasLegacyDroneData = await dirHasEntries(legacyDefaultDroneRootDir());
-  const hasLegacyDvmData = await dirHasEntries(legacyDefaultDvmRootDir());
-  if (!hasLegacyDroneData && !hasLegacyDvmData) {
-    throw new Error('no legacy drone or dvm data found to migrate');
+  if (profiles.length > 0) {
+    await writeActiveProfileName(profiles[0]);
+    resetActiveProfileCaches();
+    return { bootstrapped: true, activeProfile: profiles[0] };
   }
-
-  if (await dirHasEntries(profileDroneRootDir('default'))) {
-    throw new Error('default profile already has drone data; cannot migrate legacy state into a non-empty default profile');
-  }
-  if (await dirHasEntries(profileDvmRootDir('default'))) {
-    throw new Error('default profile already has dvm data; cannot migrate legacy state into a non-empty default profile');
-  }
-
-  const activated = await useProfile('default', {
-    stopCurrentHub: opts?.stopCurrentHub,
-    syncRunningHubState: opts?.syncRunningHubState ?? null,
-  });
-  return {
-    ...activated,
-    migratedFromLegacy: true,
-  };
+  await createProfile(DEFAULT_PROFILE_NAME, { use: true, stopCurrentHub: false });
+  return { bootstrapped: true, activeProfile: DEFAULT_PROFILE_NAME };
 }
 
 export async function createProfile(nameRaw: string, opts?: { use?: boolean; stopCurrentHub?: boolean }): Promise<CreateProfileResult> {
   const profileName = normalizeProfileName(nameRaw);
   if (!profileName) throw new Error('invalid profile name (use lowercase letters, numbers, ".", "_" or "-")');
   await ensureProfileDirs(profileName);
-  await migrateLegacyRootsToDefaultProfileIfNeeded(profileName);
   let stoppedHub = false;
   if (opts?.use) {
     const currentActive = await readActiveProfileName();
-    const currentDroneDir = currentActive ? profileDroneRootDir(currentActive) : legacyDefaultDroneRootDir();
+    const currentDroneDir = currentActive ? profileDroneRootDir(currentActive) : defaultProfileDroneRootDir();
     if (opts.stopCurrentHub !== false) {
       stoppedHub = await stopHubAtRootIfRunning(currentDroneDir);
     }
@@ -516,15 +445,12 @@ export async function useProfile(nameRaw: string, opts?: { stopCurrentHub?: bool
   const profileName = normalizeProfileName(nameRaw);
   if (!profileName) throw new Error('invalid profile name (use lowercase letters, numbers, ".", "_" or "-")');
 
-  if (profileName === 'default') {
-    await ensureProfileDirs(profileName);
-    await migrateLegacyRootsToDefaultProfileIfNeeded(profileName);
-  } else if (!(await pathExists(profileRootDir(profileName)))) {
+  if (!(await pathExists(profileRootDir(profileName)))) {
     throw new Error(`unknown profile: ${profileName}`);
   }
 
   const currentActive = await readActiveProfileName();
-  const currentDroneDir = currentActive ? profileDroneRootDir(currentActive) : legacyDefaultDroneRootDir();
+  const currentDroneDir = currentActive ? profileDroneRootDir(currentActive) : defaultProfileDroneRootDir();
   let stoppedHub = false;
   if (opts?.stopCurrentHub !== false) {
     stoppedHub = await stopHubAtRootIfRunning(currentDroneDir);
