@@ -22,6 +22,7 @@ type PlaybookRunsWorkspaceProps = {
   onOpenPlaybookSettings: (playbookId: string) => void;
   onDeleteRunDrone: (droneId: string) => Promise<void>;
   deletingDrones: Record<string, boolean>;
+  optimisticallyDeletedDrones: Record<string, boolean>;
   onOpenRun: (droneId: string, chatName: string) => void;
   onOpenArtifact: (droneId: string, chatName: string, path: string, name: string) => void;
 };
@@ -34,6 +35,7 @@ export function PlaybookRunsWorkspace({
   onOpenPlaybookSettings,
   onDeleteRunDrone,
   deletingDrones,
+  optimisticallyDeletedDrones,
   onOpenRun,
   onOpenArtifact,
 }: PlaybookRunsWorkspaceProps) {
@@ -106,8 +108,11 @@ export function PlaybookRunsWorkspace({
   const runs = Array.isArray(runsResp?.runs) ? runsResp.runs : [];
   const queue = Array.isArray(runsResp?.queue) ? runsResp.queue : [];
   const visibleRuns = React.useMemo(
-    () => runs.filter((run) => !deletingDrones[run.droneId]),
-    [deletingDrones, runs],
+    () =>
+      runs.filter(
+        (run) => !deletingDrones[run.droneId] && !optimisticallyDeletedDrones[run.droneId],
+      ),
+    [deletingDrones, optimisticallyDeletedDrones, runs],
   );
   const artifactAvailabilityByKey = usePlaybookArtifactAvailability({ runs: visibleRuns });
 
@@ -491,7 +496,7 @@ export function PlaybookRunsWorkspace({
                 runDisabled={runDisabled}
                 runDisabledReason={runDisabledReason}
                 onLaunchCountInputChange={setLaunchCountInput}
-                onToggleSerializeFirstMessageGroup={() => setSerializeFirstMessageGroup((prev) => !prev)}
+                onSerializeFirstMessageGroupChange={setSerializeFirstMessageGroup}
                 onRun={() => {
                   if (selectedPlaybook) void runPlaybook(selectedPlaybook);
                 }}

@@ -2,9 +2,22 @@ import React from 'react';
 import { timeAgo } from '../../domain';
 import type { PlaybookDefinition, PlaybookRunQueueSummary } from '../types';
 import { IconChevron, IconSpinner, IconTrash } from './icons';
+import { SegmentedToolbarToggle } from './SegmentedToolbarToggle';
 
 const PLAYBOOK_RUN_BATCH_MIN = 1;
 const PLAYBOOK_RUN_BATCH_MAX = 50;
+const PLAYBOOK_RUN_STARTUP_OPTIONS = [
+  {
+    value: 'parallel' as const,
+    label: 'Parallel',
+    title: 'Start first messages for all launched runs immediately.',
+  },
+  {
+    value: 'serialized' as const,
+    label: 'Serialized',
+    title: 'Start the first message for each launched run one at a time.',
+  },
+];
 
 export function playbookRunsRepoLabel(repoPathRaw: string): string {
   const repoPath = String(repoPathRaw ?? '').trim();
@@ -33,7 +46,7 @@ type PlaybookRunLaunchControlsProps = {
   runDisabled: boolean;
   runDisabledReason: string;
   onLaunchCountInputChange: (value: string) => void;
-  onToggleSerializeFirstMessageGroup: () => void;
+  onSerializeFirstMessageGroupChange: (value: boolean) => void;
   onRun: () => void;
 };
 
@@ -47,9 +60,11 @@ export function PlaybookRunLaunchControls({
   runDisabled,
   runDisabledReason,
   onLaunchCountInputChange,
-  onToggleSerializeFirstMessageGroup,
+  onSerializeFirstMessageGroupChange,
   onRun,
 }: PlaybookRunLaunchControlsProps) {
+  const startupMode = serializeFirstMessageGroup ? 'serialized' : 'parallel';
+
   return (
     <div className="rounded-lg border border-[var(--border-subtle)] bg-[rgba(255,255,255,.018)] px-3 py-3">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -68,26 +83,14 @@ export function PlaybookRunLaunchControls({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <label className="flex items-center gap-2 rounded-md border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-2.5 py-1.5 text-[11px] text-[var(--fg-secondary)]">
-            <span className="font-medium">Serialize startup</span>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={serializeFirstMessageGroup}
-              onClick={onToggleSerializeFirstMessageGroup}
-              className={`relative inline-flex h-4.5 w-8 shrink-0 rounded-full border transition-all ${
-                serializeFirstMessageGroup
-                  ? 'border-[var(--accent-muted)] bg-[rgba(167,139,250,.18)]'
-                  : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.04)]'
-              }`}
-            >
-              <span
-                className={`absolute top-[1px] h-3 w-3 rounded-full bg-[var(--fg)] transition-all ${
-                  serializeFirstMessageGroup ? 'left-[16px]' : 'left-[1px]'
-                }`}
-              />
-            </button>
-          </label>
+          <div className="rounded-lg border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-2.5 py-1.5">
+            <SegmentedToolbarToggle
+              label="Startup"
+              value={startupMode}
+              options={PLAYBOOK_RUN_STARTUP_OPTIONS}
+              onChange={(value) => onSerializeFirstMessageGroupChange(value === 'serialized')}
+            />
+          </div>
 
           <label className="flex items-center gap-2 rounded-md border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-2.5 py-1.5 text-[11px] text-[var(--fg-secondary)]">
             <span className="font-medium">Count</span>

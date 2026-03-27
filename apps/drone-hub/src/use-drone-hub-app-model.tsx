@@ -2610,6 +2610,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     selectDroneChat,
     deleteDrone,
     deletingDrones,
+    optimisticallyDeletedDrones,
     parseJobsFromAgentMessage,
     drones,
     dronesLoading,

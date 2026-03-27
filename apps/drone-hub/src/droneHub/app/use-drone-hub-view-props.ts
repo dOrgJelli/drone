@@ -434,6 +434,7 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
     selectDroneChat,
     deleteDrone,
     deletingDrones,
+    optimisticallyDeletedDrones,
     parseJobsFromAgentMessage,
     dronesLoading,
     sidebarDrones,
@@ -642,6 +643,7 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
             await deleteDrone(droneId);
           },
           deletingDrones,
+          optimisticallyDeletedDrones,
           onOpenRun: (droneId, chatName) => {
             setPlaybookRunsOpen(false);
             selectDroneChat(droneId, chatName);
