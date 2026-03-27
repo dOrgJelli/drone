@@ -1,4 +1,5 @@
 import React from 'react';
+import { formatProfileDisplayName } from './profile-display';
 import type { UseProfileSettingsResult } from './use-profile-settings';
 
 export function ProfilesSettingsTab({ profile }: { profile: UseProfileSettingsResult }) {
@@ -75,7 +76,7 @@ export function ProfilesSettingsTab({ profile }: { profile: UseProfileSettingsRe
               Active profile
             </div>
             <div className="text-[20px] font-semibold text-[var(--fg)]" style={{ fontFamily: 'var(--display)' }}>
-              {activeProfileName ?? 'Legacy mode'}
+              {activeProfileName ? formatProfileDisplayName(activeProfileName) : 'Legacy Mode'}
             </div>
             <div className="text-[11px] text-[var(--muted-dim)] leading-relaxed">
               {profileSettings?.mode === 'legacy' && legacy?.hasLegacyData
@@ -96,7 +97,7 @@ export function ProfilesSettingsTab({ profile }: { profile: UseProfileSettingsRe
               value={createProfileDraft}
               onChange={(e) => setCreateProfileDraft(e.target.value)}
               className="h-10 rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.15)] px-3 text-[13px] text-[var(--fg)] placeholder:text-[var(--muted-dim)] focus:outline-none focus:border-[var(--accent-muted)] transition-colors"
-              placeholder="fresh-onboarding"
+              placeholder="Enter profile name"
               disabled={isBusy || legacyRequiresScript}
             />
             <button
@@ -200,7 +201,7 @@ export function ProfilesSettingsTab({ profile }: { profile: UseProfileSettingsRe
                             <>
                               <div className="flex flex-wrap items-center gap-2">
                                 <div className="text-[16px] font-semibold text-[var(--fg)]" style={{ fontFamily: 'var(--display)' }}>
-                                  {item.name}
+                                  {formatProfileDisplayName(item.name)}
                                 </div>
                                 {item.active && (
                                   <span className="rounded-full border border-[rgba(52,211,153,.24)] bg-[rgba(16,185,129,.08)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-[#34d399]">
@@ -252,7 +253,7 @@ export function ProfilesSettingsTab({ profile }: { profile: UseProfileSettingsRe
                               type="button"
                               onClick={() => {
                                 const ok = window.confirm(
-                                  `Delete profile ${item.name}?\n\nThis removes all containers and host runtimes tracked by that profile.`,
+                                  `Delete profile ${formatProfileDisplayName(item.name)}?\n\nThis removes all containers and host runtimes tracked by that profile.`,
                                 );
                                 if (!ok) return;
                                 void deleteProfile(item.name);
