@@ -19,6 +19,11 @@ function dependencyTone(status: string, blocking: boolean): string {
   return 'border-[rgba(255,214,102,.2)] bg-[rgba(255,214,102,.08)]';
 }
 
+function dependencySeverityLabel(status: string, blocking: boolean): string {
+  if (status === 'ready') return 'ready';
+  return blocking ? 'blocker' : 'warning';
+}
+
 export function SetupWelcomeView({
   setupStatus,
   setupStatusLoading,
@@ -186,7 +191,9 @@ export function SetupWelcomeView({
                     <div key={item.id} className={`rounded-2xl border px-4 py-4 ${dependencyTone(item.status, Boolean(item.blocking))}`}>
                       <div className="flex items-center justify-between gap-3">
                         <div className="text-[13px] font-semibold text-[var(--fg-secondary)]">{item.label}</div>
-                        <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--muted-dim)]">{item.status}</div>
+                        <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--muted-dim)]">
+                          {dependencySeverityLabel(item.status, Boolean(item.blocking))}
+                        </div>
                       </div>
                       <div className="mt-2 text-[11px] text-[var(--muted-dim)]">Used for {item.requiredFor}</div>
                       <div className="mt-3 text-[12px] leading-relaxed text-[var(--fg-secondary)]">{item.detail}</div>

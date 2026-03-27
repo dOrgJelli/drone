@@ -34,6 +34,27 @@ export function persistProfileStorageIdOverride(profileIdRaw: string | null | un
   }
 }
 
+export function clearProfileScopedStorage(profileIdRaw: string | null | undefined): void {
+  if (typeof localStorage === 'undefined') return;
+  const profileId = normalizeProfileId(profileIdRaw);
+  if (!profileId) return;
+  const suffix = `:${profileId}`;
+  try {
+    const keysToRemove: string[] = [];
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index);
+      if (!key || !key.endsWith(suffix)) continue;
+      keysToRemove.push(key);
+    }
+    for (const key of keysToRemove) localStorage.removeItem(key);
+    if (readStoredProfileOverride() === profileId) {
+      localStorage.removeItem(PROFILE_OVERRIDE_STORAGE_KEY);
+    }
+  } catch {
+    // ignore
+  }
+}
+
 export function profileStorageKey(baseKeyRaw: string): string {
   const baseKey = String(baseKeyRaw ?? '').trim();
   if (!baseKey) return '';
