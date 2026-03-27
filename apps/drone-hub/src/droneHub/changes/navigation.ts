@@ -1,6 +1,8 @@
+import { profileStorageKey } from '../../profile-storage';
+
 export const CHANGES_OPEN_PULL_REQUEST_EVENT = 'droneHub:changes:openPullRequest';
-const CHANGES_PULL_REQUEST_SELECTION_STORAGE_KEY = 'droneHub.changesPullRequestSelectionByDrone';
-const CHANGES_PENDING_PULL_REQUEST_OPEN_STORAGE_KEY = 'droneHub.changesPendingPullRequestOpenByDrone';
+const CHANGES_PULL_REQUEST_SELECTION_STORAGE_KEY = profileStorageKey('droneHub.changesPullRequestSelectionByDrone');
+const CHANGES_PENDING_PULL_REQUEST_OPEN_STORAGE_KEY = profileStorageKey('droneHub.changesPendingPullRequestOpenByDrone');
 
 export type ChangesOpenPullRequestDetail = {
   droneId: string;

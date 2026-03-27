@@ -4,6 +4,7 @@ import {
   isValidDroneNameDashCase,
 } from './domain';
 import { requestJson } from './droneHub/http';
+import { activeProfileStorageId, persistProfileStorageIdOverride } from './profile-storage';
 import { requestGuidedOnboardingReplay, resetGuidedOnboardingDismissals } from './onboarding/control';
 import { copyText } from './droneHub/app/clipboard';
 import { isCanvasDraftNodeId, useDroneCanvasStore } from './droneHub/canvas/use-drone-canvas-store';
@@ -42,7 +43,10 @@ import { useKanbanBoardSettings } from './droneHub/app/use-kanban-board-settings
 import { useUiPreferencesSettings } from './droneHub/app/use-ui-preferences-settings';
 import { useDeleteActionSettings } from './droneHub/app/use-delete-action-settings';
 import { useFilesystemSettings } from './droneHub/app/use-filesystem-settings';
+import { useProfileSettings } from './droneHub/app/use-profile-settings';
+import { useSetupStatus } from './droneHub/app/use-setup-status';
 import { useSkillLibrary } from './droneHub/app/use-skill-library';
+import type { ProfileSettingsResponse } from './droneHub/app/settings-types';
 import { useQueuedPromptsState } from './droneHub/app/use-queued-prompts-state';
 import { useRightPanelLayout } from './droneHub/app/use-right-panel-layout';
 import { useDroneSelectionState } from './droneHub/app/use-drone-selection-state';
@@ -490,8 +494,29 @@ export function useDroneHubAppModel(): DroneHubAppModel {
   useUiPreferencesSettings({ requestJson });
   const deleteActionSettingsState = useDeleteActionSettings(requestJson);
   const filesystemSettingsState = useFilesystemSettings(requestJson);
+  const profileSettingsState = useProfileSettings(requestJson);
+  const setupStatusState = useSetupStatus(requestJson);
   const skillLibraryState = useSkillLibrary(requestJson);
   const { llmSettings } = llmSettingsState;
+
+  React.useEffect(() => {
+    let cancelled = false;
+    void requestJson<ProfileSettingsResponse>('/api/settings/profiles')
+      .then((data) => {
+        if (cancelled) return;
+        const serverProfile = data.activeProfile ?? null;
+        if (serverProfile === activeProfileStorageId()) return;
+        persistProfileStorageIdOverride(serverProfile);
+        if (typeof window !== 'undefined') window.location.reload();
+      })
+      .catch(() => {
+        // ignore; the settings hook surfaces fetch errors when needed
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const suggestKanbanCardTitleFromPaste = React.useCallback(
     async (descriptionRaw: string): Promise<string | null> => {
       const description = String(descriptionRaw ?? '').trim();
@@ -2557,6 +2582,8 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     skillLibraryState,
     deleteActionSettingsState,
     filesystemSettingsState,
+    profileSettingsState,
+    setupStatusState,
     hubLogsState,
     hubLogsTailLines: HUB_LOGS_TAIL_LINES,
     hubLogsMaxBytes: HUB_LOGS_MAX_BYTES,

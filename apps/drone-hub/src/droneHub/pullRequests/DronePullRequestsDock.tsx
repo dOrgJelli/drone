@@ -9,8 +9,9 @@ import type {
   RepoPullRequestsPayload,
 } from '../types';
 import { requestChangesPullRequest } from '../changes/navigation';
+import { profileStorageKey } from '../../profile-storage';
 
-const PR_MERGE_METHOD_STORAGE_KEY = 'droneHub.prMergeMethod';
+const PR_MERGE_METHOD_STORAGE_KEY = profileStorageKey('droneHub.prMergeMethod');
 
 type PullRequestListDiagnostics = {
   repoRoot: string | null;

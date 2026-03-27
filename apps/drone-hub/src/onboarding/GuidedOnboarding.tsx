@@ -9,6 +9,7 @@ import {
   type OnboardingDismissals,
   writeOnboardingDismissals,
 } from './storage';
+import { profileStorageKey } from '../profile-storage';
 
 export type GuidedOnboardingStep = {
   id: string;
@@ -210,7 +211,7 @@ export function GuidedOnboarding({ steps = GUIDED_ONBOARDING_STEPS }: { steps?: 
   // Keep in sync across tabs.
   React.useEffect(() => {
     const onStorage = (e: StorageEvent) => {
-      if (e.key !== 'droneHub.onboarding.dismissals') return;
+      if (e.key !== profileStorageKey('droneHub.onboarding.dismissals')) return;
       setDismissals(readOnboardingDismissals());
     };
     window.addEventListener('storage', onStorage);
@@ -502,4 +503,3 @@ export function GuidedOnboarding({ steps = GUIDED_ONBOARDING_STEPS }: { steps?: 
     document.body,
   );
 }
-

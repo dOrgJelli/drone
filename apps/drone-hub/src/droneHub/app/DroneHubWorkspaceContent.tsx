@@ -6,10 +6,12 @@ import { NoDroneSelectedState } from './NoDroneSelectedState';
 import { PlaybookRunsWorkspace } from './PlaybookRunsWorkspace';
 import { SelectedDroneWorkspace } from './SelectedDroneWorkspace';
 import { SettingsView } from './SettingsView';
+import { SetupWelcomeView } from './SetupWelcomeView';
 import type { AppView } from './app-types';
 
 export type DroneHubWorkspaceContentProps = {
   appView: AppView;
+  setupWelcomeProps: React.ComponentProps<typeof SetupWelcomeView> | null;
   settingsViewProps: React.ComponentProps<typeof SettingsView>;
   draftChatWorkspaceProps: React.ComponentProps<typeof DraftChatWorkspace> | null;
   kanbanBoardWorkspaceProps: React.ComponentProps<typeof KanbanBoardWorkspace> | null;
@@ -22,6 +24,7 @@ export type DroneHubWorkspaceContentProps = {
 
 export function DroneHubWorkspaceContent({
   appView,
+  setupWelcomeProps,
   settingsViewProps,
   draftChatWorkspaceProps,
   kanbanBoardWorkspaceProps,
@@ -43,7 +46,9 @@ export function DroneHubWorkspaceContent({
 
   return (
     <div data-drone-workspace-root="1" className="relative flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden bg-[var(--panel)]">
-      {appView === 'settings' ? (
+      {setupWelcomeProps && appView !== 'settings' ? (
+        <SetupWelcomeView {...setupWelcomeProps} />
+      ) : appView === 'settings' ? (
         <SettingsView {...settingsViewProps} />
       ) : draftChatWorkspaceProps ? (
         <DraftChatWorkspace {...draftChatWorkspaceProps} />

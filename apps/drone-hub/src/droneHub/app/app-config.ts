@@ -1,4 +1,5 @@
 import type { ChatAgentConfig } from '../../domain';
+import { profileStorageKey } from '../../profile-storage';
 import { parseIsoTimestampMs } from './helpers';
 import type { RightPanelTabId } from './RightPanel';
 import type { StartupSeedState } from './app-types';
@@ -11,25 +12,25 @@ export const BUILTIN_AGENT_OPTIONS: Array<{ key: string; label: string; agent: C
   { key: 'builtin:pi', label: 'Pi', agent: { kind: 'builtin', id: 'pi' } },
 ];
 
-export const PORT_PREVIEW_STORAGE_KEY = 'droneHub.portPreviewByDrone';
-export const PREVIEW_URL_STORAGE_KEY = 'droneHub.previewUrlByDrone';
-export const FS_EXPLORER_VIEW_STORAGE_KEY = 'droneHub.fsExplorerView';
+export const PORT_PREVIEW_STORAGE_KEY = profileStorageKey('droneHub.portPreviewByDrone');
+export const PREVIEW_URL_STORAGE_KEY = profileStorageKey('droneHub.previewUrlByDrone');
+export const FS_EXPLORER_VIEW_STORAGE_KEY = profileStorageKey('droneHub.fsExplorerView');
 export const PORT_STATUS_POLL_INTERVAL_MS = 15_000;
 export const PORT_STATUS_TIMEOUT_MS = 1_800;
 export const DRONE_DND_MIME = 'application/x-drone-ids+json';
 export const DRONE_CHAT_DND_MIME = 'application/x-drone-chat-refs+json';
-export const RIGHT_PANEL_WIDTH_STORAGE_KEY = 'droneHub.rightPanelWidth';
-export const RIGHT_PANEL_SPLIT_STORAGE_KEY = 'droneHub.rightPanelSplit';
-export const RIGHT_PANEL_TOP_TAB_STORAGE_KEY = 'droneHub.rightPanelTopTab';
-export const RIGHT_PANEL_BOTTOM_TAB_STORAGE_KEY = 'droneHub.rightPanelBottomTab';
+export const RIGHT_PANEL_WIDTH_STORAGE_KEY = profileStorageKey('droneHub.rightPanelWidth');
+export const RIGHT_PANEL_SPLIT_STORAGE_KEY = profileStorageKey('droneHub.rightPanelSplit');
+export const RIGHT_PANEL_TOP_TAB_STORAGE_KEY = profileStorageKey('droneHub.rightPanelTopTab');
+export const RIGHT_PANEL_BOTTOM_TAB_STORAGE_KEY = profileStorageKey('droneHub.rightPanelBottomTab');
 export const RIGHT_PANEL_DEFAULT_WIDTH_PX = 460;
 export const RIGHT_PANEL_MIN_WIDTH_PX = 360;
-export const GROUP_MULTI_CHAT_COLUMN_WIDTH_STORAGE_KEY = 'droneHub.groupMultiChatColumnWidth';
+export const GROUP_MULTI_CHAT_COLUMN_WIDTH_STORAGE_KEY = profileStorageKey('droneHub.groupMultiChatColumnWidth');
 export const GROUP_MULTI_CHAT_COLUMN_WIDTH_DEFAULT_PX = 420;
 export const GROUP_MULTI_CHAT_COLUMN_WIDTH_MIN_PX = 300;
 export const GROUP_MULTI_CHAT_COLUMN_WIDTH_MAX_PX = 640;
-export const SIDEBAR_REPOS_COLLAPSED_STORAGE_KEY = 'droneHub.sidebarReposCollapsed';
-export const SIDEBAR_AUTO_MINIMIZE_STORAGE_KEY = 'droneHub.sidebarAutoMinimize';
+export const SIDEBAR_REPOS_COLLAPSED_STORAGE_KEY = profileStorageKey('droneHub.sidebarReposCollapsed');
+export const SIDEBAR_AUTO_MINIMIZE_STORAGE_KEY = profileStorageKey('droneHub.sidebarAutoMinimize');
 export const HUB_LOGS_TAIL_LINES = 600;
 export const HUB_LOGS_MAX_BYTES = 200_000;
 export const STARTUP_SEED_MISSING_GRACE_MS = 30_000;

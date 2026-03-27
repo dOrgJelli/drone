@@ -2,6 +2,7 @@ import React from 'react';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import { useShallow } from 'zustand/react/shallow';
+import { profileStorageKey } from '../../profile-storage';
 import {
   RIGHT_PANEL_DEFAULT_WIDTH_PX,
   RIGHT_PANEL_TABS,
@@ -114,7 +115,7 @@ const useRightPanelLayoutStore = create<RightPanelLayoutState>()(
         }),
     }),
     {
-      name: 'droneHub.rightPanelLayout',
+      name: profileStorageKey('droneHub.rightPanelLayout'),
       version: 2,
       storage: createJSONStorage(() => localStorage),
       partialize: (state): RightPanelLayoutPersistedState => ({

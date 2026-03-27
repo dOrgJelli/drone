@@ -368,14 +368,17 @@ export function useDroneHubOverlaysProps(args: any): DroneHubOverlaysProps {
 export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceContentProps {
   const {
     appView,
+    setupStatusState,
     llmSettingsState,
     skillLibraryState,
     deleteActionSettingsState,
     filesystemSettingsState,
+    profileSettingsState,
     hubLogsState,
     hubLogsTailLines,
     hubLogsMaxBytes,
     setAppView,
+    setSettingsActiveTab,
     onReplayOnboarding,
     onResetOnboarding,
     draftChat,
@@ -422,7 +425,6 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
     createDroneFromDraft,
     registeredRepoPaths,
     setActiveRepoPath,
-    setSettingsActiveTab,
     setSettingsPlaybookFocusId,
     selectedGroupMultiChatData,
     groupBroadcastPromptError,
@@ -554,11 +556,39 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
 
   return {
     appView,
+    setupWelcomeProps:
+      setupStatusState.setupStatus?.shouldShowWelcome
+        ? {
+            setupStatus: setupStatusState.setupStatus,
+            setupStatusLoading: setupStatusState.setupStatusLoading,
+            setupStatusError: setupStatusState.setupStatusError,
+            dismissingWelcome: setupStatusState.dismissingWelcome,
+            migratingLegacy: setupStatusState.migratingLegacy,
+            onDismissWelcome: () => {
+              void setupStatusState.dismissWelcome();
+            },
+            onMigrateLegacyToDefault: () => {
+              void setupStatusState.migrateLegacyToDefault();
+            },
+            onReload: () => {
+              void setupStatusState.reloadSetupStatus();
+            },
+            onOpenProfiles: () => {
+              setSettingsActiveTab('profiles');
+              setAppView('settings');
+            },
+            onOpenGeneralSettings: () => {
+              setSettingsActiveTab('general');
+              setAppView('settings');
+            },
+          }
+        : null,
     settingsViewProps: {
       llm: llmSettingsState,
       skillLibrary: skillLibraryState,
       deleteAction: deleteActionSettingsState,
       filesystem: filesystemSettingsState,
+      profile: profileSettingsState,
       hubLogsState,
       hubLogsTailLines,
       hubLogsMaxBytes,

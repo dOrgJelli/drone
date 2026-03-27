@@ -1,6 +1,8 @@
+import { profileStorageKey } from '../profile-storage';
+
 export type OnboardingDismissals = Record<string, number>;
 
-const STORAGE_KEY = 'droneHub.onboarding.dismissals';
+const STORAGE_KEY = profileStorageKey('droneHub.onboarding.dismissals');
 
 function coerceDismissals(raw: unknown): OnboardingDismissals {
   if (!raw || typeof raw !== 'object') return {};
@@ -50,4 +52,3 @@ export function dismissOnboardingStep(
   if ((dismissals[key] ?? 0) >= v) return dismissals;
   return { ...dismissals, [key]: v };
 }
-
