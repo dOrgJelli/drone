@@ -7,8 +7,9 @@ import type {
   RepoPullRequestSummary,
   RepoPullRequestsPayload,
 } from '../types';
+import { profileStorageKey } from '../../profile-storage';
 
-const PR_MERGE_METHOD_STORAGE_KEY = 'droneHub.prMergeMethod';
+const PR_MERGE_METHOD_STORAGE_KEY = profileStorageKey('droneHub.prMergeMethod');
 const HEADER_REPO_PR_CACHE_TTL_MS = 12_000;
 const headerRepoPullRequestSummaryCache = new Map<
   string,

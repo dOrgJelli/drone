@@ -253,6 +253,11 @@ type HubStateSnapshot = {
   apiToken?: string;
 };
 
+type ProfileManifest = {
+  version: 1;
+  activeProfile: string;
+};
+
 function uniquePaths(paths: string[]): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
@@ -271,9 +276,33 @@ function sdkRepoRootCandidate(): string {
   return path.resolve(__dirname, '..', '..', '..');
 }
 
+function normalizeProfileName(raw: unknown): string | null {
+  const value = String(raw ?? '')
+    .trim()
+    .toLowerCase();
+  if (!value) return null;
+  if (!/^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/.test(value)) return null;
+  return value;
+}
+
+function readActiveProfileName(): string | null {
+  const manifestPath = path.join(sdkRepoRootCandidate(), 'data', 'profiles', 'manifest.json');
+  try {
+    const parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as ProfileManifest;
+    if (Number(parsed?.version) !== 1) return null;
+    return normalizeProfileName(parsed?.activeProfile);
+  } catch {
+    return null;
+  }
+}
+
 function defaultDroneDataDirs(): string[] {
   const explicit = String(process.env.DRONE_DATA_DIR ?? '').trim();
   if (explicit) return uniquePaths([explicit]);
+  const activeProfile = readActiveProfileName();
+  if (activeProfile) {
+    return uniquePaths([path.join(sdkRepoRootCandidate(), 'data', 'profiles', activeProfile, 'drone')]);
+  }
   const repoDataDir = path.join(sdkRepoRootCandidate(), 'data', 'drone');
   if (process.platform === 'win32') {
     const appData = String(process.env.APPDATA ?? '').trim() || path.join(os.homedir(), 'AppData', 'Roaming');

@@ -26,6 +26,7 @@ import {
 } from './automation-config';
 import { normalizeSidebarGroupOrder } from './sidebar-group-order';
 import { mergeSeenModelIds, normalizeSeenModelIds } from './spawn-model-history';
+import { profileStorageKey } from '../../profile-storage';
 
 type Updater<T> = T | ((prev: T) => T);
 
@@ -36,7 +37,7 @@ type FsExplorerView = 'list' | 'thumb';
 type OutputView = 'screen' | 'log';
 const CHAT_INPUT_DRAFT_MAX_CHARS = 4_000;
 const CHAT_INPUT_DRAFT_MAX_KEYS = 80;
-const CHAT_INPUT_DRAFTS_STORAGE_KEY = 'droneHub.chatInputDrafts';
+const CHAT_INPUT_DRAFTS_STORAGE_KEY = profileStorageKey('droneHub.chatInputDrafts');
 const CHAT_INPUT_DRAFTS_PERSIST_DEBOUNCE_MS = 300;
 
 type DroneHubUiState = {
@@ -332,7 +333,7 @@ function readPersistedDroneHubUiSelections(): Pick<
   DroneHubUiState,
   'playbookRunsSelectionInitialized' | 'playbookRunsSelectedPlaybookId' | 'playbookRunsSelectedRepoPath'
 > {
-  const storageRaw = readLocalStorageItem('droneHub.ui');
+  const storageRaw = readLocalStorageItem(profileStorageKey('droneHub.ui'));
   if (!storageRaw) {
     return {
       playbookRunsSelectionInitialized: false,
@@ -620,7 +621,7 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
       setAgentMenuOpen: (next) => set((s) => ({ agentMenuOpen: resolveNext(s.agentMenuOpen, next) })),
     }),
     {
-      name: 'droneHub.ui',
+      name: profileStorageKey('droneHub.ui'),
       version: 9,
       storage: createJSONStorage(() => localStorage),
       migrate: (persistedState, version) => migrateDroneHubUiPersistedState(persistedState, version),
@@ -668,6 +669,7 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
           ...persistedRest,
           settingsActiveTab:
             persisted.settingsActiveTab === 'general' ||
+            persisted.settingsActiveTab === 'profiles' ||
             persisted.settingsActiveTab === 'trash' ||
             persisted.settingsActiveTab === 'archive' ||
             persisted.settingsActiveTab === 'shortcuts' ||

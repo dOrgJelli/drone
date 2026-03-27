@@ -8,6 +8,7 @@ import type {
   UiPreferencesSettingsResponse,
 } from './settings-types';
 import { useDroneHubUiStore } from './use-drone-hub-ui-store';
+import { profileStorageKey } from '../../profile-storage';
 
 type RequestJson = <T>(url: string, init?: RequestInit) => Promise<T>;
 
@@ -215,7 +216,7 @@ export function useUiPreferencesSettings({ requestJson }: UseUiPreferencesSettin
       const backendSnapshot = normalizeUiPreferencesSnapshot(data.uiPreferences);
       const restored = restoreUiPreferencesFromPersistedStorage(
         backendSnapshot,
-        typeof localStorage !== 'undefined' ? localStorage.getItem('droneHub.ui') : null,
+        typeof localStorage !== 'undefined' ? localStorage.getItem(profileStorageKey('droneHub.ui')) : null,
       );
       if (data.updatedAt || restored.restored) {
         const normalized = applyUiPreferences(restored.snapshot);

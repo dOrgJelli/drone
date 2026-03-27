@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createDroneSDK } from '../src';
 import { createMockTransport } from '../src/testing';
 
@@ -291,6 +291,90 @@ describe('drone-sdk core', () => {
       else process.env.DRONE_HUB_BASE_URL = previousBaseUrl;
       globalThis.fetch = previousFetch;
       await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test('auto-discovers hub token and baseUrl from the active profile manifest', async () => {
+    const previousDataDir = process.env.DRONE_DATA_DIR;
+    const previousToken = process.env.DRONE_TOKEN;
+    const previousHubToken = process.env.DRONE_HUB_API_TOKEN;
+    const previousBaseUrl = process.env.DRONE_HUB_BASE_URL;
+    const previousFetch = globalThis.fetch;
+    const repoRoot = path.resolve(__dirname, '..', '..', '..');
+    const profilesRoot = path.join(repoRoot, 'data', 'profiles');
+    const manifestPath = path.join(profilesRoot, 'manifest.json');
+    const profileName = 'sdk-manifest-test';
+    const profileDroneDir = path.join(profilesRoot, profileName, 'drone');
+    let manifestBackup: string | null = null;
+
+    const observed: Array<{ url: string; auth: string }> = [];
+    try {
+      try {
+        manifestBackup = await readFile(manifestPath, 'utf8');
+      } catch {
+        manifestBackup = null;
+      }
+
+      await rm(path.join(profilesRoot, profileName), { recursive: true, force: true });
+      await mkdir(profileDroneDir, { recursive: true });
+      await writeFile(
+        manifestPath,
+        JSON.stringify({ version: 1, activeProfile: profileName }, null, 2),
+        'utf8',
+      );
+      await writeFile(path.join(profileDroneDir, 'hub.token'), 'token-from-profile\n', 'utf8');
+      await writeFile(
+        path.join(profileDroneDir, 'hub.json'),
+        JSON.stringify(
+          {
+            version: 1,
+            pid: process.pid,
+            apiHost: '127.0.0.1',
+            apiPort: 9991,
+            uiPort: 5174,
+            startedAt: new Date().toISOString(),
+            logPath: path.join(profileDroneDir, 'hub.log'),
+          },
+          null,
+          2,
+        ),
+        'utf8',
+      );
+
+      delete process.env.DRONE_DATA_DIR;
+      delete process.env.DRONE_TOKEN;
+      delete process.env.DRONE_HUB_API_TOKEN;
+      delete process.env.DRONE_HUB_BASE_URL;
+
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const observedUrl = String(input);
+        const headers = new Headers(init?.headers as HeadersInit | undefined);
+        observed.push({ url: observedUrl, auth: String(headers.get('authorization') ?? '') });
+        return new Response(JSON.stringify({ id: 'drone-profile', name: 'from-profile' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }) as typeof fetch;
+
+      const sdk = createDroneSDK();
+      const drone = await sdk.drones.create('from-profile');
+
+      expect(drone.id).toBe('drone-profile');
+      expect(observed.some((entry) => entry.url === 'http://127.0.0.1:9991/api/drones')).toBe(true);
+      expect(observed.every((entry) => entry.auth === 'Bearer token-from-profile')).toBe(true);
+    } finally {
+      if (previousDataDir === undefined) delete process.env.DRONE_DATA_DIR;
+      else process.env.DRONE_DATA_DIR = previousDataDir;
+      if (previousToken === undefined) delete process.env.DRONE_TOKEN;
+      else process.env.DRONE_TOKEN = previousToken;
+      if (previousHubToken === undefined) delete process.env.DRONE_HUB_API_TOKEN;
+      else process.env.DRONE_HUB_API_TOKEN = previousHubToken;
+      if (previousBaseUrl === undefined) delete process.env.DRONE_HUB_BASE_URL;
+      else process.env.DRONE_HUB_BASE_URL = previousBaseUrl;
+      globalThis.fetch = previousFetch;
+      await rm(path.join(profilesRoot, profileName), { recursive: true, force: true });
+      if (manifestBackup == null) await rm(manifestPath, { force: true });
+      else await writeFile(manifestPath, manifestBackup, 'utf8');
     }
   });
 

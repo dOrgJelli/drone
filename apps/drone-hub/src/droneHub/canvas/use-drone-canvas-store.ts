@@ -1,9 +1,10 @@
 import { create } from 'zustand';
 import { createJSONStorage, persist, type StateStorage } from 'zustand/middleware';
+import { profileStorageKey } from '../../profile-storage';
 
 const MIN_CANVAS_SCALE = 0.35;
 const MAX_CANVAS_SCALE = 2.6;
-const DRONE_CANVAS_STORAGE_KEY = 'droneHub.canvas';
+const DRONE_CANVAS_STORAGE_KEY = profileStorageKey('droneHub.canvas');
 const CANVAS_PERSIST_DEBOUNCE_MS = 180;
 const CANVAS_PERSIST_MAX_STALE_MS = 900;
 const DRAFT_CANVAS_NODE_PREFIX = 'draft:';

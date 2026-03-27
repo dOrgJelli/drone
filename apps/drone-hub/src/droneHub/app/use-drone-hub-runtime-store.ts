@@ -4,6 +4,7 @@ import { useShallow } from 'zustand/react/shallow';
 import type { PendingPrompt, TranscriptItem } from '../types';
 import { createCanvasChatNodeId } from './app-config';
 import type { StartupSeedState } from './app-types';
+import { profileStorageKey } from '../../profile-storage';
 
 type Updater<T> = T | ((prev: T) => T);
 
@@ -101,7 +102,7 @@ export const useDroneHubRuntimeStore = create<DroneHubRuntimeState>()(
         set((s) => ({ pinnedToBottom: resolveNext(s.pinnedToBottom, next) })),
     }),
     {
-      name: 'droneHub.runtime',
+      name: profileStorageKey('droneHub.runtime'),
       version: 1,
       storage: createJSONStorage(() => localStorage),
       partialize: (state): DroneHubRuntimePersistedState => ({

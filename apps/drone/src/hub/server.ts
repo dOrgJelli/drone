@@ -9,10 +9,23 @@ import path from 'node:path';
 import { URL } from 'node:url';
 
 import { RawData, WebSocket, WebSocketServer } from 'ws';
+import { BaseConfigManager } from 'dvm';
 
 import { droneRootPath } from '../host/paths';
+import { readActiveProfileName } from '../host/profiles';
+import {
+  createProfile as createManagedProfile,
+  deleteProfile as deleteManagedProfile,
+  ensureDefaultProfileForFirstRun,
+  listProfilesState,
+  migrateLegacyToDefaultProfile,
+  type HubState as ManagedHubState,
+  renameProfile as renameManagedProfile,
+  useProfile as useManagedProfile,
+} from '../host/profile-manager';
 import { loadRegistry, updateRegistry } from '../host/registry';
 import { installFleetCliScript, installTasksCliScript, normalizeDroneRuntime, type DroneRuntime } from '../host/runtime';
+import { dismissWelcomeForScope, ensureHubSetupState, resolveHubSetupScopeKey } from '../host/setup-state';
 import { resolveContainerTerminalShellCommand, resolveHostTerminalShellCommand } from '../host/shell';
 import {
   dvmBaseSet,
@@ -394,6 +407,152 @@ function json(res: http.ServerResponse, status: number, body: any) {
   res.setHeader('content-type', 'application/json; charset=utf-8');
   res.setHeader('cache-control', 'no-store');
   res.end(data);
+}
+
+async function readManagedHubStateAtRoot(rootDir: string): Promise<ManagedHubState> {
+  const statePath = path.join(rootDir, 'hub.json');
+  const raw = await fs.readFile(statePath, 'utf8');
+  const parsed: any = JSON.parse(raw);
+  const pid = Number(parsed?.pid);
+  const apiPort = Number(parsed?.apiPort);
+  const uiPort = Number(parsed?.uiPort);
+  if (!parsed || typeof parsed !== 'object' || Number(parsed.version) !== 1) {
+    throw new Error(`invalid hub state at ${statePath}`);
+  }
+  if (!Number.isFinite(pid) || !Number.isFinite(apiPort) || !Number.isFinite(uiPort)) {
+    throw new Error(`invalid hub state at ${statePath}`);
+  }
+  return {
+    version: 1,
+    pid,
+    apiHost: typeof parsed.apiHost === 'string' ? parsed.apiHost : '127.0.0.1',
+    apiPort,
+    uiPort,
+    startedAt: typeof parsed.startedAt === 'string' ? parsed.startedAt : new Date().toISOString(),
+    logPath: typeof parsed.logPath === 'string' ? parsed.logPath : path.join(rootDir, 'hub.log'),
+    launchEnv: parsed.launchEnv ?? null,
+  };
+}
+
+function profileSettingsErrorStatus(error: unknown): number {
+  const message = String((error as any)?.message ?? error ?? '').trim();
+  if (/invalid profile name/i.test(message)) return 400;
+  if (
+    /unknown profile/i.test(message) ||
+    /cannot delete active profile/i.test(message) ||
+    /already exists/i.test(message) ||
+    /legacy migration is only available in legacy mode/i.test(message) ||
+    /no legacy drone or dvm data found to migrate/i.test(message) ||
+    /default profile already has .* data/i.test(message) ||
+    /legacy data is still present; run bun run migrate:legacy-profile/i.test(message)
+  ) {
+    return 409;
+  }
+  return 500;
+}
+
+function shellQuoteForCheck(raw: string): string {
+  return `'${String(raw ?? '').replace(/'/g, `'\\''`)}'`;
+}
+
+async function checkHostCommand(command: string): Promise<{ available: boolean; detail: string | null }> {
+  const result = await runHostCommand('bash', ['-lc', `command -v ${shellQuoteForCheck(command)} >/dev/null 2>&1`], { timeoutMs: 3_000 });
+  if (result.code === 0) return { available: true, detail: null };
+  return { available: false, detail: `${command} is not on PATH` };
+}
+
+async function resolveSetupStatusResponse(): Promise<any> {
+  await ensureDefaultProfileForFirstRun();
+  const setupState = await ensureHubSetupState();
+  const profileState = await listProfilesState();
+  const setupScope = resolveHubSetupScopeKey(profileState.activeProfile);
+  const welcomeDismissedAt = setupState.welcomeDismissedAtByScope[setupScope] ?? null;
+  const regAny = await loadRegistry();
+  const dronesObj = regAny?.drones && typeof regAny.drones === 'object' && !Array.isArray(regAny.drones) ? regAny.drones : {};
+  const reposObj = regAny?.repos && typeof regAny.repos === 'object' && !Array.isArray(regAny.repos) ? regAny.repos : {};
+  const droneCount = Object.keys(dronesObj).length;
+  const repoCount = Object.keys(reposObj).length;
+  const llmSettings = await resolveLlmSettingsResponse();
+  const activeProvider = llmSettings.provider.selected;
+  const activeProviderSettings = activeProvider === 'gemini' ? llmSettings.gemini : llmSettings.openai;
+  const dockerCommand = await checkHostCommand('docker');
+  let dockerStatus: { status: 'ready' | 'missing' | 'warning'; detail: string | null } = {
+    status: dockerCommand.available ? 'ready' : 'missing',
+    detail: dockerCommand.detail,
+  };
+  if (dockerCommand.available) {
+    const info = await runHostCommand('docker', ['info'], { timeoutMs: 10_000 });
+    if (info.code !== 0) {
+      const detail = String(info.stderr || info.stdout || 'docker is installed but unavailable').trim();
+      dockerStatus = { status: 'warning', detail: detail || 'docker is installed but unavailable' };
+    }
+  }
+  const tmuxCommand = await checkHostCommand('tmux');
+  const hasBaseImage = await new BaseConfigManager().hasBase();
+  const dependencies = [
+    {
+      id: 'docker',
+      label: 'Docker',
+      status: dockerStatus.status,
+      blocking: dockerStatus.status !== 'ready',
+      requiredFor: 'container drones',
+      detail: dockerStatus.detail ?? (dockerStatus.status === 'ready' ? 'Docker daemon is reachable.' : 'Docker is required for container drones.'),
+    },
+    {
+      id: 'tmux',
+      label: 'tmux',
+      status: tmuxCommand.available ? 'ready' : 'warning',
+      blocking: false,
+      requiredFor: 'host-runtime drones',
+      detail: tmuxCommand.available ? 'Host-runtime drones can launch local daemons.' : 'Install tmux if you plan to use host-runtime drones.',
+    },
+    {
+      id: 'llm',
+      label: 'LLM provider',
+      status: activeProviderSettings.hasKey ? 'ready' : 'warning',
+      blocking: !activeProviderSettings.hasKey,
+      requiredFor: 'agent chats',
+      detail: activeProviderSettings.hasKey
+        ? `${activeProvider === 'gemini' ? 'Gemini' : 'OpenAI'} is configured.`
+        : `Configure a ${activeProvider === 'gemini' ? 'Gemini' : 'OpenAI'} key before sending prompts.`,
+    },
+    {
+      id: 'base-image',
+      label: 'Base image',
+      status: hasBaseImage ? 'ready' : 'warning',
+      blocking: false,
+      requiredFor: 'faster container setup',
+      detail: hasBaseImage ? 'A DVM base image is configured for this profile.' : 'Optional: set a base image to speed up future container creation.',
+    },
+  ];
+  const hasBlockingDependency = dependencies.some((item) => item.blocking && item.status !== 'ready');
+  const isFreshProfile = droneCount === 0 && repoCount === 0;
+  const hasLegacyMigrationPrompt = profileState.mode === 'legacy' && profileState.legacy.hasLegacyData;
+  return {
+    ok: true,
+    firstHubStartedAt: setupState.firstHubStartedAt,
+    welcomeDismissedAt,
+    shouldShowWelcome: !welcomeDismissedAt && (hasBlockingDependency || isFreshProfile || hasLegacyMigrationPrompt),
+    activeProfile: profileState.activeProfile,
+    mode: profileState.mode,
+    profile: {
+      activeProfile: profileState.activeProfile,
+      droneCount,
+      repoCount,
+      isFresh: isFreshProfile,
+      droneDataDir: profileState.droneDataDir,
+      dvmDataDir: profileState.dvmDataDir,
+    },
+    legacy: profileState.legacy,
+    dependencies,
+  };
+}
+
+async function assertLegacyMigrationScriptNotRequiredForProfileMode(): Promise<void> {
+  const profileState = await listProfilesState();
+  if (profileState.mode === 'legacy' && profileState.legacy.hasLegacyData) {
+    throw new Error('legacy data is still present; run bun run migrate:legacy-profile -- --name default before entering profile mode');
+  }
 }
 
 const DRONE_OP_LOCKS = new Map<string, Promise<void>>();
@@ -8226,6 +8385,44 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
     if (n) allowedOrigins.add(n);
   }
 
+  const resolveCurrentHubStateFallback = (rootDir: string, req: http.IncomingMessage): ManagedHubState => {
+    const address = server.address();
+    const apiPort = typeof address === 'object' && address ? address.port : opts.port;
+    let uiPort = 0;
+    const candidateUrl = typeof req.headers.origin === 'string' ? req.headers.origin : typeof req.headers.referer === 'string' ? req.headers.referer : '';
+    if (candidateUrl) {
+      try {
+        const parsed = new URL(candidateUrl);
+        const parsedPort = Number(parsed.port);
+        if (Number.isFinite(parsedPort) && parsedPort > 0) uiPort = parsedPort;
+      } catch {
+        // ignore
+      }
+    }
+    return {
+      version: 1,
+      pid: process.pid,
+      apiHost: host,
+      apiPort,
+      uiPort,
+      startedAt: new Date().toISOString(),
+      logPath: path.join(rootDir, 'hub.log'),
+      launchEnv: null,
+    };
+  };
+
+  const readManagedHubStateAtRootOrFallback = async (rootDir: string, req: http.IncomingMessage): Promise<ManagedHubState> => {
+    try {
+      return await readManagedHubStateAtRoot(rootDir);
+    } catch (error: any) {
+      const message = String(error?.message ?? error ?? '');
+      if (/no such file/i.test(message) || /invalid hub state/i.test(message)) {
+        return resolveCurrentHubStateFallback(rootDir, req);
+      }
+      throw error;
+    }
+  };
+
   // Best-effort: resume any pending provisioning after hub restarts.
   // (Pending entries are persisted in the registry, but the in-memory queue is not.)
   try {
@@ -8625,6 +8822,22 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         return;
       }
 
+      if (pathname === '/api/setup/status' && method === 'GET') {
+        json(res, 200, await resolveSetupStatusResponse());
+        return;
+      }
+
+      if (pathname === '/api/setup/welcome/dismiss' && method === 'POST') {
+        const activeProfile = await readActiveProfileName();
+        const next = await dismissWelcomeForScope(resolveHubSetupScopeKey(activeProfile));
+        const welcomeDismissedAt = next.welcomeDismissedAtByScope[resolveHubSetupScopeKey(activeProfile)] ?? null;
+        json(res, 200, {
+          ok: true,
+          welcomeDismissedAt,
+        });
+        return;
+      }
+
       if (pathname === '/api/settings/openai' || pathname === '/api/settings/gemini') {
         const provider: LlmProviderId = pathname.endsWith('/gemini') ? 'gemini' : 'openai';
         if (method === 'GET') {
@@ -8774,6 +8987,149 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           }
           await upsertStoredFilesystemSettings({ uploadMaxBytes });
           json(res, 200, await resolveFilesystemSettingsResponse());
+          return;
+        }
+      }
+
+      if (pathname === '/api/settings/profiles') {
+        if (method === 'GET') {
+          json(res, 200, { ok: true, ...(await listProfilesState()) });
+          return;
+        }
+
+        if (method === 'POST') {
+          let body: any = null;
+          try {
+            body = await readJsonBody(req);
+          } catch (e: any) {
+            json(res, 400, { ok: false, error: e?.message ?? String(e) });
+            return;
+          }
+          try {
+            await assertLegacyMigrationScriptNotRequiredForProfileMode();
+            const created = await createManagedProfile(body?.name, { use: false, stopCurrentHub: false });
+            json(res, 201, {
+              ok: true,
+              ...(await listProfilesState()),
+              createdProfile: created.created,
+            });
+          } catch (e: any) {
+            json(res, profileSettingsErrorStatus(e), { ok: false, error: e?.message ?? String(e) });
+          }
+          return;
+        }
+      }
+
+      if (pathname === '/api/settings/profiles/activate') {
+        if (method === 'POST') {
+          let body: any = null;
+          try {
+            body = await readJsonBody(req);
+          } catch (e: any) {
+            json(res, 400, { ok: false, error: e?.message ?? String(e) });
+            return;
+          }
+          const previousRootDir = droneRootPath();
+          try {
+            await assertLegacyMigrationScriptNotRequiredForProfileMode();
+            const currentHubState = await readManagedHubStateAtRootOrFallback(previousRootDir, req);
+            const activated = await useManagedProfile(body?.name, {
+              stopCurrentHub: false,
+              syncRunningHubState: {
+                state: currentHubState,
+                apiToken,
+                previousRootDir,
+              },
+            });
+            json(res, 200, {
+              ok: true,
+              ...(await listProfilesState()),
+              activeProfile: activated.activeProfile,
+              activatedProfile: activated.activeProfile,
+              reloadRequired: true,
+            });
+          } catch (e: any) {
+            json(res, profileSettingsErrorStatus(e), { ok: false, error: e?.message ?? String(e) });
+          }
+          return;
+        }
+      }
+
+      if (pathname === '/api/settings/profiles/migrate-legacy') {
+        if (method === 'POST') {
+          const previousRootDir = droneRootPath();
+          try {
+            const currentHubState = await readManagedHubStateAtRootOrFallback(previousRootDir, req);
+            const migrated = await migrateLegacyToDefaultProfile({
+              stopCurrentHub: false,
+              syncRunningHubState: {
+                state: currentHubState,
+                apiToken,
+                previousRootDir,
+              },
+            });
+            json(res, 200, {
+              ok: true,
+              ...(await listProfilesState()),
+              activatedProfile: migrated.activeProfile,
+              migratedFromLegacy: migrated.migratedFromLegacy,
+              reloadRequired: true,
+            });
+          } catch (e: any) {
+            json(res, profileSettingsErrorStatus(e), { ok: false, error: e?.message ?? String(e) });
+          }
+          return;
+        }
+      }
+
+      if (pathname === '/api/settings/profiles/rename') {
+        if (method === 'POST') {
+          let body: any = null;
+          try {
+            body = await readJsonBody(req);
+          } catch (e: any) {
+            json(res, 400, { ok: false, error: e?.message ?? String(e) });
+            return;
+          }
+          const previousRootDir = droneRootPath();
+          try {
+            const currentHubState = await readManagedHubStateAtRootOrFallback(previousRootDir, req);
+            const renamed = await renameManagedProfile(body?.name, body?.nextName, {
+              syncRunningHubState: {
+                state: currentHubState,
+                apiToken,
+                previousRootDir,
+              },
+            });
+            json(res, 200, {
+              ok: true,
+              ...(await listProfilesState()),
+              renamedFrom: renamed.renamedFrom,
+              renamedTo: renamed.renamedTo,
+              reloadRequired: renamed.activeProfile === renamed.renamedTo && renamed.renamedFrom !== renamed.renamedTo,
+            });
+          } catch (e: any) {
+            json(res, profileSettingsErrorStatus(e), { ok: false, error: e?.message ?? String(e) });
+          }
+          return;
+        }
+      }
+
+      const profileDeleteMatch = pathname.match(/^\/api\/settings\/profiles\/([^/]+)$/);
+      if (profileDeleteMatch) {
+        if (method === 'DELETE') {
+          try {
+            const deleted = await deleteManagedProfile(decodeURIComponent(profileDeleteMatch[1]));
+            json(res, 200, {
+              ok: true,
+              ...(await listProfilesState()),
+              deletedProfile: deleted.deleted,
+              removedContainers: deleted.removedContainers,
+              removedHostRoots: deleted.removedHostRoots,
+            });
+          } catch (e: any) {
+            json(res, profileSettingsErrorStatus(e), { ok: false, error: e?.message ?? String(e) });
+          }
           return;
         }
       }

@@ -15,6 +15,7 @@ import type {
 } from '../types';
 import type { DiffExpansionRange, DiffNoTextReason } from './types';
 import { readChangesStorage } from './storage';
+import { profileStorageKey } from '../../profile-storage';
 
 export type DiffKind = 'staged' | 'unstaged';
 export type ChangesDataMode = 'working-tree' | 'pull-preview' | 'pull-request';
@@ -44,7 +45,7 @@ export type ExplorerSidebarWidthOptions = {
   fallbackWidthPx?: number;
 };
 
-const PR_MERGE_METHOD_STORAGE_KEY = 'droneHub.prMergeMethod';
+const PR_MERGE_METHOD_STORAGE_KEY = profileStorageKey('droneHub.prMergeMethod');
 
 export function shortSha(sha: string | null | undefined): string {
   const s = String(sha ?? '').trim();

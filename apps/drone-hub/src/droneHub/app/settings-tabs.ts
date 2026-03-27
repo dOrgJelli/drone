@@ -1,4 +1,4 @@
-export type SettingsTabId = 'general' | 'trash' | 'archive' | 'shortcuts' | 'automations' | 'playbooks' | 'skills' | 'system';
+export type SettingsTabId = 'general' | 'profiles' | 'trash' | 'archive' | 'shortcuts' | 'automations' | 'playbooks' | 'skills' | 'system';
 
 export const SETTINGS_TABS: Array<{
   id: SettingsTabId;
@@ -11,6 +11,12 @@ export const SETTINGS_TABS: Array<{
     label: 'General',
     title: 'General settings',
     description: 'LLM providers, filesystem uploads, transcript defaults, and onboarding controls.',
+  },
+  {
+    id: 'profiles',
+    label: 'Profiles',
+    title: 'Profiles',
+    description: 'Create, rename, switch, and delete isolated Hub workspaces.',
   },
   {
     id: 'trash',

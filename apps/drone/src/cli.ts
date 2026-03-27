@@ -10,6 +10,26 @@ import path from 'node:path';
 import { health, procStart, procStop, readOutput, sendInput, sendKeys, status } from './host/api';
 import { dvmClone, dvmCopyToContainer, dvmCreate, dvmExec, dvmLs, dvmPorts, dvmRemove, dvmSessionStart } from './host/dvm';
 import { droneRootPath } from './host/paths';
+import {
+  createProfile as createManagedProfile,
+  ensureDefaultProfileForFirstRun,
+  deleteProfile as deleteManagedProfile,
+  listProfilesState,
+  useProfile as useManagedProfile,
+} from './host/profile-manager';
+import {
+  ensureProfileDirs,
+  legacyDefaultDroneRootDir,
+  legacyDefaultDvmRootDir,
+  listProfiles,
+  normalizeProfileName,
+  profileDroneRootDir,
+  profileDvmRootDir,
+  profileRootDir,
+  readActiveProfileName,
+  readActiveProfileNameSync,
+  writeActiveProfileName,
+} from './host/profiles';
 import { loadRegistry, registryHasDisplayName, updateRegistry } from './host/registry';
 import {
   hostDroneDaemonDataPath,
@@ -23,6 +43,7 @@ import {
   normalizeDroneRuntime,
   type DroneRuntime,
 } from './host/runtime';
+import { ensureHubSetupState } from './host/setup-state';
 import { resolveDetachedCliLaunchSpec } from './hub/hub-launch';
 import { parseHubRunnerProcessesFromPsOutput, selectHubRunnerPidsToStop } from './hub/orphan-hub-runners';
 import { startDroneHubApiServer } from './hub/server';
@@ -451,24 +472,24 @@ function hubLaunchEnvSnapshotsDiffer(a: HubLaunchEnvSnapshot | null | undefined,
   return JSON.stringify(a) !== JSON.stringify(b);
 }
 
-function droneDir(): string {
-  return droneRootPath();
+function droneDir(rootDir?: string): string {
+  return rootDir ? path.resolve(rootDir) : droneRootPath();
 }
 
-function hubStatePath(): string {
-  return path.join(droneDir(), 'hub.json');
+function hubStatePath(rootDir?: string): string {
+  return path.join(droneDir(rootDir), 'hub.json');
 }
 
-function hubTokenPath(): string {
-  return path.join(droneDir(), 'hub.token');
+function hubTokenPath(rootDir?: string): string {
+  return path.join(droneDir(rootDir), 'hub.token');
 }
 
-function hubLogPath(): string {
-  return path.join(droneDir(), 'hub.log');
+function hubLogPath(rootDir?: string): string {
+  return path.join(droneDir(rootDir), 'hub.log');
 }
 
-async function ensureDroneDir(): Promise<void> {
-  await fs.mkdir(droneDir(), { recursive: true });
+async function ensureDroneDir(rootDir?: string): Promise<void> {
+  await fs.mkdir(droneDir(rootDir), { recursive: true });
 }
 
 function pidIsRunning(pid: number): boolean {
@@ -483,9 +504,9 @@ function pidIsRunning(pid: number): boolean {
   }
 }
 
-async function readHubState(): Promise<HubState | null> {
+async function readHubState(rootDir?: string): Promise<HubState | null> {
   try {
-    const raw = await fs.readFile(hubStatePath(), 'utf8');
+    const raw = await fs.readFile(hubStatePath(rootDir), 'utf8');
     const parsed: any = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object') return null;
     if (parsed.version !== 1) return null;
@@ -495,7 +516,7 @@ async function readHubState(): Promise<HubState | null> {
     if (!Number.isFinite(pid) || !Number.isFinite(apiPort) || !Number.isFinite(uiPort)) return null;
     const apiHost = typeof parsed.apiHost === 'string' ? parsed.apiHost : '127.0.0.1';
     const startedAt = typeof parsed.startedAt === 'string' ? parsed.startedAt : new Date().toISOString();
-    const logPath = typeof parsed.logPath === 'string' ? parsed.logPath : hubLogPath();
+    const logPath = typeof parsed.logPath === 'string' ? parsed.logPath : hubLogPath(rootDir);
     const launchEnv = parseHubLaunchEnvSnapshot(parsed.launchEnv);
     return { version: 1, pid, apiHost, apiPort, uiPort, startedAt, logPath, launchEnv };
   } catch {
@@ -503,23 +524,23 @@ async function readHubState(): Promise<HubState | null> {
   }
 }
 
-async function writeHubState(state: HubState): Promise<void> {
-  await ensureDroneDir();
-  const p = hubStatePath();
+async function writeHubState(state: HubState, rootDir?: string): Promise<void> {
+  await ensureDroneDir(rootDir);
+  const p = hubStatePath(rootDir);
   await fs.writeFile(p, JSON.stringify(state, null, 2), 'utf8');
   await setPrivateFileModeBestEffort(p);
 }
 
-async function writeHubApiToken(token: string): Promise<void> {
-  await ensureDroneDir();
-  const p = hubTokenPath();
+async function writeHubApiToken(token: string, rootDir?: string): Promise<void> {
+  await ensureDroneDir(rootDir);
+  const p = hubTokenPath(rootDir);
   await fs.writeFile(p, `${String(token ?? '').trim()}\n`, 'utf8');
   await setPrivateFileModeBestEffort(p);
 }
 
-async function clearHubApiTokenBestEffort(): Promise<void> {
+async function clearHubApiTokenBestEffort(rootDir?: string): Promise<void> {
   try {
-    await fs.rm(hubTokenPath(), { force: true });
+    await fs.rm(hubTokenPath(rootDir), { force: true });
   } catch {
     // ignore
   }
@@ -536,12 +557,12 @@ async function setPrivateFileModeBestEffort(p: string): Promise<void> {
   }
 }
 
-async function removeHubStateIfOwnedByPid(pid: number): Promise<void> {
+async function removeHubStateIfOwnedByPid(pid: number, rootDir?: string): Promise<void> {
   try {
-    const cur = await readHubState();
+    const cur = await readHubState(rootDir);
     if (cur && cur.pid === pid) {
-      await fs.rm(hubStatePath(), { force: true });
-      await clearHubApiTokenBestEffort();
+      await fs.rm(hubStatePath(rootDir), { force: true });
+      await clearHubApiTokenBestEffort(rootDir);
     }
   } catch {
     // ignore
@@ -617,6 +638,126 @@ async function stopHubProcess(pid: number): Promise<void> {
     }
     await waitForPidExit(pid, 2_000);
   }
+}
+
+async function pathExists(targetPath: string): Promise<boolean> {
+  try {
+    await fs.stat(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function dirHasEntries(targetPath: string): Promise<boolean> {
+  try {
+    const entries = await fs.readdir(targetPath);
+    return entries.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+async function moveTreeIfNeeded(sourcePath: string, targetPath: string): Promise<boolean> {
+  if (!(await pathExists(sourcePath))) return false;
+  if (await dirHasEntries(targetPath)) return false;
+  await fs.mkdir(path.dirname(targetPath), { recursive: true });
+  try {
+    await fs.rename(sourcePath, targetPath);
+    return true;
+  } catch {
+    await fs.cp(sourcePath, targetPath, { recursive: true });
+    await fs.rm(sourcePath, { recursive: true, force: true });
+    return true;
+  }
+}
+
+async function migrateLegacyRootsToDefaultProfileIfNeeded(profileName: string): Promise<void> {
+  if (profileName !== 'default') return;
+  await ensureProfileDirs(profileName);
+  await moveTreeIfNeeded(legacyDefaultDroneRootDir(), profileDroneRootDir(profileName));
+  await moveTreeIfNeeded(legacyDefaultDvmRootDir(), profileDvmRootDir(profileName));
+}
+
+async function stopHubAtRootIfRunning(rootDir: string): Promise<boolean> {
+  const cur = await readHubState(rootDir);
+  if (!cur || !pidIsRunning(cur.pid)) {
+    try {
+      await fs.rm(hubStatePath(rootDir), { force: true });
+    } catch {
+      // ignore
+    }
+    await clearHubApiTokenBestEffort(rootDir);
+    return false;
+  }
+  await stopHubProcess(cur.pid);
+  try {
+    await fs.rm(hubStatePath(rootDir), { force: true });
+  } catch {
+    // ignore
+  }
+  await clearHubApiTokenBestEffort(rootDir);
+  return true;
+}
+
+async function readRegistrySnapshotAtRoot(rootDir: string): Promise<any> {
+  try {
+    const raw = await fs.readFile(path.join(rootDir, 'registry.json'), 'utf8');
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+async function deleteProfileResources(profileName: string): Promise<{
+  removedContainers: string[];
+  removedHostRoots: string[];
+  stoppedHub: boolean;
+}> {
+  const droneDirForProfile = profileDroneRootDir(profileName);
+  const reg = await readRegistrySnapshotAtRoot(droneDirForProfile);
+  const removedContainers: string[] = [];
+  const removedHostRoots: string[] = [];
+  const failures: string[] = [];
+  const stoppedHub = await stopHubAtRootIfRunning(droneDirForProfile);
+  const drones = reg?.drones && typeof reg.drones === 'object' && !Array.isArray(reg.drones) ? Object.values(reg.drones) : [];
+
+  for (const droneAny of drones) {
+    const drone = droneAny as any;
+    const runtime = normalizeDroneRuntime(drone?.runtime);
+    if (runtime === 'host') {
+      const hostPid = Number(drone?.host?.pid);
+      const hostRootDir = String(drone?.host?.rootDir ?? '').trim();
+      try {
+        if (Number.isFinite(hostPid) && hostPid > 0) {
+          await stopHostDaemonByPid(hostPid);
+        }
+        if (hostRootDir) {
+          await fs.rm(hostRootDir, { recursive: true, force: true });
+          removedHostRoots.push(hostRootDir);
+        }
+      } catch (error: any) {
+        failures.push(`host runtime ${String(drone?.name ?? drone?.id ?? '(unknown)')}: ${error?.message ?? String(error)}`);
+      }
+      continue;
+    }
+
+    const containerName = String(drone?.containerName ?? drone?.name ?? '').trim();
+    if (!containerName) continue;
+    try {
+      await dvmRemove(containerName, { keepVolume: false });
+      removedContainers.push(containerName);
+    } catch (error: any) {
+      failures.push(`container ${containerName}: ${error?.message ?? String(error)}`);
+    }
+  }
+
+  if (failures.length > 0) {
+    throw new Error(`failed deleting profile resources:\n- ${failures.join('\n- ')}`);
+  }
+
+  return { removedContainers, removedHostRoots, stoppedHub };
 }
 
 async function runGit(
@@ -1622,6 +1763,9 @@ async function hubRun(options: any) {
   if (!Number.isFinite(apiPort) || apiPort <= 0) throw new Error('invalid --api-port');
 
   const apiHost = String(options.host || '127.0.0.1');
+  await ensureDefaultProfileForFirstRun();
+  await ensureHubSetupState();
+  const activeProfile = readActiveProfileNameSync();
   const apiToken = crypto.randomBytes(32).toString('base64url');
   const allowedOrigins = new Set<string>([`http://127.0.0.1:${uiPort}`, `http://localhost:${uiPort}`]);
   if (apiHost && apiHost !== '0.0.0.0' && apiHost !== '::') {
@@ -1659,6 +1803,7 @@ async function hubRun(options: any) {
       ...process.env,
       DRONE_HUB_API_PORT: String(api.port),
       DRONE_HUB_API_TOKEN: apiToken,
+      ...(activeProfile ? { VITE_DRONE_PROFILE_ID: activeProfile } : {}),
     },
   });
 
@@ -1848,6 +1993,80 @@ async function hubStop() {
   // eslint-disable-next-line no-console
   console.log(JSON.stringify({ ok: true, stopped: true, pid }, null, 2));
 }
+
+async function profileListCommand() {
+  // eslint-disable-next-line no-console
+  console.log(JSON.stringify({ ok: true, ...(await listProfilesState()) }, null, 2));
+}
+
+async function profileCurrentCommand() {
+  const activeProfile = await readActiveProfileName();
+  // eslint-disable-next-line no-console
+  console.log(
+    JSON.stringify(
+      {
+        ok: true,
+        activeProfile,
+        mode: activeProfile ? 'profile' : 'legacy',
+        droneDataDir: activeProfile ? profileDroneRootDir(activeProfile) : legacyDefaultDroneRootDir(),
+        dvmDataDir: activeProfile ? profileDvmRootDir(activeProfile) : legacyDefaultDvmRootDir(),
+      },
+      null,
+      2,
+    ),
+  );
+}
+
+async function assertLegacyMigrationScriptNotRequiredForProfileMode(): Promise<void> {
+  const profileState = await listProfilesState();
+  if (profileState.mode === 'legacy' && profileState.legacy.hasLegacyData) {
+    throw new Error('legacy data is still present; run bun run migrate:legacy-profile -- --name default before entering profile mode');
+  }
+}
+
+async function profileCreateCommand(nameRaw: string, options: { use?: boolean }) {
+  await assertLegacyMigrationScriptNotRequiredForProfileMode();
+  const result = await createManagedProfile(nameRaw, { use: options.use, stopCurrentHub: true });
+  // eslint-disable-next-line no-console
+  console.log(JSON.stringify({ ok: true, ...result }, null, 2));
+}
+
+async function profileUseCommand(nameRaw: string) {
+  await assertLegacyMigrationScriptNotRequiredForProfileMode();
+  const result = await useManagedProfile(nameRaw, { stopCurrentHub: true });
+  // eslint-disable-next-line no-console
+  console.log(JSON.stringify({ ok: true, ...result }, null, 2));
+}
+
+async function profileDeleteCommand(nameRaw: string) {
+  const result = await deleteManagedProfile(nameRaw);
+  // eslint-disable-next-line no-console
+  console.log(JSON.stringify({ ok: true, ...result }, null, 2));
+}
+
+const profile = program.command('profile').description('Manage repo-local Drone/DVM profiles');
+profile.command('list').description('List available profiles').action(async () => {
+  await profileListCommand();
+});
+profile.command('current').description('Show the active profile and resolved data roots').action(async () => {
+  await profileCurrentCommand();
+});
+profile.command('create <name>')
+  .description('Create a new profile')
+  .option('--use', 'Switch to the new profile after creating it', false)
+  .action(async (name, options) => {
+    await profileCreateCommand(name, options);
+  });
+profile.command('use <name>')
+  .description('Switch the active profile')
+  .action(async (name) => {
+    await profileUseCommand(name);
+  });
+profile.command('delete <name>')
+  .description('Delete a profile and all of its containers/runtime state')
+  .action(async (name) => {
+    await profileDeleteCommand(name);
+  });
 
 const hub = program.command('hub').description('Manage the local Drone Hub (detached dev server)');
 hub.command('start')

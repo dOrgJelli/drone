@@ -1,4 +1,6 @@
 export { createDvmApi, DvmApi } from './api';
+export { BaseConfigManager } from './config/base';
+export { resetDvmRootDirCache } from './hostPaths';
 export type {
   DvmCloneContainerOptions,
   DvmCopyFromContainerOptions,

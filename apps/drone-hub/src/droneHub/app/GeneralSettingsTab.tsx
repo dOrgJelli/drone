@@ -385,10 +385,10 @@ export function GeneralSettingsTab({
         </div>
 
         <div className="flex flex-col gap-4">
-          <div className="rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.12)] px-3 py-3 flex flex-col gap-3">
-            <div className="text-[10px] font-semibold text-[var(--muted-dim)] tracking-[0.08em] uppercase" style={{ fontFamily: 'var(--display)' }}>
-              Transcript
-            </div>
+        <div className="rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.12)] px-3 py-3 flex flex-col gap-3">
+          <div className="text-[10px] font-semibold text-[var(--muted-dim)] tracking-[0.08em] uppercase" style={{ fontFamily: 'var(--display)' }}>
+            Transcript
+          </div>
             <div className="text-[11px] text-[var(--muted-dim)] leading-relaxed">
               Show image links inline inside agent messages by default.
             </div>

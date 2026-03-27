@@ -3,6 +3,7 @@ import { AutomationSettingsSection } from './AutomationSettingsSection';
 import { ArchiveSettingsTab } from './ArchiveSettingsTab';
 import { GeneralSettingsTab } from './GeneralSettingsTab';
 import { PlaybookSettingsSection } from './PlaybookSettingsSection';
+import { ProfilesSettingsTab } from './ProfilesSettingsTab';
 import { ShortcutSettingsSection } from './ShortcutSettingsSection';
 import { SkillLibrarySection } from './SkillLibrarySection';
 import { SystemLogsSettingsTab } from './SystemLogsSettingsTab';
@@ -13,6 +14,7 @@ import type { UseDeleteActionSettingsResult } from './use-delete-action-settings
 import type { UseFilesystemSettingsResult } from './use-filesystem-settings';
 import type { UseHubLogsResult } from './use-hub-logs';
 import type { UseLlmSettingsResult } from './use-llm-settings';
+import type { UseProfileSettingsResult } from './use-profile-settings';
 import type { UseSkillLibraryResult } from './use-skill-library';
 
 type SettingsViewProps = {
@@ -20,6 +22,7 @@ type SettingsViewProps = {
   skillLibrary: UseSkillLibraryResult;
   deleteAction: UseDeleteActionSettingsResult;
   filesystem: UseFilesystemSettingsResult;
+  profile: UseProfileSettingsResult;
   hubLogsState: UseHubLogsResult;
   hubLogsTailLines: number;
   hubLogsMaxBytes: number;
@@ -45,6 +48,7 @@ export function SettingsView({
   skillLibrary,
   deleteAction,
   filesystem,
+  profile,
   hubLogsState,
   hubLogsTailLines,
   hubLogsMaxBytes,
@@ -65,6 +69,7 @@ export function SettingsView({
     llm.llmSettingsLoading ||
     deleteAction.deleteSettingsLoading ||
     filesystem.filesystemSettingsLoading ||
+    profile.profileSettingsLoading ||
     deleteAction.archivedDronesLoading ||
     deleteAction.archivedChatsLoading ||
     llm.savingOpenAiSettings ||
@@ -79,7 +84,10 @@ export function SettingsView({
     skillLibrary.skillsSaving ||
     skillLibrary.skillsDeleting ||
     deleteAction.savingDeleteSettings ||
-    filesystem.savingFilesystemSettings;
+    filesystem.savingFilesystemSettings ||
+    profile.creatingProfile ||
+    Boolean(profile.activatingProfileName) ||
+    Boolean(profile.deletingProfileName);
   const activeTabMeta = SETTINGS_TABS.find((tab) => tab.id === activeTab) ?? SETTINGS_TABS[0];
 
   React.useEffect(() => {
@@ -107,10 +115,11 @@ export function SettingsView({
     void filesystem.loadFilesystemSettings();
     void deleteAction.loadArchivedDrones();
     void deleteAction.loadArchivedChats();
+    void profile.loadProfileSettings();
     void hubLogsState.loadHubLogs();
     void skillLibrary.loadSkills();
     void skillLibrary.loadSkillSources();
-  }, [deleteAction, filesystem, hubLogsState, llm, skillLibrary]);
+  }, [deleteAction, filesystem, hubLogsState, llm, profile, skillLibrary]);
 
   const renderActiveTab = () => {
     if (activeTab === 'general') {
@@ -125,6 +134,7 @@ export function SettingsView({
         />
       );
     }
+    if (activeTab === 'profiles') return <ProfilesSettingsTab profile={profile} />;
     if (activeTab === 'trash') return <TrashBehaviorSettingsTab deleteAction={deleteAction} />;
     if (activeTab === 'archive') return <ArchiveSettingsTab deleteAction={deleteAction} />;
     if (activeTab === 'shortcuts') return <ShortcutSettingsSection />;

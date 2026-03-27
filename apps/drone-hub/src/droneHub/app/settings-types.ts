@@ -89,6 +89,77 @@ export type UiPreferencesSettingsResponse = {
   updatedAt: string | null;
 };
 
+export type ProfileSettingsProfile = {
+  name: string;
+  active: boolean;
+  rootDir: string;
+  droneDataDir: string;
+  dvmDataDir: string;
+};
+
+export type ProfileSettingsResponse = {
+  ok: true;
+  activeProfile: string | null;
+  mode: 'profile' | 'legacy';
+  droneDataDir: string;
+  dvmDataDir: string;
+  profiles: ProfileSettingsProfile[];
+  legacy: {
+    hasLegacyDroneData: boolean;
+    hasLegacyDvmData: boolean;
+    hasLegacyData: boolean;
+    droneDataDir: string;
+    dvmDataDir: string;
+    canMigrateToDefault: boolean;
+  };
+  createdProfile?: string;
+  activatedProfile?: string;
+  deletedProfile?: string;
+  renamedFrom?: string;
+  renamedTo?: string;
+  migratedFromLegacy?: boolean;
+  removedContainers?: string[];
+  removedHostRoots?: string[];
+  reloadRequired?: boolean;
+};
+
+export type SetupDependencyStatus = 'ready' | 'missing' | 'warning';
+
+export type SetupDependencyCheck = {
+  id: string;
+  label: string;
+  status: SetupDependencyStatus;
+  blocking: boolean;
+  requiredFor: string;
+  detail: string;
+};
+
+export type SetupStatusResponse = {
+  ok: true;
+  firstHubStartedAt: string | null;
+  welcomeDismissedAt: string | null;
+  shouldShowWelcome: boolean;
+  activeProfile: string | null;
+  mode: 'profile' | 'legacy';
+  profile: {
+    activeProfile: string | null;
+    droneCount: number;
+    repoCount: number;
+    isFresh: boolean;
+    droneDataDir: string;
+    dvmDataDir: string;
+  };
+  legacy: {
+    hasLegacyDroneData: boolean;
+    hasLegacyDvmData: boolean;
+    hasLegacyData: boolean;
+    droneDataDir: string;
+    dvmDataDir: string;
+    canMigrateToDefault: boolean;
+  };
+  dependencies: SetupDependencyCheck[];
+};
+
 export type ArchivedDroneSummary = {
   id: string;
   name: string;

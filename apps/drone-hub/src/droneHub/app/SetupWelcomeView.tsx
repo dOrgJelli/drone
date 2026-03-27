@@ -1,0 +1,273 @@
+import React from 'react';
+import type { SetupStatusResponse } from './settings-types';
+
+type SetupWelcomeViewProps = {
+  setupStatus: SetupStatusResponse | null;
+  setupStatusLoading: boolean;
+  setupStatusError: string | null;
+  dismissingWelcome: boolean;
+  migratingLegacy: boolean;
+  onDismissWelcome: () => void;
+  onMigrateLegacyToDefault: () => void;
+  onReload: () => void;
+  onOpenProfiles: () => void;
+  onOpenGeneralSettings: () => void;
+};
+
+function dependencyTone(status: string, blocking: boolean): string {
+  if (status === 'ready') return 'border-[rgba(52,211,153,.22)] bg-[rgba(16,185,129,.08)]';
+  if (blocking) return 'border-[rgba(255,90,90,.22)] bg-[rgba(255,90,90,.08)]';
+  return 'border-[rgba(255,214,102,.2)] bg-[rgba(255,214,102,.08)]';
+}
+
+export function SetupWelcomeView({
+  setupStatus,
+  setupStatusLoading,
+  setupStatusError,
+  dismissingWelcome,
+  migratingLegacy,
+  onDismissWelcome,
+  onMigrateLegacyToDefault,
+  onReload,
+  onOpenProfiles,
+  onOpenGeneralSettings,
+}: SetupWelcomeViewProps) {
+  const dependencies = setupStatus?.dependencies ?? [];
+  const blockers = dependencies.filter((item) => item.blocking && item.status !== 'ready');
+  const recommended = dependencies.filter((item) => !item.blocking && item.status !== 'ready');
+  const legacy = setupStatus?.legacy ?? null;
+  const showingLegacyMigration = setupStatus?.mode === 'legacy' && Boolean(legacy?.hasLegacyData);
+
+  return (
+    <div className="flex-1 overflow-y-auto">
+      <div className="min-h-full px-4 py-5 sm:px-5 sm:py-6 lg:px-6 lg:py-8">
+        <div className="mx-auto max-w-[1180px] flex flex-col gap-5">
+          <div className="rounded-[28px] border border-[rgba(255,255,255,.08)] bg-[linear-gradient(135deg,rgba(12,18,28,.96),rgba(17,25,36,.92))] overflow-hidden shadow-[0_30px_90px_rgba(0,0,0,.28)]">
+            <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,.8fr)]">
+              <div className="px-6 py-6 sm:px-8 sm:py-8 flex flex-col gap-5">
+                <div className="flex flex-col gap-3">
+                  <div className="inline-flex items-center gap-2 text-[10px] uppercase tracking-[0.16em] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+                    <span className="h-2 w-2 rounded-full bg-[var(--accent)] shadow-[0_0_18px_rgba(255,214,102,.55)]" />
+                    Drone Hub Setup
+                  </div>
+                  <div className="max-w-[18ch] text-[34px] leading-[1.02] font-semibold text-[var(--fg)]" style={{ fontFamily: 'var(--display)' }}>
+                    Bring this profile online before you start flying.
+                  </div>
+                  <div className="max-w-[64ch] text-[13px] leading-relaxed text-[var(--muted)]">
+                    This screen tracks machine dependencies, fresh-profile state, and any remaining legacy installs that still need to be migrated into an isolated profile.
+                  </div>
+                </div>
+
+                {setupStatusError && (
+                  <div className="rounded border border-[rgba(255,90,90,.2)] bg-[var(--red-subtle)] px-3 py-2 text-[12px] text-[var(--red)]">
+                    {setupStatusError}
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div className="rounded-2xl border border-[var(--border-subtle)] bg-[rgba(255,255,255,.03)] px-4 py-4">
+                    <div className="text-[10px] uppercase tracking-[0.1em] text-[var(--muted-dim)] font-semibold">Active profile</div>
+                    <div className="mt-2 text-[22px] font-semibold text-[var(--fg)]" style={{ fontFamily: 'var(--display)' }}>
+                      {setupStatus?.activeProfile ?? (showingLegacyMigration ? 'Legacy mode' : 'default')}
+                    </div>
+                    <div className="mt-1 text-[11px] text-[var(--muted-dim)]">
+                      {showingLegacyMigration
+                        ? 'Existing install without profiles'
+                        : setupStatus?.profile.isFresh
+                          ? 'Fresh profile'
+                          : 'Returning profile'}
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-[var(--border-subtle)] bg-[rgba(255,255,255,.03)] px-4 py-4">
+                    <div className="text-[10px] uppercase tracking-[0.1em] text-[var(--muted-dim)] font-semibold">Blockers</div>
+                    <div className="mt-2 text-[22px] font-semibold text-[var(--fg)]" style={{ fontFamily: 'var(--display)' }}>
+                      {blockers.length}
+                    </div>
+                    <div className="mt-1 text-[11px] text-[var(--muted-dim)]">Things that will stop important flows from working.</div>
+                  </div>
+                  <div className="rounded-2xl border border-[var(--border-subtle)] bg-[rgba(255,255,255,.03)] px-4 py-4">
+                    <div className="text-[10px] uppercase tracking-[0.1em] text-[var(--muted-dim)] font-semibold">Profile contents</div>
+                    <div className="mt-2 text-[22px] font-semibold text-[var(--fg)]" style={{ fontFamily: 'var(--display)' }}>
+                      {setupStatus ? `${setupStatus.profile.droneCount} drones` : '...'}
+                    </div>
+                    <div className="mt-1 text-[11px] text-[var(--muted-dim)]">
+                      {setupStatus ? `${setupStatus.profile.repoCount} repos registered in this profile.` : 'Loading profile summary…'}
+                    </div>
+                  </div>
+                </div>
+
+                {showingLegacyMigration && legacy && (
+                  <div className="rounded-2xl border border-[rgba(255,214,102,.2)] bg-[rgba(255,214,102,.08)] px-4 py-4">
+                    <div className="text-[12px] font-semibold text-[var(--fg-secondary)]">Legacy data detected</div>
+                    <div className="mt-2 text-[12px] leading-relaxed text-[var(--muted)]">
+                      Drone is currently running from the old shared data roots. Since this repo only has one active user, the intended migration path is the one-time repo script instead of an in-product conversion flow.
+                    </div>
+                    <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-[11px] text-[var(--muted-dim)]">
+                      <div className="rounded-xl border border-[var(--border-subtle)] bg-[rgba(0,0,0,.12)] px-3 py-3">
+                        <div className="font-semibold text-[var(--fg-secondary)]">Legacy Drone root</div>
+                        <div className="mt-2 break-all">{legacy.droneDataDir}</div>
+                      </div>
+                      <div className="rounded-xl border border-[var(--border-subtle)] bg-[rgba(0,0,0,.12)] px-3 py-3">
+                        <div className="font-semibold text-[var(--fg-secondary)]">Legacy DVM root</div>
+                        <div className="mt-2 break-all">{legacy.dvmDataDir}</div>
+                      </div>
+                    </div>
+                    <div className="mt-3 rounded-xl border border-[var(--border-subtle)] bg-[rgba(0,0,0,.18)] px-3 py-3">
+                      <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--muted-dim)] font-semibold">Run from repo root</div>
+                      <div className="mt-2 font-mono text-[12px] text-[var(--fg-secondary)] break-all">bun run migrate:legacy-profile -- --name default</div>
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={onDismissWelcome}
+                    disabled={dismissingWelcome || migratingLegacy || setupStatusLoading}
+                    className={`h-10 px-4 rounded text-[11px] font-semibold tracking-wide uppercase border transition-all ${
+                      dismissingWelcome || migratingLegacy || setupStatusLoading
+                        ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
+                        : showingLegacyMigration
+                          ? 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]'
+                          : 'bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-fg)] hover:shadow-[var(--glow-accent)] hover:brightness-110'
+                    }`}
+                    style={{ fontFamily: 'var(--display)' }}
+                  >
+                    {dismissingWelcome ? 'Opening…' : showingLegacyMigration ? 'Keep legacy mode' : 'Continue to Hub'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onOpenProfiles}
+                    className="h-10 px-4 rounded text-[11px] font-semibold tracking-wide uppercase border transition-all bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]"
+                    style={{ fontFamily: 'var(--display)' }}
+                  >
+                    Open profiles
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onOpenGeneralSettings}
+                    className="h-10 px-4 rounded text-[11px] font-semibold tracking-wide uppercase border transition-all bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]"
+                    style={{ fontFamily: 'var(--display)' }}
+                  >
+                    Open general settings
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onReload}
+                    className="h-10 px-4 rounded text-[11px] font-semibold tracking-wide uppercase border transition-all bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]"
+                    style={{ fontFamily: 'var(--display)' }}
+                  >
+                    Refresh checks
+                  </button>
+                </div>
+              </div>
+
+              <div className="border-t xl:border-t-0 xl:border-l border-[rgba(255,255,255,.08)] bg-[linear-gradient(180deg,rgba(255,255,255,.04),rgba(255,255,255,.015))] px-6 py-6 sm:px-8 sm:py-8 flex flex-col gap-4">
+                <div>
+                  <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--muted-dim)] font-semibold" style={{ fontFamily: 'var(--display)' }}>
+                    Suggested flow
+                  </div>
+                  <div className="mt-2 text-[12px] leading-relaxed text-[var(--muted)]">
+                    Fix blockers first, then decide whether this profile stays empty for testing or becomes a normal working profile.
+                  </div>
+                </div>
+                <div className="flex flex-col gap-3">
+                  <div className="rounded-2xl border border-[var(--border-subtle)] bg-[rgba(0,0,0,.14)] px-4 py-4">
+                    <div className="text-[11px] font-semibold text-[var(--fg-secondary)]">1. Resolve blockers</div>
+                    <div className="mt-1 text-[11px] text-[var(--muted-dim)]">Docker and LLM setup have the biggest impact on first-run success.</div>
+                  </div>
+                  <div className="rounded-2xl border border-[var(--border-subtle)] bg-[rgba(0,0,0,.14)] px-4 py-4">
+                    <div className="text-[11px] font-semibold text-[var(--fg-secondary)]">2. Choose your profile strategy</div>
+                    <div className="mt-1 text-[11px] text-[var(--muted-dim)]">
+                      {showingLegacyMigration
+                        ? 'Run the one-time legacy migration script, then restart the Hub and continue in profile mode.'
+                        : 'Keep this profile empty for onboarding tests or start creating drones and repos here.'}
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-[var(--border-subtle)] bg-[rgba(0,0,0,.14)] px-4 py-4">
+                    <div className="text-[11px] font-semibold text-[var(--fg-secondary)]">3. Optional base image</div>
+                    <div className="mt-1 text-[11px] text-[var(--muted-dim)]">Nice to have, not required. It improves repeatability once you know the shape of your environment.</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1.35fr)_minmax(320px,.65fr)] gap-4">
+            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--panel-alt)] px-5 py-5">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--muted-dim)] font-semibold" style={{ fontFamily: 'var(--display)' }}>
+                    Dependency checks
+                  </div>
+                  <div className="mt-1 text-[12px] text-[var(--muted)]">Backend-reported readiness for the current machine and active profile.</div>
+                </div>
+              </div>
+
+              <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+                {(setupStatusLoading && !setupStatus
+                  ? Array.from({ length: 4 }).map((_, index) => (
+                      <div key={index} className="rounded-2xl border border-[var(--border-subtle)] bg-[rgba(255,255,255,.03)] px-4 py-4 text-[12px] text-[var(--muted-dim)]">
+                        Loading checks…
+                      </div>
+                    ))
+                  : dependencies
+                ).map((item: any, index: number) =>
+                  item?.id ? (
+                    <div key={item.id} className={`rounded-2xl border px-4 py-4 ${dependencyTone(item.status, Boolean(item.blocking))}`}>
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-[13px] font-semibold text-[var(--fg-secondary)]">{item.label}</div>
+                        <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--muted-dim)]">{item.status}</div>
+                      </div>
+                      <div className="mt-2 text-[11px] text-[var(--muted-dim)]">Used for {item.requiredFor}</div>
+                      <div className="mt-3 text-[12px] leading-relaxed text-[var(--fg-secondary)]">{item.detail}</div>
+                    </div>
+                  ) : (
+                    <div key={index} />
+                  ),
+                )}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--panel-alt)] px-5 py-5 flex flex-col gap-4">
+              <div>
+                <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--muted-dim)] font-semibold" style={{ fontFamily: 'var(--display)' }}>
+                  Current profile
+                </div>
+                <div className="mt-2 text-[12px] text-[var(--muted)]">
+                  {showingLegacyMigration
+                    ? 'Legacy mode means Drone is still reading the old shared roots instead of an isolated profile.'
+                    : setupStatus?.profile.isFresh
+                    ? 'This profile is still empty, so it is ideal for onboarding and first-run flow testing.'
+                    : 'This profile already contains saved Hub state, so it behaves like a returning workspace.'}
+                </div>
+              </div>
+              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-4 py-4">
+                <div className="text-[11px] font-semibold text-[var(--fg-secondary)]">Drone data root</div>
+                <div className="mt-2 text-[11px] text-[var(--muted-dim)] break-all">
+                  {(showingLegacyMigration ? legacy?.droneDataDir : setupStatus?.profile.droneDataDir) ?? 'Loading…'}
+                </div>
+              </div>
+              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-4 py-4">
+                <div className="text-[11px] font-semibold text-[var(--fg-secondary)]">DVM data root</div>
+                <div className="mt-2 text-[11px] text-[var(--muted-dim)] break-all">
+                  {(showingLegacyMigration ? legacy?.dvmDataDir : setupStatus?.profile.dvmDataDir) ?? 'Loading…'}
+                </div>
+              </div>
+              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-4 py-4">
+                <div className="text-[11px] font-semibold text-[var(--fg-secondary)]">Recommended next move</div>
+                <div className="mt-2 text-[11px] text-[var(--muted-dim)]">
+                  {blockers.length > 0
+                    ? 'Resolve the blocking dependencies first.'
+                    : recommended.length > 0
+                      ? 'You can continue now, but a couple of optional setup steps will make the workflow smoother.'
+                      : 'The machine and profile are ready. You can continue straight into the Hub.'}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
