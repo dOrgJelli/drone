@@ -44,6 +44,7 @@ export function useDroneHubSidebarProps(args: any): DroneSidebarProps {
     deleteDrone,
     openDroneErrorModal,
     moveDronesToGroup,
+    createGroup,
     createGroupAndMove,
     setCollapsedGroups,
     renameGroup,
@@ -99,15 +100,14 @@ export function useDroneHubSidebarProps(args: any): DroneSidebarProps {
     onDeleteDrone: deleteDrone,
     onOpenDroneErrorModal: openDroneErrorModal,
     onMoveDronesToGroup: moveDronesToGroup,
+    onCreateGroup: createGroup,
     onCreateGroupAndMove: createGroupAndMove,
     onToggleGroupCollapsed: (group) =>
       setCollapsedGroups((prev: Record<string, boolean>) => ({
         ...prev,
         [group]: !prev[group],
       })),
-    onRenameGroup: (group) => {
-      void renameGroup(group);
-    },
+    onRenameGroup: (group, nextName) => renameGroup(group, nextName),
     onOpenGroupMultiChat: (group) => {
       openGroupMultiChat(group);
     },

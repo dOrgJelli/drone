@@ -1,3 +1,8 @@
+import {
+  isSameOrDescendantSidebarGroupPath,
+  rewriteSidebarGroupPathPrefix,
+} from './sidebar-group-paths';
+
 export type SidebarGroupOrderKind = 'group' | 'repo';
 
 export type SidebarGroupOrderRef = {
@@ -133,6 +138,24 @@ export function renameSidebarGroupTokenList(
   return normalizeSidebarGroupOrder(tokens).map((token) => (token === currentToken ? nextToken : token));
 }
 
+export function renameSidebarGroupTokenListByPrefix(
+  tokens: string[],
+  current: SidebarGroupOrderRef,
+  next: SidebarGroupOrderRef,
+): string[] {
+  if (current.kind !== next.kind) return normalizeSidebarGroupOrder(tokens);
+  const kindPrefix = `${current.kind}:`;
+  const currentGroup = String(current.group ?? '').trim();
+  const nextGroup = String(next.group ?? '').trim();
+  if (!currentGroup || !nextGroup || currentGroup === nextGroup) return normalizeSidebarGroupOrder(tokens);
+  return normalizeSidebarGroupOrder(tokens).map((token) => {
+    if (!token.startsWith(kindPrefix)) return token;
+    const groupPath = token.slice(kindPrefix.length);
+    if (!isSameOrDescendantSidebarGroupPath(groupPath, currentGroup)) return token;
+    return `${kindPrefix}${rewriteSidebarGroupPathPrefix(groupPath, currentGroup, nextGroup)}`;
+  });
+}
+
 export function renameSidebarEntryOrderMapKey(
   entriesByKey: Record<string, string[]>,
   current: SidebarGroupOrderRef,
@@ -149,6 +172,32 @@ export function renameSidebarEntryOrderMapKey(
   const mergedEntries = normalizeSidebarGroupOrder([...(nextMap[nextToken] ?? []), ...currentEntries]);
   if (mergedEntries.length > 0) nextMap[nextToken] = mergedEntries;
   return nextMap;
+}
+
+export function renameSidebarEntryOrderMapKeysByPrefix(
+  entriesByKey: Record<string, string[]>,
+  current: SidebarGroupOrderRef,
+  next: SidebarGroupOrderRef,
+): Record<string, string[]> {
+  if (current.kind !== next.kind) return entriesByKey;
+  const currentGroup = String(current.group ?? '').trim();
+  const nextGroup = String(next.group ?? '').trim();
+  if (!currentGroup || !nextGroup || currentGroup === nextGroup) return entriesByKey;
+
+  const out: Record<string, string[]> = {};
+  for (const [key, entries] of Object.entries(entriesByKey)) {
+    const prefix = `${current.kind}:`;
+    if (!key.startsWith(prefix)) {
+      out[key] = normalizeSidebarGroupOrder(entries);
+      continue;
+    }
+    const groupPath = key.slice(prefix.length);
+    const nextKey = isSameOrDescendantSidebarGroupPath(groupPath, currentGroup)
+      ? `${prefix}${rewriteSidebarGroupPathPrefix(groupPath, currentGroup, nextGroup)}`
+      : key;
+    out[nextKey] = normalizeSidebarGroupOrder([...(out[nextKey] ?? []), ...entries]);
+  }
+  return out;
 }
 
 export const renameSidebarGroupOrderToken = renameSidebarGroupTokenList;

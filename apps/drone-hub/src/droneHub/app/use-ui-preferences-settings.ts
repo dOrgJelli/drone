@@ -55,6 +55,7 @@ function normalizeUiPreferencesSnapshot(value: Partial<UiPreferencesSnapshot> | 
     sidebarGroupingMode: normalizeSidebarGroupingMode(value?.sidebarGroupingMode),
     sidebarGroupOrder: normalizeOrderedStringList(value?.sidebarGroupOrder),
     sidebarDroneOrderByGroup: normalizeOrderedStringMap(value?.sidebarDroneOrderByGroup),
+    sidebarNodeOrderByParent: normalizeOrderedStringMap(value?.sidebarNodeOrderByParent),
     sidebarChatOrderByDrone: normalizeOrderedStringMap(value?.sidebarChatOrderByDrone),
     hiddenSidebarGroups: normalizeOrderedStringList(value?.hiddenSidebarGroups),
     autoDelete: value?.autoDelete === true,
@@ -71,6 +72,7 @@ function hasMeaningfulUiPreferencesSnapshot(value: UiPreferencesSnapshot): boole
     value.sidebarGroupingMode === 'repos' ||
     value.sidebarGroupOrder.length > 0 ||
     Object.keys(value.sidebarDroneOrderByGroup).length > 0 ||
+    Object.keys(value.sidebarNodeOrderByParent).length > 0 ||
     Object.keys(value.sidebarChatOrderByDrone).length > 0 ||
     value.hiddenSidebarGroups.length > 0 ||
     value.autoDelete ||
@@ -84,6 +86,8 @@ function mergeUiPreferencesForRecovery(base: UiPreferencesSnapshot, rescue: UiPr
     sidebarGroupOrder: base.sidebarGroupOrder.length > 0 ? base.sidebarGroupOrder : rescue.sidebarGroupOrder,
     sidebarDroneOrderByGroup:
       Object.keys(base.sidebarDroneOrderByGroup).length > 0 ? base.sidebarDroneOrderByGroup : rescue.sidebarDroneOrderByGroup,
+    sidebarNodeOrderByParent:
+      Object.keys(base.sidebarNodeOrderByParent).length > 0 ? base.sidebarNodeOrderByParent : rescue.sidebarNodeOrderByParent,
     sidebarChatOrderByDrone:
       Object.keys(base.sidebarChatOrderByDrone).length > 0 ? base.sidebarChatOrderByDrone : rescue.sidebarChatOrderByDrone,
     hiddenSidebarGroups: base.hiddenSidebarGroups.length > 0 ? base.hiddenSidebarGroups : rescue.hiddenSidebarGroups,
@@ -121,6 +125,7 @@ export function useUiPreferencesSettings({ requestJson }: UseUiPreferencesSettin
     sidebarGroupingMode,
     sidebarGroupOrder,
     sidebarDroneOrderByGroup,
+    sidebarNodeOrderByParent,
     sidebarChatOrderByDrone,
     hiddenSidebarGroups,
     autoDelete,
@@ -128,6 +133,7 @@ export function useUiPreferencesSettings({ requestJson }: UseUiPreferencesSettin
     setSidebarGroupingMode,
     setSidebarGroupOrder,
     setSidebarDroneOrderByGroup,
+    setSidebarNodeOrderByParent,
     setSidebarChatOrderByDrone,
     setHiddenSidebarGroups,
     setAutoDelete,
@@ -137,6 +143,7 @@ export function useUiPreferencesSettings({ requestJson }: UseUiPreferencesSettin
       sidebarGroupingMode: s.sidebarGroupingMode,
       sidebarGroupOrder: s.sidebarGroupOrder,
       sidebarDroneOrderByGroup: s.sidebarDroneOrderByGroup,
+      sidebarNodeOrderByParent: s.sidebarNodeOrderByParent,
       sidebarChatOrderByDrone: s.sidebarChatOrderByDrone,
       hiddenSidebarGroups: s.hiddenSidebarGroups,
       autoDelete: s.autoDelete,
@@ -144,6 +151,7 @@ export function useUiPreferencesSettings({ requestJson }: UseUiPreferencesSettin
       setSidebarGroupingMode: s.setSidebarGroupingMode,
       setSidebarGroupOrder: s.setSidebarGroupOrder,
       setSidebarDroneOrderByGroup: s.setSidebarDroneOrderByGroup,
+      setSidebarNodeOrderByParent: s.setSidebarNodeOrderByParent,
       setSidebarChatOrderByDrone: s.setSidebarChatOrderByDrone,
       setHiddenSidebarGroups: s.setHiddenSidebarGroups,
       setAutoDelete: s.setAutoDelete,
@@ -162,6 +170,7 @@ export function useUiPreferencesSettings({ requestJson }: UseUiPreferencesSettin
       setSidebarGroupingMode(normalized.sidebarGroupingMode);
       setSidebarGroupOrder(normalized.sidebarGroupOrder);
       setSidebarDroneOrderByGroup(normalized.sidebarDroneOrderByGroup);
+      setSidebarNodeOrderByParent(normalized.sidebarNodeOrderByParent);
       setSidebarChatOrderByDrone(normalized.sidebarChatOrderByDrone);
       setHiddenSidebarGroups(normalized.hiddenSidebarGroups);
       setAutoDelete(normalized.autoDelete);
@@ -174,6 +183,7 @@ export function useUiPreferencesSettings({ requestJson }: UseUiPreferencesSettin
       setHiddenSidebarGroups,
       setSidebarChatOrderByDrone,
       setSidebarDroneOrderByGroup,
+      setSidebarNodeOrderByParent,
       setSidebarGroupOrder,
       setSidebarGroupingMode,
     ],
@@ -193,6 +203,7 @@ export function useUiPreferencesSettings({ requestJson }: UseUiPreferencesSettin
         sidebarGroupingMode,
         sidebarGroupOrder,
         sidebarDroneOrderByGroup,
+        sidebarNodeOrderByParent,
         sidebarChatOrderByDrone,
         hiddenSidebarGroups,
         autoDelete,
@@ -204,6 +215,7 @@ export function useUiPreferencesSettings({ requestJson }: UseUiPreferencesSettin
       hiddenSidebarGroups,
       sidebarChatOrderByDrone,
       sidebarDroneOrderByGroup,
+      sidebarNodeOrderByParent,
       sidebarGroupOrder,
       sidebarGroupingMode,
     ],
@@ -254,9 +266,6 @@ export function useUiPreferencesSettings({ requestJson }: UseUiPreferencesSettin
           if (saveSeqRef.current !== seq) return;
           const normalized = normalizeUiPreferencesSnapshot(data.uiPreferences);
           lastSavedSerializedRef.current = serializeUiPreferencesSnapshot(normalized);
-          if (serializeUiPreferencesSnapshot(normalized) !== serialized) {
-            applyUiPreferences(normalized);
-          }
         })
         .catch(() => {
           if (saveSeqRef.current !== seq) return;
@@ -267,5 +276,5 @@ export function useUiPreferencesSettings({ requestJson }: UseUiPreferencesSettin
       if (saveTimeoutRef.current === timeout) saveTimeoutRef.current = null;
       window.clearTimeout(timeout);
     };
-  }, [applyUiPreferences, requestJson, snapshot]);
+  }, [requestJson, snapshot]);
 }

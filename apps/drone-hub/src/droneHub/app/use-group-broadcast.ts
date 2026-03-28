@@ -3,6 +3,7 @@ import type { ChatSendPayload } from '../chat';
 import type { DroneSummary } from '../types';
 import { isDroneStartingOrSeeding, resolveChatNameForDrone } from './helpers';
 import { SIDEBAR_VISIBLE_MULTI_CHAT_GROUP, type SidebarGroup } from './use-sidebar-view-model';
+import { isSameOrDescendantSidebarGroupPath } from './sidebar-group-paths';
 
 type RequestJsonFn = <T>(url: string, init?: RequestInit) => Promise<T>;
 
@@ -42,7 +43,16 @@ export function useGroupBroadcast({
           items: sidebarVisibleDrones,
         };
       }
-      return sidebarGroups.find((g) => g.group === selectedGroupMultiChat) ?? null;
+      const exact = sidebarGroups.find((g) => g.group === selectedGroupMultiChat);
+      if (exact?.kind === 'repo') return exact;
+      const matches = sidebarGroups.filter((g) => isSameOrDescendantSidebarGroupPath(g.group, selectedGroupMultiChat));
+      if (matches.length === 0) return exact ?? null;
+      return {
+        group: selectedGroupMultiChat,
+        label: exact?.label ?? selectedGroupMultiChat,
+        kind: 'group' as const,
+        items: matches.flatMap((group) => group.items),
+      };
     },
     [selectedGroupMultiChat, sidebarGroups, sidebarVisibleDrones],
   );

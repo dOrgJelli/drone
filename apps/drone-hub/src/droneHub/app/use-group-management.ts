@@ -4,10 +4,17 @@ import type { DroneSummary } from '../types';
 import { isUngroupedGroupName } from '../../domain';
 import { isNotFoundError } from './hooks';
 import {
-  renameSidebarEntryOrderMapKey,
-  renameSidebarGroupOrderToken,
-  renameSidebarGroupTokenList,
+  renameSidebarEntryOrderMapKeysByPrefix,
+  renameSidebarGroupTokenListByPrefix,
 } from './sidebar-group-order';
+import {
+  removeSidebarNodeOrderByParentGroupPrefix,
+  renameSidebarNodeOrderByParentGroupPrefix,
+} from './sidebar-node-order';
+import {
+  isSameOrDescendantSidebarGroupPath,
+  rewriteSidebarGroupPathPrefix,
+} from './sidebar-group-paths';
 
 type UseGroupManagementArgs = {
   autoDelete: boolean;
@@ -18,6 +25,7 @@ type UseGroupManagementArgs = {
   setCollapsedGroups: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
   setSidebarGroupOrder: React.Dispatch<React.SetStateAction<string[]>>;
   setSidebarDroneOrderByGroup: React.Dispatch<React.SetStateAction<Record<string, string[]>>>;
+  setSidebarNodeOrderByParent: React.Dispatch<React.SetStateAction<Record<string, string[]>>>;
   setHiddenSidebarGroups: React.Dispatch<React.SetStateAction<string[]>>;
   selectedGroupMultiChat: string | null;
   setSelectedGroupMultiChat: React.Dispatch<React.SetStateAction<string | null>>;
@@ -34,6 +42,39 @@ type DeleteGroupOptions = {
   repoPath?: string | null;
 };
 
+function renameCollapsedGroupKeysByPrefix(
+  value: Record<string, boolean>,
+  currentGroup: string,
+  nextGroup: string,
+): Record<string, boolean> {
+  let changed = false;
+  const nextMap: Record<string, boolean> = {};
+  for (const [key, collapsed] of Object.entries(value)) {
+    const nextKey = isSameOrDescendantSidebarGroupPath(key, currentGroup)
+      ? rewriteSidebarGroupPathPrefix(key, currentGroup, nextGroup)
+      : key;
+    if (nextKey !== key) changed = true;
+    nextMap[nextKey] = collapsed;
+  }
+  return changed ? nextMap : value;
+}
+
+function removeCollapsedGroupKeysByPrefix(
+  value: Record<string, boolean>,
+  currentGroup: string,
+): Record<string, boolean> {
+  let changed = false;
+  const nextMap: Record<string, boolean> = {};
+  for (const [key, collapsed] of Object.entries(value)) {
+    if (isSameOrDescendantSidebarGroupPath(key, currentGroup)) {
+      changed = true;
+      continue;
+    }
+    nextMap[key] = collapsed;
+  }
+  return changed ? nextMap : value;
+}
+
 export function useGroupManagement({
   autoDelete,
   drones,
@@ -43,6 +84,7 @@ export function useGroupManagement({
   setCollapsedGroups,
   setSidebarGroupOrder,
   setSidebarDroneOrderByGroup,
+  setSidebarNodeOrderByParent,
   setHiddenSidebarGroups,
   selectedGroupMultiChat,
   setSelectedGroupMultiChat,
@@ -55,19 +97,19 @@ export function useGroupManagement({
   const shouldConfirmDelete = React.useCallback(() => !autoDelete, [autoDelete]);
 
   const renameGroup = React.useCallback(
-    async (groupRaw: string): Promise<void> => {
+    async (groupRaw: string, nextNameRaw?: string): Promise<boolean> => {
       const group = String(groupRaw ?? '').trim();
-      if (!group) return;
-      if (isUngroupedGroupName(group)) return;
-      if (renamingGroups[group]) return;
+      if (!group) return false;
+      if (isUngroupedGroupName(group)) return false;
+      if (renamingGroups[group]) return false;
 
-      const next = window.prompt(`Rename group "${group}" to:`, group);
+      const next = typeof nextNameRaw === 'string' ? nextNameRaw : window.prompt(`Rename group "${group}" to:`, group);
       const newName = String(next ?? '').trim();
-      if (!newName) return;
-      if (newName === group) return;
+      if (!newName) return false;
+      if (newName === group) return false;
       if (isUngroupedGroupName(newName)) {
         window.alert('"Ungrouped" is reserved.');
-        return;
+        return false;
       }
 
       setRenamingGroups((prev) => ({ ...prev, [group]: true }));
@@ -82,51 +124,51 @@ export function useGroupManagement({
         );
 
         // Keep per-group UI state aligned after rename.
-        setCollapsedGroups((prev) => {
-          if (!(group in prev)) return prev;
-          const nextMap = { ...prev };
-          const wasCollapsed = Boolean(nextMap[group]);
-          delete nextMap[group];
-          nextMap[newName] = wasCollapsed;
-          return nextMap;
-        });
+        setCollapsedGroups((prev) => renameCollapsedGroupKeysByPrefix(prev, group, newName));
         setDeletingGroups((prev) => {
           if (!(group in prev)) return prev;
           const nextMap = { ...prev };
           delete nextMap[group];
+          nextMap[newName] = false;
           return nextMap;
         });
         setSidebarGroupOrder((prev) =>
-          renameSidebarGroupOrderToken(
+          renameSidebarGroupTokenListByPrefix(
             prev,
             { group, kind: 'group' },
             { group: newName, kind: 'group' },
           ),
         );
         setHiddenSidebarGroups((prev) =>
-          renameSidebarGroupTokenList(
+          renameSidebarGroupTokenListByPrefix(
             prev,
             { group, kind: 'group' },
             { group: newName, kind: 'group' },
           ),
         );
         setSidebarDroneOrderByGroup((prev) =>
-          renameSidebarEntryOrderMapKey(
+          renameSidebarEntryOrderMapKeysByPrefix(
             prev,
             { group, kind: 'group' },
             { group: newName, kind: 'group' },
           ),
         );
-        if (selectedGroupMultiChat === group) setSelectedGroupMultiChat(newName);
+        setSidebarNodeOrderByParent((prev) => renameSidebarNodeOrderByParentGroupPrefix(prev, group, newName));
+        if (selectedGroupMultiChat && isSameOrDescendantSidebarGroupPath(selectedGroupMultiChat, group)) {
+          setSelectedGroupMultiChat(rewriteSidebarGroupPathPrefix(selectedGroupMultiChat, group, newName));
+        }
+        return true;
       } catch (e: any) {
         const msg = String(e?.message ?? e ?? '').trim();
         console.error('[DroneHub] rename group failed', { group, newName, error: e });
         window.alert(msg || 'Rename failed.');
+        return false;
       } finally {
         setRenamingGroups((prev) => {
-          if (!prev[group]) return prev;
+          if (!prev[group] && !prev[newName]) return prev;
           const nextMap = { ...prev };
           delete nextMap[group];
+          delete nextMap[newName];
           return nextMap;
         });
       }
@@ -139,6 +181,7 @@ export function useGroupManagement({
       setSelectedGroupMultiChat,
       setSidebarDroneOrderByGroup,
       setSidebarGroupOrder,
+      setSidebarNodeOrderByParent,
     ],
   );
 
@@ -170,7 +213,7 @@ export function useGroupManagement({
               }
               const droneGroup = String(d?.group ?? '').trim();
               if (wantsUngroupedGroup) return !droneGroup || isUngroupedGroupName(droneGroup);
-              return droneGroup === group;
+              return isSameOrDescendantSidebarGroupPath(droneGroup, group);
             })
             .map((d) => String(d?.id ?? '').trim())
             .filter(Boolean),
@@ -230,7 +273,29 @@ export function useGroupManagement({
         } else {
           await requestJson(`/api/groups/${encodeURIComponent(group)}`, { method: 'DELETE' });
         }
-        if (selectedGroupMultiChat === group) setSelectedGroupMultiChat(null);
+        setCollapsedGroups((prev) => removeCollapsedGroupKeysByPrefix(prev, group));
+        setSidebarGroupOrder((prev) =>
+          prev.filter((token) => !token.startsWith('group:') || !isSameOrDescendantSidebarGroupPath(token.slice('group:'.length), group)),
+        );
+        setHiddenSidebarGroups((prev) =>
+          prev.filter((token) => !token.startsWith('group:') || !isSameOrDescendantSidebarGroupPath(token.slice('group:'.length), group)),
+        );
+        setSidebarDroneOrderByGroup((prev) => {
+          let changed = false;
+          const nextMap: Record<string, string[]> = {};
+          for (const [key, value] of Object.entries(prev)) {
+            if (key.startsWith('group:') && isSameOrDescendantSidebarGroupPath(key.slice('group:'.length), group)) {
+              changed = true;
+              continue;
+            }
+            nextMap[key] = value;
+          }
+          return changed ? nextMap : prev;
+        });
+        setSidebarNodeOrderByParent((prev) => removeSidebarNodeOrderByParentGroupPrefix(prev, group));
+        if (selectedGroupMultiChat && isSameOrDescendantSidebarGroupPath(selectedGroupMultiChat, group)) {
+          setSelectedGroupMultiChat(null);
+        }
       } catch (e: any) {
         console.error('[DroneHub] delete group failed', { group, error: e });
         if (addedByThisDelete.length > 0) {
@@ -259,8 +324,13 @@ export function useGroupManagement({
       optimisticallyDeletedDrones,
       polledDrones,
       selectedGroupMultiChat,
+      setCollapsedGroups,
       setOptimisticallyDeletedDrones,
       setSelectedGroupMultiChat,
+      setSidebarDroneOrderByGroup,
+      setSidebarNodeOrderByParent,
+      setSidebarGroupOrder,
+      setHiddenSidebarGroups,
       shouldConfirmDelete,
     ],
   );
@@ -370,6 +440,38 @@ export function useGroupManagement({
     [moveDronesToGroup],
   );
 
+  const createGroup = React.useCallback(
+    async (targetGroupLabel: string) => {
+      const target = String(targetGroupLabel ?? '').trim();
+      if (!target) {
+        const msg = 'Group name is required.';
+        setGroupMoveError(msg);
+        return { ok: false, error: msg };
+      }
+      if (isUngroupedGroupName(target)) {
+        const msg = '"Ungrouped" is reserved.';
+        setGroupMoveError(msg);
+        return { ok: false, error: msg };
+      }
+
+      setGroupMoveError(null);
+      try {
+        await requestJson<{ ok: true; name: string; createdAt: string }>(`/api/groups`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name: target }),
+        });
+        return { ok: true, error: null };
+      } catch (e: any) {
+        const msg = String(e?.message ?? e ?? '').trim();
+        if (/group already exists/i.test(msg)) return { ok: true, error: null };
+        setGroupMoveError(msg || 'Create group failed.');
+        return { ok: false, error: msg || 'Create group failed.' };
+      }
+    },
+    [],
+  );
+
   return {
     groupMoveError,
     setGroupMoveError,
@@ -378,6 +480,7 @@ export function useGroupManagement({
     renamingGroups,
     renameGroup,
     deleteGroup,
+    createGroup,
     moveDronesToGroup,
     createGroupAndMove,
   };

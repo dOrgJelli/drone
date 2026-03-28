@@ -5,6 +5,7 @@ import { compareDronesByNewestFirst, isHiddenDrone } from './helpers';
 import { isStartupSeedFresh } from './app-config';
 import type { StartupSeedState } from './app-types';
 import { orderSidebarEntries, orderSidebarGroups, sidebarGroupOrderToken } from './sidebar-group-order';
+import { isSameOrDescendantSidebarGroupPath } from './sidebar-group-paths';
 
 export type SidebarGroup = {
   group: string;
@@ -114,6 +115,18 @@ export function useSidebarViewModel({
   }, [activeRepoPath, sidebarDrones]);
 
   const hiddenSidebarGroupTokenSet = React.useMemo(() => new Set(hiddenSidebarGroups), [hiddenSidebarGroups]);
+  const isSidebarGroupHidden = React.useCallback(
+    (group: SidebarGroup) => {
+      const token = sidebarGroupOrderToken(group);
+      if (hiddenSidebarGroupTokenSet.has(token)) return true;
+      if (group.kind !== 'group') return false;
+      return hiddenSidebarGroups.some((hiddenToken) => {
+        if (!hiddenToken.startsWith('group:')) return false;
+        return isSameOrDescendantSidebarGroupPath(group.group, hiddenToken.slice('group:'.length));
+      });
+    },
+    [hiddenSidebarGroupTokenSet, hiddenSidebarGroups],
+  );
 
   const allSidebarGroups = React.useMemo(() => {
     if (sidebarGroupingMode === 'repos') {
@@ -195,16 +208,16 @@ export function useSidebarViewModel({
   const sidebarHiddenGroupCount = React.useMemo(
     () =>
       allSidebarGroups.reduce(
-        (count, group) => count + (hiddenSidebarGroupTokenSet.has(sidebarGroupOrderToken(group)) ? 1 : 0),
+        (count, group) => count + (isSidebarGroupHidden(group) ? 1 : 0),
         0,
       ),
-    [allSidebarGroups, hiddenSidebarGroupTokenSet],
+    [allSidebarGroups, isSidebarGroupHidden],
   );
 
   const sidebarGroups = React.useMemo(() => {
     if (showHiddenSidebarGroups) return allSidebarGroups;
-    return allSidebarGroups.filter((group) => !hiddenSidebarGroupTokenSet.has(sidebarGroupOrderToken(group)));
-  }, [allSidebarGroups, hiddenSidebarGroupTokenSet, showHiddenSidebarGroups]);
+    return allSidebarGroups.filter((group) => !isSidebarGroupHidden(group));
+  }, [allSidebarGroups, isSidebarGroupHidden, showHiddenSidebarGroups]);
 
   const visibleSidebarDroneIdSet = React.useMemo(() => {
     const out = new Set<string>();

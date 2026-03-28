@@ -29,6 +29,9 @@ export function DroneCard({
   deleteBusy,
   statusHint,
   unreadAgentMessage,
+  active,
+  selectionTone,
+  showSelectionEdge,
 }: {
   drone: DroneSummary;
   displayName?: string;
@@ -54,6 +57,9 @@ export function DroneCard({
   deleteBusy?: boolean;
   statusHint?: string;
   unreadAgentMessage?: boolean;
+  active?: boolean;
+  selectionTone?: 'accent' | 'muted';
+  showSelectionEdge?: boolean;
   showGroup?: boolean;
 }) {
   const shownName = String(displayName ?? drone.name).trim() || drone.name;
@@ -88,9 +94,12 @@ export function DroneCard({
   const isStarting = drone.hubPhase === 'creating' || drone.hubPhase === 'starting' || drone.hubPhase === 'seeding';
   const showUnreadIndicator =
     Boolean(unreadAgentMessage) && !isStarting && !showRespondingAsStatus;
+  const showActiveIndicator = Boolean(active) && !showUnreadIndicator;
   const errText = String(drone.hubMessage ?? drone.statusError ?? '').trim();
   const showInlineError = drone.hubPhase === 'error' && Boolean(errText);
   const canOpenInlineError = showInlineError && typeof onErrorClick === 'function';
+  const selectedTone = selectionTone === 'muted' ? 'muted' : 'accent';
+  const renderSelectionEdge = showSelectionEdge !== false;
   const stopCardSelection = (e: React.SyntheticEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -112,14 +121,16 @@ export function DroneCard({
       }}
       className={`w-full text-left px-3 h-8 flex items-center rounded-md border transition-all duration-150 group/drone relative ${
         selected
-          ? 'bg-[var(--selected)] border-[var(--accent-muted)]'
+          ? selectedTone === 'muted'
+            ? 'bg-[rgba(255,255,255,.04)] border-[var(--border-subtle)]'
+            : 'bg-[var(--selected)] border-[var(--accent-muted)]'
           : 'border-transparent hover:bg-[var(--hover)] hover:border-[var(--border-subtle)]'
       } ${draggable ? 'cursor-grab touch-none active:cursor-grabbing' : ''} ${
         dragging ? 'opacity-35' : ''
       } focus:outline-none focus-visible:outline-none`}
     >
       {/* Accent edge for selected state */}
-      {selected && (
+      {selected && renderSelectionEdge && (
         <div className="absolute left-0 top-1 bottom-1 w-[2px] rounded-full bg-[var(--accent)]" />
       )}
 
@@ -130,6 +141,12 @@ export function DroneCard({
             className="inline-flex h-1.5 w-1.5 flex-shrink-0 rounded-full bg-[var(--yellow)]"
             title="Unread agent message"
             aria-label="Unread agent message"
+          />
+        ) : showActiveIndicator ? (
+          <span
+            className="inline-flex h-1.5 w-1.5 flex-shrink-0 rounded-full bg-[var(--accent)]"
+            title="Open chat"
+            aria-label="Open chat"
           />
         ) : null}
         <span

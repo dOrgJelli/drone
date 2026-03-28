@@ -2144,6 +2144,22 @@ function validateGroupNameOrThrow(raw: any, label: string = 'group'): string {
   return name;
 }
 
+function isSameOrDescendantGroupPath(pathRaw: any, prefixRaw: any): boolean {
+  const path = normalizeGroupName(pathRaw);
+  const prefix = normalizeGroupName(prefixRaw);
+  if (!path || !prefix) return false;
+  return path === prefix || path.startsWith(`${prefix}/`);
+}
+
+function rewriteGroupPathPrefix(pathRaw: any, fromPrefixRaw: any, toPrefixRaw: any): string {
+  const path = normalizeGroupName(pathRaw);
+  const fromPrefix = normalizeGroupName(fromPrefixRaw);
+  const toPrefix = normalizeGroupName(toPrefixRaw);
+  if (!path || !fromPrefix || !toPrefix || !isSameOrDescendantGroupPath(path, fromPrefix)) return path;
+  if (path === fromPrefix) return toPrefix;
+  return `${toPrefix}/${path.slice(fromPrefix.length + 1)}`;
+}
+
 const DRONE_DISPLAY_NAME_MAX_LEN = 80;
 function normalizeDroneDisplayName(raw: any): string {
   const s = String(raw ?? '').trim();
@@ -15916,7 +15932,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
       }
 
       // POST /api/groups/:group/rename
-      // Renames a group and migrates drone assignments to the new name.
+      // Renames a group path and migrates exact + descendant drone assignments to the new prefix.
       if (method === 'POST' && parts.length === 4 && parts[0] === 'api' && parts[1] === 'groups' && parts[3] === 'rename') {
         const oldNameRaw = decodeURIComponent(parts[2]);
         const oldName = normalizeGroupName(oldNameRaw);
@@ -15961,49 +15977,57 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
 
           for (const d of Object.values(regAny?.drones ?? {}) as any[]) {
             const g = normalizeGroupName(d?.group);
-            if (g === oldName) usedOld = true;
-            if (g === newName) usedNew = true;
+            if (isSameOrDescendantGroupPath(g, oldName)) usedOld = true;
+            if (isSameOrDescendantGroupPath(g, newName)) usedNew = true;
           }
           for (const d of Object.values(regAny?.pending ?? {}) as any[]) {
             const g = normalizeGroupName(d?.group);
-            if (g === oldName) usedOld = true;
-            if (g === newName) usedNew = true;
+            if (isSameOrDescendantGroupPath(g, oldName)) usedOld = true;
+            if (isSameOrDescendantGroupPath(g, newName)) usedNew = true;
           }
 
-          const hasOldEntry = Boolean(regAny.groups[oldName]);
+          const hasOldEntry = Object.keys(regAny.groups ?? {}).some((name) => isSameOrDescendantGroupPath(name, oldName));
           if (!hasOldEntry && !usedOld) return { ok: false as const, status: 404 as const, error: `unknown group: ${oldName}` };
-          if (regAny.groups[newName] || usedNew) return { ok: false as const, status: 409 as const, error: `group already exists: ${newName}` };
+          const collidesWithExistingGroup = Object.keys(regAny.groups ?? {}).some((name) => {
+            if (isSameOrDescendantGroupPath(name, oldName)) return false;
+            return isSameOrDescendantGroupPath(name, newName);
+          });
+          if (collidesWithExistingGroup || usedNew) {
+            return { ok: false as const, status: 409 as const, error: `group already exists: ${newName}` };
+          }
 
           // Migrate drone assignments.
           for (const [name, d] of Object.entries(regAny?.drones ?? {}) as any) {
             const g = normalizeGroupName(d?.group);
-            if (g !== oldName) continue;
-            d.group = newName;
+            if (!isSameOrDescendantGroupPath(g, oldName)) continue;
+            d.group = rewriteGroupPathPrefix(g, oldName, newName);
             regAny.drones = regAny.drones ?? {};
             regAny.drones[String(name)] = d;
             movedDrones += 1;
           }
           for (const [name, d] of Object.entries(regAny?.pending ?? {}) as any) {
             const g = normalizeGroupName(d?.group);
-            if (g !== oldName) continue;
-            d.group = newName;
+            if (!isSameOrDescendantGroupPath(g, oldName)) continue;
+            d.group = rewriteGroupPathPrefix(g, oldName, newName);
             regAny.pending = regAny.pending ?? {};
             regAny.pending[String(name)] = d;
             movedPending += 1;
           }
 
-          // Rename/seed the group entry.
-          if (regAny.groups[oldName]) {
-            const entry = regAny.groups[oldName];
-            delete regAny.groups[oldName];
-            regAny.groups[newName] = {
+          // Rewrite exact + descendant group entries.
+          const rewrittenGroups: Record<string, any> = {};
+          for (const [name, entry] of Object.entries(regAny.groups ?? {}) as Array<[string, any]>) {
+            const rewrittenName = isSameOrDescendantGroupPath(name, oldName)
+              ? rewriteGroupPathPrefix(name, oldName, newName)
+              : name;
+            rewrittenGroups[rewrittenName] = {
               ...(entry && typeof entry === 'object' ? entry : {}),
-              name: newName,
-              updatedAt: at,
+              name: rewrittenName,
+              updatedAt: isSameOrDescendantGroupPath(name, oldName) ? at : entry?.updatedAt,
             };
-          } else {
-            regAny.groups[newName] = { name: newName, createdAt: at, updatedAt: at };
           }
+          if (!rewrittenGroups[newName]) rewrittenGroups[newName] = { name: newName, createdAt: at, updatedAt: at };
+          regAny.groups = rewrittenGroups;
 
           return { ok: true as const, movedDrones, movedPending };
         });
@@ -16018,7 +16042,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
       }
 
       // DELETE /api/groups/:group?keepVolume=0|1&forget=0|1
-      // NOTE: Deleting a group deletes all drones inside it, and removes the group entry (if any).
+      // NOTE: Deleting a group path deletes all drones inside that subtree and removes matching group entries.
       if (method === 'DELETE' && parts.length === 3 && parts[0] === 'api' && parts[1] === 'groups') {
         const groupRaw = decodeURIComponent(parts[2]);
         const group = groupRaw.trim();
@@ -16032,14 +16056,16 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         const wantsUngrouped = isUngroupedGroupName(group);
 
         const regAny: any = await loadRegistry();
-        const groupExists = !wantsUngrouped && Boolean(regAny?.groups?.[group]);
+        const groupExists =
+          !wantsUngrouped &&
+          Object.keys(regAny?.groups ?? {}).some((name) => isSameOrDescendantGroupPath(name, group));
 
         const realTargets = (Object.entries(regAny.drones ?? {}) as Array<[string, any]>)
           .map(([id, d]) => ({ id: normalizeDroneIdentity(id), name: String(d?.name ?? '').trim(), group: String(d?.group ?? '').trim() }))
           .filter((t) => Boolean(t.id))
           .filter((t) => {
             if (wantsUngrouped) return !t.group || isUngroupedGroupName(t.group);
-            return t.group === group;
+            return isSameOrDescendantGroupPath(t.group, group);
           });
 
         const pendingTargets = (Object.entries(regAny.pending ?? {}) as Array<[string, any]>)
@@ -16047,7 +16073,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           .filter((t) => Boolean(t.id))
           .filter((t) => {
             if (wantsUngrouped) return !t.group || isUngroupedGroupName(t.group);
-            return t.group === group;
+            return isSameOrDescendantGroupPath(t.group, group);
           });
 
         const targetById = new Map<string, { id: string; name: string }>();
@@ -16065,7 +16091,9 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           }
           try {
             await updateRegistry((regLatest: any) => {
-              if (regLatest?.groups?.[group]) delete regLatest.groups[group];
+              for (const name of Object.keys(regLatest?.groups ?? {})) {
+                if (isSameOrDescendantGroupPath(name, group)) delete regLatest.groups[name];
+              }
             });
           } catch {
             // ignore
@@ -16107,7 +16135,11 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             for (const n of pendingDeleted) {
               if (regLatest?.pending?.[n] && !regLatest?.drones?.[n]) delete regLatest.pending[n];
             }
-            if (!wantsUngrouped && regLatest?.groups?.[group]) delete regLatest.groups[group];
+            if (!wantsUngrouped) {
+              for (const name of Object.keys(regLatest?.groups ?? {})) {
+                if (isSameOrDescendantGroupPath(name, group)) delete regLatest.groups[name];
+              }
+            }
           });
         } catch {
           // ignore (drones are already deleted)

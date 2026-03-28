@@ -42,6 +42,7 @@ import { useLlmSettings } from './droneHub/app/use-llm-settings';
 import { useKanbanBoardSettings } from './droneHub/app/use-kanban-board-settings';
 import { useTaskPlaybookButtonSettings } from './droneHub/app/use-task-playbook-button-settings';
 import { useUiPreferencesSettings } from './droneHub/app/use-ui-preferences-settings';
+import { removeDroneIdsFromSidebarNodeOrderByParent } from './droneHub/app/sidebar-node-order';
 import { useDeleteActionSettings } from './droneHub/app/use-delete-action-settings';
 import { useFilesystemSettings } from './droneHub/app/use-filesystem-settings';
 import { useProfileSettings } from './droneHub/app/use-profile-settings';
@@ -143,6 +144,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     collapsedGroups,
     sidebarGroupOrder,
     sidebarDroneOrderByGroup,
+    sidebarNodeOrderByParent,
     sidebarChatOrderByDrone,
     hiddenSidebarGroups,
     showHiddenSidebarGroups,
@@ -181,6 +183,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setCollapsedGroups,
     setSidebarGroupOrder,
     setSidebarDroneOrderByGroup,
+    setSidebarNodeOrderByParent,
     setSidebarChatOrderByDrone,
     setHiddenSidebarGroups,
     setFleetDashboardOpen,
@@ -770,6 +773,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     movingDroneGroups,
     deletingGroups,
     renamingGroups,
+    createGroup: createSidebarGroup,
     renameGroup,
     deleteGroup,
     moveDronesToGroup,
@@ -783,6 +787,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setCollapsedGroups,
     setSidebarGroupOrder,
     setSidebarDroneOrderByGroup,
+    setSidebarNodeOrderByParent,
     setHiddenSidebarGroups,
     selectedGroupMultiChat,
     setSelectedGroupMultiChat,
@@ -838,9 +843,10 @@ export function useDroneHubAppModel(): DroneHubAppModel {
         }
         return changed ? next : prev;
       });
+      setSidebarNodeOrderByParent((prev) => removeDroneIdsFromSidebarNodeOrderByParent(prev, [droneId]));
       return true;
     },
-    [deleteDroneBase, setSidebarChatOrderByDrone, setSidebarDroneOrderByGroup],
+    [deleteDroneBase, setSidebarChatOrderByDrone, setSidebarDroneOrderByGroup, setSidebarNodeOrderByParent],
   );
 
   const normalizeCreateRepoPath = React.useCallback(
@@ -2473,6 +2479,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     deleteDrone,
     openDroneErrorModal,
     moveDronesToGroup,
+    createGroup: createSidebarGroup,
     createGroupAndMove,
     setCollapsedGroups,
     renameGroup,
