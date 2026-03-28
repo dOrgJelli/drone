@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
 import {
+  clearSelectedPullRequestForDrone,
   consumeRequestedPullRequestForDrone,
   requestChangesPullRequest,
   selectedPullRequestForDrone,
@@ -50,5 +51,15 @@ describe('changes navigation requests', () => {
     expect(consumeRequestedPullRequestForDrone('drone-b')).toBe(9);
     expect(consumeRequestedPullRequestForDrone('drone-a')).toBe(7);
     expect(consumeRequestedPullRequestForDrone('drone-b')).toBeNull();
+  });
+
+  test('clears selected PR without affecting other drones', () => {
+    requestChangesPullRequest({ droneId: 'drone-a', pullNumber: 11 });
+    requestChangesPullRequest({ droneId: 'drone-b', pullNumber: 12 });
+
+    clearSelectedPullRequestForDrone('drone-a');
+
+    expect(selectedPullRequestForDrone('drone-a')).toBeNull();
+    expect(selectedPullRequestForDrone('drone-b')).toBe(12);
   });
 });

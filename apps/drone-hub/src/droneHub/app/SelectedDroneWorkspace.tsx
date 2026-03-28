@@ -563,7 +563,7 @@ export function SelectedDroneWorkspace({
     };
   }, [currentDrone.hubPhase, currentDrone.id, currentDroneRepoAttached]);
 
-  const tryOpenMarkdownPullRequestInChanges = React.useCallback(
+  const tryOpenMarkdownPullRequest = React.useCallback(
     (href: string): boolean => {
       const parsed = parseGithubPullRequestHref(href);
       if (!parsed) return false;
@@ -572,7 +572,7 @@ export function SelectedDroneWorkspace({
       const knownRepo = repoIdentityRef.current;
       if (knownRepo && (knownRepo.owner !== parsed.owner || knownRepo.repo !== parsed.repo)) return false;
       setRightPanelOpen(true);
-      setRightPanelTab('changes');
+      setRightPanelTab('prs');
       requestChangesPullRequest({ droneId: currentDrone.id, pullNumber: parsed.pullNumber });
       return true;
     },
@@ -1448,7 +1448,7 @@ export function SelectedDroneWorkspace({
                             headerError={runningGroup ? stopPromptAutomationError : null}
                             nowMs={nowMs}
                             onOpenFileReference={onOpenMarkdownFileReference}
-                            onOpenLink={tryOpenMarkdownPullRequestInChanges}
+                            onOpenLink={tryOpenMarkdownPullRequest}
                           />
                         );
                       }
@@ -1466,7 +1466,7 @@ export function SelectedDroneWorkspace({
                           onToggleTldr={toggleTldrForAgentMessage}
                           onHoverAgentMessage={handleAgentMessageHover}
                           onOpenFileReference={onOpenMarkdownFileReference}
-                          onOpenLink={tryOpenMarkdownPullRequestInChanges}
+                          onOpenLink={tryOpenMarkdownPullRequest}
                           droneId={currentDrone.id}
                           droneHomePath={droneHomePath(currentDrone)}
                           showRoleIcons={false}
@@ -1485,7 +1485,7 @@ export function SelectedDroneWorkspace({
                             onCancelQueued={requestCancelPendingPrompt}
                             onRequestUnstick={requestUnstickPendingPrompt}
                             onOpenFileReference={onOpenMarkdownFileReference}
-                            onOpenLink={tryOpenMarkdownPullRequestInChanges}
+                            onOpenLink={tryOpenMarkdownPullRequest}
                             droneId={currentDrone.id}
                             droneHomePath={droneHomePath(currentDrone)}
                             cancelBusy={Boolean(cancellingPendingPromptById[p.id])}
@@ -1509,7 +1509,7 @@ export function SelectedDroneWorkspace({
                             headerError={runningGroup ? stopPromptAutomationError : null}
                             nowMs={nowMs}
                             onOpenFileReference={onOpenMarkdownFileReference}
-                            onOpenLink={tryOpenMarkdownPullRequestInChanges}
+                            onOpenLink={tryOpenMarkdownPullRequest}
                           />
                         );
                       }

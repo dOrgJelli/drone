@@ -128,6 +128,7 @@ export function DroneChangesDock({
   repoAttached,
   repoPath,
   repoUnavailableReason,
+  fixedContextMode = null,
   disabled,
   hubPhase,
   hubMessage,
@@ -138,6 +139,7 @@ export function DroneChangesDock({
   repoAttached: boolean;
   repoPath: string;
   repoUnavailableReason?: string | null;
+  fixedContextMode?: ChangesContextMode | null;
   disabled: boolean;
   hubPhase?: 'creating' | 'starting' | 'seeding' | 'error' | null;
   hubMessage?: string | null;
@@ -176,13 +178,15 @@ export function DroneChangesDock({
     'pull-preview': null,
     'pull-request': null,
   });
-  const [contextMode, setContextMode] = React.useState<ChangesContextMode>(() =>
-    initialRequestedPullNumberRef.current && initialRequestedPullNumberRef.current > 0
+  const [contextModeState, setContextModeState] = React.useState<ChangesContextMode>(() => {
+    if (fixedContextMode) return fixedContextMode;
+    return initialRequestedPullNumberRef.current && initialRequestedPullNumberRef.current > 0
       ? 'pull-request'
       : readChangesStorage(CHANGES_CONTEXT_STORAGE_KEY) === 'pull-request'
         ? 'pull-request'
-        : 'branch',
-  );
+        : 'branch';
+  });
+  const contextMode = fixedContextMode ?? contextModeState;
   const [primaryView, setPrimaryView] = React.useState<ChangesPrimaryView>(() =>
     readChangesStorage(CHANGES_PRIMARY_VIEW_STORAGE_KEY) === 'commits' ? 'commits' : 'changes',
   );
@@ -328,8 +332,9 @@ export function DroneChangesDock({
     writeChangesStorage(CHANGES_DIFF_VIEW_STORAGE_KEY, diffViewType);
   }, [diffViewType]);
   React.useEffect(() => {
+    if (fixedContextMode) return;
     writeChangesStorage(CHANGES_CONTEXT_STORAGE_KEY, contextMode);
-  }, [contextMode]);
+  }, [contextMode, fixedContextMode]);
   React.useEffect(() => {
     writeChangesStorage(CHANGES_PRIMARY_VIEW_STORAGE_KEY, primaryView);
   }, [primaryView]);
@@ -355,35 +360,42 @@ export function DroneChangesDock({
     const onOpenPullRequest = (event: Event) => {
       const detail = (event as CustomEvent<ChangesOpenPullRequestDetail>).detail;
       if (!detail || String(detail.droneId ?? '').trim() !== String(droneId ?? '').trim()) return;
+      if (fixedContextMode === 'branch') return;
       const pullNumber = Number(detail.pullNumber);
       if (!Number.isFinite(pullNumber) || pullNumber <= 0) return;
       const normalizedPullNumber = Math.floor(pullNumber);
       consumeRequestedPullRequestForDrone(droneId);
       setPullRequestNumber(normalizedPullNumber);
-      setContextMode('pull-request');
+      if (!fixedContextMode) setContextModeState('pull-request');
       setRefreshNonce((n) => n + 1);
     };
     window.addEventListener(CHANGES_OPEN_PULL_REQUEST_EVENT, onOpenPullRequest as EventListener);
     return () => window.removeEventListener(CHANGES_OPEN_PULL_REQUEST_EVENT, onOpenPullRequest as EventListener);
-  }, [droneId]);
+  }, [droneId, fixedContextMode]);
 
   React.useEffect(() => {
+    if (fixedContextMode === 'branch') {
+      setPullRequestNumber(selectedPullRequestForDrone(droneId));
+      setContextModeState('branch');
+      return;
+    }
     const requestedPullNumber = consumeRequestedPullRequestForDrone(droneId);
     if (requestedPullNumber && requestedPullNumber > 0) {
       setPullRequestNumber(requestedPullNumber);
-      setContextMode('pull-request');
+      if (!fixedContextMode) setContextModeState('pull-request');
       setRefreshNonce((n) => n + 1);
       return;
     }
     setPullRequestNumber(selectedPullRequestForDrone(droneId));
-    setContextMode('branch');
-  }, [droneId]);
+    if (!fixedContextMode) setContextModeState('branch');
+  }, [droneId, fixedContextMode]);
 
   React.useEffect(() => {
+    if (fixedContextMode) return;
     if (contextMode !== 'pull-request') return;
     if (pullRequestNumber && pullRequestNumber > 0) return;
-    setContextMode('branch');
-  }, [contextMode, pullRequestNumber]);
+    setContextModeState('branch');
+  }, [contextMode, fixedContextMode, pullRequestNumber]);
 
   React.useEffect(() => {
     setPullRequestActionError(null);
@@ -2201,40 +2213,44 @@ export function DroneChangesDock({
         <div data-onboarding-id="changes.viewMode" className="inline-flex items-center gap-1 flex-wrap justify-end">
           {repoAttached && !disabled ? (
             <>
-              <span className="text-[9px] uppercase tracking-wide text-[var(--muted-dim)] mr-1" style={{ fontFamily: 'var(--display)' }}>
-                Context
-              </span>
-              <button
-                type="button"
-                onClick={() => setContextMode('branch')}
-                className={`h-6 px-2 rounded-md border text-[9px] font-semibold tracking-wide uppercase transition-colors ${
-                  contextMode === 'branch'
-                    ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
-                    : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:text-[var(--fg-secondary)]'
-                }`}
-                style={{ fontFamily: 'var(--display)' }}
-                title="Inspect the current branch workspace and branch history"
-              >
-                Branch
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  if (!pullRequestNumber) return;
-                  setContextMode('pull-request');
-                }}
-                disabled={!pullRequestNumber}
-                className={`h-6 px-2 rounded-md border text-[9px] font-semibold tracking-wide uppercase transition-colors ${
-                  contextMode === 'pull-request'
-                    ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
-                    : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:text-[var(--fg-secondary)] disabled:opacity-40 disabled:cursor-not-allowed'
-                }`}
-                style={{ fontFamily: 'var(--display)' }}
-                title={pullRequestNumber ? `Inspect PR #${pullRequestNumber}` : 'Click a PR title in the PRs tab to enter PR context'}
-              >
-                PR
-              </button>
-              <span className="mx-1 text-[var(--border-subtle)]">|</span>
+              {!fixedContextMode ? (
+                <>
+                  <span className="text-[9px] uppercase tracking-wide text-[var(--muted-dim)] mr-1" style={{ fontFamily: 'var(--display)' }}>
+                    Context
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setContextModeState('branch')}
+                    className={`h-6 px-2 rounded-md border text-[9px] font-semibold tracking-wide uppercase transition-colors ${
+                      contextMode === 'branch'
+                        ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
+                        : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:text-[var(--fg-secondary)]'
+                    }`}
+                    style={{ fontFamily: 'var(--display)' }}
+                    title="Inspect the current branch workspace and branch history"
+                  >
+                    Branch
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!pullRequestNumber) return;
+                      setContextModeState('pull-request');
+                    }}
+                    disabled={!pullRequestNumber}
+                    className={`h-6 px-2 rounded-md border text-[9px] font-semibold tracking-wide uppercase transition-colors ${
+                      contextMode === 'pull-request'
+                        ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
+                        : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:text-[var(--fg-secondary)] disabled:opacity-40 disabled:cursor-not-allowed'
+                    }`}
+                    style={{ fontFamily: 'var(--display)' }}
+                    title={pullRequestNumber ? `Inspect PR #${pullRequestNumber}` : 'Click a PR title in the PRs tab to enter PR context'}
+                  >
+                    PR
+                  </button>
+                  <span className="mx-1 text-[var(--border-subtle)]">|</span>
+                </>
+              ) : null}
               <span className="text-[9px] uppercase tracking-wide text-[var(--muted-dim)] mr-1" style={{ fontFamily: 'var(--display)' }}>
                 View
               </span>
