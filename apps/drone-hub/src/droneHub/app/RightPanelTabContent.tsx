@@ -129,7 +129,7 @@ type RightPanelTabContentProps = {
   onOpenedEditorFileContentChange: (next: string) => void;
   onSaveOpenedEditorFile: (contentOverride?: string) => Promise<boolean>;
   onCloseOpenedEditorFile: () => void;
-  onOpenPullRequestInChanges: (paneKey: 'top' | 'bottom' | 'single', pullRequest: RepoPullRequestSummary) => void;
+  onOpenPullRequest: (paneKey: 'top' | 'bottom' | 'single', pullRequest: RepoPullRequestSummary) => void;
   onRevealChangesFileInFiles: (paneKey: 'top' | 'bottom' | 'single', repoRelativePath: string) => void;
   onOpenChangesFileInEditor: (repoRelativePath: string) => void;
 };
@@ -201,7 +201,7 @@ export function RightPanelTabContent({
   onOpenedEditorFileContentChange,
   onSaveOpenedEditorFile,
   onCloseOpenedEditorFile,
-  onOpenPullRequestInChanges,
+  onOpenPullRequest,
   onRevealChangesFileInFiles,
   onOpenChangesFileInEditor,
 }: RightPanelTabContentProps) {
@@ -369,6 +369,7 @@ export function RightPanelTabContent({
           repoAttached={repoFeaturesEnabled}
           repoPath={drone.repoPath}
           repoUnavailableReason={repoUnavailableReason}
+          fixedContextMode="branch"
           disabled={disabled}
           hubPhase={drone.hubPhase}
           hubMessage={drone.hubMessage}
@@ -389,7 +390,9 @@ export function RightPanelTabContent({
           disabled={disabled}
           hubPhase={drone.hubPhase}
           hubMessage={drone.hubMessage}
-          onOpenPullRequestInChanges={(pullRequest) => onOpenPullRequestInChanges(paneKey, pullRequest)}
+          onOpenPullRequest={(pullRequest) => onOpenPullRequest(paneKey, pullRequest)}
+          onRevealFileInFiles={(repoRelativePath) => onRevealChangesFileInFiles(paneKey, repoRelativePath)}
+          onOpenFileInEditor={onOpenChangesFileInEditor}
         />
       );
 

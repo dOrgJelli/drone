@@ -2295,10 +2295,10 @@ export function useDroneHubAppModel(): DroneHubAppModel {
           onCloseOpenedEditorFile={closeEditorFile}
           onRevealChangesFileInFiles={revealChangesFileInFiles}
           onOpenChangesFileInEditor={openChangesFileInEditor}
-          onOpenPullRequestInChanges={(pane, _pullRequest) => {
+          onOpenPullRequest={(pane, _pullRequest) => {
             setRightPanelOpen(true);
-            if (pane === 'bottom') setRightPanelBottomTab('changes');
-            else setRightPanelTab('changes');
+            if (pane === 'bottom') setRightPanelBottomTab('prs');
+            else setRightPanelTab('prs');
           }}
         />
       );
