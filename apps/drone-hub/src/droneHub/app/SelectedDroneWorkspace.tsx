@@ -43,8 +43,10 @@ import { buildPendingTimelineBlocks } from './pending-timeline-blocks';
 import { orderSidebarEntries } from './sidebar-group-order';
 import {
   buildPendingPromptLoopGroups,
+  buildTranscriptTimelineBlocks,
   buildTranscriptRenderBlocks,
   type TranscriptRenderBlock,
+  type TranscriptTimelineBlock,
 } from './prompt-loop-groups';
 import { resolveRunningPromptLoopIdentity } from './prompt-loop-running-identity';
 import type { RepoTransferPeer } from './use-workspace-actions';
@@ -407,6 +409,14 @@ export function SelectedDroneWorkspace({
     },
     [visiblePendingPromptsWithStartup],
   );
+  const transcriptTimelineBlocks = React.useMemo<TranscriptTimelineBlock[]>(
+    () =>
+      buildTranscriptTimelineBlocks({
+        transcriptRenderBlocks,
+        pendingPlainPrompts,
+      }),
+    [pendingPlainPrompts, transcriptRenderBlocks],
+  );
   const pendingPromptLoopByIdentity = React.useMemo(() => {
     const out = new Map<string, PendingPrompt[]>();
     for (const group of pendingPromptLoopGroups) out.set(group.identity, group.pendingRuns);
@@ -438,7 +448,7 @@ export function SelectedDroneWorkspace({
   const pendingTimelineBlocks = React.useMemo(() => {
     return buildPendingTimelineBlocks({
       pendingOnlyPromptLoopGroups,
-      pendingPlainPrompts,
+      pendingPlainPrompts: [],
       queuedAutomationItems,
       promptAutomationJob,
       runningAutomationIdentity,
@@ -1434,7 +1444,28 @@ export function SelectedDroneWorkspace({
                   <TranscriptSkeleton message="Loading chat messages..." />
                 ) : (transcripts && transcripts.length > 0) || visiblePendingPromptsWithStartup.length > 0 ? (
                   <div className="max-w-[1170px] mx-auto px-6 py-5 flex flex-col gap-6">
-                    {transcriptRenderBlocks.map((block) => {
+                    {transcriptTimelineBlocks.map((block) => {
+                      if (block.kind === 'pending-prompt') {
+                        const p = block.item;
+                        return (
+                          <PendingTranscriptTurn
+                            key={block.key}
+                            item={p}
+                            nowMs={nowMs}
+                            showRoleIcons={false}
+                            onCancelQueued={requestCancelPendingPrompt}
+                            onRequestUnstick={requestUnstickPendingPrompt}
+                            onOpenFileReference={onOpenMarkdownFileReference}
+                            onOpenLink={tryOpenMarkdownPullRequest}
+                            droneId={currentDrone.id}
+                            droneHomePath={droneHomePath(currentDrone)}
+                            cancelBusy={Boolean(cancellingPendingPromptById[p.id])}
+                            cancelError={cancelPendingPromptErrorById[p.id] ?? null}
+                            unstickBusy={Boolean(unstickingPendingPromptById[p.id])}
+                            unstickError={unstickPendingPromptErrorById[p.id] ?? null}
+                          />
+                        );
+                      }
                       if (block.kind === 'prompt-loop-group') {
                         const runningGroup = Boolean(promptAutomationJob?.running) && Boolean(runningAutomationIdentity) && block.identity === runningAutomationIdentity;
                         return (

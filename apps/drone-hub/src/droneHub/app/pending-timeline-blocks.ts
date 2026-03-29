@@ -37,7 +37,7 @@ export function buildPendingTimelineBlocks(opts: {
 
   for (const group of opts.pendingOnlyPromptLoopGroups) {
     const sortMs = group.pendingRuns.reduce((min, run) => {
-      const ms = parseIsoMs(run.updatedAt ?? run.at);
+      const ms = parseIsoMs(run.at || run.updatedAt);
       return ms < min ? ms : min;
     }, Number.MAX_SAFE_INTEGER);
     items.push({
@@ -59,7 +59,7 @@ export function buildPendingTimelineBlocks(opts: {
       kind: 'pending-prompt',
       key: `pending-prompt:${item.id}`,
       item,
-      sortMs: parseIsoMs(item.updatedAt ?? item.at),
+      sortMs: parseIsoMs(item.at || item.updatedAt),
       order: order++,
       timelineRole: 'other',
     });
