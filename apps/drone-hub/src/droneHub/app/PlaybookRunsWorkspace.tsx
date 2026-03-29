@@ -3,7 +3,7 @@ import { timeAgo } from '../../domain';
 import { requestJson } from '../http';
 import type { PlaybookDefinition, PlaybookRunQueueSummary, PlaybookRunSummary } from '../types';
 import { fetchJson, useNowMs, usePoll } from './hooks';
-import { IconBoard, IconChevron, IconSpinner, IconTrash } from './icons';
+import { IconBoard, IconSpinner, IconTrash } from './icons';
 import { normalizePlaybookArtifactPath } from './playbook-config';
 import {
   normalizePlaybookRunLaunchCount,
@@ -313,374 +313,326 @@ export function PlaybookRunsWorkspace({
   };
 
   return (
-    <div className="flex-1 min-h-0 overflow-y-auto">
-      <div className="w-full min-h-full px-4 py-4 sm:px-5 lg:px-6 flex flex-col gap-4">
-        <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--panel-alt)] overflow-hidden shadow-[0_8px_32px_rgba(0,0,0,.12)]">
-          <div className="relative border-b border-[var(--border)] overflow-hidden">
-            <div className="absolute inset-0 bg-[linear-gradient(135deg,rgba(167,139,250,.04)_0%,transparent_50%)]" />
-            <div className="relative px-5 py-3 flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2.5 min-w-0">
-                <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[rgba(167,139,250,.1)] text-[var(--accent)]">
-                  <IconBoard className="opacity-80" />
+    <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
+      {/* ── Header ── */}
+      <div className="relative flex-shrink-0 border-b border-[var(--border-subtle)]">
+        <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(167,139,250,.04)_0%,transparent_80%)]" />
+        <div className="dh-noise relative">
+          <div className="px-6 py-5">
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex items-start gap-3.5 min-w-0">
+                <div className="mt-0.5 flex h-10 w-10 items-center justify-center rounded-xl bg-[rgba(167,139,250,.1)] text-[var(--accent)] shadow-[0_0_16px_rgba(167,139,250,.08)]">
+                  <IconBoard />
                 </div>
-                <div className="text-[11px] uppercase tracking-[0.1em] text-[var(--accent)] font-semibold" style={{ fontFamily: 'var(--display)' }}>
-                  Playbook Runs
+                <div className="min-w-0">
+                  <div className="flex items-center gap-3">
+                    <span className="text-[15px] font-semibold tracking-tight text-[var(--fg)]" style={{ fontFamily: 'var(--display)' }}>
+                      Playbook Runs
+                    </span>
+                    <span className="inline-flex items-center gap-1.5 rounded-md bg-[rgba(255,255,255,.04)] px-2.5 py-1 text-[10px] font-medium text-[var(--muted-dim)]" style={{ fontFamily: 'var(--code)' }}>
+                      {filteredRuns.length}<span className="opacity-40">R</span>
+                      {totalQueuedCount > 0 && <>{' '}{totalQueuedCount}<span className="opacity-40">Q</span></>}
+                    </span>
+                    {(runsLoading || playbooksLoading) && (
+                      <span className="flex items-center gap-1.5 text-[10px] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--code)' }}>
+                        <span className="h-1.5 w-1.5 rounded-full bg-[var(--accent)] animate-pulse-dot" />Loading
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-1.5 text-[11px] text-[var(--muted)] leading-relaxed max-w-[52ch]">
+                    Launch playbooks, monitor active runs, and inspect artifacts.
+                  </div>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={onClose}
-                className="h-7 px-2.5 rounded-md text-[10px] font-semibold tracking-wide uppercase border bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)] hover:border-[var(--border)] hover:bg-[rgba(255,255,255,.05)] hover:text-[var(--fg)]"
-                style={{ fontFamily: 'var(--display)' }}
-              >
-                Back
-              </button>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="inline-flex h-8 items-center justify-center rounded-lg px-3 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)] transition-all hover:bg-[rgba(255,255,255,.04)] hover:text-[var(--fg)]"
+                  style={{ fontFamily: 'var(--display)' }}
+                >
+                  Close
+                </button>
+              </div>
             </div>
-            <div className="dh-accent-bar" />
           </div>
 
-          {(actionError || playbooksError || runsError) && (
-            <div className="mx-4 mt-3 flex items-center gap-2 rounded-lg border border-[rgba(255,90,90,.2)] bg-[rgba(255,90,90,.06)] px-3 py-2 text-[11px] text-[var(--red)]">
-              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--red)]" />
-              {actionError || playbooksError || runsError}
+          {/* ── Filter pills ── */}
+          <div className="flex flex-wrap items-center gap-3 px-6 pb-4">
+            {/* Playbook filters */}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-[9px] font-semibold uppercase tracking-[0.1em] text-[var(--muted-dim)] mr-0.5" style={{ fontFamily: 'var(--display)' }}>Playbook</span>
+              <button
+                type="button"
+                onClick={() => setSelectedPlaybookId('')}
+                className={`inline-flex h-7 items-center rounded-lg px-2.5 text-[10px] font-semibold uppercase tracking-wide transition-all ${
+                  selectedPlaybookId === ''
+                    ? 'bg-[var(--fg)] text-[var(--panel)] shadow-[0_2px_8px_rgba(0,0,0,.2)]'
+                    : 'bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.07)] hover:text-[var(--fg)]'
+                }`}
+                style={{ fontFamily: 'var(--display)' }}
+              >
+                All
+                <span className="ml-1.5 text-[9px] opacity-60" style={{ fontFamily: 'var(--code)' }}>{runsForSelectedRepo.length}</span>
+              </button>
+              {playbooks.map((playbook) => {
+                const active = selectedPlaybookId === playbook.id;
+                const count = playbookRunCountById[playbook.id] ?? 0;
+                const pendingLaunchCount = launchPendingCountById[playbook.id] ?? 0;
+                return (
+                  <div key={playbook.id} className="inline-flex items-center">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedPlaybookId((current) => (current === playbook.id ? '' : playbook.id))}
+                      className={`inline-flex h-7 items-center gap-1.5 rounded-lg px-2.5 text-[10px] font-semibold uppercase tracking-wide transition-all ${
+                        active
+                          ? 'bg-[rgba(167,139,250,.16)] text-[var(--accent)] border border-[rgba(167,139,250,.2)]'
+                          : 'bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] border border-transparent hover:bg-[rgba(255,255,255,.07)] hover:text-[var(--fg)]'
+                      }`}
+                      style={{ fontFamily: 'var(--display)' }}
+                    >
+                      {active && <span className="h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />}
+                      {pendingLaunchCount > 0 && <span className="h-1.5 w-1.5 rounded-full bg-[var(--green)] animate-pulse-dot" />}
+                      {playbook.label || 'Untitled'}
+                      <span className="text-[9px] opacity-50" style={{ fontFamily: 'var(--code)' }}>{count}</span>
+                    </button>
+                    {active && (
+                      <button
+                        type="button"
+                        onClick={() => onOpenPlaybookSettings(playbook.id)}
+                        className="ml-0.5 inline-flex h-7 items-center rounded-lg px-1.5 text-[9px] font-semibold uppercase tracking-wide text-[var(--accent)] hover:bg-[rgba(167,139,250,.08)]"
+                        style={{ fontFamily: 'var(--display)' }}
+                        title={`Edit "${playbook.label}"`}
+                      >
+                        Edit
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
             </div>
-          )}
 
-          <div className="px-4 py-4 flex flex-col gap-4">
-            <section className="flex flex-col gap-3">
-              <div className="flex items-center gap-3">
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 flex-1 min-w-0">
-                  <div className="rounded-lg border border-[var(--border-subtle)] bg-[rgba(255,255,255,.015)] overflow-hidden">
-                    <div className="px-3 py-2 border-b border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)]">
-                      <div className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
-                        Playbooks
-                      </div>
-                    </div>
-                    {playbooksLoading ? (
-                      <div className="px-3 py-4 flex items-center gap-2">
-                        <IconSpinner className="text-[var(--accent)] opacity-60" />
-                        <div className="text-[11px] text-[var(--muted-dim)]">Loading...</div>
-                      </div>
-                    ) : playbooks.length === 0 ? (
-                      <div className="px-3 py-4 text-[11px] text-[var(--muted-dim)]">
-                        No playbooks yet. Create one in Settings &gt; Playbooks.
-                      </div>
-                    ) : (
-                      <div className="max-h-[260px] overflow-y-auto">
-                        <button
-                          type="button"
-                          onClick={() => setSelectedPlaybookId('')}
-                          aria-pressed={selectedPlaybookId === ''}
-                          className={`dh-selection-card w-full px-3 py-2.5 text-left border-b border-[var(--border-subtle)] ${
-                            selectedPlaybookId === '' ? 'is-active' : ''
-                          }`}
+            <div className="h-4 w-px bg-[var(--border-subtle)]" />
+
+            {/* Repo filters */}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-[9px] font-semibold uppercase tracking-[0.1em] text-[var(--muted-dim)] mr-0.5" style={{ fontFamily: 'var(--display)' }}>Repo</span>
+              <button
+                type="button"
+                onClick={() => setSelectedRepoPath('')}
+                className={`inline-flex h-7 items-center rounded-lg px-2.5 text-[10px] font-semibold uppercase tracking-wide transition-all ${
+                  selectedRepoPath === ''
+                    ? 'bg-[var(--fg)] text-[var(--panel)] shadow-[0_2px_8px_rgba(0,0,0,.2)]'
+                    : 'bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.07)] hover:text-[var(--fg)]'
+                }`}
+                style={{ fontFamily: 'var(--display)' }}
+              >
+                All
+                <span className="ml-1.5 text-[9px] opacity-60" style={{ fontFamily: 'var(--code)' }}>{runsForSelectedPlaybook.length}</span>
+              </button>
+              {registeredRepoPaths.map((repoPath) => {
+                const active = selectedRepoPath === repoPath;
+                const count = repoRunCountByPath[repoPath] ?? 0;
+                return (
+                  <button
+                    key={repoPath}
+                    type="button"
+                    onClick={() => setSelectedRepoPath((current) => (current === repoPath ? '' : repoPath))}
+                    className={`inline-flex h-7 items-center gap-1.5 rounded-lg px-2.5 text-[10px] font-semibold uppercase tracking-wide transition-all ${
+                      active
+                        ? 'bg-[rgba(167,139,250,.16)] text-[var(--accent)] border border-[rgba(167,139,250,.2)]'
+                        : 'bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] border border-transparent hover:bg-[rgba(255,255,255,.07)] hover:text-[var(--fg)]'
+                    }`}
+                    style={{ fontFamily: 'var(--display)' }}
+                  >
+                    {active && <span className="h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />}
+                    {playbookRunsRepoLabel(repoPath)}
+                    <span className="text-[9px] opacity-50" style={{ fontFamily: 'var(--code)' }}>{count}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {(actionError || playbooksError || runsError) && (
+              <div className="ml-auto flex items-center gap-1.5 text-[10px] text-[var(--red)]" style={{ fontFamily: 'var(--code)' }}>
+                <span className="h-1.5 w-1.5 rounded-full bg-[var(--red)]" />
+                {actionError || playbooksError || runsError}
+              </div>
+            )}
+          </div>
+
+          {/* ── Launch controls ── */}
+          <div className="px-6 pb-4">
+            <PlaybookRunLaunchControls
+              selectedPlaybook={selectedPlaybook}
+              selectedRepoPath={selectedRepoPath}
+              totalQueuedCount={totalQueuedCount}
+              launchCountInput={launchCountInput}
+              normalizedLaunchCount={normalizedLaunchCount}
+              serializeFirstMessageGroup={serializeFirstMessageGroup}
+              runDisabled={runDisabled}
+              runDisabledReason={runDisabledReason}
+              onLaunchCountInputChange={setLaunchCountInput}
+              onSerializeFirstMessageGroupChange={setSerializeFirstMessageGroup}
+              onRun={() => {
+                if (selectedPlaybook) void runPlaybook(selectedPlaybook);
+              }}
+            />
+          </div>
+        </div>
+        <div className="dh-accent-bar" />
+      </div>
+
+      {/* ── Body ── */}
+      <div className="flex-1 min-h-0 overflow-auto px-6 py-4">
+        {/* Queue section (compact) */}
+        <PlaybookRunQueueSection
+          queue={filteredQueue}
+          selectedPlaybookLabel={selectedPlaybook?.label ?? null}
+          selectedRepoPath={selectedRepoPath}
+          nowMs={nowMs}
+          actionBusyByKey={actionBusyByKey}
+          onClearQueuedRuns={() => void clearQueuedRuns()}
+          onRemoveQueuedRun={(queueItemId) => void removeQueuedRun(queueItemId)}
+        />
+
+        {/* Runs table */}
+        {runsLoading && filteredRuns.length === 0 ? (
+          <div className="flex items-center gap-2 py-8 text-[11px] text-[var(--muted-dim)]">
+            <IconSpinner className="text-[var(--accent)] opacity-60" />
+            Loading runs...
+          </div>
+        ) : filteredRuns.length === 0 ? (
+          <div className="flex-1 flex items-center justify-center py-12 text-[12px] text-[var(--muted-dim)]">
+            No runs found for the current filters.
+          </div>
+        ) : (
+          <table className="dh-task-table w-full mt-2">
+            <thead>
+              <tr>
+                <th className="text-left">Run</th>
+                <th className="text-left w-[90px]">Status</th>
+                <th className="text-left">Summary</th>
+                <th className="text-left w-[80px]">Updated</th>
+                <th className="text-left w-[140px]">Actions</th>
+                <th className="text-left w-[120px]">Artifacts</th>
+                <th className="w-[36px]" />
+              </tr>
+            </thead>
+            <tbody>
+              {filteredRuns.map((run) => {
+                const summaryExpanded = Boolean(expandedSummaryByRunId[run.id]);
+                const deleteBusy = Boolean(deletingDrones[run.droneId]);
+                return (
+                  <tr key={run.id} className="align-top">
+                    <td>
+                      <button
+                        type="button"
+                        onClick={() => onOpenRun(run.droneId, run.chatName)}
+                        className="text-[12px] font-medium text-[var(--accent)] hover:underline decoration-[var(--accent-muted)] underline-offset-2"
+                        title={`Open "${run.playbookLabel}"`}
+                      >
+                        {run.playbookLabel}
+                      </button>
+                      <div className="text-[9px] text-[var(--muted-dim)] mt-0.5" style={{ fontFamily: 'var(--code)' }}>{playbookRunsRepoLabel(run.repoPath)}</div>
+                    </td>
+                    <td>
+                      <span className={`dh-run-status-badge ${statusClass(run.status)}`}>
+                        {run.status}
+                      </span>
+                      {run.statusError && (
+                        <div className="mt-1 text-[9px] text-[var(--red)] max-w-[140px] leading-relaxed truncate" title={run.statusError}>
+                          {run.statusError}
+                        </div>
+                      )}
+                    </td>
+                    <td className="max-w-[280px]">
+                      <button
+                        type="button"
+                        onClick={() => toggleRunSummary(run.id)}
+                        className="block w-full text-left"
+                        title={summaryExpanded ? 'Collapse summary' : 'Expand summary'}
+                      >
+                        <div
+                          className={`text-[11px] text-[var(--fg-secondary)] whitespace-pre-wrap leading-relaxed ${summaryExpanded ? '' : 'line-clamp-2'}`}
                         >
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="text-[11px] font-semibold text-[var(--fg)]">All playbooks</div>
-                            <div className="rounded-md bg-[rgba(255,255,255,.05)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--muted)]" style={{ fontFamily: 'var(--code)' }}>
-                              {runsForSelectedRepo.length}
-                            </div>
-                          </div>
-                        </button>
-                        {playbooks.map((playbook) => {
-                          const active = selectedPlaybookId === playbook.id;
-                          const pendingLaunchCount = launchPendingCountById[playbook.id] ?? 0;
+                          {run.lastMessage || <span className="italic text-[var(--muted-dim)]">No output yet.</span>}
+                        </div>
+                      </button>
+                    </td>
+                    <td>
+                      <span className="text-[10px] text-[var(--muted-dim)] tabular-nums" style={{ fontFamily: 'var(--code)' }}>
+                        {timeAgo(run.updatedAt, nowMs)}
+                      </span>
+                    </td>
+                    <td>
+                      <div className="flex flex-wrap gap-1">
+                        {run.actions.map((action) => {
+                          const busyKey = `${run.id}:${action.id}`;
                           return (
-                            <div
-                              key={playbook.id}
-                              className="flex items-stretch border-b border-[var(--border-subtle)] last:border-b-0"
+                            <button
+                              key={action.id}
+                              type="button"
+                              onClick={() => void sendRunAction(run, action)}
+                              disabled={Boolean(actionBusyByKey[busyKey])}
+                              className={`h-6 px-2 rounded-md text-[9px] font-semibold tracking-wide uppercase border transition-all ${
+                                actionBusyByKey[busyKey]
+                                  ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
+                                  : 'bg-[rgba(255,255,255,.03)] border-[var(--border-subtle)] text-[var(--muted)] hover:border-[var(--accent-muted)] hover:bg-[rgba(167,139,250,.06)] hover:text-[var(--accent)]'
+                              }`}
+                              style={{ fontFamily: 'var(--display)' }}
+                              title={`${action.messages.length} queued message${action.messages.length === 1 ? '' : 's'}`}
                             >
-                              <button
-                                type="button"
-                                onClick={() => setSelectedPlaybookId((current) => (current === playbook.id ? '' : playbook.id))}
-                                aria-pressed={active}
-                                className={`dh-selection-card flex-1 px-3 py-2.5 text-left ${active ? 'is-active' : ''}`}
-                              >
-                                <div className="flex items-center justify-between gap-2">
-                                  <div className="min-w-0 flex items-center gap-2">
-                                    <div className="text-[11px] font-semibold text-[var(--fg)] truncate">{playbook.label || 'Untitled playbook'}</div>
-                                    {pendingLaunchCount > 0 && (
-                                      <span className="flex items-center gap-1 rounded-md bg-[rgba(74,222,128,.1)] px-1.5 py-0.5 text-[9px] font-semibold text-[var(--green)] shrink-0" style={{ fontFamily: 'var(--display)' }}>
-                                        <span className="h-1 w-1 rounded-full bg-[var(--green)] animate-pulse-dot" />
-                                        {pendingLaunchCount}
-                                      </span>
-                                    )}
-                                  </div>
-                                  <div className="flex items-center gap-1.5 shrink-0">
-                                    <span className="text-[9px] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--code)' }}>
-                                      {playbook.messages.length}msg
-                                    </span>
-                                    <div className="rounded-md bg-[rgba(255,255,255,.05)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--muted)]" style={{ fontFamily: 'var(--code)' }}>
-                                      {playbookRunCountById[playbook.id] ?? 0}
-                                    </div>
-                                  </div>
-                                </div>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => onOpenPlaybookSettings(playbook.id)}
-                                className={`shrink-0 px-2.5 flex items-center text-[10px] font-semibold uppercase tracking-wide border-l transition-all ${
-                                  active
-                                    ? 'border-[rgba(167,139,250,.15)] text-[var(--accent)] hover:bg-[rgba(167,139,250,.08)]'
-                                    : 'border-[var(--border-subtle)] text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.03)] hover:text-[var(--fg-secondary)]'
-                                }`}
-                                style={{ fontFamily: 'var(--display)' }}
-                                title={`Edit "${playbook.label || 'Untitled playbook'}"`}
-                              >
-                                Edit
-                              </button>
-                            </div>
+                              {actionBusyByKey[busyKey] ? <IconSpinner className="inline mr-0.5 opacity-60" /> : null}
+                              {action.label}
+                            </button>
                           );
                         })}
                       </div>
-                    )}
-                  </div>
-
-                  <div className="rounded-lg border border-[var(--border-subtle)] bg-[rgba(255,255,255,.015)] overflow-hidden">
-                    <div className="px-3 py-2 border-b border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)]">
-                      <div className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
-                        Repos
+                    </td>
+                    <td>
+                      <div className="flex flex-wrap gap-1">
+                        {run.artifacts.map((artifactPath) => {
+                          const normalizedArtifact = normalizePlaybookArtifactPath(artifactPath);
+                          if (!normalizedArtifact) return null;
+                          const availability = artifactAvailabilityByKey[playbookArtifactKey(run.id, normalizedArtifact)];
+                          if (!availability?.exists) return null;
+                          return (
+                            <button
+                              key={normalizedArtifact}
+                              type="button"
+                              onClick={() => onOpenArtifact(run.droneId, run.chatName, availability.path, availability.name)}
+                              className="h-6 px-2 rounded-md text-[9px] font-semibold tracking-wide border bg-[rgba(74,222,128,.04)] border-[rgba(74,222,128,.15)] text-[var(--green)] hover:bg-[rgba(74,222,128,.1)] hover:border-[rgba(74,222,128,.25)]"
+                              title={availability.path}
+                              style={{ fontFamily: 'var(--code)' }}
+                            >
+                              {availability.name}
+                            </button>
+                          );
+                        })}
                       </div>
-                    </div>
-                    <div className="max-h-[260px] overflow-y-auto">
+                    </td>
+                    <td>
                       <button
                         type="button"
-                        onClick={() => setSelectedRepoPath('')}
-                        aria-pressed={selectedRepoPath === ''}
-                        className={`dh-selection-card w-full px-3 py-2.5 text-left border-b border-[var(--border-subtle)] ${
-                          selectedRepoPath === '' ? 'is-active' : ''
+                        onClick={() => void onDeleteRunDrone(run.droneId)}
+                        disabled={deleteBusy}
+                        className={`inline-flex h-6 w-6 items-center justify-center rounded-md transition-all ${
+                          deleteBusy
+                            ? 'opacity-40 cursor-not-allowed text-[var(--muted-dim)]'
+                            : 'text-[var(--muted-dim)] opacity-0 hover:opacity-100 hover:bg-[rgba(255,90,90,.12)] hover:text-[var(--red)]'
                         }`}
+                        title={deleteBusy ? `Removing "${run.droneName}"...` : `Delete "${run.droneName}"`}
                       >
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="text-[11px] font-semibold text-[var(--fg)]">All repos</div>
-                          <div className="rounded-md bg-[rgba(255,255,255,.05)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--muted)]" style={{ fontFamily: 'var(--code)' }}>
-                            {runsForSelectedPlaybook.length}
-                          </div>
-                        </div>
+                        {deleteBusy ? <IconSpinner className="opacity-90" /> : <IconTrash className="opacity-80" />}
                       </button>
-                      {registeredRepoPaths.map((repoPath) => {
-                        const active = selectedRepoPath === repoPath;
-                        return (
-                          <button
-                            key={repoPath}
-                            type="button"
-                            onClick={() => setSelectedRepoPath((current) => (current === repoPath ? '' : repoPath))}
-                            aria-pressed={active}
-                            className={`dh-selection-card w-full px-3 py-2.5 text-left border-b border-[var(--border-subtle)] last:border-b-0 ${
-                              active ? 'is-active' : ''
-                            }`}
-                          >
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="min-w-0">
-                                <div className="text-[11px] font-semibold text-[var(--fg)] truncate">{playbookRunsRepoLabel(repoPath)}</div>
-                              </div>
-                              <div className="rounded-md bg-[rgba(255,255,255,.05)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--muted)]" style={{ fontFamily: 'var(--code)' }}>
-                                {repoRunCountByPath[repoPath] ?? 0}
-                              </div>
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <PlaybookRunLaunchControls
-                selectedPlaybook={selectedPlaybook}
-                selectedRepoPath={selectedRepoPath}
-                totalQueuedCount={totalQueuedCount}
-                launchCountInput={launchCountInput}
-                normalizedLaunchCount={normalizedLaunchCount}
-                serializeFirstMessageGroup={serializeFirstMessageGroup}
-                runDisabled={runDisabled}
-                runDisabledReason={runDisabledReason}
-                onLaunchCountInputChange={setLaunchCountInput}
-                onSerializeFirstMessageGroupChange={setSerializeFirstMessageGroup}
-                onRun={() => {
-                  if (selectedPlaybook) void runPlaybook(selectedPlaybook);
-                }}
-              />
-            </section>
-
-            <PlaybookRunQueueSection
-              queue={filteredQueue}
-              selectedPlaybookLabel={selectedPlaybook?.label ?? null}
-              selectedRepoPath={selectedRepoPath}
-              nowMs={nowMs}
-              actionBusyByKey={actionBusyByKey}
-              onClearQueuedRuns={() => void clearQueuedRuns()}
-              onRemoveQueuedRun={(queueItemId) => void removeQueuedRun(queueItemId)}
-            />
-
-            <section className="flex flex-col gap-4">
-              <div className="flex items-center gap-2.5">
-                <div className="flex h-6 w-6 items-center justify-center rounded-md bg-[rgba(255,255,255,.04)]">
-                  <IconChevron down className="opacity-50" />
-                </div>
-                <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--fg-secondary)]" style={{ fontFamily: 'var(--display)' }}>
-                  Active Runs
-                </div>
-                <span className="rounded-md bg-[rgba(255,255,255,.05)] px-2 py-0.5 text-[10px] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--code)' }}>
-                  {filteredRuns.length}
-                </span>
-                <span className="text-[10px] text-[var(--muted-dim)]">
-                  {selectedPlaybook?.label || 'All playbooks'} · {selectedRepoPath ? playbookRunsRepoLabel(selectedRepoPath) : 'All repos'}
-                </span>
-                <div className="flex-1 h-px bg-[linear-gradient(90deg,var(--border-subtle),transparent)]" />
-              </div>
-              {runsLoading ? (
-                <div className="flex items-center gap-2 px-1 py-4 text-[11px] text-[var(--muted-dim)]">
-                  <IconSpinner className="text-[var(--accent)] opacity-60" />
-                  Loading runs...
-                </div>
-              ) : filteredRuns.length === 0 ? (
-                <div className="rounded-xl border border-dashed border-[rgba(255,255,255,.08)] bg-[rgba(255,255,255,.01)] px-6 py-8 text-center">
-                  <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-[rgba(255,255,255,.04)]">
-                    <IconBoard className="opacity-30" />
-                  </div>
-                  <div className="text-[12px] text-[var(--muted)]">No runs found</div>
-                  <div className="mt-1 text-[11px] text-[var(--muted-dim)]">
-                    {selectedPlaybook?.label || 'the current playbook filter'} in{' '}
-                    {selectedRepoPath ? playbookRunsRepoLabel(selectedRepoPath) : 'the current repo filter'}
-                  </div>
-                </div>
-              ) : (
-                <div className="overflow-x-auto rounded-xl border border-[var(--border-subtle)] overflow-hidden">
-                  <table className="dh-runs-table w-full min-w-[920px] text-left">
-                    <thead>
-                      <tr className="text-[10px] uppercase tracking-[0.08em] text-[var(--muted-dim)]">
-                        <th className="px-4 py-3 font-semibold">Run</th>
-                        <th className="px-4 py-3 font-semibold">Status</th>
-                        <th className="px-4 py-3 font-semibold">Summary</th>
-                        <th className="px-4 py-3 font-semibold">Updated</th>
-                        <th className="px-4 py-3 font-semibold">Actions</th>
-                        <th className="px-4 py-3 font-semibold">Artifacts</th>
-                        <th className="px-4 py-3 font-semibold w-[60px]" />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filteredRuns.map((run) => {
-                        const summaryExpanded = Boolean(expandedSummaryByRunId[run.id]);
-                        const deleteBusy = Boolean(deletingDrones[run.droneId]);
-                        return (
-                          <tr key={run.id} className="border-t border-[var(--border-subtle)] align-top">
-                            <td className="px-4 py-3.5">
-                              <button
-                                type="button"
-                                onClick={() => onOpenRun(run.droneId, run.chatName)}
-                                className="text-[12px] font-semibold text-[var(--accent)] hover:underline decoration-[var(--accent-muted)] underline-offset-2"
-                                title={`Open "${run.playbookLabel}"`}
-                              >
-                                {run.playbookLabel}
-                              </button>
-                              <div className="text-[10px] text-[var(--muted-dim)] mt-1" style={{ fontFamily: 'var(--code)' }}>{playbookRunsRepoLabel(run.repoPath)}</div>
-                            </td>
-                            <td className="px-4 py-3.5">
-                              <div className={`dh-run-status-badge ${statusClass(run.status)}`}>
-                                {run.status}
-                              </div>
-                              {run.statusError && (
-                                <div className="mt-2 rounded-md bg-[rgba(255,90,90,.06)] px-2 py-1 text-[10px] text-[var(--red)] max-w-[180px] leading-relaxed">
-                                  {run.statusError}
-                                </div>
-                              )}
-                            </td>
-                            <td className="px-4 py-3.5 max-w-[320px]">
-                              <button
-                                type="button"
-                                onClick={() => toggleRunSummary(run.id)}
-                                className="block w-full text-left"
-                                title={summaryExpanded ? 'Collapse summary' : 'Expand summary'}
-                              >
-                                <div
-                                  className={`text-[11px] text-[var(--fg-secondary)] whitespace-pre-wrap leading-relaxed ${summaryExpanded ? '' : 'line-clamp-2'}`}
-                                >
-                                  {run.lastMessage || <span className="italic text-[var(--muted-dim)]">No output yet.</span>}
-                                </div>
-                              </button>
-                            </td>
-                            <td className="px-4 py-3.5">
-                              <div className="text-[11px] text-[var(--fg-secondary)]" style={{ fontFamily: 'var(--code)' }}>
-                                {timeAgo(run.updatedAt, nowMs)}
-                              </div>
-                              <div className="text-[10px] text-[var(--muted-dim)] mt-0.5" style={{ fontFamily: 'var(--code)' }}>
-                                {run.runsCompleted} completed
-                              </div>
-                            </td>
-                            <td className="px-4 py-3.5">
-                              <div className="flex flex-wrap gap-1.5 max-w-[260px]">
-                                {run.actions.map((action) => {
-                                  const busyKey = `${run.id}:${action.id}`;
-                                  return (
-                                    <button
-                                      key={action.id}
-                                      type="button"
-                                      onClick={() => void sendRunAction(run, action)}
-                                      disabled={Boolean(actionBusyByKey[busyKey])}
-                                      className={`h-7 px-2.5 rounded-md text-[10px] font-semibold tracking-wide uppercase border transition-all ${
-                                        actionBusyByKey[busyKey]
-                                          ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
-                                          : 'bg-[rgba(255,255,255,.03)] border-[var(--border-subtle)] text-[var(--muted)] hover:border-[var(--accent-muted)] hover:bg-[rgba(167,139,250,.06)] hover:text-[var(--accent)]'
-                                      }`}
-                                      style={{ fontFamily: 'var(--display)' }}
-                                      title={`${action.messages.length} queued message${action.messages.length === 1 ? '' : 's'}`}
-                                    >
-                                      {actionBusyByKey[busyKey] ? <IconSpinner className="inline mr-1 opacity-60" /> : null}
-                                      {action.label}
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                            </td>
-                            <td className="px-4 py-3.5">
-                              <div className="flex flex-wrap gap-1.5 max-w-[280px]">
-                                {run.artifacts.map((artifactPath) => {
-                                  const normalizedArtifact = normalizePlaybookArtifactPath(artifactPath);
-                                  if (!normalizedArtifact) return null;
-                                  const availability = artifactAvailabilityByKey[playbookArtifactKey(run.id, normalizedArtifact)];
-                                  if (!availability?.exists) return null;
-                                  return (
-                                    <button
-                                      key={normalizedArtifact}
-                                      type="button"
-                                      onClick={() => onOpenArtifact(run.droneId, run.chatName, availability.path, availability.name)}
-                                      className="h-7 px-2.5 rounded-md text-[10px] font-semibold tracking-wide border bg-[rgba(74,222,128,.04)] border-[rgba(74,222,128,.15)] text-[var(--green)] hover:bg-[rgba(74,222,128,.1)] hover:border-[rgba(74,222,128,.25)]"
-                                      title={availability.path}
-                                      style={{ fontFamily: 'var(--code)' }}
-                                    >
-                                      {availability.name}
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                            </td>
-                            <td className="px-4 py-3.5">
-                              <button
-                                type="button"
-                                onClick={() => void onDeleteRunDrone(run.droneId)}
-                                disabled={deleteBusy}
-                                className={`h-8 w-8 inline-flex items-center justify-center rounded-lg border transition-all ${
-                                  deleteBusy
-                                    ? 'opacity-40 cursor-not-allowed bg-transparent border-[var(--border-subtle)] text-[var(--muted-dim)]'
-                                    : 'bg-[rgba(255,90,90,.06)] border-[rgba(255,90,90,.15)] text-[var(--red)] hover:bg-[rgba(255,90,90,.14)] hover:border-[rgba(255,90,90,.25)]'
-                                }`}
-                                title={deleteBusy ? `Removing "${run.droneName}"...` : `Delete or archive "${run.droneName}"`}
-                                aria-label={deleteBusy ? `Removing "${run.droneName}"` : `Delete or archive "${run.droneName}"`}
-                              >
-                                {deleteBusy ? <IconSpinner className="opacity-90" /> : <IconTrash className="opacity-80" />}
-                              </button>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </section>
-          </div>
-        </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
       </div>
     </div>
   );
