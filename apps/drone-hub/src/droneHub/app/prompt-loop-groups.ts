@@ -1,8 +1,11 @@
 import type { PendingPrompt, TranscriptItem } from '../types';
+import { parseIsoMs } from './selected-drone-workspace-utils';
 
 export type TranscriptRenderBlock =
   | { kind: 'turn'; key: string; item: TranscriptItem }
   | { kind: 'prompt-loop-group'; key: string; identity: string; runs: TranscriptItem[] };
+
+export type TranscriptTimelineBlock = TranscriptRenderBlock | { kind: 'pending-prompt'; key: string; item: PendingPrompt };
 
 export type PendingPromptLoopGroup = {
   key: string;
@@ -70,6 +73,51 @@ export function buildTranscriptRenderBlocks(items: TranscriptItem[]): Transcript
     });
   }
   return blocks;
+}
+
+function transcriptBlockSortMs(block: TranscriptRenderBlock): number {
+  if (block.kind === 'turn') {
+    return parseIsoMs(block.item.promptAt ?? block.item.at);
+  }
+  const first = block.runs[0];
+  return parseIsoMs(first?.promptAt ?? first?.at);
+}
+
+function pendingPromptSortMs(item: PendingPrompt): number {
+  return parseIsoMs(item.at || item.updatedAt);
+}
+
+export function buildTranscriptTimelineBlocks(opts: {
+  transcriptRenderBlocks: TranscriptRenderBlock[];
+  pendingPlainPrompts: PendingPrompt[];
+}): TranscriptTimelineBlock[] {
+  const items: Array<(TranscriptTimelineBlock & { sortMs: number; order: number })> = [];
+  let order = 0;
+
+  for (const block of opts.transcriptRenderBlocks) {
+    items.push({
+      ...block,
+      sortMs: transcriptBlockSortMs(block),
+      order: order++,
+    });
+  }
+
+  for (const item of opts.pendingPlainPrompts) {
+    items.push({
+      kind: 'pending-prompt',
+      key: `pending-prompt:${item.id}`,
+      item,
+      sortMs: pendingPromptSortMs(item),
+      order: order++,
+    });
+  }
+
+  items.sort((a, b) => {
+    if (a.sortMs !== b.sortMs) return a.sortMs - b.sortMs;
+    return a.order - b.order;
+  });
+
+  return items.map(({ sortMs: _sortMs, order: _order, ...item }) => item);
 }
 
 export function buildPendingPromptLoopGroups(items: PendingPrompt[]): {

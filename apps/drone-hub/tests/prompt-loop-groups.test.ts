@@ -1,0 +1,53 @@
+import { describe, expect, test } from 'bun:test';
+import { buildTranscriptRenderBlocks, buildTranscriptTimelineBlocks } from '../src/droneHub/app/prompt-loop-groups';
+import type { PendingPrompt, TranscriptItem } from '../src/droneHub/types';
+
+function transcriptTurn(id: string, at: string): TranscriptItem {
+  return {
+    id,
+    turn: 1,
+    at,
+    promptAt: at,
+    completedAt: at,
+    prompt: `prompt:${id}`,
+    session: 'default',
+    logPath: `/tmp/${id}.log`,
+    ok: true,
+    output: `output:${id}`,
+  };
+}
+
+function failedPendingPrompt(id: string, at: string, updatedAt: string): PendingPrompt {
+  return {
+    id,
+    at,
+    updatedAt,
+    prompt: `prompt:${id}`,
+    state: 'failed',
+    error: 'failed',
+  };
+}
+
+describe('buildTranscriptTimelineBlocks', () => {
+  test('keeps failed pending prompts in chronological position based on prompt time', () => {
+    const transcriptRenderBlocks = buildTranscriptRenderBlocks([
+      transcriptTurn('first', '2026-03-29T10:00:00.000Z'),
+      transcriptTurn('second', '2026-03-29T10:02:00.000Z'),
+    ]);
+
+    const out = buildTranscriptTimelineBlocks({
+      transcriptRenderBlocks,
+      pendingPlainPrompts: [
+        failedPendingPrompt('failed-mid', '2026-03-29T10:01:00.000Z', '2026-03-29T10:05:00.000Z'),
+      ],
+    });
+
+    expect(out.map((item) => item.kind)).toEqual(['turn', 'pending-prompt', 'turn']);
+    expect(out[1]).toMatchObject({
+      kind: 'pending-prompt',
+      item: {
+        id: 'failed-mid',
+      },
+    });
+  });
+});
