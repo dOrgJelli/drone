@@ -37,6 +37,17 @@ export function IconColumns({ className }: { className?: string }) {
   );
 }
 
+export function IconTable({ className }: { className?: string }) {
+  return (
+    <svg className={className} width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
+      <line x1="1.5" y1="6" x2="14.5" y2="6" />
+      <line x1="1.5" y1="9.5" x2="14.5" y2="9.5" />
+      <line x1="6" y1="6" x2="6" y2="13.5" />
+    </svg>
+  );
+}
+
 export function IconBoard({ className }: { className?: string }) {
   return (
     <svg className={className} width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

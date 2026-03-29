@@ -238,6 +238,44 @@ code, pre {
 }
 
 /* ──────────────────────────────────────────────────────────
+   Kanban table view
+   ────────────────────────────────────────────────────────── */
+
+.dh-task-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12px;
+}
+.dh-task-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  font-family: var(--display);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--muted-dim);
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--panel);
+}
+.dh-task-table tbody tr {
+  transition: background .1s ease;
+}
+.dh-task-table tbody tr:hover {
+  background: rgba(255,255,255,.03);
+}
+.dh-task-table tbody tr:hover .group-hover\/row\:opacity-100 {
+  opacity: 1;
+}
+.dh-task-table tbody td {
+  padding: 7px 10px;
+  border-bottom: 1px solid rgba(255,255,255,.03);
+  vertical-align: middle;
+}
+
+/* ──────────────────────────────────────────────────────────
    Playbook runs refinements
    ────────────────────────────────────────────────────────── */
 
