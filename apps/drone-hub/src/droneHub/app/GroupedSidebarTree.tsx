@@ -263,6 +263,7 @@ function GroupedSidebarDragShadowSlot() {
 }
 
 function GroupedSidebarChatRow({ drone, chatName, isOptimistic }: { drone: DroneSummary; chatName: string; isOptimistic: boolean }) {
+  const activeDrag = useDroneHubActiveDrag();
   const {
     uiDroneName,
     movingDroneGroups,
@@ -296,7 +297,7 @@ function GroupedSidebarChatRow({ drone, chatName, isOptimistic }: { drone: Drone
       droneId: drone.id,
       chatName,
     },
-    disabled: movingDroneGroups || isOptimistic,
+    disabled: movingDroneGroups || isOptimistic || activeDrag?.type !== 'sidebar-chat',
   });
   const active = selectedDrone === drone.id && activeChatName === chatName;
   const selected = selectedSidebarNodeId === sidebarChatId;
@@ -379,6 +380,7 @@ function GroupedSidebarChatRow({ drone, chatName, isOptimistic }: { drone: Drone
 }
 
 function GroupedSidebarDroneRow({ node, groupPath, nested = false }: { node: SidebarTreeDroneNode; groupPath: string | null; nested?: boolean }) {
+  const activeDrag = useDroneHubActiveDrag();
   const {
     droneById,
     sidebarOptimisticDroneIdSet,
@@ -433,6 +435,15 @@ function GroupedSidebarDroneRow({ node, groupPath, nested = false }: { node: Sid
     sidebarChatOrderByDrone[drone.id] ?? [],
     (chat) => chat,
   );
+  const { setNodeRef: setChatTailDropNodeRef, isOver: isChatTailOver } = useDroppable({
+    id: `sidebar-tree-drone-tail:${node.id}`,
+    data: {
+      type: 'sidebar-tree-drone-tail',
+      nodeId: node.id,
+      parentId: node.parentId,
+    },
+    disabled: chats.length <= 1,
+  });
   const hasOnlyDefaultChat = chats.length === 1 && chats[0] === 'default';
   const defaultChatNodeId = createCanvasChatNodeId(drone.id, 'default');
   const showBusy =
@@ -451,7 +462,13 @@ function GroupedSidebarDroneRow({ node, groupPath, nested = false }: { node: Sid
         : dragOverTreeTarget.placement === 'after'
           ? 'pb-1'
           : ''
-      : '';
+      : isChatTailOver
+        ? 'pb-1'
+        : '';
+  const showChatTailPreview =
+    isChatTailOver && (activeDrag?.type === 'sidebar-drone' || activeDrag?.type === 'sidebar-folder');
+  const showAfterPreview =
+    (dragOverTreeTarget?.nodeId === node.id && dragOverTreeTarget.placement === 'after') || showChatTailPreview;
 
   return (
     <div className={`flex flex-col gap-0.5 transition-[margin] duration-150 ${nested ? 'ml-4' : ''} ${reorderPreviewClass}`}>
@@ -518,7 +535,7 @@ function GroupedSidebarDroneRow({ node, groupPath, nested = false }: { node: Sid
         />
       </div>
       {chats.length > 1 ? (
-        <div className="ml-5 mr-1 flex flex-col gap-0.5">
+        <div ref={setChatTailDropNodeRef} className="ml-5 mr-1 flex flex-col gap-0.5">
           {chats.map((chatName) => (
             <GroupedSidebarChatRow key={`${drone.id}:${chatName}`} drone={drone} chatName={chatName} isOptimistic={isOptimistic} />
           ))}
@@ -536,7 +553,7 @@ function GroupedSidebarDroneRow({ node, groupPath, nested = false }: { node: Sid
           ))}
         </div>
       ) : null}
-      {dragOverTreeTarget?.nodeId === node.id && dragOverTreeTarget.placement === 'after' ? (
+      {showAfterPreview ? (
         <div className="mt-2">
           <GroupedSidebarDragShadowSlot />
         </div>
@@ -933,6 +950,40 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
 
       if (
         (active?.type === 'sidebar-drone' || activeRaw?.type === 'sidebar-folder') &&
+        overData?.type === 'sidebar-tree-drone-tail' &&
+        typeof overData.nodeId === 'string'
+      ) {
+        const targetNodeId = String(overData.nodeId ?? '').trim();
+        if (nodeTree.nodesById[targetNodeId]?.kind === 'drone') {
+          setDragOverChat(null);
+          setDragOverFolderBodyId(null);
+          setDragOverTreeTarget({
+            nodeId: targetNodeId,
+            placement: 'after',
+          });
+          return;
+        }
+      }
+
+      if (
+        (active?.type === 'sidebar-drone' || activeRaw?.type === 'sidebar-folder') &&
+        overData?.type === 'sidebar-chat-reorder' &&
+        typeof overData.droneId === 'string'
+      ) {
+        const targetNodeId = sidebarDroneNodeId(String(overData.droneId ?? '').trim());
+        if (nodeTree.nodesById[targetNodeId]?.kind === 'drone') {
+          setDragOverChat(null);
+          setDragOverFolderBodyId(null);
+          setDragOverTreeTarget({
+            nodeId: targetNodeId,
+            placement: 'after',
+          });
+          return;
+        }
+      }
+
+      if (
+        (active?.type === 'sidebar-drone' || activeRaw?.type === 'sidebar-folder') &&
         overData?.type === 'sidebar-tree-node' &&
         typeof overData.nodeId === 'string'
       ) {
@@ -1014,9 +1065,16 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
 
       if (
         active?.type === 'sidebar-drone' &&
-        (overData?.type === 'sidebar-tree-node' || overData?.type === 'sidebar-tree-folder-body')
+        (
+          overData?.type === 'sidebar-tree-node' ||
+          overData?.type === 'sidebar-tree-folder-body' ||
+          overData?.type === 'sidebar-chat-reorder' ||
+          overData?.type === 'sidebar-tree-drone-tail'
+        )
       ) {
-        const hoveredNodeId = String(overData.nodeId ?? '').trim();
+        const chatTargetNodeId =
+          overData?.type === 'sidebar-chat-reorder' ? sidebarDroneNodeId(String(overData.droneId ?? '').trim()) : null;
+        const hoveredNodeId = chatTargetNodeId ?? String(overData.nodeId ?? '').trim();
         const folderBodyInsertionTarget =
           overData?.type === 'sidebar-tree-folder-body'
             ? resolveFolderBodyInsertionTarget(hoveredNodeId, activeRectMidY(event))
@@ -1064,17 +1122,25 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
             ? props.selectedDroneIds.slice()
             : [active.droneId];
         const placement =
-          overData.type === 'sidebar-tree-folder-body'
-            ? (folderBodyInsertionTarget?.placement ?? 'into')
-            : dragOverTreeTarget?.nodeId === targetNodeId
-              ? dragOverTreeTarget.placement
-              : placementFromEvent(event, false);
+          overData.type === 'sidebar-chat-reorder' || overData.type === 'sidebar-tree-drone-tail'
+            ? 'after'
+            : overData.type === 'sidebar-tree-folder-body'
+              ? (folderBodyInsertionTarget?.placement ?? 'into')
+              : dragOverTreeTarget?.nodeId === targetNodeId
+                ? dragOverTreeTarget.placement
+                : placementFromEvent(event, false);
         const targetParentId =
-          overData.type === 'sidebar-tree-folder-body' && folderBodyInsertionTarget
+          overData.type === 'sidebar-chat-reorder' || overData.type === 'sidebar-tree-drone-tail'
             ? targetNode.parentId
-            : placement === 'into' && targetNode.kind === 'folder'
-              ? targetNode.id
-              : targetNode.parentId;
+            : overData.type === 'sidebar-tree-folder-body'
+              ? folderBodyInsertionTarget
+                ? targetNode.parentId
+                : placement === 'into' && targetNode.kind === 'folder'
+                  ? targetNode.id
+                  : targetNode.parentId
+              : placement === 'into' && targetNode.kind === 'folder'
+                ? targetNode.id
+                : targetNode.parentId;
         const targetFolderPath = targetParentId === SIDEBAR_ROOT_PARENT_ID ? null : sidebarFolderPathFromNodeId(targetParentId);
         const sourceNode = nodeTree.nodesById[sidebarDroneNodeId(active.droneId)] as SidebarTreeDroneNode | undefined;
         const sourceParentId = sourceNode?.parentId ?? targetParentId;
@@ -1120,12 +1186,19 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
 
       if (
         activeRaw?.type === 'sidebar-folder' &&
-        (overData?.type === 'sidebar-tree-node' || overData?.type === 'sidebar-tree-folder-body')
+        (
+          overData?.type === 'sidebar-tree-node' ||
+          overData?.type === 'sidebar-tree-folder-body' ||
+          overData?.type === 'sidebar-chat-reorder' ||
+          overData?.type === 'sidebar-tree-drone-tail'
+        )
       ) {
         const sourceFolderPath = String(activeRaw.folderPath ?? '').trim();
         const sourceNodeId = sidebarFolderNodeId(sourceFolderPath);
         const sourceNode = nodeTree.nodesById[sourceNodeId];
-        const hoveredNodeId = String(overData.nodeId ?? '').trim();
+        const chatTargetNodeId =
+          overData?.type === 'sidebar-chat-reorder' ? sidebarDroneNodeId(String(overData.droneId ?? '').trim()) : null;
+        const hoveredNodeId = chatTargetNodeId ?? String(overData.nodeId ?? '').trim();
         const folderBodyInsertionTarget =
           overData?.type === 'sidebar-tree-folder-body'
             ? resolveFolderBodyInsertionTarget(hoveredNodeId, activeRectMidY(event))
@@ -1163,18 +1236,22 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
         }
 
         const placement =
-          overData.type === 'sidebar-tree-folder-body'
-            ? (folderBodyInsertionTarget?.placement ?? 'into')
-            : dragOverTreeTarget?.nodeId === targetNodeId
-              ? dragOverTreeTarget.placement
-              : placementFromEvent(event, false);
+          overData.type === 'sidebar-chat-reorder' || overData.type === 'sidebar-tree-drone-tail'
+            ? 'after'
+            : overData.type === 'sidebar-tree-folder-body'
+              ? (folderBodyInsertionTarget?.placement ?? 'into')
+              : dragOverTreeTarget?.nodeId === targetNodeId
+                ? dragOverTreeTarget.placement
+                : placementFromEvent(event, false);
         const sourceParentId = sourceNode.parentId;
         const targetParentId =
-          overData.type === 'sidebar-tree-folder-body' && folderBodyInsertionTarget
+          overData.type === 'sidebar-chat-reorder' || overData.type === 'sidebar-tree-drone-tail'
             ? targetNode.parentId
-            : placement === 'into' && targetNode.kind === 'folder'
-              ? targetNode.id
-              : targetNode.parentId;
+            : overData.type === 'sidebar-tree-folder-body' && folderBodyInsertionTarget
+              ? targetNode.parentId
+              : placement === 'into' && targetNode.kind === 'folder'
+                ? targetNode.id
+                : targetNode.parentId;
         const sourceVisibleChildIds = nodeTree.childIdsByParent[sourceParentId] ?? [];
         const targetVisibleChildIds = nodeTree.childIdsByParent[targetParentId] ?? [];
         if (sourceParentId === targetParentId && placement !== 'into') {
