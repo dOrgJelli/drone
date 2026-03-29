@@ -36,11 +36,14 @@ import {
 } from './kanban-board-state';
 import { shouldApplySuggestedKanbanTitle } from './kanban-generated-title-state';
 import { fetchJson, usePoll } from './hooks';
-import { IconBoard, IconPlus, IconTrash } from './icons';
+import { IconBoard, IconPlus, IconTable, IconTrash } from './icons';
+import { KanbanTableView } from './KanbanTableView';
 import { KanbanTaskDetailsDialog } from './KanbanTaskDetailsDialog';
 import { KanbanTaskPlaybookButtonEditor } from './KanbanTaskPlaybookButtonEditor';
 import { KanbanTaskTypeEditor } from './KanbanTaskTypeEditor';
 import { SpawnContextToolbar } from './SpawnContextToolbar';
+
+type BoardViewMode = 'board' | 'table';
 
 type KanbanBoardWorkspaceProps = {
   board: KanbanBoardState;
@@ -342,6 +345,7 @@ export function KanbanBoardWorkspace({
 }: KanbanBoardWorkspaceProps) {
   const rootRef = React.useRef<HTMLDivElement | null>(null);
   const controlsLocked = boardLoading;
+  const [viewMode, setViewMode] = React.useState<BoardViewMode>('board');
   const [selectedTypeIds, setSelectedTypeIds] = React.useState<string[]>([]);
   const [typesEditorOpen, setTypesEditorOpen] = React.useState(false);
   const [selectedCardRef, setSelectedCardRef] = React.useState<KanbanCardRef | null>(null);
@@ -824,6 +828,32 @@ export function KanbanBoardWorkspace({
                 </div>
               </div>
               <div className="flex items-center gap-1.5">
+                <div className="inline-flex items-center rounded-lg border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setViewMode('board')}
+                    className={`inline-flex h-7 w-7 items-center justify-center rounded-md transition-all ${
+                      viewMode === 'board'
+                        ? 'bg-[var(--accent-subtle)] text-[var(--accent)]'
+                        : 'text-[var(--muted-dim)] hover:text-[var(--fg)] hover:bg-[var(--hover)]'
+                    }`}
+                    title="Board view"
+                  >
+                    <IconBoard />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setViewMode('table')}
+                    className={`inline-flex h-7 w-7 items-center justify-center rounded-md transition-all ${
+                      viewMode === 'table'
+                        ? 'bg-[var(--accent-subtle)] text-[var(--accent)]'
+                        : 'text-[var(--muted-dim)] hover:text-[var(--fg)] hover:bg-[var(--hover)]'
+                    }`}
+                    title="Table view"
+                  >
+                    <IconTable />
+                  </button>
+                </div>
                 <button
                   type="button"
                   onClick={onReloadBoard}
@@ -968,113 +998,124 @@ export function KanbanBoardWorkspace({
         <div className="dh-accent-bar" />
       </div>
 
-      <DndContext
-        sensors={sensors}
-        collisionDetection={closestCenter}
-        onDragStart={handleDragStart}
-        onDragEnd={handleDragEnd}
-        onDragCancel={handleDragCancel}
-      >
-        <div className="flex-1 min-h-0 overflow-x-auto overflow-y-hidden px-6 py-6">
-          <div className="flex h-full min-h-0 w-max items-start gap-5 pr-6">
-            {visibleBoard.lanes.map((lane, laneIdx) => {
-              const accent = laneAccent(laneIdx);
-              return (
-                <section key={lane.id} className="dh-lane-column flex h-full min-h-0 w-[300px] flex-col">
-                  <div className="dh-lane-accent" style={{ background: `linear-gradient(90deg, ${accent}, transparent)` }} />
-                  <div className="flex items-center justify-between gap-3 px-3.5 pt-3.5 pb-1">
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2 text-[12px] text-[var(--fg)]">
-                        <span className="h-2 w-2 rounded-sm" style={{ backgroundColor: accent }} />
-                        <input
-                          value={lane.title}
-                          onChange={(event) => updateLaneTitle(lane.id, event.target.value)}
-                          disabled={boardInteractionLocked}
-                          placeholder={`Lane ${laneIdx + 1}`}
-                          className={`min-w-0 flex-1 bg-transparent font-semibold tracking-tight focus:outline-none ${
-                            controlsLocked ? 'cursor-not-allowed opacity-70' : ''
-                          }`}
-                          style={{ fontFamily: 'var(--display)' }}
-                        />
+      {viewMode === 'table' ? (
+        <KanbanTableView
+          board={visibleBoard}
+          controlsLocked={boardInteractionLocked}
+          taskTypeLabelById={taskTypeLabelById}
+          laneAccent={laneAccent}
+          onOpenCard={openCard}
+          onRemoveCard={removeCard}
+        />
+      ) : (
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCenter}
+          onDragStart={handleDragStart}
+          onDragEnd={handleDragEnd}
+          onDragCancel={handleDragCancel}
+        >
+          <div className="flex-1 min-h-0 overflow-x-auto overflow-y-hidden px-6 py-6">
+            <div className="flex h-full min-h-0 w-max items-start gap-5 pr-6">
+              {visibleBoard.lanes.map((lane, laneIdx) => {
+                const accent = laneAccent(laneIdx);
+                return (
+                  <section key={lane.id} className="dh-lane-column flex h-full min-h-0 w-[300px] flex-col">
+                    <div className="dh-lane-accent" style={{ background: `linear-gradient(90deg, ${accent}, transparent)` }} />
+                    <div className="flex items-center justify-between gap-3 px-3.5 pt-3.5 pb-1">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2 text-[12px] text-[var(--fg)]">
+                          <span className="h-2 w-2 rounded-sm" style={{ backgroundColor: accent }} />
+                          <input
+                            value={lane.title}
+                            onChange={(event) => updateLaneTitle(lane.id, event.target.value)}
+                            disabled={boardInteractionLocked}
+                            placeholder={`Lane ${laneIdx + 1}`}
+                            className={`min-w-0 flex-1 bg-transparent font-semibold tracking-tight focus:outline-none ${
+                              controlsLocked ? 'cursor-not-allowed opacity-70' : ''
+                            }`}
+                            style={{ fontFamily: 'var(--display)' }}
+                          />
+                        </div>
+                        <div className="mt-1 flex items-center gap-2 px-4 text-[10px] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--code)' }}>
+                          <span>{lane.cards.length} task{lane.cards.length === 1 ? '' : 's'}</span>
+                          {laneIdx === 0 ? (
+                            <span className="rounded-md bg-[rgba(167,139,250,.1)] px-1.5 py-0.5 text-[9px] text-[var(--accent)]" style={{ fontFamily: 'var(--display)' }}>
+                              Paste target
+                            </span>
+                          ) : null}
+                        </div>
                       </div>
-                      <div className="mt-1 flex items-center gap-2 px-4 text-[10px] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--code)' }}>
-                        <span>{lane.cards.length} task{lane.cards.length === 1 ? '' : 's'}</span>
-                        {laneIdx === 0 ? (
-                          <span className="rounded-md bg-[rgba(167,139,250,.1)] px-1.5 py-0.5 text-[9px] text-[var(--accent)]" style={{ fontFamily: 'var(--display)' }}>
-                            Paste target
-                          </span>
-                        ) : null}
-                      </div>
+                      <button
+                        type="button"
+                        onClick={() => removeLane(lane.id)}
+                        disabled={boardInteractionLocked || board.lanes.length <= 1}
+                        className={`inline-flex h-7 w-7 items-center justify-center rounded-lg transition-all ${
+                          boardInteractionLocked || board.lanes.length <= 1
+                            ? 'cursor-not-allowed text-[var(--muted-dim)] opacity-20'
+                            : 'text-[var(--muted-dim)] hover:bg-[rgba(255,90,90,.1)] hover:text-[var(--red)]'
+                        }`}
+                        title={
+                          boardInteractionLocked ? 'Clear filters to edit lanes' : board.lanes.length <= 1 ? 'Keep at least one lane' : 'Delete lane'
+                        }
+                      >
+                        <IconTrash className="opacity-80" />
+                      </button>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => removeLane(lane.id)}
-                      disabled={boardInteractionLocked || board.lanes.length <= 1}
-                      className={`inline-flex h-7 w-7 items-center justify-center rounded-lg transition-all ${
-                        boardInteractionLocked || board.lanes.length <= 1
-                          ? 'cursor-not-allowed text-[var(--muted-dim)] opacity-20'
-                          : 'text-[var(--muted-dim)] hover:bg-[rgba(255,90,90,.1)] hover:text-[var(--red)]'
-                      }`}
-                      title={
-                        boardInteractionLocked ? 'Clear filters to edit lanes' : board.lanes.length <= 1 ? 'Keep at least one lane' : 'Delete lane'
-                      }
-                    >
-                      <IconTrash className="opacity-80" />
-                    </button>
-                  </div>
 
-                  <div className="flex-1 min-h-0 overflow-y-auto px-2 pt-2 pb-1">
-                    <KanbanLaneCards
-                      lane={lane}
-                      controlsLocked={boardInteractionLocked}
-                      selectedCardRef={selectedCardRef}
-                      activeDragCardId={activeDragCardId}
-                      taskTypeLabelById={taskTypeLabelById}
-                      onOpenCard={openCard}
-                      onRemoveCard={removeCard}
-                    />
-                  </div>
+                    <div className="flex-1 min-h-0 overflow-y-auto px-2 pt-2 pb-1">
+                      <KanbanLaneCards
+                        lane={lane}
+                        controlsLocked={boardInteractionLocked}
+                        selectedCardRef={selectedCardRef}
+                        activeDragCardId={activeDragCardId}
+                        taskTypeLabelById={taskTypeLabelById}
+                        onOpenCard={openCard}
+                        onRemoveCard={removeCard}
+                      />
+                    </div>
 
-                  <div className="px-3 pb-3 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => addCard(lane.id)}
-                      disabled={boardInteractionLocked}
-                      className={`inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-lg border border-dashed text-[10px] font-semibold uppercase tracking-wide transition-all ${
-                        boardInteractionLocked
-                          ? 'cursor-not-allowed border-[rgba(255,255,255,.06)] bg-transparent text-[var(--muted-dim)] opacity-40'
-                          : 'border-[rgba(255,255,255,.1)] bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)] hover:border-[var(--accent-muted)] hover:bg-[rgba(167,139,250,.06)] hover:text-[var(--accent)]'
-                      }`}
-                      style={{ fontFamily: 'var(--display)' }}
-                    >
-                      <IconPlus className="opacity-70" />
-                      Add task
-                    </button>
-                  </div>
-                </section>
-              );
-            })}
+                    <div className="px-3 pb-3 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => addCard(lane.id)}
+                        disabled={boardInteractionLocked}
+                        className={`inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-lg border border-dashed text-[10px] font-semibold uppercase tracking-wide transition-all ${
+                          boardInteractionLocked
+                            ? 'cursor-not-allowed border-[rgba(255,255,255,.06)] bg-transparent text-[var(--muted-dim)] opacity-40'
+                            : 'border-[rgba(255,255,255,.1)] bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)] hover:border-[var(--accent-muted)] hover:bg-[rgba(167,139,250,.06)] hover:text-[var(--accent)]'
+                        }`}
+                        style={{ fontFamily: 'var(--display)' }}
+                      >
+                        <IconPlus className="opacity-70" />
+                        Add task
+                      </button>
+                    </div>
+                  </section>
+                );
+              })}
 
-            <button
-              type="button"
-              onClick={addLane}
-              disabled={boardInteractionLocked}
-              className={`inline-flex h-full min-h-[200px] w-[80px] flex-col items-center justify-center gap-2 rounded-2xl border border-dashed transition-all ${
-                boardInteractionLocked
-                  ? 'cursor-not-allowed border-[rgba(255,255,255,.06)] text-[var(--muted-dim)] opacity-30'
-                  : 'border-[rgba(255,255,255,.08)] text-[var(--muted-dim)] hover:border-[var(--accent-muted)] hover:bg-[rgba(167,139,250,.04)] hover:text-[var(--accent)]'
-              }`}
-              style={{ fontFamily: 'var(--display)' }}
-            >
-              <IconPlus className="opacity-60" />
-              <span className="text-[9px] font-semibold uppercase tracking-widest">Lane</span>
-            </button>
+              <button
+                type="button"
+                onClick={addLane}
+                disabled={boardInteractionLocked}
+                className={`inline-flex h-full min-h-[200px] w-[80px] flex-col items-center justify-center gap-2 rounded-2xl border border-dashed transition-all ${
+                  boardInteractionLocked
+                    ? 'cursor-not-allowed border-[rgba(255,255,255,.06)] text-[var(--muted-dim)] opacity-30'
+                    : 'border-[rgba(255,255,255,.08)] text-[var(--muted-dim)] hover:border-[var(--accent-muted)] hover:bg-[rgba(167,139,250,.04)] hover:text-[var(--accent)]'
+                }`}
+                style={{ fontFamily: 'var(--display)' }}
+              >
+                <IconPlus className="opacity-60" />
+                <span className="text-[9px] font-semibold uppercase tracking-widest">Lane</span>
+              </button>
+            </div>
           </div>
-        </div>
-        <DragOverlay>
-          {activeDragCard ? <DragOverlayKanbanCard card={activeDragCard} taskTypeLabel={taskTypeLabelById[activeDragCard.typeId] ?? activeDragCard.typeId} /> : null}
-        </DragOverlay>
-      </DndContext>
+          <DragOverlay>
+            {activeDragCard ? <DragOverlayKanbanCard card={activeDragCard} taskTypeLabel={taskTypeLabelById[activeDragCard.typeId] ?? activeDragCard.typeId} /> : null}
+          </DragOverlay>
+        </DndContext>
+      )}
       <KanbanTaskDetailsDialog
         card={selectedCardEntry?.card ?? null}
         laneTitle={selectedCardEntry?.lane.title ?? null}
