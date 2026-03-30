@@ -75,6 +75,7 @@ type GroupedSidebarTreeProps = {
   onStartRenameFolder: (path: string) => void;
   onFolderEditorValueChange: (next: string) => void;
   onSubmitFolderEditor: () => void;
+  onBlurFolderEditor: () => void;
   onCancelFolderEditor: () => void;
   folderEditor: FolderEditorState | null;
   folderEditorInputRef: React.RefObject<HTMLInputElement>;
@@ -636,6 +637,7 @@ function GroupedSidebarFolderRow({ node }: { node: SidebarTreeFolderNode }) {
     folderEditorInputRef,
     onFolderEditorValueChange,
     onSubmitFolderEditor,
+    onBlurFolderEditor,
     onCancelFolderEditor,
     nodeTree,
     dragOverTreeTarget,
@@ -744,7 +746,7 @@ function GroupedSidebarFolderRow({ node }: { node: SidebarTreeFolderNode }) {
                   ref={folderEditorInputRef}
                   value={folderEditor.value}
                   onChange={(event) => onFolderEditorValueChange(event.target.value)}
-                  onBlur={onSubmitFolderEditor}
+                  onBlur={onBlurFolderEditor}
                   onKeyDown={(event) => {
                     if (event.key === 'Enter') {
                       event.preventDefault();
@@ -853,7 +855,7 @@ function GroupedSidebarFolderRow({ node }: { node: SidebarTreeFolderNode }) {
                 ref={folderEditorInputRef}
                 value={folderEditor?.value ?? ''}
                 onChange={(event) => onFolderEditorValueChange(event.target.value)}
-                onBlur={onSubmitFolderEditor}
+                onBlur={onBlurFolderEditor}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') {
                     event.preventDefault();
