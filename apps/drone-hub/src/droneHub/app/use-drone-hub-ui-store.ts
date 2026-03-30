@@ -35,6 +35,7 @@ type ViewMode = 'grouped' | 'flat';
 type SidebarGroupingMode = 'groups' | 'repos';
 type FsExplorerView = 'list' | 'thumb';
 type OutputView = 'screen' | 'log';
+type KanbanBoardViewMode = 'board' | 'table';
 const CHAT_INPUT_DRAFT_MAX_CHARS = 4_000;
 const CHAT_INPUT_DRAFT_MAX_KEYS = 80;
 const CHAT_INPUT_DRAFTS_STORAGE_KEY = profileStorageKey('droneHub.chatInputDrafts');
@@ -47,6 +48,9 @@ type DroneHubUiState = {
   playbookRunsSelectionInitialized: boolean;
   playbookRunsSelectedPlaybookId: string;
   playbookRunsSelectedRepoPath: string;
+  kanbanBoardSelectionInitialized: boolean;
+  kanbanBoardSelectedRepoPath: string;
+  kanbanBoardViewMode: KanbanBoardViewMode;
   chatHeaderRepoPath: string;
   sidebarReposCollapsed: boolean;
   sidebarAutoMinimize: boolean;
@@ -103,6 +107,9 @@ type DroneHubUiState = {
   setPlaybookRunsSelectionInitialized: (next: Updater<boolean>) => void;
   setPlaybookRunsSelectedPlaybookId: (next: Updater<string>) => void;
   setPlaybookRunsSelectedRepoPath: (next: Updater<string>) => void;
+  setKanbanBoardSelectionInitialized: (next: Updater<boolean>) => void;
+  setKanbanBoardSelectedRepoPath: (next: Updater<string>) => void;
+  setKanbanBoardViewMode: (next: Updater<KanbanBoardViewMode>) => void;
   setChatHeaderRepoPath: (next: Updater<string>) => void;
   setSidebarReposCollapsed: (next: Updater<boolean>) => void;
   setSidebarAutoMinimize: (next: Updater<boolean>) => void;
@@ -172,6 +179,9 @@ type DroneHubUiPersistedState = Pick<
   | 'playbookRunsSelectionInitialized'
   | 'playbookRunsSelectedPlaybookId'
   | 'playbookRunsSelectedRepoPath'
+  | 'kanbanBoardSelectionInitialized'
+  | 'kanbanBoardSelectedRepoPath'
+  | 'kanbanBoardViewMode'
   | 'chatHeaderRepoPath'
   | 'sidebarReposCollapsed'
   | 'sidebarAutoMinimize'
@@ -269,6 +279,10 @@ function normalizeFsExplorerView(value: unknown): FsExplorerView {
   return value === 'thumb' ? 'thumb' : 'list';
 }
 
+function normalizeKanbanBoardViewMode(value: unknown): KanbanBoardViewMode {
+  return value === 'table' ? 'table' : 'board';
+}
+
 function normalizeBoolean(value: unknown): boolean {
   return value === true;
 }
@@ -331,7 +345,12 @@ function readPersistedChatInputDrafts(): Record<string, string> {
 
 function readPersistedDroneHubUiSelections(): Pick<
   DroneHubUiState,
-  'playbookRunsSelectionInitialized' | 'playbookRunsSelectedPlaybookId' | 'playbookRunsSelectedRepoPath'
+  | 'playbookRunsSelectionInitialized'
+  | 'playbookRunsSelectedPlaybookId'
+  | 'playbookRunsSelectedRepoPath'
+  | 'kanbanBoardSelectionInitialized'
+  | 'kanbanBoardSelectedRepoPath'
+  | 'kanbanBoardViewMode'
 > {
   const storageRaw = readLocalStorageItem(profileStorageKey('droneHub.ui'));
   if (!storageRaw) {
@@ -339,6 +358,9 @@ function readPersistedDroneHubUiSelections(): Pick<
       playbookRunsSelectionInitialized: false,
       playbookRunsSelectedPlaybookId: '',
       playbookRunsSelectedRepoPath: '',
+      kanbanBoardSelectionInitialized: false,
+      kanbanBoardSelectedRepoPath: '',
+      kanbanBoardViewMode: 'board',
     };
   }
   try {
@@ -351,12 +373,18 @@ function readPersistedDroneHubUiSelections(): Pick<
       playbookRunsSelectionInitialized: normalizeBoolean(persistedState?.playbookRunsSelectionInitialized),
       playbookRunsSelectedPlaybookId: normalizeTrimmedString(persistedState?.playbookRunsSelectedPlaybookId),
       playbookRunsSelectedRepoPath: normalizeTrimmedString(persistedState?.playbookRunsSelectedRepoPath),
+      kanbanBoardSelectionInitialized: normalizeBoolean(persistedState?.kanbanBoardSelectionInitialized),
+      kanbanBoardSelectedRepoPath: normalizeTrimmedString(persistedState?.kanbanBoardSelectedRepoPath),
+      kanbanBoardViewMode: normalizeKanbanBoardViewMode(persistedState?.kanbanBoardViewMode),
     };
   } catch {
     return {
       playbookRunsSelectionInitialized: false,
       playbookRunsSelectedPlaybookId: '',
       playbookRunsSelectedRepoPath: '',
+      kanbanBoardSelectionInitialized: false,
+      kanbanBoardSelectedRepoPath: '',
+      kanbanBoardViewMode: 'board',
     };
   }
 }
@@ -396,6 +424,9 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
       playbookRunsSelectionInitialized: initialPlaybookRunsSelections.playbookRunsSelectionInitialized,
       playbookRunsSelectedPlaybookId: initialPlaybookRunsSelections.playbookRunsSelectedPlaybookId,
       playbookRunsSelectedRepoPath: initialPlaybookRunsSelections.playbookRunsSelectedRepoPath,
+      kanbanBoardSelectionInitialized: initialPlaybookRunsSelections.kanbanBoardSelectionInitialized,
+      kanbanBoardSelectedRepoPath: initialPlaybookRunsSelections.kanbanBoardSelectedRepoPath,
+      kanbanBoardViewMode: initialPlaybookRunsSelections.kanbanBoardViewMode,
       chatHeaderRepoPath: '',
       sidebarReposCollapsed: false,
       sidebarAutoMinimize: false,
@@ -456,6 +487,12 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
         set((s) => ({ playbookRunsSelectedPlaybookId: normalizeTrimmedString(resolveNext(s.playbookRunsSelectedPlaybookId, next)) })),
       setPlaybookRunsSelectedRepoPath: (next) =>
         set((s) => ({ playbookRunsSelectedRepoPath: normalizeTrimmedString(resolveNext(s.playbookRunsSelectedRepoPath, next)) })),
+      setKanbanBoardSelectionInitialized: (next) =>
+        set((s) => ({ kanbanBoardSelectionInitialized: resolveNext(s.kanbanBoardSelectionInitialized, next) })),
+      setKanbanBoardSelectedRepoPath: (next) =>
+        set((s) => ({ kanbanBoardSelectedRepoPath: normalizeTrimmedString(resolveNext(s.kanbanBoardSelectedRepoPath, next)) })),
+      setKanbanBoardViewMode: (next) =>
+        set((s) => ({ kanbanBoardViewMode: normalizeKanbanBoardViewMode(resolveNext(s.kanbanBoardViewMode, next)) })),
       setChatHeaderRepoPath: (next) => set((s) => ({ chatHeaderRepoPath: resolveNext(s.chatHeaderRepoPath, next) })),
       setSidebarReposCollapsed: (next) => set((s) => ({ sidebarReposCollapsed: resolveNext(s.sidebarReposCollapsed, next) })),
       setSidebarAutoMinimize: (next) => set((s) => ({ sidebarAutoMinimize: resolveNext(s.sidebarAutoMinimize, next) })),
@@ -622,7 +659,7 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
     }),
     {
       name: profileStorageKey('droneHub.ui'),
-      version: 9,
+      version: 10,
       storage: createJSONStorage(() => localStorage),
       migrate: (persistedState, version) => migrateDroneHubUiPersistedState(persistedState, version),
       partialize: (state): DroneHubUiPersistedState => ({
@@ -631,6 +668,9 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
         playbookRunsSelectionInitialized: state.playbookRunsSelectionInitialized,
         playbookRunsSelectedPlaybookId: state.playbookRunsSelectedPlaybookId,
         playbookRunsSelectedRepoPath: state.playbookRunsSelectedRepoPath,
+        kanbanBoardSelectionInitialized: state.kanbanBoardSelectionInitialized,
+        kanbanBoardSelectedRepoPath: state.kanbanBoardSelectedRepoPath,
+        kanbanBoardViewMode: state.kanbanBoardViewMode,
         chatHeaderRepoPath: state.chatHeaderRepoPath,
         sidebarReposCollapsed: state.sidebarReposCollapsed,
         sidebarAutoMinimize: state.sidebarAutoMinimize,
@@ -687,6 +727,15 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
           ),
           playbookRunsSelectedRepoPath: normalizeTrimmedString(
             persisted.playbookRunsSelectedRepoPath ?? currentState.playbookRunsSelectedRepoPath,
+          ),
+          kanbanBoardSelectionInitialized: normalizeBoolean(
+            persisted.kanbanBoardSelectionInitialized ?? currentState.kanbanBoardSelectionInitialized,
+          ),
+          kanbanBoardSelectedRepoPath: normalizeTrimmedString(
+            persisted.kanbanBoardSelectedRepoPath ?? currentState.kanbanBoardSelectedRepoPath,
+          ),
+          kanbanBoardViewMode: normalizeKanbanBoardViewMode(
+            persisted.kanbanBoardViewMode ?? currentState.kanbanBoardViewMode,
           ),
           appView: normalizeAppView(persisted.appView ?? currentState.appView),
           sidebarAutoMinimize: normalizeBoolean(persisted.sidebarAutoMinimize ?? currentState.sidebarAutoMinimize),

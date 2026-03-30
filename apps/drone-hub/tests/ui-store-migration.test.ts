@@ -10,6 +10,9 @@ describe('drone hub ui store migration', () => {
         autoDelete: true,
         showCanvasLastMessagePreviews: true,
         seenModelIds: ['gpt-5.4', 'o3'],
+        kanbanBoardSelectionInitialized: true,
+        kanbanBoardSelectedRepoPath: '/tmp/repo-a',
+        kanbanBoardViewMode: 'table',
         automations: [
           {
             id: 'automation-a',
@@ -27,6 +30,9 @@ describe('drone hub ui store migration', () => {
       autoDelete: true,
       showCanvasLastMessagePreviews: true,
       seenModelIds: ['gpt-5.4', 'o3'],
+      kanbanBoardSelectionInitialized: true,
+      kanbanBoardSelectedRepoPath: '/tmp/repo-a',
+      kanbanBoardViewMode: 'table',
     });
     expect(Array.isArray(migrated.automations)).toBe(true);
     expect((migrated.automations ?? [])[0]).toMatchObject({
