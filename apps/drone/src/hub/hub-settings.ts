@@ -131,6 +131,7 @@ export type UiAutomationConfig = {
 };
 export type UiPreferencesSettings = {
   sidebarGroupingMode: SidebarGroupingMode;
+  sidebarDensityMode: 'compact' | 'default' | 'comfortable';
   sidebarGroupOrder: string[];
   sidebarDroneOrderByGroup: Record<string, string[]>;
   sidebarNodeOrderByParent: Record<string, string[]>;
@@ -150,6 +151,7 @@ const DEFAULT_DRONE_DELETE_MODE: DroneDeleteMode = 'permanent';
 const DEFAULT_ARCHIVE_RETENTION: ArchiveRetentionId = '1d';
 const DEFAULT_ARCHIVE_RUNTIME_POLICY: ArchiveRuntimePolicy = 'keep-running';
 const DEFAULT_SIDEBAR_GROUPING_MODE: SidebarGroupingMode = 'groups';
+const DEFAULT_SIDEBAR_DENSITY_MODE: UiPreferencesSettings['sidebarDensityMode'] = 'default';
 export const FILESYSTEM_UPLOAD_MAX_BYTES_MIN = 1 * 1024 * 1024;
 export const FILESYSTEM_UPLOAD_MAX_BYTES_MAX = 8 * 1024 * 1024 * 1024;
 export const FILESYSTEM_UPLOAD_MAX_BYTES_DEFAULT = 2 * 1024 * 1024 * 1024;
@@ -205,6 +207,13 @@ export function parseSidebarGroupingMode(raw: unknown): SidebarGroupingMode | nu
     .toLowerCase();
   if (s === 'groups' || s === 'repos') return s;
   return null;
+}
+
+function parseSidebarDensityMode(raw: unknown): UiPreferencesSettings['sidebarDensityMode'] | null {
+  const s = String(raw ?? '')
+    .trim()
+    .toLowerCase();
+  return s === 'compact' || s === 'comfortable' || s === 'default' ? s : null;
 }
 
 export function archiveRetentionMs(retention: ArchiveRetentionId): number {
@@ -339,6 +348,7 @@ function sanitizeUiPreferencesSettings(value: unknown): UiPreferencesSettings {
   const raw = value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
   return {
     sidebarGroupingMode: parseSidebarGroupingMode(raw.sidebarGroupingMode) ?? DEFAULT_SIDEBAR_GROUPING_MODE,
+    sidebarDensityMode: parseSidebarDensityMode(raw.sidebarDensityMode) ?? DEFAULT_SIDEBAR_DENSITY_MODE,
     sidebarGroupOrder: normalizeOrderedStringList(raw.sidebarGroupOrder),
     sidebarDroneOrderByGroup: normalizeOrderedStringMap(raw.sidebarDroneOrderByGroup),
     sidebarNodeOrderByParent: normalizeOrderedStringMap(raw.sidebarNodeOrderByParent),
@@ -786,6 +796,7 @@ export async function upsertStoredUiPreferencesSettings(valueRaw: unknown): Prom
     reg.settings ??= {};
     reg.settings.uiPreferences = {
       sidebarGroupingMode: uiPreferences.sidebarGroupingMode,
+      sidebarDensityMode: uiPreferences.sidebarDensityMode,
       sidebarGroupOrder: uiPreferences.sidebarGroupOrder.slice(),
       sidebarDroneOrderByGroup: Object.fromEntries(
         Object.entries(uiPreferences.sidebarDroneOrderByGroup).map(([key, value]) => [key, value.slice()]),

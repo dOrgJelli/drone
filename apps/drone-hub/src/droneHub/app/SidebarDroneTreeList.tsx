@@ -23,6 +23,7 @@ import {
 } from './sidebar-reorder-ui';
 import { useDroneSidebarUiState } from './use-drone-hub-ui-store';
 import type { SidebarDroneTree } from './sidebar-drone-tree';
+import type { SidebarDensityMode } from './settings-types';
 
 export type SidebarInlineSectionKind = 'chats' | 'children';
 
@@ -34,6 +35,7 @@ export function sidebarInlineSectionKey(droneIdRaw: string, kind: SidebarInlineS
 export type SidebarDroneTreeListProps = {
   droneById: Record<string, DroneSummary>;
   tree: SidebarDroneTree;
+  sidebarDensityMode: SidebarDensityMode;
   draftSidebarPlaceholderId: string;
   selectedDroneIds: string[];
   selectedDroneSet: Set<string>;
@@ -69,6 +71,7 @@ export type SidebarDroneTreeListProps = {
 
 type SidebarDroneRowProps = {
   drone: DroneSummary;
+  sidebarDensityMode: SidebarDensityMode;
   selectedDroneIds: string[];
   selectedDroneSet: Set<string>;
   deletingDrones: Record<string, boolean>;
@@ -94,6 +97,7 @@ type SidebarDroneRowProps = {
 
 type SidebarChatRowProps = {
   drone: DroneSummary;
+  sidebarDensityMode: SidebarDensityMode;
   chatName: string;
   selected: boolean;
   unread: boolean;
@@ -119,6 +123,48 @@ type SidebarDroneNodeProps = SidebarDroneTreeListProps & {
 };
 
 const EMPTY_CHAT_ORDER: string[] = [];
+
+function sidebarTreeDensityClasses(sidebarDensityMode: SidebarDensityMode): {
+  chatRow: string;
+  chatDeleteWidth: string;
+  chatPlaceholderWidth: string;
+  childIndent: string;
+  draftRow: string;
+  draftText: string;
+  leadingIcon: string;
+} {
+  if (sidebarDensityMode === 'compact') {
+    return {
+      chatRow: 'h-6 px-1.5 text-[10.5px]',
+      chatDeleteWidth: 'w-6',
+      chatPlaceholderWidth: 'w-6',
+      childIndent: 'ml-4',
+      draftRow: 'px-2.5 h-7',
+      draftText: 'text-[11.5px]',
+      leadingIcon: 'h-3 w-3 text-[var(--muted-dim)] opacity-75',
+    };
+  }
+  if (sidebarDensityMode === 'comfortable') {
+    return {
+      chatRow: 'h-8 px-2.5 text-[11.5px]',
+      chatDeleteWidth: 'w-8',
+      chatPlaceholderWidth: 'w-8',
+      childIndent: 'ml-6',
+      draftRow: 'px-3 h-9',
+      draftText: 'text-[13px]',
+      leadingIcon: 'h-[15px] w-[15px] text-[var(--muted-dim)] opacity-75',
+    };
+  }
+  return {
+    chatRow: 'h-7 px-2 text-[11px]',
+    chatDeleteWidth: 'w-7',
+    chatPlaceholderWidth: 'w-7',
+    childIndent: 'ml-5',
+    draftRow: 'px-3 h-8',
+    draftText: 'text-[12.5px]',
+    leadingIcon: 'h-3.5 w-3.5 text-[var(--muted-dim)] opacity-75',
+  };
+}
 
 function flattenSidebarTreeOrder(tree: SidebarDroneTree): string[] {
   const out: string[] = [];
@@ -155,6 +201,7 @@ function currentPlacementFromEvent(
 
 function SidebarDroneRow({
   drone,
+  sidebarDensityMode,
   selectedDroneIds,
   selectedDroneSet,
   deletingDrones,
@@ -177,6 +224,7 @@ function SidebarDroneRow({
   onDeleteDrone,
   onOpenDroneErrorModal,
 }: SidebarDroneRowProps) {
+  const densityClasses = sidebarTreeDensityClasses(sidebarDensityMode);
   const isOptimistic = sidebarOptimisticDroneIdSet.has(drone.id);
   const dragDisabled = movingDroneGroups || isOptimistic;
   const selectedDragDroneIds =
@@ -215,13 +263,14 @@ function SidebarDroneRow({
       <div className="min-w-0 flex-1">
         <DroneCard
           drone={drone}
+          density={sidebarDensityMode}
           displayName={uiDroneName(drone.name)}
           statusHint={isOptimistic ? 'queued' : undefined}
           selected={selectedDroneSet.has(drone.id)}
           busy={busy}
           unreadAgentMessage={unread}
           showGroup={showGroup}
-          leadingIcon={<IconDrone className="h-3.5 w-3.5 text-[var(--muted-dim)] opacity-75" />}
+          leadingIcon={<IconDrone className={densityClasses.leadingIcon} />}
           onClick={(rowOpts) => onSelectDroneCard(drone.id, rowOpts)}
           dragNodeRef={setDragNodeRef}
           draggable={!dragDisabled}
@@ -279,6 +328,7 @@ function SidebarDroneRow({
 
 function SidebarChatRow({
   drone,
+  sidebarDensityMode,
   chatName,
   selected,
   unread,
@@ -292,6 +342,7 @@ function SidebarChatRow({
   onSelectDroneChat,
   onDeleteChatClick,
 }: SidebarChatRowProps) {
+  const densityClasses = sidebarTreeDensityClasses(sidebarDensityMode);
   const chatKey = `${drone.id}:${chatName}`;
   const chatDragData = React.useMemo(
     () => createSidebarChatDragData(drone.id, chatName, `${uiDroneName(drone.name)} / ${chatName}`),
@@ -324,7 +375,7 @@ function SidebarChatRow({
           event.stopPropagation();
           onSelectDroneChat(drone.id, chatName);
         }}
-        className={`flex-1 h-7 rounded border px-2 text-left text-[11px] transition-all flex items-center gap-1.5 min-w-0 ${
+        className={`flex-1 rounded border text-left transition-all flex items-center gap-1.5 min-w-0 ${densityClasses.chatRow} ${
           selected
             ? 'border-[var(--accent-muted)] bg-[var(--selected)] text-[var(--fg)]'
             : 'border-transparent text-[var(--muted)] hover:border-[var(--border-subtle)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]'
@@ -357,7 +408,7 @@ function SidebarChatRow({
           onPointerDown={(event) => event.stopPropagation()}
           onMouseDown={(event) => event.stopPropagation()}
           disabled={deleting}
-          className={`inline-flex w-7 flex-shrink-0 items-center justify-center rounded border transition-all ${
+          className={`inline-flex ${densityClasses.chatDeleteWidth} flex-shrink-0 items-center justify-center rounded border transition-all ${
             deleting
               ? 'bg-[var(--panel-raised)] border-[var(--border-subtle)] text-[var(--muted)]'
               : 'opacity-0 pointer-events-none group-hover/chat-row:opacity-100 group-hover/chat-row:pointer-events-auto bg-[var(--red-subtle)] border-[rgba(255,90,90,.2)] text-[var(--red)] hover:bg-[rgba(255,90,90,.15)]'
@@ -368,7 +419,7 @@ function SidebarChatRow({
           {deleting ? <IconSpinner className="opacity-90" /> : <IconTrash className="opacity-90" />}
         </button>
       ) : (
-        <span className="w-7 flex-shrink-0" />
+        <span className={`${densityClasses.chatPlaceholderWidth} flex-shrink-0`} />
       )}
     </div>
   );
@@ -377,6 +428,7 @@ function SidebarChatRow({
 function SidebarDroneNode({
   droneById,
   tree,
+  sidebarDensityMode,
   draftSidebarPlaceholderId,
   selectedDroneIds,
   selectedDroneSet,
@@ -413,6 +465,7 @@ function SidebarDroneNode({
   deletingChats,
   onDeleteChatClick,
 }: SidebarDroneNodeProps) {
+  const densityClasses = sidebarTreeDensityClasses(sidebarDensityMode);
   if (ancestorDroneIds?.has(droneId)) return null;
   const drone = droneById[droneId];
   if (!drone) return null;
@@ -422,10 +475,10 @@ function SidebarDroneNode({
 
   if (drone.id === draftSidebarPlaceholderId) {
     return (
-      <div key={drone.id} className="w-full text-left px-3 h-8 flex items-center rounded-md border bg-[var(--selected)] border-[var(--accent-muted)] relative">
+      <div key={drone.id} className={`w-full text-left flex items-center rounded-md border bg-[var(--selected)] border-[var(--accent-muted)] relative ${densityClasses.draftRow}`}>
         <div className="absolute left-0 top-1 bottom-1 w-[2px] rounded-full bg-[var(--accent)]" />
         <div className="flex-1 min-w-0 flex items-center gap-1.5">
-          <span className="flex-1 min-w-0 truncate text-[12.5px] font-semibold text-[var(--fg)]" title={`${drone.name} · pending draft`}>
+          <span className={`flex-1 min-w-0 truncate font-semibold text-[var(--fg)] ${densityClasses.draftText}`} title={`${drone.name} · pending draft`}>
             {drone.name}
           </span>
           <span
@@ -463,6 +516,7 @@ function SidebarDroneNode({
     <div key={drone.id} className="flex flex-col gap-0.5">
       <SidebarDroneRow
         drone={drone}
+        sidebarDensityMode={sidebarDensityMode}
         selectedDroneIds={selectedDroneIds}
         selectedDroneSet={selectedDroneSet}
         deletingDrones={deletingDrones}
@@ -486,7 +540,7 @@ function SidebarDroneNode({
         onOpenDroneErrorModal={onOpenDroneErrorModal}
       />
       {hasChatSection ? (
-        <div className="ml-5 mr-1 flex flex-col gap-0.5">
+        <div className={`${densityClasses.childIndent} mr-1 flex flex-col gap-0.5`}>
           {chats.map((chatName) => {
             const chatNodeId = createCanvasChatNodeId(drone.id, chatName);
             if (!chatNodeId) return null;
@@ -495,6 +549,7 @@ function SidebarDroneNode({
               <SidebarChatRow
                 key={chatKey}
                 drone={drone}
+                sidebarDensityMode={sidebarDensityMode}
                 chatName={chatName}
                 selected={selectedDrone === drone.id && activeChatName === chatName}
                 unread={unreadAgentMessageByChatNodeId[chatNodeId] === true}
@@ -513,7 +568,7 @@ function SidebarDroneNode({
         </div>
       ) : null}
       {hasChildrenSection ? (
-        <div className="ml-5 mr-1 flex flex-col gap-0.5">
+        <div className={`${densityClasses.childIndent} mr-1 flex flex-col gap-0.5`}>
           {childDroneIds.map((childDroneId) => (
             <SidebarDroneNode
               key={childDroneId}
@@ -521,6 +576,7 @@ function SidebarDroneNode({
               ancestorDroneIds={nextAncestorDroneIds}
               droneById={droneById}
               tree={tree}
+              sidebarDensityMode={sidebarDensityMode}
               draftSidebarPlaceholderId={draftSidebarPlaceholderId}
               selectedDroneIds={selectedDroneIds}
               selectedDroneSet={selectedDroneSet}
@@ -565,6 +621,7 @@ function SidebarDroneNode({
 export function SidebarDroneTreeList({
   droneById,
   tree,
+  sidebarDensityMode,
   draftSidebarPlaceholderId,
   selectedDroneIds,
   selectedDroneSet,
@@ -754,12 +811,13 @@ export function SidebarDroneTreeList({
   return (
     <>
       {tree.rootDroneIds.map((droneId) => (
-        <SidebarDroneNode
-          key={droneId}
-          droneId={droneId}
-          droneById={droneById}
-          tree={tree}
-          draftSidebarPlaceholderId={draftSidebarPlaceholderId}
+          <SidebarDroneNode
+            key={droneId}
+            droneId={droneId}
+            droneById={droneById}
+            tree={tree}
+            sidebarDensityMode={sidebarDensityMode}
+            draftSidebarPlaceholderId={draftSidebarPlaceholderId}
           selectedDroneIds={selectedDroneIds}
           selectedDroneSet={selectedDroneSet}
           selectedDrone={selectedDrone}

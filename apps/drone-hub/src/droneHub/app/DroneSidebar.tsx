@@ -47,12 +47,14 @@ import {
 import { SIDEBAR_VISIBLE_MULTI_CHAT_GROUP, type SidebarGroup } from './use-sidebar-view-model';
 import type { MoveDronesToGroupResult } from './use-group-management';
 import { useSidebarOptimisticGroups } from './use-sidebar-optimistic-groups';
+import type { SidebarDensityMode } from './settings-types';
 
 const SIDEBAR_EXPANDED_WIDTH_PX = 280;
 const SIDEBAR_COLLAPSED_RAIL_WIDTH_PX = 40;
 const AUTO_MINIMIZE_COLLAPSE_DELAY_MS = 90;
 const AUTO_MINIMIZE_EXPAND_DELAY_MS = 120;
 const AUTO_MINIMIZE_REOPEN_GUARD_MS = 220;
+const SIDEBAR_DENSITY_MODE_ORDER: SidebarDensityMode[] = ['compact', 'default', 'comfortable'];
 type SidebarIconButtonProps = {
   title: string;
   ariaLabel?: string;
@@ -63,6 +65,13 @@ type SidebarIconButtonProps = {
   disabled?: boolean;
   tabIndex?: number;
 };
+
+function stepSidebarDensityMode(current: SidebarDensityMode, direction: -1 | 1): SidebarDensityMode {
+  const currentIndex = SIDEBAR_DENSITY_MODE_ORDER.indexOf(current);
+  const safeIndex = currentIndex >= 0 ? currentIndex : 1;
+  const nextIndex = Math.max(0, Math.min(SIDEBAR_DENSITY_MODE_ORDER.length - 1, safeIndex + direction));
+  return SIDEBAR_DENSITY_MODE_ORDER[nextIndex] ?? 'default';
+}
 
 function SidebarIconButton({
   title,
@@ -880,6 +889,7 @@ export function DroneSidebar({
     appView,
     viewMode,
     sidebarGroupingMode,
+    sidebarDensityMode,
     activeRepoPath,
     selectedDrone,
     selectedChat,
@@ -898,6 +908,7 @@ export function DroneSidebar({
     setAppView,
     setViewMode,
     setSidebarGroupingMode,
+    setSidebarDensityMode,
     setCollapsedGroups,
     setSidebarGroupOrder,
     setSidebarDroneOrderByGroup,
@@ -1666,6 +1677,7 @@ export function DroneSidebar({
   }, [activeChatName, selectedDrone, sidebarDroneById]);
   const sharedDroneTreeListProps = {
     droneById: sidebarDroneById,
+    sidebarDensityMode,
     draftSidebarPlaceholderId: DRAFT_SIDEBAR_PLACEHOLDER_ID,
     selectedDroneIds,
     selectedDroneSet,
@@ -1692,6 +1704,17 @@ export function DroneSidebar({
     onOpenDroneErrorModal,
     onPrepareDroneDragStart,
   } satisfies Omit<React.ComponentProps<typeof SidebarDroneTreeList>, 'tree'>;
+
+  const onSidebarWheel = React.useCallback(
+    (event: React.WheelEvent<HTMLElement>) => {
+      if (!(event.ctrlKey || event.metaKey)) return;
+      const direction = event.deltaY < 0 ? 1 : event.deltaY > 0 ? -1 : 0;
+      if (!direction) return;
+      event.preventDefault();
+      setSidebarDensityMode((current) => stepSidebarDensityMode(current, direction));
+    },
+    [setSidebarDensityMode],
+  );
 
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1747,6 +1770,7 @@ export function DroneSidebar({
         style={{ width: sidebarCollapsed ? 0 : SIDEBAR_EXPANDED_WIDTH_PX }}
         onPointerEnter={onSidebarPointerEnter}
         onPointerLeave={onSidebarPointerLeave}
+        onWheel={onSidebarWheel}
       >
         <div className="flex-shrink-0 px-3 py-3 border-b border-[var(--border)] relative">
           <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-[var(--accent)] via-[var(--accent-muted)] to-transparent opacity-40" />
@@ -2038,9 +2062,10 @@ export function DroneSidebar({
                       ) : null}
                       </>
                     ) : null}
-                    <GroupedSidebarTree
-                      sidebarGroups={renderSidebarGroups}
-                      sidebarFolderTree={sidebarFolderTree}
+                <GroupedSidebarTree
+                  sidebarGroups={renderSidebarGroups}
+                  sidebarDensityMode={sidebarDensityMode}
+                  sidebarFolderTree={sidebarFolderTree}
                       sidebarGroupOrder={sidebarGroupOrder}
                       sidebarDroneOrderByGroup={sidebarDroneOrderByGroup}
                       sidebarNodeOrderByParent={sidebarNodeOrderByParent}

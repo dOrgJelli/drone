@@ -7,6 +7,7 @@ export type DroneDeleteMode = 'permanent' | 'archive';
 export type ArchiveRetentionId = '1h' | '8h' | '1d' | '1w';
 export type ArchiveRuntimePolicy = 'keep-running' | 'stop';
 export type SidebarGroupingMode = 'groups' | 'repos';
+export type SidebarDensityMode = 'compact' | 'default' | 'comfortable';
 
 export type ApiKeySettingsResponse = {
   ok: true;
@@ -94,6 +95,7 @@ export type UiPreferencesSettingsResponse = {
   ok: true;
   uiPreferences: {
     sidebarGroupingMode: SidebarGroupingMode;
+    sidebarDensityMode: SidebarDensityMode;
     sidebarGroupOrder: string[];
     sidebarDroneOrderByGroup: Record<string, string[]>;
     sidebarNodeOrderByParent: Record<string, string[]>;
