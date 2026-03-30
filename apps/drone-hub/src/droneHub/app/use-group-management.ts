@@ -157,9 +157,9 @@ export function useGroupManagement({
   );
 
   const deleteGroup = React.useCallback(
-    async (groupRaw: string, countHint?: number, opts?: DeleteGroupOptions) => {
+    async (groupRaw: string, countHint?: number, opts?: DeleteGroupOptions): Promise<boolean> => {
       const group = String(groupRaw ?? '').trim();
-      if (!group || deletingGroups[group]) return;
+      if (!group || deletingGroups[group]) return false;
       const targetKind = opts?.kind === 'repo' ? 'repo' : 'group';
       const groupLabel = String(opts?.label ?? group).trim() || group;
       const targetRepoPath = targetKind === 'repo' ? String(opts?.repoPath ?? '').trim() : '';
@@ -170,7 +170,7 @@ export function useGroupManagement({
             ? `Are you sure you want to delete repo group "${groupLabel}"${n != null ? ` (${n} drone${n === 1 ? '' : 's'})` : ''}?\n\nThis will delete ALL drones attached to:\n${targetRepoPath}`
             : `Are you sure you want to delete ungrouped repo drones${n != null ? ` (${n} drone${n === 1 ? '' : 's'})` : ''}?\n\nThis will delete ALL drones not attached to a repo path.`
           : `Are you sure you want to delete group "${group}"${n != null ? ` (${n} drone${n === 1 ? '' : 's'})` : ''}?\n\nThis will delete ALL drones inside the group (containers + registry entries).`);
-        if (!ok) return;
+        if (!ok) return false;
       }
       const wantsUngroupedGroup = targetKind === 'group' && isUngroupedGroupName(group);
       const targetNames = Array.from(
@@ -190,7 +190,7 @@ export function useGroupManagement({
             .filter(Boolean),
         ),
       );
-      if (targetKind === 'repo' && targetNames.length === 0) return;
+      if (targetKind === 'repo' && targetNames.length === 0) return false;
       const preHidden = new Set(
         Object.keys(optimisticallyDeletedDrones).filter((name) => optimisticallyDeletedDrones[name]),
       );
@@ -267,6 +267,7 @@ export function useGroupManagement({
         if (selectedGroupMultiChat && isSameOrDescendantSidebarGroupPath(selectedGroupMultiChat, group)) {
           setSelectedGroupMultiChat(null);
         }
+        return true;
       } catch (e: any) {
         console.error('[DroneHub] delete group failed', { group, error: e });
         if (addedByThisDelete.length > 0) {
@@ -281,6 +282,7 @@ export function useGroupManagement({
             return changed ? nextMap : prev;
           });
         }
+        return false;
       } finally {
         setDeletingGroups((prev) => {
           if (!prev[group]) return prev;

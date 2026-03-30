@@ -27,6 +27,7 @@ import {
   patchAutomationConfig,
   type AutomationConfig,
 } from './automation-config';
+import { normalizeSidebarRepoScopedGroupMap } from './sidebar-repo-scoped-groups';
 import { normalizeSidebarGroupOrder } from './sidebar-group-order';
 import { mergeSeenModelIds, normalizeSeenModelIds } from './spawn-model-history';
 import { profileStorageKey } from '../../profile-storage';
@@ -81,6 +82,7 @@ type DroneHubUiState = {
   viewMode: ViewMode;
   collapsedGroups: Record<string, boolean>;
   sidebarGroupOrder: string[];
+  sidebarRepoScopedGroupByPath: Record<string, string>;
   sidebarDroneOrderByGroup: Record<string, string[]>;
   sidebarNodeOrderByParent: Record<string, string[]>;
   sidebarChatOrderByDrone: Record<string, string[]>;
@@ -148,6 +150,7 @@ type DroneHubUiState = {
   setViewMode: (next: Updater<ViewMode>) => void;
   setCollapsedGroups: (next: Updater<Record<string, boolean>>) => void;
   setSidebarGroupOrder: (next: Updater<string[]>) => void;
+  setSidebarRepoScopedGroupByPath: (next: Updater<Record<string, string>>) => void;
   setSidebarDroneOrderByGroup: (next: Updater<Record<string, string[]>>) => void;
   setSidebarNodeOrderByParent: (next: Updater<Record<string, string[]>>) => void;
   setSidebarChatOrderByDrone: (next: Updater<Record<string, string[]>>) => void;
@@ -306,6 +309,7 @@ type DroneHubUiPersistedState = Pick<
   | 'viewMode'
   | 'collapsedGroups'
   | 'sidebarGroupOrder'
+  | 'sidebarRepoScopedGroupByPath'
   | 'sidebarDroneOrderByGroup'
   | 'sidebarNodeOrderByParent'
   | 'sidebarChatOrderByDrone'
@@ -590,6 +594,7 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
       viewMode: 'grouped',
       collapsedGroups: {},
       sidebarGroupOrder: [],
+      sidebarRepoScopedGroupByPath: {},
       sidebarDroneOrderByGroup: {},
       sidebarNodeOrderByParent: {},
       sidebarChatOrderByDrone: {},
@@ -670,6 +675,12 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
       setCollapsedGroups: (next) => set((s) => ({ collapsedGroups: resolveNext(s.collapsedGroups, next) })),
       setSidebarGroupOrder: (next) =>
         set((s) => ({ sidebarGroupOrder: normalizeSidebarGroupOrder(resolveNext(s.sidebarGroupOrder, next)) })),
+      setSidebarRepoScopedGroupByPath: (next) =>
+        set((s) => ({
+          sidebarRepoScopedGroupByPath: normalizeSidebarRepoScopedGroupMap(
+            resolveNext(s.sidebarRepoScopedGroupByPath, next),
+          ),
+        })),
       setSidebarDroneOrderByGroup: (next) =>
         set((s) => ({
           sidebarDroneOrderByGroup: normalizeOrderedStringMap(resolveNext(s.sidebarDroneOrderByGroup, next)),
@@ -914,7 +925,7 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
     }),
     {
       name: profileStorageKey('droneHub.ui'),
-      version: 12,
+      version: 13,
       storage: createJSONStorage(() => localStorage),
       migrate: (persistedState, version) => migrateDroneHubUiPersistedState(persistedState, version),
       partialize: (state): DroneHubUiPersistedState => ({
@@ -937,6 +948,7 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
         viewMode: state.viewMode,
         collapsedGroups: state.collapsedGroups,
         sidebarGroupOrder: state.sidebarGroupOrder,
+        sidebarRepoScopedGroupByPath: state.sidebarRepoScopedGroupByPath,
         sidebarDroneOrderByGroup: state.sidebarDroneOrderByGroup,
         sidebarNodeOrderByParent: state.sidebarNodeOrderByParent,
         sidebarChatOrderByDrone: state.sidebarChatOrderByDrone,
@@ -1017,6 +1029,9 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
           collapsedGroups: normalizeCollapsedGroups(persisted.collapsedGroups ?? currentState.collapsedGroups),
           sidebarGroupOrder: normalizeSidebarGroupOrder(
             persisted.sidebarGroupOrder ?? currentState.sidebarGroupOrder,
+          ),
+          sidebarRepoScopedGroupByPath: normalizeSidebarRepoScopedGroupMap(
+            (persisted as any).sidebarRepoScopedGroupByPath ?? currentState.sidebarRepoScopedGroupByPath,
           ),
           sidebarDroneOrderByGroup: normalizeOrderedStringMap(
             persisted.sidebarDroneOrderByGroup ?? currentState.sidebarDroneOrderByGroup,
@@ -1211,6 +1226,7 @@ export function useDroneSidebarUiState() {
       sidebarGroupingMode: s.sidebarGroupingMode,
       sidebarDensityMode: s.sidebarDensityMode,
       sidebarGroupOrder: s.sidebarGroupOrder,
+      sidebarRepoScopedGroupByPath: s.sidebarRepoScopedGroupByPath,
       sidebarDroneOrderByGroup: s.sidebarDroneOrderByGroup,
       sidebarNodeOrderByParent: s.sidebarNodeOrderByParent,
       sidebarChatOrderByDrone: s.sidebarChatOrderByDrone,
@@ -1225,6 +1241,7 @@ export function useDroneSidebarUiState() {
       setSidebarDensityMode: s.setSidebarDensityMode,
       setCollapsedGroups: s.setCollapsedGroups,
       setSidebarGroupOrder: s.setSidebarGroupOrder,
+      setSidebarRepoScopedGroupByPath: s.setSidebarRepoScopedGroupByPath,
       setSidebarDroneOrderByGroup: s.setSidebarDroneOrderByGroup,
       setSidebarNodeOrderByParent: s.setSidebarNodeOrderByParent,
       setSidebarChatOrderByDrone: s.setSidebarChatOrderByDrone,

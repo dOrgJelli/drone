@@ -64,6 +64,10 @@ import { useDroneHubToolbarMenuState } from './droneHub/app/use-drone-hub-toolba
 import { useTranscriptTldrState } from './droneHub/app/use-transcript-tldr-state';
 import { useWorkspaceNavigationActions } from './droneHub/app/use-workspace-navigation-actions';
 import { useWorkspaceActions } from './droneHub/app/use-workspace-actions';
+import {
+  resolveNewDroneContextFromCurrentSelection,
+  shouldInheritNewDroneContextFromCurrentSelection,
+} from './droneHub/app/new-drone-context';
 import { busyChatNodeIdsForDrone, droneChatNodeIds, normalizedDroneChats } from './droneHub/app/chat-node-helpers';
 import { orderSidebarEntries } from './droneHub/app/sidebar-group-order';
 import {
@@ -892,7 +896,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     [drones],
   );
 
-  const { openCreateModal, openDraftChatComposer, openPlaybookRuns } =
+  const { openCreateModal: openCreateModalBase, openDraftChatComposer: openDraftChatComposerBase, openPlaybookRuns } =
     useWorkspaceNavigationActions({
       creating,
       createMode,
@@ -1607,6 +1611,72 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     currentAgent.kind === 'builtin'
       ? `builtin:${currentAgent.id}`
       : `custom:${currentAgent.id}`;
+  const currentSelectionCreateSeed = React.useMemo(
+    () => resolveNewDroneContextFromCurrentSelection(currentDrone),
+    [currentDrone],
+  );
+  const currentSelectionSpawnModel = currentAgent.kind === 'builtin' ? String(currentModel ?? '') : '';
+  const openCreateModal = React.useCallback(() => {
+    openCreateModalBase();
+    if (!selectedDrone || !currentDrone) return;
+    const nextRepoPath = normalizeCreateRepoPath(currentSelectionCreateSeed.repoPath);
+    setSpawnContextRepoPath(nextRepoPath);
+    setCreateRepoPath(nextRepoPath);
+    setCreateGroup(currentSelectionCreateSeed.group);
+    if (effectiveChatInfo) {
+      updateSpawnContextForRepo(nextRepoPath, {
+        spawnAgentKey: currentAgentKey,
+        spawnModel: currentSelectionSpawnModel,
+      });
+    }
+  }, [
+    currentAgentKey,
+    currentDrone,
+    currentSelectionCreateSeed.group,
+    currentSelectionCreateSeed.repoPath,
+    currentSelectionSpawnModel,
+    effectiveChatInfo,
+    normalizeCreateRepoPath,
+    openCreateModalBase,
+    selectedDrone,
+    setCreateGroup,
+    setCreateRepoPath,
+    setSpawnContextRepoPath,
+    updateSpawnContextForRepo,
+  ]);
+  const openDraftChatComposer = React.useCallback(
+    (opts?: { repoPath?: string | null; group?: string | null }) => {
+      if (!shouldInheritNewDroneContextFromCurrentSelection(opts) || !selectedDrone || !currentDrone) {
+        openDraftChatComposerBase(opts);
+        return;
+      }
+      const nextRepoPath = normalizeCreateRepoPath(currentSelectionCreateSeed.repoPath);
+      setSpawnContextRepoPath(nextRepoPath);
+      if (effectiveChatInfo) {
+        updateSpawnContextForRepo(nextRepoPath, {
+          spawnAgentKey: currentAgentKey,
+          spawnModel: currentSelectionSpawnModel,
+        });
+      }
+      openDraftChatComposerBase({
+        repoPath: nextRepoPath,
+        group: currentSelectionCreateSeed.group,
+      });
+    },
+    [
+      currentAgentKey,
+      currentDrone,
+      currentSelectionCreateSeed.group,
+      currentSelectionCreateSeed.repoPath,
+      currentSelectionSpawnModel,
+      effectiveChatInfo,
+      normalizeCreateRepoPath,
+      openDraftChatComposerBase,
+      selectedDrone,
+      setSpawnContextRepoPath,
+      updateSpawnContextForRepo,
+    ],
+  );
   React.useEffect(() => {
     rememberSeenModels([currentModel, ...chatModels.map((model) => model.id)]);
   }, [chatModels, currentModel, rememberSeenModels]);
