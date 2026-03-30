@@ -6,6 +6,12 @@ const apiToken = String(process.env.DRONE_HUB_API_TOKEN ?? '').trim();
 
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    dedupe: ['react', 'react-dom'],
+  },
+  optimizeDeps: {
+    include: ['react', 'react-dom'],
+  },
   build: {
     outDir: 'dist',
     sourcemap: true
