@@ -304,6 +304,10 @@ export function SelectedDroneWorkspace({
     () => resolveChatNameForDrone(currentDrone, selectedChat),
     [currentDrone, selectedChat],
   );
+  const hasChats = React.useMemo(
+    () => Array.isArray(currentDrone.chats) && currentDrone.chats.some((chat) => String(chat ?? '').trim().length > 0),
+    [currentDrone.chats],
+  );
   const syncMenuRef = React.useRef<HTMLDivElement | null>(null);
   const [syncMenuOpen, setSyncMenuOpen] = React.useState(false);
   useDropdownDismiss(syncMenuRef, syncMenuOpen, setSyncMenuOpen);

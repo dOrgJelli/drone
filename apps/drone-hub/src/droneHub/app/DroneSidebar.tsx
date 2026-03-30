@@ -1270,7 +1270,11 @@ export function DroneSidebar({
 
     setChatEditor((prev) => (prev ? { ...prev, pending: true, error: null } : prev));
     if (draft.mode === 'create') {
-      const drone = sidebarDroneById[draft.droneId];
+      const drone =
+        optimisticSidebarDronesFilteredByRepo.find((candidate) => {
+          const droneId = String(candidate?.id ?? '').trim();
+          return droneId === draft.droneId;
+        }) ?? null;
       if (!drone) {
         setChatEditor((prev) => (prev ? { ...prev, pending: false, error: 'Drone is unavailable.' } : prev));
         return;
@@ -1295,7 +1299,7 @@ export function DroneSidebar({
     const nextChatName = String(result.chatName ?? chatName).trim() || chatName;
     setSelectedSidebarNodeId(sidebarChatSidebarNodeId(draft.droneId, nextChatName));
     setChatEditor(null);
-  }, [chatEditor, onCreateDroneChat, onRenameDroneChat, setSelectedSidebarNodeId, sidebarDroneById]);
+  }, [chatEditor, onCreateDroneChat, onRenameDroneChat, optimisticSidebarDronesFilteredByRepo, setSelectedSidebarNodeId]);
 
   const blurChatEditor = React.useCallback(() => {
     const draft = chatEditor;
