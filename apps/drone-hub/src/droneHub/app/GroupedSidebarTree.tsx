@@ -56,6 +56,7 @@ type GroupedSidebarTreeProps = {
   sidebarDensityMode: SidebarDensityMode;
   sidebarFolderTree: import('./sidebar-folder-tree').SidebarFolderNode[];
   sidebarGroupOrder: string[];
+  repoScopedGroupPathsByRepoGroup: Record<string, string[]>;
   sidebarDroneOrderByGroup: Record<string, string[]>;
   sidebarNodeOrderByParent: Record<string, string[]>;
   setSidebarNodeOrderByParent: React.Dispatch<React.SetStateAction<Record<string, string[]>>>;
@@ -80,7 +81,10 @@ type GroupedSidebarTreeProps = {
   renamingGroups: Record<string, boolean>;
   hiddenSidebarGroupTokenSet: Set<string>;
   selectedGroupMultiChat: string | null;
-  onOpenFolderCreate: (parentPath: string | null, opts?: { anchorPath?: string | null }) => void;
+  onOpenFolderCreate: (
+    parentPath: string | null,
+    opts?: { anchorPath?: string | null; repoGroupPath?: string | null },
+  ) => void;
   onStartRenameFolder: (path: string) => void;
   onFolderEditorValueChange: (next: string) => void;
   onSubmitFolderEditor: () => void;
@@ -94,7 +98,7 @@ type GroupedSidebarTreeProps = {
     group: string,
     count: number,
     opts?: { kind?: 'group' | 'repo'; label?: string; repoPath?: string | null },
-  ) => void;
+  ) => Promise<boolean> | boolean;
   busyChatNodeIdSet: Set<string>;
   unreadAgentMessageByChatNodeId: Record<string, boolean>;
   deletingDrones: Record<string, boolean>;
@@ -895,7 +899,14 @@ function GroupedSidebarFolderRow({ node }: { node: SidebarTreeFolderNode }) {
               <button
                 type="button"
                 onClick={() =>
-                  onOpenFolderCreate(isVirtualGroup ? null : folderPath, isVirtualGroup ? { anchorPath: folderPath } : undefined)
+                  onOpenFolderCreate(
+                    isVirtualGroup ? null : folderPath,
+                    isVirtualGroup
+                      ? { anchorPath: folderPath, repoGroupPath: node.repoGroupPath }
+                      : node.repoGroupPath
+                        ? { repoGroupPath: node.repoGroupPath }
+                        : undefined,
+                  )
                 }
                 className={`inline-flex ${densityClasses.folderActionButton} items-center justify-center rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)] transition-all hover:border-[var(--accent-muted)] hover:bg-[var(--accent-subtle)] hover:text-[var(--accent)]`}
                 title={isVirtualGroup ? `New top-level folder from "${node.label}"` : `New subfolder in "${node.label}"`}
@@ -998,7 +1009,14 @@ function GroupedSidebarFolderRow({ node }: { node: SidebarTreeFolderNode }) {
               <button
                 type="button"
                 onClick={() =>
-                  onOpenFolderCreate(isVirtualGroup ? null : folderPath, isVirtualGroup ? { anchorPath: folderPath } : undefined)
+                  onOpenFolderCreate(
+                    isVirtualGroup ? null : folderPath,
+                    isVirtualGroup
+                      ? { anchorPath: folderPath, repoGroupPath: node.repoGroupPath }
+                      : node.repoGroupPath
+                        ? { repoGroupPath: node.repoGroupPath }
+                        : undefined,
+                  )
                 }
                 className={densityClasses.emptyHint}
                 title={isVirtualGroup ? `Create a top-level folder from "${node.label}"` : `Create a subfolder in "${node.label}"`}
@@ -1039,6 +1057,7 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
     sidebarGroups,
     sidebarFolderTree,
     sidebarGroupOrder,
+    repoScopedGroupPathsByRepoGroup,
     sidebarDroneOrderByGroup,
     sidebarNodeOrderByParent,
     setSidebarNodeOrderByParent,
@@ -1064,10 +1083,11 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
         sidebarFolderTree,
         sidebarGroups,
         sidebarGroupOrder,
+        repoScopedGroupPathsByRepoGroup,
         sidebarDroneOrderByGroup,
         sidebarNodeOrderByParent,
       }),
-    [sidebarDroneOrderByGroup, sidebarFolderTree, sidebarGroupOrder, sidebarGroups, sidebarNodeOrderByParent],
+    [repoScopedGroupPathsByRepoGroup, sidebarDroneOrderByGroup, sidebarFolderTree, sidebarGroupOrder, sidebarGroups, sidebarNodeOrderByParent],
   );
 
   const orderedGroupItemsByPath = React.useMemo(() => {

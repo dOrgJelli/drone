@@ -12,6 +12,7 @@ export type SidebarTreeFolderNode = {
   kind: 'folder';
   path: string;
   groupPath: string | null;
+  repoGroupPath: string | null;
   label: string;
   groupKind: SidebarGroup['kind'];
   parentId: string;
@@ -26,6 +27,7 @@ export type SidebarTreeDroneNode = {
   droneId: string;
   parentId: string;
   groupPath: string | null;
+  repoGroupPath: string | null;
   depth: number;
 };
 
@@ -42,6 +44,7 @@ type BuildSidebarNodeTreeArgs = {
   sidebarFolderTree: SidebarFolderNode[];
   sidebarGroups: SidebarGroup[];
   sidebarGroupOrder: string[];
+  repoScopedGroupPathsByRepoGroup?: Record<string, string[]>;
   sidebarDroneOrderByGroup: Record<string, string[]>;
   sidebarNodeOrderByParent: Record<string, string[]>;
 };
@@ -51,6 +54,7 @@ function appendDroneTreeNodes(args: {
   rootDroneIds: string[];
   parentId: string;
   groupPath: string | null;
+  repoGroupPath: string | null;
   depth: number;
   nodesById: Record<string, SidebarTreeNode>;
   childIdsByParentDraft: Record<string, string[]>;
@@ -66,6 +70,7 @@ function appendDroneTreeNodes(args: {
       droneId,
       parentId,
       groupPath: args.groupPath,
+      repoGroupPath: args.repoGroupPath,
       depth,
     };
     args.childIdsByParentDraft[parentId] ??= [];
@@ -100,6 +105,7 @@ function collectFolderNodes(
     kind: 'folder',
     path: folder.path,
     groupPath: folder.kind === 'group' ? folder.path : null,
+    repoGroupPath: folder.kind === 'repo' ? folder.path : null,
     label: sidebarFolderDisplayLabel(folder),
     groupKind: folder.kind,
     parentId,
@@ -162,6 +168,7 @@ function ensureRepoScopedGroupFolders(args: {
         kind: 'folder',
         path: repoScopedFolderPath(args.repoGroup.group, currentGroupPath),
         groupPath: currentGroupPath,
+        repoGroupPath: args.repoGroup.group,
         label: part,
         groupKind: 'group',
         parentId,
@@ -201,6 +208,7 @@ export function buildSidebarNodeTree({
   sidebarFolderTree,
   sidebarGroups,
   sidebarGroupOrder,
+  repoScopedGroupPathsByRepoGroup = {},
   sidebarDroneOrderByGroup,
   sidebarNodeOrderByParent,
 }: BuildSidebarNodeTreeArgs): SidebarNodeTreeModel {
@@ -230,6 +238,7 @@ export function buildSidebarNodeTree({
     rootDroneIds: rootUngroupedTree.rootDroneIds,
     parentId: SIDEBAR_ROOT_PARENT_ID,
     groupPath: null,
+    repoGroupPath: null,
     depth: 0,
     nodesById,
     childIdsByParentDraft,
@@ -254,6 +263,11 @@ export function buildSidebarNodeTree({
           itemsByActualGroup.set(key, [item]);
         }
       }
+      for (const repoScopedGroupPath of repoScopedGroupPathsByRepoGroup[group.group] ?? []) {
+        const groupPath = String(repoScopedGroupPath ?? '').trim();
+        if (!groupPath || itemsByActualGroup.has(groupPath)) continue;
+        itemsByActualGroup.set(groupPath, []);
+      }
       const repoFolderNodeByGroupPath = ensureRepoScopedGroupFolders({
         repoGroup: group,
         repoRootNode,
@@ -276,6 +290,7 @@ export function buildSidebarNodeTree({
           rootDroneIds: tree.rootDroneIds,
           parentId: parentNode?.id ?? repoRootNode.id,
           groupPath: actualGroupPath || null,
+          repoGroupPath: group.group,
           depth: (parentNode?.depth ?? repoRootNode.depth) + 1,
           nodesById,
           childIdsByParentDraft,
@@ -298,6 +313,7 @@ export function buildSidebarNodeTree({
       rootDroneIds: tree.rootDroneIds,
       parentId: folderNode.id,
       groupPath,
+      repoGroupPath: null,
       depth: folderNode.depth + 1,
       nodesById,
       childIdsByParentDraft,
