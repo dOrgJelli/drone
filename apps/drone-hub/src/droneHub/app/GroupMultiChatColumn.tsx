@@ -2,6 +2,7 @@ import React from 'react';
 import {
   ChatInput,
   type ChatSendPayload,
+  type DroneHubTask,
   EmptyState,
   PendingTranscriptTurn,
   TranscriptSkeleton,
@@ -52,6 +53,11 @@ export type GroupMultiChatColumnProps = {
   onDeleteDrone: () => void;
   deleteBusy?: boolean;
   onCreateJobs: (opts: { turn: number; message: string }) => void;
+  onSpawnDroneHubTask: (opts: {
+    sourceDroneId: string;
+    sourceChatName: string;
+    task: DroneHubTask;
+  }) => Promise<{ ok: boolean; error?: string | null }>;
   columnWidthPx: number;
   onRuntimeStateChange?: (next: GroupMultiChatColumnRuntimeState) => void;
 };
@@ -65,6 +71,7 @@ export function GroupMultiChatColumn({
   onDeleteDrone,
   deleteBusy = false,
   onCreateJobs,
+  onSpawnDroneHubTask,
   columnWidthPx,
   onRuntimeStateChange,
 }: GroupMultiChatColumnProps) {
@@ -609,6 +616,13 @@ export function GroupMultiChatColumn({
                   nowMs={nowMs}
                   parsingJobs={false}
                   onCreateJobs={onCreateJobs}
+                  onSpawnDroneHubTask={(task) =>
+                    onSpawnDroneHubTask({
+                      sourceDroneId: drone.id,
+                      sourceChatName: chatName,
+                      task,
+                    })
+                  }
                   messageId={messageId}
                   tldr={null}
                   showTldr={false}

@@ -466,6 +466,7 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
     deletingDrones,
     optimisticallyDeletedDrones,
     parseJobsFromAgentMessage,
+    spawnDroneHubTaskFromAgentMessage,
     dronesLoading,
     sidebarDrones,
     dronesError,
@@ -750,6 +751,7 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
           onDeleteDrone: deleteDrone,
           deletingDrones,
           onParseJobsFromAgentMessage: parseJobsFromAgentMessage,
+          onSpawnDroneHubTaskFromAgentMessage: spawnDroneHubTaskFromAgentMessage,
         }
       : null,
     noDroneSelectedStateProps: {
@@ -840,6 +842,7 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
           nowMs,
           parsingJobsByTurn,
           parseJobsFromAgentMessage,
+          spawnDroneHubTaskFromAgentMessage,
           tldrByMessageId,
           showTldrByMessageId,
           toggleTldrForAgentMessage,
