@@ -176,6 +176,7 @@ type DroneRegistryV1 = {
       sidebarGroupingMode?: 'groups' | 'repos';
       sidebarGroupOrder?: string[];
       sidebarDroneOrderByGroup?: Record<string, string[]>;
+      sidebarNodeOrderByParent?: Record<string, string[]>;
       sidebarChatOrderByDrone?: Record<string, string[]>;
       hiddenSidebarGroups?: string[];
       autoDelete?: boolean;

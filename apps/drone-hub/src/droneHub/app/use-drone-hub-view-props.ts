@@ -37,6 +37,7 @@ export function useDroneHubSidebarProps(args: any): DroneSidebarProps {
     openPlaybookRuns,
     selectDroneCard,
     selectDroneChat,
+    createDroneChat,
     deleteCanvasChat,
     openCloneModal,
     renameDrone,
@@ -44,6 +45,7 @@ export function useDroneHubSidebarProps(args: any): DroneSidebarProps {
     deleteDrone,
     openDroneErrorModal,
     moveDronesToGroup,
+    createGroup,
     createGroupAndMove,
     setCollapsedGroups,
     renameGroup,
@@ -90,6 +92,9 @@ export function useDroneHubSidebarProps(args: any): DroneSidebarProps {
     onSelectDroneChat: (droneId, chatName) => {
       selectDroneChat(droneId, chatName);
     },
+    onCreateDroneChat: (drone) => {
+      void createDroneChat(drone);
+    },
     onDeleteDroneChat: async (droneId, chatName) => await deleteCanvasChat(droneId, chatName),
     onOpenCloneModal: openCloneModal,
     onRenameDrone: renameDrone,
@@ -99,15 +104,14 @@ export function useDroneHubSidebarProps(args: any): DroneSidebarProps {
     onDeleteDrone: deleteDrone,
     onOpenDroneErrorModal: openDroneErrorModal,
     onMoveDronesToGroup: moveDronesToGroup,
+    onCreateGroup: createGroup,
     onCreateGroupAndMove: createGroupAndMove,
     onToggleGroupCollapsed: (group) =>
       setCollapsedGroups((prev: Record<string, boolean>) => ({
         ...prev,
         [group]: !prev[group],
       })),
-    onRenameGroup: (group) => {
-      void renameGroup(group);
-    },
+    onRenameGroup: (group, nextName) => renameGroup(group, nextName),
     onOpenGroupMultiChat: (group) => {
       openGroupMultiChat(group);
     },

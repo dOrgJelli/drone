@@ -8,6 +8,7 @@ export function assignedDroneIdsFromData(data: DroneHubDragData | null): string[
     const droneId = String(data.droneId ?? '').trim();
     return droneId ? [droneId] : [];
   }
+  if (data.type === 'sidebar-folder') return [];
   return Array.from(new Set(data.droneIds.map((item) => String(item ?? '').trim()).filter(Boolean)));
 }
 

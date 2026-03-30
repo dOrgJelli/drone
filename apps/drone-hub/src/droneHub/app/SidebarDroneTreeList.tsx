@@ -6,7 +6,7 @@ import type { DroneSummary } from '../types';
 import { createCanvasChatNodeId } from './app-config';
 import { normalizedDroneChats } from './chat-node-helpers';
 import { isDroneStartingOrSeeding } from './helpers';
-import { IconSpinner, IconTrash } from './icons';
+import { IconDrone, IconSpinner, IconTrash } from './icons';
 import {
   createSidebarChatDragData,
   parseDroneHubDragData,
@@ -56,6 +56,7 @@ export type SidebarDroneTreeListProps = {
     chatName: string,
   ) => Promise<{ ok: boolean; deletedDrone?: boolean; error?: string | null }>;
   onOpenCloneModal: (drone: DroneSummary) => void;
+  onCreateDroneChat: (drone: DroneSummary) => void;
   onRenameDrone: (droneId: string) => void;
   onSetDroneBaseImage: (droneId: string) => void;
   onDeleteDrone: (droneId: string) => void;
@@ -84,6 +85,7 @@ type SidebarDroneRowProps = {
   uiDroneName: (nameRaw: string) => string;
   onSelectDroneCard: (droneId: string, opts?: { toggle?: boolean; range?: boolean }) => void;
   onOpenCloneModal: (drone: DroneSummary) => void;
+  onCreateDroneChat: (drone: DroneSummary) => void;
   onRenameDrone: (droneId: string) => void;
   onSetDroneBaseImage: (droneId: string) => void;
   onDeleteDrone: (droneId: string) => void;
@@ -169,6 +171,7 @@ function SidebarDroneRow({
   uiDroneName,
   onSelectDroneCard,
   onOpenCloneModal,
+  onCreateDroneChat,
   onRenameDrone,
   onSetDroneBaseImage,
   onDeleteDrone,
@@ -218,6 +221,7 @@ function SidebarDroneRow({
           busy={busy}
           unreadAgentMessage={unread}
           showGroup={showGroup}
+          leadingIcon={<IconDrone className="h-3.5 w-3.5 text-[var(--muted-dim)] opacity-75" />}
           onClick={(rowOpts) => onSelectDroneCard(drone.id, rowOpts)}
           dragNodeRef={setDragNodeRef}
           draggable={!dragDisabled}
@@ -225,6 +229,7 @@ function SidebarDroneRow({
           dragAttributes={attributes as unknown as Record<string, unknown>}
           dragListeners={listeners as unknown as Record<string, unknown>}
           onClone={() => onOpenCloneModal(drone)}
+          onCreateChat={() => onCreateDroneChat(drone)}
           onRename={() => onRenameDrone(drone.id)}
           onSetBaseImage={() => onSetDroneBaseImage(drone.id)}
           onDelete={() => onDeleteDrone(drone.id)}
@@ -235,6 +240,13 @@ function SidebarDroneRow({
             Boolean(renamingDrones[drone.id]) ||
             Boolean(settingBaseImages[drone.id]) ||
             String(drone.runtime ?? 'container').trim().toLowerCase() === 'host'
+          }
+          createChatDisabled={
+            isOptimistic ||
+            Boolean(deletingDrones[drone.id]) ||
+            Boolean(renamingDrones[drone.id]) ||
+            Boolean(settingBaseImages[drone.id]) ||
+            isDroneStartingOrSeeding(drone.hubPhase)
           }
           renameDisabled={
             isOptimistic ||
@@ -384,6 +396,7 @@ function SidebarDroneNode({
   onSelectDroneChat,
   onDeleteDroneChat,
   onOpenCloneModal,
+  onCreateDroneChat,
   onRenameDrone,
   onSetDroneBaseImage,
   onDeleteDrone,
@@ -465,8 +478,9 @@ function SidebarDroneNode({
         dragOverPlacement={dragOverDrone?.droneId === drone.id ? dragOverDrone.placement : null}
         uiDroneName={uiDroneName}
         onSelectDroneCard={onSelectDroneCard}
-        onOpenCloneModal={onOpenCloneModal}
-        onRenameDrone={onRenameDrone}
+                onOpenCloneModal={onOpenCloneModal}
+                onCreateDroneChat={onCreateDroneChat}
+                onRenameDrone={onRenameDrone}
         onSetDroneBaseImage={onSetDroneBaseImage}
         onDeleteDrone={onDeleteDrone}
         onOpenDroneErrorModal={onOpenDroneErrorModal}
@@ -526,6 +540,7 @@ function SidebarDroneNode({
               onSelectDroneChat={onSelectDroneChat}
               onDeleteDroneChat={onDeleteDroneChat}
               onOpenCloneModal={onOpenCloneModal}
+              onCreateDroneChat={onCreateDroneChat}
               onRenameDrone={onRenameDrone}
               onSetDroneBaseImage={onSetDroneBaseImage}
               onDeleteDrone={onDeleteDrone}
@@ -569,6 +584,7 @@ export function SidebarDroneTreeList({
   onSelectDroneChat,
   onDeleteDroneChat,
   onOpenCloneModal,
+  onCreateDroneChat,
   onRenameDrone,
   onSetDroneBaseImage,
   onDeleteDrone,
@@ -762,6 +778,7 @@ export function SidebarDroneTreeList({
           onSelectDroneChat={onSelectDroneChat}
           onDeleteDroneChat={onDeleteDroneChat}
           onOpenCloneModal={onOpenCloneModal}
+          onCreateDroneChat={onCreateDroneChat}
           onRenameDrone={onRenameDrone}
           onSetDroneBaseImage={onSetDroneBaseImage}
           onDeleteDrone={onDeleteDrone}

@@ -65,6 +65,7 @@ type DroneHubUiState = {
   collapsedGroups: Record<string, boolean>;
   sidebarGroupOrder: string[];
   sidebarDroneOrderByGroup: Record<string, string[]>;
+  sidebarNodeOrderByParent: Record<string, string[]>;
   sidebarChatOrderByDrone: Record<string, string[]>;
   hiddenSidebarGroups: string[];
   showHiddenSidebarGroups: boolean;
@@ -128,6 +129,7 @@ type DroneHubUiState = {
   setCollapsedGroups: (next: Updater<Record<string, boolean>>) => void;
   setSidebarGroupOrder: (next: Updater<string[]>) => void;
   setSidebarDroneOrderByGroup: (next: Updater<Record<string, string[]>>) => void;
+  setSidebarNodeOrderByParent: (next: Updater<Record<string, string[]>>) => void;
   setSidebarChatOrderByDrone: (next: Updater<Record<string, string[]>>) => void;
   setHiddenSidebarGroups: (next: Updater<string[]>) => void;
   setShowHiddenSidebarGroups: (next: Updater<boolean>) => void;
@@ -204,6 +206,7 @@ type DroneHubUiPersistedState = Pick<
   | 'collapsedGroups'
   | 'sidebarGroupOrder'
   | 'sidebarDroneOrderByGroup'
+  | 'sidebarNodeOrderByParent'
   | 'sidebarChatOrderByDrone'
   | 'hiddenSidebarGroups'
   | 'autoDelete'
@@ -283,7 +286,7 @@ function normalizeViewMode(value: unknown): ViewMode {
 }
 
 function normalizeSidebarGroupingMode(value: unknown): SidebarGroupingMode {
-  return value === 'repos' ? 'repos' : 'groups';
+  return value === 'groups' ? 'groups' : 'repos';
 }
 
 function normalizeOutputView(value: unknown): OutputView {
@@ -459,12 +462,13 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
       chatHeaderRepoPath: '',
       sidebarReposCollapsed: false,
       sidebarAutoMinimize: false,
-      sidebarGroupingMode: 'groups',
+      sidebarGroupingMode: 'repos',
       appView: 'workspace',
       viewMode: 'grouped',
       collapsedGroups: {},
       sidebarGroupOrder: [],
       sidebarDroneOrderByGroup: {},
+      sidebarNodeOrderByParent: {},
       sidebarChatOrderByDrone: {},
       hiddenSidebarGroups: [],
       showHiddenSidebarGroups: false,
@@ -540,6 +544,10 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
       setSidebarDroneOrderByGroup: (next) =>
         set((s) => ({
           sidebarDroneOrderByGroup: normalizeOrderedStringMap(resolveNext(s.sidebarDroneOrderByGroup, next)),
+        })),
+      setSidebarNodeOrderByParent: (next) =>
+        set((s) => ({
+          sidebarNodeOrderByParent: normalizeOrderedStringMap(resolveNext(s.sidebarNodeOrderByParent, next)),
         })),
       setSidebarChatOrderByDrone: (next) =>
         set((s) => ({
@@ -719,6 +727,7 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
         collapsedGroups: state.collapsedGroups,
         sidebarGroupOrder: state.sidebarGroupOrder,
         sidebarDroneOrderByGroup: state.sidebarDroneOrderByGroup,
+        sidebarNodeOrderByParent: state.sidebarNodeOrderByParent,
         sidebarChatOrderByDrone: state.sidebarChatOrderByDrone,
         hiddenSidebarGroups: state.hiddenSidebarGroups,
         autoDelete: state.autoDelete,
@@ -797,6 +806,9 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
           sidebarDroneOrderByGroup: normalizeOrderedStringMap(
             persisted.sidebarDroneOrderByGroup ?? currentState.sidebarDroneOrderByGroup,
           ),
+          sidebarNodeOrderByParent: normalizeOrderedStringMap(
+            (persisted as any).sidebarNodeOrderByParent ?? currentState.sidebarNodeOrderByParent,
+          ),
           sidebarChatOrderByDrone: normalizeOrderedStringMap(
             persisted.sidebarChatOrderByDrone ?? currentState.sidebarChatOrderByDrone,
           ),
@@ -862,6 +874,7 @@ export function useDroneHubAppModelUiState() {
       collapsedGroups: s.collapsedGroups,
       sidebarGroupOrder: s.sidebarGroupOrder,
       sidebarDroneOrderByGroup: s.sidebarDroneOrderByGroup,
+      sidebarNodeOrderByParent: s.sidebarNodeOrderByParent,
       sidebarChatOrderByDrone: s.sidebarChatOrderByDrone,
       hiddenSidebarGroups: s.hiddenSidebarGroups,
       showHiddenSidebarGroups: s.showHiddenSidebarGroups,
@@ -914,6 +927,7 @@ export function useDroneHubAppModelUiState() {
       setCollapsedGroups: s.setCollapsedGroups,
       setSidebarGroupOrder: s.setSidebarGroupOrder,
       setSidebarDroneOrderByGroup: s.setSidebarDroneOrderByGroup,
+      setSidebarNodeOrderByParent: s.setSidebarNodeOrderByParent,
       setSidebarChatOrderByDrone: s.setSidebarChatOrderByDrone,
       setHiddenSidebarGroups: s.setHiddenSidebarGroups,
       setShowHiddenSidebarGroups: s.setShowHiddenSidebarGroups,
@@ -974,6 +988,7 @@ export function useDroneSidebarUiState() {
       sidebarGroupingMode: s.sidebarGroupingMode,
       sidebarGroupOrder: s.sidebarGroupOrder,
       sidebarDroneOrderByGroup: s.sidebarDroneOrderByGroup,
+      sidebarNodeOrderByParent: s.sidebarNodeOrderByParent,
       sidebarChatOrderByDrone: s.sidebarChatOrderByDrone,
       hiddenSidebarGroups: s.hiddenSidebarGroups,
       showHiddenSidebarGroups: s.showHiddenSidebarGroups,
@@ -983,8 +998,10 @@ export function useDroneSidebarUiState() {
       setSidebarReposCollapsed: s.setSidebarReposCollapsed,
       setSidebarAutoMinimize: s.setSidebarAutoMinimize,
       setSidebarGroupingMode: s.setSidebarGroupingMode,
+      setCollapsedGroups: s.setCollapsedGroups,
       setSidebarGroupOrder: s.setSidebarGroupOrder,
       setSidebarDroneOrderByGroup: s.setSidebarDroneOrderByGroup,
+      setSidebarNodeOrderByParent: s.setSidebarNodeOrderByParent,
       setSidebarChatOrderByDrone: s.setSidebarChatOrderByDrone,
       setHiddenSidebarGroups: s.setHiddenSidebarGroups,
       setShowHiddenSidebarGroups: s.setShowHiddenSidebarGroups,

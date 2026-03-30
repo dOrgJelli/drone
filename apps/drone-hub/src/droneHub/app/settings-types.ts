@@ -96,6 +96,7 @@ export type UiPreferencesSettingsResponse = {
     sidebarGroupingMode: SidebarGroupingMode;
     sidebarGroupOrder: string[];
     sidebarDroneOrderByGroup: Record<string, string[]>;
+    sidebarNodeOrderByParent: Record<string, string[]>;
     sidebarChatOrderByDrone: Record<string, string[]>;
     hiddenSidebarGroups: string[];
     autoDelete: boolean;

@@ -133,6 +133,7 @@ export type UiPreferencesSettings = {
   sidebarGroupingMode: SidebarGroupingMode;
   sidebarGroupOrder: string[];
   sidebarDroneOrderByGroup: Record<string, string[]>;
+  sidebarNodeOrderByParent: Record<string, string[]>;
   sidebarChatOrderByDrone: Record<string, string[]>;
   hiddenSidebarGroups: string[];
   autoDelete: boolean;
@@ -340,6 +341,7 @@ function sanitizeUiPreferencesSettings(value: unknown): UiPreferencesSettings {
     sidebarGroupingMode: parseSidebarGroupingMode(raw.sidebarGroupingMode) ?? DEFAULT_SIDEBAR_GROUPING_MODE,
     sidebarGroupOrder: normalizeOrderedStringList(raw.sidebarGroupOrder),
     sidebarDroneOrderByGroup: normalizeOrderedStringMap(raw.sidebarDroneOrderByGroup),
+    sidebarNodeOrderByParent: normalizeOrderedStringMap(raw.sidebarNodeOrderByParent),
     sidebarChatOrderByDrone: normalizeOrderedStringMap(raw.sidebarChatOrderByDrone),
     hiddenSidebarGroups: normalizeOrderedStringList(raw.hiddenSidebarGroups),
     autoDelete: raw.autoDelete === true,
@@ -787,6 +789,9 @@ export async function upsertStoredUiPreferencesSettings(valueRaw: unknown): Prom
       sidebarGroupOrder: uiPreferences.sidebarGroupOrder.slice(),
       sidebarDroneOrderByGroup: Object.fromEntries(
         Object.entries(uiPreferences.sidebarDroneOrderByGroup).map(([key, value]) => [key, value.slice()]),
+      ),
+      sidebarNodeOrderByParent: Object.fromEntries(
+        Object.entries(uiPreferences.sidebarNodeOrderByParent).map(([key, value]) => [key, value.slice()]),
       ),
       sidebarChatOrderByDrone: Object.fromEntries(
         Object.entries(uiPreferences.sidebarChatOrderByDrone).map(([key, value]) => [key, value.slice()]),

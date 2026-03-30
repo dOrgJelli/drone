@@ -12,6 +12,13 @@ import {
   type RepoBranchSourceMode,
 } from './drone-create-runtime';
 import { makeId } from './helpers';
+import { allocateUntitledDisplayName } from './name-helpers';
+import {
+  addOptimisticStartupSeeds,
+  clearOptimisticStartupSeeds,
+  replaceOptimisticStartupSeeds,
+  type StartupSeedMap,
+} from './startup-seed-optimistic';
 
 type RequestJsonFn = <T>(url: string, init?: RequestInit) => Promise<T>;
 
@@ -86,6 +93,7 @@ type UseDroneCreationActionsArgs = {
     },
   ) => void;
   rememberSeenModels: (models: Iterable<string | null | undefined>) => void;
+  setStartupSeedByDrone: React.Dispatch<React.SetStateAction<StartupSeedMap>>;
   isValidDroneName: (name: string) => boolean;
   hasWhitespaceInNameRaw: (nameRaw: string) => boolean;
   setCreateError: React.Dispatch<React.SetStateAction<string | null>>;
@@ -173,6 +181,7 @@ export function useDroneCreationActions({
   suggestAndRenameDraftDrone,
   rememberStartupSeed,
   rememberSeenModels,
+  setStartupSeedByDrone,
   isValidDroneName,
   hasWhitespaceInNameRaw,
   setCreateError,
@@ -253,6 +262,15 @@ export function useDroneCreationActions({
       setCreating(true);
       cloneDronePendingRef.current = true;
       setCreateError(null);
+      const optimisticSeeds = addOptimisticStartupSeeds(setStartupSeedByDrone, [name], {
+        runtime: 'container',
+        agent: null,
+        model: null,
+        prompt: '',
+        chatName: 'default',
+        group,
+        repoPath,
+      });
       try {
         const resp = await requestJson<QueueDronesResponse>(`/api/drones/batch`, {
           method: 'POST',
@@ -277,6 +295,15 @@ export function useDroneCreationActions({
         const firstAcceptedName =
           String((firstAccepted as any)?.name ?? '').trim() || name || firstAcceptedId;
         if (firstAcceptedId) {
+          replaceOptimisticStartupSeeds(setStartupSeedByDrone, optimisticSeeds, [{ id: firstAcceptedId, name: firstAcceptedName }], {
+            runtime: 'container',
+            agent: null,
+            model: null,
+            prompt: '',
+            chatName: 'default',
+            group,
+            repoPath,
+          });
           if (opts?.selectOnSuccess !== false) {
             preferredSelectedDroneRef.current = firstAcceptedId;
             preferredSelectedDroneHoldUntilRef.current = Date.now() + startupSeedMissingGraceMs;
@@ -290,9 +317,11 @@ export function useDroneCreationActions({
         const rejected = Array.isArray(resp?.rejected) ? resp.rejected : [];
         const firstRejected = rejected.length > 0 ? rejected[0] : null;
         const rejectedMessage = String((firstRejected as any)?.error ?? '').trim();
+        clearOptimisticStartupSeeds(setStartupSeedByDrone, optimisticSeeds);
         showTransientToast(rejectedMessage || `Failed to clone ${source.name}.`, 'Clone failed');
         return { ok: false };
       } catch (e: any) {
+        clearOptimisticStartupSeeds(setStartupSeedByDrone, optimisticSeeds);
         showTransientToast(e?.message ?? `Failed to clone ${source.name}.`, 'Clone failed');
         return { ok: false };
       } finally {
@@ -301,9 +330,12 @@ export function useDroneCreationActions({
       }
     },
     [
+      addOptimisticStartupSeeds,
+      clearOptimisticStartupSeeds,
       creating,
       preferredSelectedDroneHoldUntilRef,
       preferredSelectedDroneRef,
+      replaceOptimisticStartupSeeds,
       requestJson,
       selectionAnchorRef,
       setCreateError,
@@ -393,6 +425,19 @@ export function useDroneCreationActions({
 
     setCreating(true);
     setCreateError(null);
+    const optimisticSeeds = addOptimisticStartupSeeds(
+      setStartupSeedByDrone,
+      namedRows.map((row) => row.name),
+      {
+        runtime,
+        agent: seedAgent,
+        model: seedModel,
+        prompt: seedPrompt,
+        chatName: 'default',
+        group,
+        repoPath,
+      },
+    );
     try {
       const resp = await queueDrones(
         namedRows.map(({ name, messageSuffix }) => {
@@ -435,7 +480,7 @@ export function useDroneCreationActions({
 
       if (acceptedByName.size > 0) {
         if (seedModel) rememberSeenModels([seedModel]);
-        rememberStartupSeed(Array.from(acceptedByName.values()), {
+        replaceOptimisticStartupSeeds(setStartupSeedByDrone, Array.from(optimisticSeeds), Array.from(acceptedByName.values()), {
           runtime,
           agent: seedAgent,
           model: seedModel,
@@ -444,6 +489,8 @@ export function useDroneCreationActions({
           group,
           repoPath,
         });
+      } else {
+        clearOptimisticStartupSeeds(setStartupSeedByDrone, optimisticSeeds);
       }
 
       const firstAccepted = acceptedList.length > 0 ? acceptedList[0] : null;
@@ -489,6 +536,7 @@ export function useDroneCreationActions({
       setCreateInitialMessage('');
       setCreateMessageSuffixRows(['']);
     } catch (e: any) {
+      clearOptimisticStartupSeeds(setStartupSeedByDrone, optimisticSeeds);
       setCreateError(e?.message ?? String(e));
     } finally {
       setCreating(false);
@@ -503,6 +551,8 @@ export function useDroneCreationActions({
     createRuntime,
     createNameRows,
     createRepoPath,
+    addOptimisticStartupSeeds,
+    clearOptimisticStartupSeeds,
     pullHostBranchBeforeCreate,
     repoBranchSource,
     repoCreateRemoteBranch,
@@ -512,7 +562,7 @@ export function useDroneCreationActions({
     preferredSelectedDroneRef,
     queueDrones,
     rememberSeenModels,
-    rememberStartupSeed,
+    replaceOptimisticStartupSeeds,
     resolveAgentKeyToConfig,
     selectionAnchorRef,
     setCloneSourceId,
@@ -608,6 +658,20 @@ export function useDroneCreationActions({
       const seedModel = createWithoutChat ? null : spawnModelForSeed;
       let createdDrone = false;
       let postCreateError: string | null = null;
+      const optimisticDraftName =
+        name ||
+        allocateUntitledDisplayName(drones.map((drone) => String(drone?.name ?? '').trim()));
+      const optimisticSeeds = createWithoutChat
+        ? addOptimisticStartupSeeds(setStartupSeedByDrone, [optimisticDraftName], {
+            runtime,
+            agent: seedAgent,
+            model: seedModel,
+            prompt: shouldSeedPromptViaCreate ? prompt : '',
+            chatName: 'default',
+            group,
+            repoPath,
+          })
+        : [];
       try {
         const body = buildDraftDroneCreatePayload({
           name,
@@ -636,7 +700,17 @@ export function useDroneCreationActions({
         if (!droneId) throw new Error('create drone did not return an id');
         createdDrone = true;
 
-        if (shouldSeedPromptViaCreate) {
+        if (optimisticSeeds.length > 0) {
+          replaceOptimisticStartupSeeds(setStartupSeedByDrone, optimisticSeeds, [{ id: droneId, name: createdName }], {
+            runtime,
+            agent: seedAgent,
+            model: seedModel,
+            prompt: shouldSeedPromptViaCreate ? prompt : '',
+            chatName: 'default',
+            group,
+            repoPath,
+          });
+        } else if (shouldSeedPromptViaCreate) {
           if (seedModel) rememberSeenModels([seedModel]);
           rememberStartupSeed([{ id: droneId, name: createdName }], {
             runtime,
@@ -741,6 +815,7 @@ export function useDroneCreationActions({
         return true;
       } catch (e: any) {
         const err = e?.message ?? String(e);
+        clearOptimisticStartupSeeds(setStartupSeedByDrone, optimisticSeeds);
         if (createdDrone) {
           setDraftCreateError(`Drone created, but setup was incomplete: ${err}`);
           return true;
@@ -770,6 +845,8 @@ export function useDroneCreationActions({
       draftCreateName,
       createRuntime,
       drones,
+      addOptimisticStartupSeeds,
+      clearOptimisticStartupSeeds,
       enqueueQueuedPrompt,
       pullHostBranchBeforeCreate,
       repoBranchSource,
@@ -778,6 +855,7 @@ export function useDroneCreationActions({
       preferredSelectedDroneRef,
       rememberSeenModels,
       rememberStartupSeed,
+      replaceOptimisticStartupSeeds,
       requestJson,
       resolveAgentKeyToConfig,
       selectionAnchorRef,

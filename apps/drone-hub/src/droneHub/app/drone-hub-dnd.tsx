@@ -12,6 +12,15 @@ import {
 import { createCanvasChatNodeId } from './app-config';
 import type { SidebarGroupOrderKind } from './sidebar-group-order';
 import { expandDroneIdsToChatNodeIds, orderChatNodeIdsBySidebar } from '../canvas/chat-node-utils';
+import { DroneCard } from '../overview';
+import { IconFolder } from './icons';
+
+export type SidebarFolderDragData = {
+  type: 'sidebar-folder';
+  folderNodeId: string;
+  folderPath: string;
+  label: string;
+};
 
 export type SidebarDragGroupRef = {
   group: string;
@@ -42,6 +51,7 @@ export type SidebarChatDragData = {
 };
 
 export type DroneHubDragData =
+  | SidebarFolderDragData
   | SidebarGroupDragData
   | SidebarDroneDragData
   | SidebarChatDragData;
@@ -58,6 +68,13 @@ function isSidebarDragGroupRef(value: unknown): value is SidebarDragGroupRef {
 export function parseDroneHubDragData(value: unknown): DroneHubDragData | null {
   if (!value || typeof value !== 'object') return null;
   const type = String((value as DroneHubDragData).type ?? '').trim();
+  if (type === 'sidebar-folder') {
+    const folderNodeId = String((value as SidebarFolderDragData).folderNodeId ?? '').trim();
+    const folderPath = String((value as SidebarFolderDragData).folderPath ?? '').trim();
+    const label = String((value as SidebarFolderDragData).label ?? '').trim();
+    if (!folderNodeId || !folderPath || !label) return null;
+    return { type: 'sidebar-folder', folderNodeId, folderPath, label };
+  }
   if (type === 'sidebar-group') {
     const groupRef = (value as SidebarGroupDragData).groupRef;
     const groupLabel = String((value as SidebarGroupDragData).groupLabel ?? '').trim();
@@ -66,7 +83,7 @@ export function parseDroneHubDragData(value: unknown): DroneHubDragData | null {
           .map((item) => String(item ?? '').trim())
           .filter(Boolean)
       : [];
-    if (!isSidebarDragGroupRef(groupRef) || !groupLabel || droneIds.length === 0) return null;
+    if (!isSidebarDragGroupRef(groupRef) || !groupLabel) return null;
     return { type: 'sidebar-group', groupRef, groupLabel, droneIds };
   }
   if (type === 'sidebar-drone') {
@@ -96,6 +113,7 @@ export function parseDroneHubDragData(value: unknown): DroneHubDragData | null {
 
 export function draggedDroneIdsFromData(data: DroneHubDragData | null): string[] {
   if (!data) return [];
+  if (data.type === 'sidebar-folder') return [];
   if (data.type === 'sidebar-chat') return [];
   return Array.from(new Set(data.droneIds.map((item) => String(item ?? '').trim()).filter(Boolean)));
 }
@@ -105,6 +123,7 @@ export function draggedCanvasChatNodeIdsFromData(
   sidebarOrderedChatNodeIds: string[],
 ): string[] {
   if (!data) return [];
+  if (data.type === 'sidebar-folder') return [];
   if (data.type === 'sidebar-chat') return [data.nodeId];
   if (data.type === 'sidebar-drone') {
     return orderChatNodeIdsBySidebar(
@@ -119,6 +138,9 @@ export function draggedCanvasChatNodeIdsFromData(
 }
 
 function dragPreviewLabel(data: DroneHubDragData): { title: string; detail: string } {
+  if (data.type === 'sidebar-folder') {
+    return { title: data.label, detail: 'Folder' };
+  }
   if (data.type === 'sidebar-chat') {
     return { title: data.label, detail: 'Chat' };
   }
@@ -132,11 +154,62 @@ function dragPreviewLabel(data: DroneHubDragData): { title: string; detail: stri
   const count = data.droneIds.length;
   return {
     title: data.groupLabel,
-    detail: `${count} drone${count === 1 ? '' : 's'}`,
+    detail: count > 0 ? `${count} drone${count === 1 ? '' : 's'}` : 'Folder',
   };
 }
 
 function ActiveDragPreview({ data }: { data: DroneHubDragData }) {
+  if (data.type === 'sidebar-folder') {
+    return (
+      <div className="pointer-events-none w-[240px] rounded-md border border-[var(--accent-muted)] bg-[rgba(17,20,28,.96)] px-2 py-1.5 shadow-[0_18px_44px_rgba(0,0,0,.34)]">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <IconFolder className="h-3.5 w-3.5 flex-shrink-0 text-[var(--muted-dim)] opacity-80" />
+          <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-[var(--fg-secondary)]">
+            {data.label}
+          </span>
+        </div>
+      </div>
+    );
+  }
+  if (data.type === 'sidebar-chat') {
+    return (
+      <div className="pointer-events-none w-[220px] rounded border border-[var(--accent-muted)] bg-[rgba(17,20,28,.96)] px-2 py-1.5 shadow-[0_18px_44px_rgba(0,0,0,.34)]">
+        <div className="flex items-center gap-1.5 text-[11px] text-[var(--fg-secondary)]">
+          <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-[var(--accent)]" />
+          <span className="min-w-0 flex-1 truncate font-mono">{data.label}</span>
+        </div>
+      </div>
+    );
+  }
+  if (data.type === 'sidebar-drone') {
+    return (
+      <div className="pointer-events-none w-[260px] rounded-md shadow-[0_18px_44px_rgba(0,0,0,.34)]">
+        <DroneCard
+          drone={{
+            id: data.droneId,
+            name: data.label,
+            createdAt: new Date().toISOString(),
+            repoAttached: false,
+            repoPath: '',
+            group: null,
+            containerPort: 0,
+            hostPort: null,
+            statusOk: true,
+            statusError: null,
+            chats: ['default'],
+            hubPhase: null,
+            hubMessage: null,
+            busy: false,
+          }}
+          displayName={data.droneIds.length > 1 ? `${data.droneIds.length} drones` : data.label}
+          selected={true}
+          dragging={false}
+          draggable={false}
+          onClick={() => {}}
+        />
+      </div>
+    );
+  }
   const preview = dragPreviewLabel(data);
   return (
     <div className="pointer-events-none rounded-md border border-[var(--accent-muted)] bg-[rgba(17,20,28,.96)] px-3 py-2 shadow-[0_18px_44px_rgba(0,0,0,.34)]">

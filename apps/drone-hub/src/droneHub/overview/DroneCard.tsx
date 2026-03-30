@@ -1,7 +1,7 @@
 import React from 'react';
 import { timeAgo } from '../../domain';
 import type { DroneSummary } from '../types';
-import { IconBaseImage, IconClone, IconRename, IconSpinner, IconTrash, TypingDots } from './icons';
+import { IconBaseImage, IconClone, IconPlus, IconRename, IconSpinner, IconTrash, TypingDots } from './icons';
 import { StatusBadge } from './StatusBadge';
 
 export function DroneCard({
@@ -16,11 +16,13 @@ export function DroneCard({
   draggable,
   dragging,
   onClone,
+  onCreateChat,
   onRename,
   onSetBaseImage,
   onDelete,
   onErrorClick,
   cloneDisabled,
+  createChatDisabled,
   renameDisabled,
   renameBusy,
   setBaseImageDisabled,
@@ -29,6 +31,11 @@ export function DroneCard({
   deleteBusy,
   statusHint,
   unreadAgentMessage,
+  active,
+  activeIndicatorStyle,
+  leadingIcon,
+  selectionTone,
+  showSelectionEdge,
 }: {
   drone: DroneSummary;
   displayName?: string;
@@ -41,11 +48,13 @@ export function DroneCard({
   draggable?: boolean;
   dragging?: boolean;
   onClone?: () => void;
+  onCreateChat?: () => void;
   onRename?: () => void;
   onSetBaseImage?: () => void;
   onDelete?: () => void;
   onErrorClick?: (drone: DroneSummary, message: string) => void;
   cloneDisabled?: boolean;
+  createChatDisabled?: boolean;
   renameDisabled?: boolean;
   renameBusy?: boolean;
   setBaseImageDisabled?: boolean;
@@ -54,43 +63,57 @@ export function DroneCard({
   deleteBusy?: boolean;
   statusHint?: string;
   unreadAgentMessage?: boolean;
+  active?: boolean;
+  activeIndicatorStyle?: 'dot' | 'edge';
+  leadingIcon?: React.ReactNode;
+  selectionTone?: 'accent' | 'muted';
+  showSelectionEdge?: boolean;
   showGroup?: boolean;
 }) {
   const shownName = String(displayName ?? drone.name).trim() || drone.name;
   const canClone = typeof onClone === 'function';
+  const canCreateChat = typeof onCreateChat === 'function';
   const canRename = typeof onRename === 'function';
   const canSetBaseImage = typeof onSetBaseImage === 'function';
   const canDelete = typeof onDelete === 'function';
-  const actionCount = Number(canClone) + Number(canRename) + Number(canSetBaseImage) + Number(canDelete);
-  const hasActions = canClone || canRename || canSetBaseImage || canDelete;
+  const actionCount = Number(canClone) + Number(canCreateChat) + Number(canRename) + Number(canSetBaseImage) + Number(canDelete);
+  const hasActions = canClone || canCreateChat || canRename || canSetBaseImage || canDelete;
   const pinActionsVisible = Boolean(renameBusy) || Boolean(setBaseImageBusy) || Boolean(deleteBusy);
   const actionReserveWidthClass =
-    actionCount >= 4
-      ? 'min-w-[108px]'
+    actionCount >= 5
+      ? 'min-w-[116px]'
+      : actionCount === 4
+        ? 'min-w-[92px]'
       : actionCount === 3
-        ? 'min-w-[80px]'
+        ? 'min-w-[68px]'
         : actionCount === 2
-          ? 'min-w-[52px]'
+          ? 'min-w-[44px]'
           : actionCount === 1
-            ? 'min-w-[24px]'
+            ? 'min-w-[20px]'
             : '';
   const actionReserveHoverWidthClass =
-    actionCount >= 4
-      ? 'group-hover/drone:min-w-[108px]'
+    actionCount >= 5
+      ? 'group-hover/drone:min-w-[116px]'
+      : actionCount === 4
+        ? 'group-hover/drone:min-w-[92px]'
       : actionCount === 3
-        ? 'group-hover/drone:min-w-[80px]'
+        ? 'group-hover/drone:min-w-[68px]'
         : actionCount === 2
-          ? 'group-hover/drone:min-w-[52px]'
+          ? 'group-hover/drone:min-w-[44px]'
           : actionCount === 1
-            ? 'group-hover/drone:min-w-[24px]'
+            ? 'group-hover/drone:min-w-[20px]'
             : '';
   const showRespondingAsStatus = Boolean(busy) && Boolean(drone.statusOk) && drone.hubPhase !== 'error';
   const isStarting = drone.hubPhase === 'creating' || drone.hubPhase === 'starting' || drone.hubPhase === 'seeding';
   const showUnreadIndicator =
     Boolean(unreadAgentMessage) && !isStarting && !showRespondingAsStatus;
+  const showActiveIndicator = Boolean(active) && !showUnreadIndicator;
+  const renderActiveEdge = showActiveIndicator && activeIndicatorStyle === 'edge';
   const errText = String(drone.hubMessage ?? drone.statusError ?? '').trim();
   const showInlineError = drone.hubPhase === 'error' && Boolean(errText);
   const canOpenInlineError = showInlineError && typeof onErrorClick === 'function';
+  const selectedTone = selectionTone === 'muted' ? 'muted' : 'accent';
+  const renderSelectionEdge = showSelectionEdge !== false;
   const stopCardSelection = (e: React.SyntheticEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -110,30 +133,39 @@ export function DroneCard({
           onClick();
         }
       }}
-      className={`w-full text-left px-3 h-8 flex items-center rounded-md border transition-all duration-150 group/drone relative ${
+      className={`w-full text-left px-2.5 h-7 flex items-center rounded-md border transition-all duration-150 group/drone relative ${
         selected
-          ? 'bg-[var(--selected)] border-[var(--accent-muted)]'
-          : 'border-transparent hover:bg-[var(--hover)] hover:border-[var(--border-subtle)]'
+          ? selectedTone === 'muted'
+            ? 'bg-[rgba(255,255,255,.045)] border-[rgba(255,255,255,.08)]'
+            : 'bg-[var(--selected)] border-[var(--accent-muted)]'
+          : 'border-transparent hover:bg-[rgba(255,255,255,.03)] hover:border-[rgba(255,255,255,.06)]'
       } ${draggable ? 'cursor-grab touch-none active:cursor-grabbing' : ''} ${
         dragging ? 'opacity-35' : ''
       } focus:outline-none focus-visible:outline-none`}
     >
-      {/* Accent edge for selected state */}
-      {selected && (
+      {/* Accent edge for selected state or open-chat state when requested */}
+      {(selected && renderSelectionEdge) || renderActiveEdge ? (
         <div className="absolute left-0 top-1 bottom-1 w-[2px] rounded-full bg-[var(--accent)]" />
-      )}
+      ) : null}
 
       {/* Single row: name … status/actions */}
       <div className="flex-1 min-w-0 flex items-center gap-1.5">
+        {leadingIcon ? <span className="inline-flex flex-shrink-0 items-center">{leadingIcon}</span> : null}
         {showUnreadIndicator ? (
           <span
             className="inline-flex h-1.5 w-1.5 flex-shrink-0 rounded-full bg-[var(--yellow)]"
             title="Unread agent message"
             aria-label="Unread agent message"
           />
+        ) : showActiveIndicator && !renderActiveEdge ? (
+          <span
+            className="inline-flex h-1.5 w-1.5 flex-shrink-0 rounded-full bg-[var(--accent)]"
+            title="Open chat"
+            aria-label="Open chat"
+          />
         ) : null}
         <span
-          className={`flex-1 min-w-0 truncate text-[12.5px] ${selected ? 'font-semibold text-[var(--fg)]' : 'text-[var(--fg-secondary)]'}`}
+          className={`flex-1 min-w-0 truncate text-[12px] ${selected ? 'font-medium text-[var(--fg)]' : 'text-[var(--fg-secondary)]'}`}
           title={`${shownName}${shownName !== drone.name ? ` (${drone.name})` : ''} · created ${timeAgo(drone.createdAt)}`}
         >
           {shownName}
@@ -149,7 +181,7 @@ export function DroneCard({
         ) : null}
       </div>
 
-      <div className="flex-shrink-0 ml-2 flex items-center gap-1 min-w-0">
+      <div className="flex-shrink-0 ml-1.5 flex items-center gap-1 min-w-0">
         {showInlineError ? (
           canOpenInlineError ? (
             <button
@@ -206,7 +238,7 @@ export function DroneCard({
                   onMouseDown={stopCardSelection}
                   onPointerDown={stopCardSelection}
                   disabled={Boolean(cloneDisabled)}
-                  className={`inline-flex items-center justify-center w-6 h-6 rounded border transition-all ${
+                  className={`inline-flex items-center justify-center w-5 h-5 rounded border transition-all ${
                     cloneDisabled
                       ? 'opacity-50 cursor-not-allowed bg-[var(--panel-raised)] border-[var(--border-subtle)] text-[var(--muted)]'
                       : 'bg-[var(--accent-subtle)] border-[var(--accent-muted)] text-[var(--accent)] hover:shadow-[var(--glow-accent)]'
@@ -217,6 +249,24 @@ export function DroneCard({
                   <IconClone className="opacity-90" />
                 </button>
               )}
+              {canCreateChat && (
+                <button
+                  type="button"
+                  onClick={(e) => { stopCardSelection(e); onCreateChat?.(); }}
+                  onMouseDown={stopCardSelection}
+                  onPointerDown={stopCardSelection}
+                  disabled={Boolean(createChatDisabled)}
+                  className={`inline-flex items-center justify-center w-5 h-5 rounded border transition-all ${
+                    createChatDisabled
+                      ? 'opacity-50 cursor-not-allowed bg-[var(--panel-raised)] border-[var(--border-subtle)] text-[var(--muted)]'
+                      : 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:text-[var(--accent)] hover:border-[var(--accent-muted)] hover:bg-[var(--accent-subtle)]'
+                  }`}
+                  title={`Create chat on "${shownName}"`}
+                  aria-label={`Create chat on "${shownName}"`}
+                >
+                  <IconPlus className="opacity-90" />
+                </button>
+              )}
               {canRename && (
                 <button
                   type="button"
@@ -225,7 +275,7 @@ export function DroneCard({
                   onPointerDown={stopCardSelection}
                   disabled={Boolean(renameDisabled)}
                   aria-busy={Boolean(renameDisabled)}
-                  className={`inline-flex items-center justify-center w-6 h-6 rounded border transition-all ${
+                  className={`inline-flex items-center justify-center w-5 h-5 rounded border transition-all ${
                     renameDisabled
                       ? 'opacity-50 cursor-not-allowed bg-[var(--panel-raised)] border-[var(--border-subtle)] text-[var(--muted)]'
                       : 'bg-[rgba(80,130,255,.12)] border-[rgba(90,140,255,.25)] text-[rgb(124,170,255)] hover:bg-[rgba(80,130,255,.18)]'
@@ -244,7 +294,7 @@ export function DroneCard({
                   onPointerDown={stopCardSelection}
                   disabled={Boolean(setBaseImageDisabled)}
                   aria-busy={Boolean(setBaseImageBusy)}
-                  className={`inline-flex items-center justify-center w-6 h-6 rounded border transition-all ${
+                  className={`inline-flex items-center justify-center w-5 h-5 rounded border transition-all ${
                     setBaseImageDisabled
                       ? 'opacity-50 cursor-not-allowed bg-[var(--panel-raised)] border-[var(--border-subtle)] text-[var(--muted)]'
                       : 'bg-[rgba(250,204,21,.10)] border-[rgba(250,204,21,.22)] text-[rgb(253,224,71)] hover:bg-[rgba(250,204,21,.14)]'
@@ -263,7 +313,7 @@ export function DroneCard({
                   onPointerDown={stopCardSelection}
                   disabled={Boolean(deleteDisabled)}
                   aria-busy={Boolean(deleteDisabled)}
-                  className={`inline-flex items-center justify-center w-6 h-6 rounded border transition-all ${
+                  className={`inline-flex items-center justify-center w-5 h-5 rounded border transition-all ${
                     deleteDisabled
                       ? 'opacity-50 cursor-not-allowed bg-[var(--panel-raised)] border-[var(--border-subtle)] text-[var(--muted)]'
                       : 'bg-[var(--red-subtle)] border-[rgba(255,90,90,.2)] text-[var(--red)] hover:bg-[rgba(255,77,77,.15)]'
