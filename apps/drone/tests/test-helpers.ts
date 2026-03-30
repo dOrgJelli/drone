@@ -23,3 +23,24 @@ export async function withTempDroneDataDir<T>(
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
 }
+
+export async function withTempRepoDataRoot<T>(
+  prefix: string,
+  fn: (repoDataRoot: string) => Promise<T>,
+): Promise<T> {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const repoDataRoot = path.join(tempRoot, 'repo-data');
+  fs.mkdirSync(repoDataRoot, { recursive: true });
+  const prevRepoDataRoot = process.env.DRONE_REPO_DATA_DIR;
+  process.env.DRONE_REPO_DATA_DIR = repoDataRoot;
+  resetDroneRootDirForTests();
+
+  try {
+    return await fn(repoDataRoot);
+  } finally {
+    if (prevRepoDataRoot == null) delete process.env.DRONE_REPO_DATA_DIR;
+    else process.env.DRONE_REPO_DATA_DIR = prevRepoDataRoot;
+    resetDroneRootDirForTests();
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+}

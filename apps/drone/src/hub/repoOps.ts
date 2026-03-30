@@ -27,6 +27,13 @@ export type RepoBranchSummary = {
   behind: number;
 };
 
+export type RepoRemoteBranchSummary = {
+  ref: string;
+  remote: string;
+  branch: string;
+  oid: string | null;
+};
+
 export type RepoChangeEntry = {
   path: string;
   originalPath: string | null;
@@ -38,6 +45,10 @@ export type RepoChangeEntry = {
   isUntracked: boolean;
   isIgnored: boolean;
   isConflicted: boolean;
+  headBlobOid?: string | null;
+  indexBlobOid?: string | null;
+  reviewKey?: string;
+  reviewToken?: string;
 };
 
 export type RepoChangesSummary = {
@@ -101,6 +112,42 @@ export type RepoCommitDetails = {
   };
   entries: RepoCommitChangeEntry[];
 };
+
+function reviewDigest(parts: Array<string | number | null | undefined>): string {
+  const hash = crypto.createHash('sha1');
+  for (const part of parts) {
+    hash.update(String(part ?? ''));
+    hash.update('\0');
+  }
+  return hash.digest('hex');
+}
+
+export function buildReviewScopeId(kind: string, parts: Array<string | number | null | undefined>): string {
+  return reviewDigest([kind, ...parts]);
+}
+
+export function repoChangeReviewKey(pathRaw: string, originalPathRaw?: string | null): string {
+  const path = String(pathRaw ?? '').trim();
+  const originalPath = String(originalPathRaw ?? '').trim();
+  return `${originalPath}\u0000${path}`;
+}
+
+export function buildWorkingTreeRepoChangeReviewToken(entry: RepoChangeEntry, worktreeContentHash: string | null): string {
+  return reviewDigest([
+    repoChangeReviewKey(entry.path, entry.originalPath),
+    entry.code,
+    entry.stagedChar,
+    entry.unstagedChar,
+    entry.stagedType ?? '',
+    entry.unstagedType ?? '',
+    entry.isUntracked ? '1' : '0',
+    entry.isIgnored ? '1' : '0',
+    entry.isConflicted ? '1' : '0',
+    entry.headBlobOid ?? '',
+    entry.indexBlobOid ?? '',
+    worktreeContentHash ?? '',
+  ]);
+}
 
 export type RepoPatchApplyErrorKind = 'patch_apply_conflict' | 'patch_apply_failed';
 
@@ -407,7 +454,18 @@ function commitDiffTreeArgs(sha: string, parentSha: string | null, format: '--na
   return ['diff-tree', '--root', format, '-z', '-r', '--find-renames', '--find-copies', sha];
 }
 
-function pushRepoChangeEntry(list: RepoChangeEntry[], opts: { path: string; originalPath?: string | null; stagedChar: string; unstagedChar: string; forceConflicted?: boolean }) {
+function pushRepoChangeEntry(
+  list: RepoChangeEntry[],
+  opts: {
+    path: string;
+    originalPath?: string | null;
+    stagedChar: string;
+    unstagedChar: string;
+    forceConflicted?: boolean;
+    headBlobOid?: string | null;
+    indexBlobOid?: string | null;
+  }
+) {
   const stagedChar = normalizeStatusChar(opts.stagedChar);
   const unstagedChar = normalizeStatusChar(opts.unstagedChar);
   const stagedType = statusCharToType(stagedChar);
@@ -426,6 +484,8 @@ function pushRepoChangeEntry(list: RepoChangeEntry[], opts: { path: string; orig
     isUntracked,
     isIgnored,
     isConflicted,
+    headBlobOid: opts.headBlobOid ? String(opts.headBlobOid).trim().toLowerCase() : null,
+    indexBlobOid: opts.indexBlobOid ? String(opts.indexBlobOid).trim().toLowerCase() : null,
   });
 }
 
@@ -484,6 +544,8 @@ export function parseGitStatusPorcelainV2Z(raw: string): RepoChangesSummary {
           path: filePath,
           stagedChar: xy.charAt(0),
           unstagedChar: xy.charAt(1),
+          headBlobOid: String(fields[6] ?? '').trim() || null,
+          indexBlobOid: String(fields[7] ?? '').trim() || null,
         });
       }
       continue;
@@ -501,6 +563,8 @@ export function parseGitStatusPorcelainV2Z(raw: string): RepoChangesSummary {
           originalPath: origPath || null,
           stagedChar: xy.charAt(0),
           unstagedChar: xy.charAt(1),
+          headBlobOid: String(fields[6] ?? '').trim() || null,
+          indexBlobOid: String(fields[7] ?? '').trim() || null,
         });
       }
       continue;
@@ -516,6 +580,8 @@ export function parseGitStatusPorcelainV2Z(raw: string): RepoChangesSummary {
           stagedChar: xy.charAt(0) || 'U',
           unstagedChar: xy.charAt(1) || 'U',
           forceConflicted: true,
+          headBlobOid: String(fields[8] ?? '').trim() || null,
+          indexBlobOid: String(fields[9] ?? '').trim() || null,
         });
       }
       continue;
@@ -553,6 +619,37 @@ export function parseGitStatusPorcelainV2Z(raw: string): RepoChangesSummary {
   };
 }
 
+async function hashHostFileContents(repoRoot: string, repoRelativePath: string): Promise<string | null> {
+  const absPath = path.resolve(repoRoot, repoRelativePath);
+  const repoWithSep = repoRoot.endsWith(path.sep) ? repoRoot : `${repoRoot}${path.sep}`;
+  if (absPath !== repoRoot && !absPath.startsWith(repoWithSep)) return null;
+  try {
+    const content = await fs.readFile(absPath);
+    const header = Buffer.from(`blob ${content.length}\0`, 'utf8');
+    return crypto.createHash('sha1').update(header).update(content).digest('hex');
+  } catch {
+    return null;
+  }
+}
+
+async function applyWorkingTreeReviewMetadata(repoRoot: string, summary: RepoChangesSummary): Promise<RepoChangesSummary> {
+  const entries = await Promise.all(
+    summary.entries.map(async (entry) => {
+      const needsWorktreeHash = entry.isUntracked || (entry.unstagedType !== null && entry.unstagedType !== 'deleted');
+      const worktreeContentHash = needsWorktreeHash ? await hashHostFileContents(repoRoot, entry.path) : null;
+      return {
+        ...entry,
+        reviewKey: repoChangeReviewKey(entry.path, entry.originalPath),
+        reviewToken: buildWorkingTreeRepoChangeReviewToken(entry, worktreeContentHash),
+      };
+    })
+  );
+  return {
+    ...summary,
+    entries,
+  };
+}
+
 export async function gitTopLevel(anyPathInRepo: string): Promise<string> {
   const root = (await runLocalOrThrow('git', ['-C', anyPathInRepo, 'rev-parse', '--show-toplevel'])).trim();
   if (!root) throw new Error(`Could not determine git root for: ${anyPathInRepo}`);
@@ -565,6 +662,96 @@ export async function gitCurrentBranchOrSha(repoRoot: string): Promise<string> {
   ).trim();
   if (branch) return branch;
   return (await runLocalOrThrow('git', ['-C', repoRoot, 'rev-parse', 'HEAD'])).trim();
+}
+
+function normalizeRemoteBranchRef(raw: unknown): string {
+  return String(raw ?? '')
+    .trim()
+    .replace(/^refs\/remotes\//, '')
+    .replace(/^remotes\//, '');
+}
+
+export async function gitListRemoteBranches(repoPathRaw: string): Promise<{
+  repoRoot: string;
+  hostBranch: string | null;
+  remoteBranches: RepoRemoteBranchSummary[];
+}> {
+  const repoPath = String(repoPathRaw ?? '').trim();
+  if (!repoPath) throw new Error('missing repo path');
+  const repoRoot = await gitTopLevel(repoPath);
+  const status = await gitRepoChangesSummary(repoRoot);
+  const raw = await runLocalOrThrow('git', [
+    '-C',
+    repoRoot,
+    'for-each-ref',
+    '--format=%(refname:short)%00%(objectname)%00%(symref)',
+    'refs/remotes',
+  ]);
+
+  const remoteBranches: RepoRemoteBranchSummary[] = [];
+  for (const line of String(raw ?? '')
+    .split('\n')
+    .map((entry) => entry.trim())
+    .filter(Boolean)) {
+    const [refShortRaw, oidRaw, symrefRaw] = line.split('\0');
+    const ref = normalizeRemoteBranchRef(refShortRaw);
+    if (!ref || ref.endsWith('/HEAD')) continue;
+    if (String(symrefRaw ?? '').trim()) continue;
+    const slash = ref.indexOf('/');
+    if (slash <= 0 || slash >= ref.length - 1) continue;
+    const remote = ref.slice(0, slash);
+    const branch = ref.slice(slash + 1);
+    const oid = String(oidRaw ?? '').trim().toLowerCase();
+    remoteBranches.push({
+      ref,
+      remote,
+      branch,
+      oid: /^[0-9a-f]{40}$/.test(oid) ? oid : null,
+    });
+  }
+
+  remoteBranches.sort((a, b) => {
+    const remoteCompare = a.remote.localeCompare(b.remote);
+    if (remoteCompare !== 0) return remoteCompare;
+    return a.branch.localeCompare(b.branch);
+  });
+
+  return {
+    repoRoot,
+    hostBranch: String(status.branch.head ?? '').trim() || null,
+    remoteBranches,
+  };
+}
+
+export async function gitResolveRemoteBranchForCreate(repoPathRaw: string, remoteBranchRaw: string): Promise<{
+  repoRoot: string;
+  remoteBranch: string;
+  oid: string | null;
+}> {
+  const repoRoot = await gitTopLevel(String(repoPathRaw ?? '').trim());
+  const remoteBranch = normalizeRemoteBranchRef(remoteBranchRaw);
+  if (!remoteBranch) throw new Error('missing remote branch');
+
+  const listed = await gitListRemoteBranches(repoRoot);
+  const matched = listed.remoteBranches.find((entry) => entry.ref === remoteBranch) ?? null;
+  if (matched) {
+    return {
+      repoRoot: listed.repoRoot,
+      remoteBranch: matched.ref,
+      oid: matched.oid,
+    };
+  }
+
+  const verified = await runLocalOrThrow('git', ['-C', repoRoot, 'rev-parse', '--verify', `refs/remotes/${remoteBranch}`]).catch(() => '');
+  const oid = String(verified ?? '').trim().toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(oid)) {
+    throw new Error(`remote branch "${remoteBranch}" was not found in ${repoRoot}`);
+  }
+  return {
+    repoRoot,
+    remoteBranch,
+    oid,
+  };
 }
 
 export type HostRepoPullBeforeCreateErrorCode =
@@ -702,7 +889,8 @@ export async function gitRepoChangesSummary(repoRoot: string): Promise<RepoChang
     '--untracked-files=all',
     '-z',
   ]);
-  return parseGitStatusPorcelainV2Z(raw);
+  const summary = parseGitStatusPorcelainV2Z(raw);
+  return await applyWorkingTreeReviewMetadata(repoRoot, summary);
 }
 
 export async function gitRepoCommitList(opts: {
@@ -1191,9 +1379,10 @@ export async function applyPatchesToMainWorkingTree(opts: { repoRoot: string; pa
 
 // Apply a single exported diff (base..HEAD) directly to the host working tree.
 // This is used as a conflict fallback so users get one complete conflict set.
-export async function applyExportedDiffToMainWorkingTree(opts: { repoRoot: string; diffPath: string }): Promise<void> {
+export async function applyExportedDiffToMainWorkingTree(opts: { repoRoot: string; diffPath: string; label?: string }): Promise<void> {
   const repoRoot = String(opts.repoRoot ?? '').trim();
   const diffPath = String(opts.diffPath ?? '').trim();
+  const label = String(opts.label ?? '').trim() || path.basename(diffPath);
   if (!repoRoot) throw new Error('missing repoRoot');
   if (!diffPath) throw new Error('missing diffPath');
 
@@ -1205,7 +1394,9 @@ export async function applyExportedDiffToMainWorkingTree(opts: { repoRoot: strin
   if (r.code === 0) return;
 
   const combined = `${String(r.stderr ?? '')}\n${String(r.stdout ?? '')}`.trim();
-  const conflictFiles = parsePatchConflictFiles(combined);
+  const conflictFiles = Array.from(new Set([...parsePatchConflictFiles(combined), ...(await gitUnmergedFiles(repoRoot))])).sort((a, b) =>
+    a.localeCompare(b)
+  );
   const looksLikeConflict =
     conflictFiles.length > 0 ||
     /patch does not apply|CONFLICT|could not apply|failed to merge|with conflicts|U\s+\S+/i.test(combined) ||
@@ -1213,14 +1404,57 @@ export async function applyExportedDiffToMainWorkingTree(opts: { repoRoot: strin
   const details = (r.stderr || r.stdout || `git apply failed (exit ${r.code})`).trim();
   throw new RepoPatchApplyError({
     kind: looksLikeConflict ? 'patch_apply_conflict' : 'patch_apply_failed',
-    patchName: path.basename(diffPath),
+    patchName: label,
     conflictFiles,
     stdout: r.stdout,
     stderr: r.stderr,
     message: looksLikeConflict
-      ? `Host repo has merge conflicts while applying ${path.basename(diffPath)}.\n\n${details}`
-      : `Failed applying exported diff ${path.basename(diffPath)} to host repo.\n\n${details}`,
+      ? `Host repo has conflicts while applying ${label}.\n\n${details}`
+      : `Failed applying exported diff ${label} to host repo.\n\n${details}`,
   });
+}
+
+// Apply the net branch changes from merge-base(HEAD, branch)..branch directly to the
+// host worktree and index. This preserves conflict markers/unmerged entries without
+// leaving the repo in an actual git merge state, so later commits stay single-parent.
+export async function applyBranchDiffToMainWorkingTree(opts: { repoRoot: string; branch: string }): Promise<void> {
+  const repoRoot = String(opts.repoRoot ?? '').trim();
+  const branch = String(opts.branch ?? '').trim();
+  if (!repoRoot) throw new Error('missing repoRoot');
+  if (!branch) throw new Error('missing branch');
+
+  const diff = await runLocal('git', [
+    '-C',
+    repoRoot,
+    'diff',
+    '--binary',
+    '--full-index',
+    '--find-renames',
+    '--no-color',
+    '--no-ext-diff',
+    `HEAD...${branch}`,
+  ]);
+  if (diff.code !== 0) {
+    const details = `${String(diff.stderr ?? '')}\n${String(diff.stdout ?? '')}`.trim();
+    throw new Error(`Failed generating host apply diff for ${branch}.${details ? `\n\n${details}` : ''}`);
+  }
+
+  if (!String(diff.stdout ?? '').trim()) return;
+
+  const tempRoot = droneRootPath('repo-exports');
+  await fs.mkdir(tempRoot, { recursive: true });
+  const tempDir = await fs.mkdtemp(path.join(tempRoot, 'host-apply-'));
+  const diffPath = path.join(tempDir, 'import.diff');
+  try {
+    await fs.writeFile(diffPath, diff.stdout, 'utf8');
+    await applyExportedDiffToMainWorkingTree({ repoRoot, diffPath, label: branch });
+  } finally {
+    try {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    } catch {
+      // ignore temp cleanup failures
+    }
+  }
 }
 
 function parsePatchConflictFiles(text: string): string[] {
@@ -1330,44 +1564,6 @@ async function gitUnmergedFiles(repoRoot: string): Promise<string[]> {
     .map((l) => l.trim())
     .filter(Boolean)
     .sort((a, b) => a.localeCompare(b));
-}
-
-export async function mergeBranchIntoMainWorkingTreeNoCommit(opts: { repoRoot: string; branch: string }): Promise<void> {
-  const repoRoot = String(opts.repoRoot ?? '').trim();
-  const branch = String(opts.branch ?? '').trim();
-  if (!repoRoot) throw new Error('missing repoRoot');
-  if (!branch) throw new Error('missing branch');
-
-  const r = await runLocal('git', ['-C', repoRoot, 'merge', '--no-commit', '--no-ff', branch]);
-  if (r.code === 0) return;
-
-  const combined = `${String(r.stderr ?? '')}\n${String(r.stdout ?? '')}`.trim();
-  const conflictFiles = Array.from(new Set([...parsePatchConflictFiles(combined), ...(await gitUnmergedFiles(repoRoot))])).sort((a, b) =>
-    a.localeCompare(b)
-  );
-  const looksLikeConflict =
-    conflictFiles.length > 0 ||
-    /CONFLICT|Automatic merge failed|Merge conflict/i.test(combined);
-  const details = (r.stderr || r.stdout || `git merge failed (exit ${r.code})`).trim();
-
-  if (!looksLikeConflict) {
-    try {
-      await runLocalOrThrow('git', ['-C', repoRoot, 'merge', '--abort']);
-    } catch {
-      // ignore; best effort cleanup for non-conflict merge failures.
-    }
-  }
-
-  throw new RepoPatchApplyError({
-    kind: looksLikeConflict ? 'patch_apply_conflict' : 'patch_apply_failed',
-    patchName: branch,
-    conflictFiles,
-    stdout: r.stdout,
-    stderr: r.stderr,
-    message: looksLikeConflict
-      ? `Host repo has merge conflicts while merging ${branch}.\n\n${details}`
-      : `Failed merging ${branch} into host repo.\n\n${details}`,
-  });
 }
 
 export async function importBundleHeadToHostRef(opts: { repoRoot: string; bundlePath: string; refName: string }): Promise<string> {

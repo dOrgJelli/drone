@@ -17,6 +17,8 @@ import {
 import { readLocalStorageItem } from './hooks';
 import type { CustomAgentProfile } from '../types';
 import type { SettingsTabId } from './settings-tabs';
+import type { RepoBranchSourceMode } from './drone-create-runtime';
+import type { KanbanTaskScopeType } from './kanban-board-state';
 import {
   automationConfigsEqual,
   createAutomationConfig,
@@ -35,6 +37,8 @@ type ViewMode = 'grouped' | 'flat';
 type SidebarGroupingMode = 'groups' | 'repos';
 type FsExplorerView = 'list' | 'thumb';
 type OutputView = 'screen' | 'log';
+type KanbanBoardViewMode = 'board' | 'table';
+type KanbanBoardScopeType = KanbanTaskScopeType;
 const CHAT_INPUT_DRAFT_MAX_CHARS = 4_000;
 const CHAT_INPUT_DRAFT_MAX_KEYS = 80;
 const CHAT_INPUT_DRAFTS_STORAGE_KEY = profileStorageKey('droneHub.chatInputDrafts');
@@ -47,6 +51,11 @@ type DroneHubUiState = {
   playbookRunsSelectionInitialized: boolean;
   playbookRunsSelectedPlaybookId: string;
   playbookRunsSelectedRepoPath: string;
+  kanbanBoardSelectionInitialized: boolean;
+  kanbanBoardScopeType: KanbanBoardScopeType;
+  kanbanBoardScopeValue: string;
+  kanbanBoardSelectedRepoPath: string;
+  kanbanBoardViewMode: KanbanBoardViewMode;
   chatHeaderRepoPath: string;
   sidebarReposCollapsed: boolean;
   sidebarAutoMinimize: boolean;
@@ -88,6 +97,8 @@ type DroneHubUiState = {
   spawnAgentKey: string;
   spawnModel: string;
   seenModelIds: string[];
+  repoBranchSource: RepoBranchSourceMode;
+  repoCreateRemoteBranch: string;
   pullHostBranchBeforeCreate: boolean;
   customAgents: CustomAgentProfile[];
   customAgentModalOpen: boolean;
@@ -104,6 +115,11 @@ type DroneHubUiState = {
   setPlaybookRunsSelectionInitialized: (next: Updater<boolean>) => void;
   setPlaybookRunsSelectedPlaybookId: (next: Updater<string>) => void;
   setPlaybookRunsSelectedRepoPath: (next: Updater<string>) => void;
+  setKanbanBoardSelectionInitialized: (next: Updater<boolean>) => void;
+  setKanbanBoardScopeType: (next: Updater<KanbanBoardScopeType>) => void;
+  setKanbanBoardScopeValue: (next: Updater<string>) => void;
+  setKanbanBoardSelectedRepoPath: (next: Updater<string>) => void;
+  setKanbanBoardViewMode: (next: Updater<KanbanBoardViewMode>) => void;
   setChatHeaderRepoPath: (next: Updater<string>) => void;
   setSidebarReposCollapsed: (next: Updater<boolean>) => void;
   setSidebarAutoMinimize: (next: Updater<boolean>) => void;
@@ -149,6 +165,8 @@ type DroneHubUiState = {
   setSpawnAgentKey: (next: Updater<string>) => void;
   setSpawnModel: (next: Updater<string>) => void;
   rememberSeenModels: (models: Iterable<string | null | undefined>) => void;
+  setRepoBranchSource: (next: Updater<RepoBranchSourceMode>) => void;
+  setRepoCreateRemoteBranch: (next: Updater<string>) => void;
   setPullHostBranchBeforeCreate: (next: Updater<boolean>) => void;
   setCustomAgents: (next: Updater<CustomAgentProfile[]>) => void;
   setCustomAgentModalOpen: (next: Updater<boolean>) => void;
@@ -174,6 +192,11 @@ type DroneHubUiPersistedState = Pick<
   | 'playbookRunsSelectionInitialized'
   | 'playbookRunsSelectedPlaybookId'
   | 'playbookRunsSelectedRepoPath'
+  | 'kanbanBoardSelectionInitialized'
+  | 'kanbanBoardScopeType'
+  | 'kanbanBoardScopeValue'
+  | 'kanbanBoardSelectedRepoPath'
+  | 'kanbanBoardViewMode'
   | 'chatHeaderRepoPath'
   | 'sidebarReposCollapsed'
   | 'sidebarAutoMinimize'
@@ -198,6 +221,8 @@ type DroneHubUiPersistedState = Pick<
   | 'spawnAgentKey'
   | 'spawnModel'
   | 'seenModelIds'
+  | 'repoBranchSource'
+  | 'repoCreateRemoteBranch'
   | 'pullHostBranchBeforeCreate'
   | 'customAgents'
   | 'shortcutBindings'
@@ -272,6 +297,14 @@ function normalizeFsExplorerView(value: unknown): FsExplorerView {
   return value === 'thumb' ? 'thumb' : 'list';
 }
 
+function normalizeKanbanBoardViewMode(value: unknown): KanbanBoardViewMode {
+  return value === 'table' ? 'table' : 'board';
+}
+
+function normalizeKanbanBoardScopeType(value: unknown): KanbanBoardScopeType {
+  return value === 'repo' || value === 'group' || value === 'drone' ? value : 'global';
+}
+
 function normalizeBoolean(value: unknown): boolean {
   return value === true;
 }
@@ -334,7 +367,14 @@ function readPersistedChatInputDrafts(): Record<string, string> {
 
 function readPersistedDroneHubUiSelections(): Pick<
   DroneHubUiState,
-  'playbookRunsSelectionInitialized' | 'playbookRunsSelectedPlaybookId' | 'playbookRunsSelectedRepoPath'
+  | 'playbookRunsSelectionInitialized'
+  | 'playbookRunsSelectedPlaybookId'
+  | 'playbookRunsSelectedRepoPath'
+  | 'kanbanBoardSelectionInitialized'
+  | 'kanbanBoardScopeType'
+  | 'kanbanBoardScopeValue'
+  | 'kanbanBoardSelectedRepoPath'
+  | 'kanbanBoardViewMode'
 > {
   const storageRaw = readLocalStorageItem(profileStorageKey('droneHub.ui'));
   if (!storageRaw) {
@@ -342,6 +382,11 @@ function readPersistedDroneHubUiSelections(): Pick<
       playbookRunsSelectionInitialized: false,
       playbookRunsSelectedPlaybookId: '',
       playbookRunsSelectedRepoPath: '',
+      kanbanBoardSelectionInitialized: false,
+      kanbanBoardScopeType: 'global',
+      kanbanBoardScopeValue: '',
+      kanbanBoardSelectedRepoPath: '',
+      kanbanBoardViewMode: 'board',
     };
   }
   try {
@@ -354,12 +399,22 @@ function readPersistedDroneHubUiSelections(): Pick<
       playbookRunsSelectionInitialized: normalizeBoolean(persistedState?.playbookRunsSelectionInitialized),
       playbookRunsSelectedPlaybookId: normalizeTrimmedString(persistedState?.playbookRunsSelectedPlaybookId),
       playbookRunsSelectedRepoPath: normalizeTrimmedString(persistedState?.playbookRunsSelectedRepoPath),
+      kanbanBoardSelectionInitialized: normalizeBoolean(persistedState?.kanbanBoardSelectionInitialized),
+      kanbanBoardScopeType: normalizeKanbanBoardScopeType(persistedState?.kanbanBoardScopeType),
+      kanbanBoardScopeValue: normalizeTrimmedString(persistedState?.kanbanBoardScopeValue),
+      kanbanBoardSelectedRepoPath: normalizeTrimmedString(persistedState?.kanbanBoardSelectedRepoPath),
+      kanbanBoardViewMode: normalizeKanbanBoardViewMode(persistedState?.kanbanBoardViewMode),
     };
   } catch {
     return {
       playbookRunsSelectionInitialized: false,
       playbookRunsSelectedPlaybookId: '',
       playbookRunsSelectedRepoPath: '',
+      kanbanBoardSelectionInitialized: false,
+      kanbanBoardScopeType: 'global',
+      kanbanBoardScopeValue: '',
+      kanbanBoardSelectedRepoPath: '',
+      kanbanBoardViewMode: 'board',
     };
   }
 }
@@ -399,6 +454,11 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
       playbookRunsSelectionInitialized: initialPlaybookRunsSelections.playbookRunsSelectionInitialized,
       playbookRunsSelectedPlaybookId: initialPlaybookRunsSelections.playbookRunsSelectedPlaybookId,
       playbookRunsSelectedRepoPath: initialPlaybookRunsSelections.playbookRunsSelectedRepoPath,
+      kanbanBoardSelectionInitialized: initialPlaybookRunsSelections.kanbanBoardSelectionInitialized,
+      kanbanBoardScopeType: initialPlaybookRunsSelections.kanbanBoardScopeType,
+      kanbanBoardScopeValue: initialPlaybookRunsSelections.kanbanBoardScopeValue,
+      kanbanBoardSelectedRepoPath: initialPlaybookRunsSelections.kanbanBoardSelectedRepoPath,
+      kanbanBoardViewMode: initialPlaybookRunsSelections.kanbanBoardViewMode,
       chatHeaderRepoPath: '',
       sidebarReposCollapsed: false,
       sidebarAutoMinimize: false,
@@ -440,6 +500,8 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
       spawnAgentKey: 'builtin:cursor',
       spawnModel: '',
       seenModelIds: [],
+      repoBranchSource: 'host',
+      repoCreateRemoteBranch: '',
       pullHostBranchBeforeCreate: true,
       customAgents: [],
       customAgentModalOpen: false,
@@ -460,6 +522,16 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
         set((s) => ({ playbookRunsSelectedPlaybookId: normalizeTrimmedString(resolveNext(s.playbookRunsSelectedPlaybookId, next)) })),
       setPlaybookRunsSelectedRepoPath: (next) =>
         set((s) => ({ playbookRunsSelectedRepoPath: normalizeTrimmedString(resolveNext(s.playbookRunsSelectedRepoPath, next)) })),
+      setKanbanBoardSelectionInitialized: (next) =>
+        set((s) => ({ kanbanBoardSelectionInitialized: resolveNext(s.kanbanBoardSelectionInitialized, next) })),
+      setKanbanBoardScopeType: (next) =>
+        set((s) => ({ kanbanBoardScopeType: normalizeKanbanBoardScopeType(resolveNext(s.kanbanBoardScopeType, next)) })),
+      setKanbanBoardScopeValue: (next) =>
+        set((s) => ({ kanbanBoardScopeValue: normalizeTrimmedString(resolveNext(s.kanbanBoardScopeValue, next)) })),
+      setKanbanBoardSelectedRepoPath: (next) =>
+        set((s) => ({ kanbanBoardSelectedRepoPath: normalizeTrimmedString(resolveNext(s.kanbanBoardSelectedRepoPath, next)) })),
+      setKanbanBoardViewMode: (next) =>
+        set((s) => ({ kanbanBoardViewMode: normalizeKanbanBoardViewMode(resolveNext(s.kanbanBoardViewMode, next)) })),
       setChatHeaderRepoPath: (next) => set((s) => ({ chatHeaderRepoPath: resolveNext(s.chatHeaderRepoPath, next) })),
       setSidebarReposCollapsed: (next) => set((s) => ({ sidebarReposCollapsed: resolveNext(s.sidebarReposCollapsed, next) })),
       setSidebarAutoMinimize: (next) => set((s) => ({ sidebarAutoMinimize: resolveNext(s.sidebarAutoMinimize, next) })),
@@ -605,6 +677,8 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
           }
           return { seenModelIds: next };
         }),
+      setRepoBranchSource: (next) => set((s) => ({ repoBranchSource: resolveNext(s.repoBranchSource, next) })),
+      setRepoCreateRemoteBranch: (next) => set((s) => ({ repoCreateRemoteBranch: resolveNext(s.repoCreateRemoteBranch, next) })),
       setPullHostBranchBeforeCreate: (next) =>
         set((s) => ({ pullHostBranchBeforeCreate: resolveNext(s.pullHostBranchBeforeCreate, next) })),
       setCustomAgents: (next) => set((s) => ({ customAgents: resolveNext(s.customAgents, next) })),
@@ -630,7 +704,7 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
     }),
     {
       name: profileStorageKey('droneHub.ui'),
-      version: 9,
+      version: 11,
       storage: createJSONStorage(() => localStorage),
       migrate: (persistedState, version) => migrateDroneHubUiPersistedState(persistedState, version),
       partialize: (state): DroneHubUiPersistedState => ({
@@ -639,6 +713,11 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
         playbookRunsSelectionInitialized: state.playbookRunsSelectionInitialized,
         playbookRunsSelectedPlaybookId: state.playbookRunsSelectedPlaybookId,
         playbookRunsSelectedRepoPath: state.playbookRunsSelectedRepoPath,
+        kanbanBoardSelectionInitialized: state.kanbanBoardSelectionInitialized,
+        kanbanBoardScopeType: state.kanbanBoardScopeType,
+        kanbanBoardScopeValue: state.kanbanBoardScopeValue,
+        kanbanBoardSelectedRepoPath: state.kanbanBoardSelectedRepoPath,
+        kanbanBoardViewMode: state.kanbanBoardViewMode,
         chatHeaderRepoPath: state.chatHeaderRepoPath,
         sidebarReposCollapsed: state.sidebarReposCollapsed,
         sidebarAutoMinimize: state.sidebarAutoMinimize,
@@ -663,6 +742,8 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
         spawnAgentKey: state.spawnAgentKey,
         spawnModel: state.spawnModel,
         seenModelIds: state.seenModelIds,
+        repoBranchSource: state.repoBranchSource,
+        repoCreateRemoteBranch: state.repoCreateRemoteBranch,
         pullHostBranchBeforeCreate: state.pullHostBranchBeforeCreate,
         customAgents: state.customAgents,
         shortcutBindings: state.shortcutBindings,
@@ -696,6 +777,21 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
           ),
           playbookRunsSelectedRepoPath: normalizeTrimmedString(
             persisted.playbookRunsSelectedRepoPath ?? currentState.playbookRunsSelectedRepoPath,
+          ),
+          kanbanBoardSelectionInitialized: normalizeBoolean(
+            persisted.kanbanBoardSelectionInitialized ?? currentState.kanbanBoardSelectionInitialized,
+          ),
+          kanbanBoardScopeType: normalizeKanbanBoardScopeType(
+            persisted.kanbanBoardScopeType ?? currentState.kanbanBoardScopeType,
+          ),
+          kanbanBoardScopeValue: normalizeTrimmedString(
+            persisted.kanbanBoardScopeValue ?? currentState.kanbanBoardScopeValue,
+          ),
+          kanbanBoardSelectedRepoPath: normalizeTrimmedString(
+            persisted.kanbanBoardSelectedRepoPath ?? currentState.kanbanBoardSelectedRepoPath,
+          ),
+          kanbanBoardViewMode: normalizeKanbanBoardViewMode(
+            persisted.kanbanBoardViewMode ?? currentState.kanbanBoardViewMode,
           ),
           appView: normalizeAppView(persisted.appView ?? currentState.appView),
           sidebarAutoMinimize: normalizeBoolean(persisted.sidebarAutoMinimize ?? currentState.sidebarAutoMinimize),
@@ -739,6 +835,13 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
           seenModelIds: normalizeSeenModelIds(
             persisted.seenModelIds ?? currentState.seenModelIds,
           ),
+          repoBranchSource:
+            persisted.repoBranchSource === 'remote' || persisted.repoBranchSource === 'host'
+              ? persisted.repoBranchSource
+              : currentState.repoBranchSource,
+          repoCreateRemoteBranch: normalizeTrimmedString(
+            persisted.repoCreateRemoteBranch ?? currentState.repoCreateRemoteBranch,
+          ),
           pullHostBranchBeforeCreate: normalizeBoolean(
             persisted.pullHostBranchBeforeCreate ?? currentState.pullHostBranchBeforeCreate,
           ),
@@ -759,6 +862,11 @@ export function useDroneHubAppModelUiState() {
       playbookRunsSelectionInitialized: s.playbookRunsSelectionInitialized,
       playbookRunsSelectedPlaybookId: s.playbookRunsSelectedPlaybookId,
       playbookRunsSelectedRepoPath: s.playbookRunsSelectedRepoPath,
+      kanbanBoardSelectionInitialized: s.kanbanBoardSelectionInitialized,
+      kanbanBoardScopeType: s.kanbanBoardScopeType,
+      kanbanBoardScopeValue: s.kanbanBoardScopeValue,
+      kanbanBoardSelectedRepoPath: s.kanbanBoardSelectedRepoPath,
+      kanbanBoardViewMode: s.kanbanBoardViewMode,
       chatHeaderRepoPath: s.chatHeaderRepoPath,
       appView: s.appView,
       viewMode: s.viewMode,
@@ -791,6 +899,8 @@ export function useDroneHubAppModelUiState() {
       spawnAgentKey: s.spawnAgentKey,
       spawnModel: s.spawnModel,
       seenModelIds: s.seenModelIds,
+      repoBranchSource: s.repoBranchSource,
+      repoCreateRemoteBranch: s.repoCreateRemoteBranch,
       pullHostBranchBeforeCreate: s.pullHostBranchBeforeCreate,
       customAgents: s.customAgents,
       customAgentModalOpen: s.customAgentModalOpen,
@@ -806,6 +916,11 @@ export function useDroneHubAppModelUiState() {
       setPlaybookRunsSelectionInitialized: s.setPlaybookRunsSelectionInitialized,
       setPlaybookRunsSelectedPlaybookId: s.setPlaybookRunsSelectedPlaybookId,
       setPlaybookRunsSelectedRepoPath: s.setPlaybookRunsSelectedRepoPath,
+      setKanbanBoardSelectionInitialized: s.setKanbanBoardSelectionInitialized,
+      setKanbanBoardScopeType: s.setKanbanBoardScopeType,
+      setKanbanBoardScopeValue: s.setKanbanBoardScopeValue,
+      setKanbanBoardSelectedRepoPath: s.setKanbanBoardSelectedRepoPath,
+      setKanbanBoardViewMode: s.setKanbanBoardViewMode,
       setChatHeaderRepoPath: s.setChatHeaderRepoPath,
       setAppView: s.setAppView,
       setSidebarGroupingMode: s.setSidebarGroupingMode,
@@ -836,6 +951,8 @@ export function useDroneHubAppModelUiState() {
       setSpawnAgentKey: s.setSpawnAgentKey,
       setSpawnModel: s.setSpawnModel,
       rememberSeenModels: s.rememberSeenModels,
+      setRepoBranchSource: s.setRepoBranchSource,
+      setRepoCreateRemoteBranch: s.setRepoCreateRemoteBranch,
       setPullHostBranchBeforeCreate: s.setPullHostBranchBeforeCreate,
       setCustomAgents: s.setCustomAgents,
       setCustomAgentModalOpen: s.setCustomAgentModalOpen,

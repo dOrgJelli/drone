@@ -36,6 +36,7 @@ import { cn } from '../../ui/cn';
 import { dropdownMenuItemBaseClass, dropdownPanelBaseClass, useDropdownDismiss } from '../../ui/dropdown';
 import { UiMenuSelect, type UiMenuSelectEntry } from '../../ui/menuSelect';
 import { createDraftChatAutomationLaunch } from './chat-draft-automation';
+import { repoPathLabel } from './repo-path-label';
 import { useDroneHubUiStore, useSelectedDroneWorkspaceUiState } from './use-drone-hub-ui-store';
 import { usePromptAutomationState } from './use-prompt-automation-state';
 import { HeaderPullRequestShortcuts } from './HeaderPullRequestShortcuts';
@@ -43,8 +44,10 @@ import { buildPendingTimelineBlocks } from './pending-timeline-blocks';
 import { orderSidebarEntries } from './sidebar-group-order';
 import {
   buildPendingPromptLoopGroups,
+  buildTranscriptTimelineBlocks,
   buildTranscriptRenderBlocks,
   type TranscriptRenderBlock,
+  type TranscriptTimelineBlock,
 } from './prompt-loop-groups';
 import { resolveRunningPromptLoopIdentity } from './prompt-loop-running-identity';
 import type { RepoTransferPeer } from './use-workspace-actions';
@@ -407,6 +410,14 @@ export function SelectedDroneWorkspace({
     },
     [visiblePendingPromptsWithStartup],
   );
+  const transcriptTimelineBlocks = React.useMemo<TranscriptTimelineBlock[]>(
+    () =>
+      buildTranscriptTimelineBlocks({
+        transcriptRenderBlocks,
+        pendingPlainPrompts,
+      }),
+    [pendingPlainPrompts, transcriptRenderBlocks],
+  );
   const pendingPromptLoopByIdentity = React.useMemo(() => {
     const out = new Map<string, PendingPrompt[]>();
     for (const group of pendingPromptLoopGroups) out.set(group.identity, group.pendingRuns);
@@ -438,7 +449,7 @@ export function SelectedDroneWorkspace({
   const pendingTimelineBlocks = React.useMemo(() => {
     return buildPendingTimelineBlocks({
       pendingOnlyPromptLoopGroups,
-      pendingPlainPrompts,
+      pendingPlainPrompts: [],
       queuedAutomationItems,
       promptAutomationJob,
       runningAutomationIdentity,
@@ -563,7 +574,7 @@ export function SelectedDroneWorkspace({
     };
   }, [currentDrone.hubPhase, currentDrone.id, currentDroneRepoAttached]);
 
-  const tryOpenMarkdownPullRequestInChanges = React.useCallback(
+  const tryOpenMarkdownPullRequest = React.useCallback(
     (href: string): boolean => {
       const parsed = parseGithubPullRequestHref(href);
       if (!parsed) return false;
@@ -572,7 +583,7 @@ export function SelectedDroneWorkspace({
       const knownRepo = repoIdentityRef.current;
       if (knownRepo && (knownRepo.owner !== parsed.owner || knownRepo.repo !== parsed.repo)) return false;
       setRightPanelOpen(true);
-      setRightPanelTab('changes');
+      setRightPanelTab('prs');
       requestChangesPullRequest({ droneId: currentDrone.id, pullNumber: parsed.pullNumber });
       return true;
     },
@@ -962,10 +973,10 @@ export function SelectedDroneWorkspace({
                 entries={createRepoMenuEntries}
                 disabled={true}
                 triggerClassName="min-w-[220px] max-w-[420px]"
-                panelClassName="w-[720px] max-w-[calc(100vw-3rem)]"
+                panelClassName="w-[380px] max-w-[calc(100vw-3rem)]"
                 menuClassName="max-h-[240px] overflow-y-auto"
                 title={currentDroneRepoPath || 'No repo'}
-                triggerLabel={currentDroneRepoPath || 'No repo'}
+                triggerLabel={currentDroneRepoPath ? repoPathLabel(currentDroneRepoPath) : 'No repo'}
                 triggerLabelClassName={currentDroneRepoPath ? 'font-mono text-[11px]' : undefined}
                 chevron={() => <IconChevron down className="text-[var(--muted-dim)] opacity-60" />}
               />
@@ -1434,7 +1445,28 @@ export function SelectedDroneWorkspace({
                   <TranscriptSkeleton message="Loading chat messages..." />
                 ) : (transcripts && transcripts.length > 0) || visiblePendingPromptsWithStartup.length > 0 ? (
                   <div className="max-w-[1170px] mx-auto px-6 py-5 flex flex-col gap-6">
-                    {transcriptRenderBlocks.map((block) => {
+                    {transcriptTimelineBlocks.map((block) => {
+                      if (block.kind === 'pending-prompt') {
+                        const p = block.item;
+                        return (
+                          <PendingTranscriptTurn
+                            key={block.key}
+                            item={p}
+                            nowMs={nowMs}
+                            showRoleIcons={false}
+                            onCancelQueued={requestCancelPendingPrompt}
+                            onRequestUnstick={requestUnstickPendingPrompt}
+                            onOpenFileReference={onOpenMarkdownFileReference}
+                            onOpenLink={tryOpenMarkdownPullRequest}
+                            droneId={currentDrone.id}
+                            droneHomePath={droneHomePath(currentDrone)}
+                            cancelBusy={Boolean(cancellingPendingPromptById[p.id])}
+                            cancelError={cancelPendingPromptErrorById[p.id] ?? null}
+                            unstickBusy={Boolean(unstickingPendingPromptById[p.id])}
+                            unstickError={unstickPendingPromptErrorById[p.id] ?? null}
+                          />
+                        );
+                      }
                       if (block.kind === 'prompt-loop-group') {
                         const runningGroup = Boolean(promptAutomationJob?.running) && Boolean(runningAutomationIdentity) && block.identity === runningAutomationIdentity;
                         return (
@@ -1448,7 +1480,7 @@ export function SelectedDroneWorkspace({
                             headerError={runningGroup ? stopPromptAutomationError : null}
                             nowMs={nowMs}
                             onOpenFileReference={onOpenMarkdownFileReference}
-                            onOpenLink={tryOpenMarkdownPullRequestInChanges}
+                            onOpenLink={tryOpenMarkdownPullRequest}
                           />
                         );
                       }
@@ -1466,7 +1498,7 @@ export function SelectedDroneWorkspace({
                           onToggleTldr={toggleTldrForAgentMessage}
                           onHoverAgentMessage={handleAgentMessageHover}
                           onOpenFileReference={onOpenMarkdownFileReference}
-                          onOpenLink={tryOpenMarkdownPullRequestInChanges}
+                          onOpenLink={tryOpenMarkdownPullRequest}
                           droneId={currentDrone.id}
                           droneHomePath={droneHomePath(currentDrone)}
                           showRoleIcons={false}
@@ -1485,7 +1517,7 @@ export function SelectedDroneWorkspace({
                             onCancelQueued={requestCancelPendingPrompt}
                             onRequestUnstick={requestUnstickPendingPrompt}
                             onOpenFileReference={onOpenMarkdownFileReference}
-                            onOpenLink={tryOpenMarkdownPullRequestInChanges}
+                            onOpenLink={tryOpenMarkdownPullRequest}
                             droneId={currentDrone.id}
                             droneHomePath={droneHomePath(currentDrone)}
                             cancelBusy={Boolean(cancellingPendingPromptById[p.id])}
@@ -1509,7 +1541,7 @@ export function SelectedDroneWorkspace({
                             headerError={runningGroup ? stopPromptAutomationError : null}
                             nowMs={nowMs}
                             onOpenFileReference={onOpenMarkdownFileReference}
-                            onOpenLink={tryOpenMarkdownPullRequestInChanges}
+                            onOpenLink={tryOpenMarkdownPullRequest}
                           />
                         );
                       }

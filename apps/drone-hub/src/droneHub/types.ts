@@ -44,6 +44,25 @@ export type RepoSummary = {
   github: { owner: string; repo: string } | null;
 };
 
+export type RepoRemoteBranchOption = {
+  name: string;
+  remote: string;
+  branch: string;
+  headSha: string | null;
+};
+
+export type RepoBranchesPayload =
+  | {
+      ok: true;
+      repoRoot: string;
+      hostBranch: string | null;
+      remoteBranches: RepoRemoteBranchOption[];
+    }
+  | {
+      ok: false;
+      error: string;
+    };
+
 export type DronePortMapping = { hostPort: number; containerPort: number };
 export type DroneTerminalMode = 'shell' | 'agent';
 export type PortPreviewSelection = { containerPort: number };
@@ -150,6 +169,8 @@ export type RepoChangeEntry = {
   isUntracked: boolean;
   isIgnored: boolean;
   isConflicted: boolean;
+  reviewKey?: string;
+  reviewToken?: string;
 };
 
 export type RepoChangesPayload =
@@ -158,6 +179,7 @@ export type RepoChangesPayload =
       id: string;
       name: string;
       repoRoot: string;
+      reviewScopeId: string;
       branch: RepoBranchSummary;
       counts: {
         changed: number;
@@ -202,6 +224,8 @@ export type RepoPullChangeEntry = {
   originalPath: string | null;
   statusChar: string;
   statusType: RepoChangeType;
+  reviewKey?: string;
+  reviewToken?: string;
 };
 
 export type RepoPullBranchContext = {
@@ -217,6 +241,7 @@ export type RepoPullChangesPayload =
       id: string;
       name: string;
       repoRoot: string;
+      reviewScopeId: string;
       baseSha: string;
       headSha: string;
       branchContext: RepoPullBranchContext;
@@ -319,6 +344,8 @@ export type RepoPullRequestChangeEntry = {
   patch: string | null;
   truncated: boolean;
   isBinary: boolean;
+  reviewKey?: string;
+  reviewToken?: string;
 };
 
 export type RepoPullRequestChangesPayload =
@@ -327,6 +354,7 @@ export type RepoPullRequestChangesPayload =
       id: string;
       name: string;
       repoRoot: string;
+      reviewScopeId: string;
       github: { owner: string; repo: string };
       pullRequest: {
         number: number;

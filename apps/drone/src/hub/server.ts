@@ -83,6 +83,8 @@ import {
   getTaskBoardStateFromRegistry,
   listScopedTasksForDroneScope,
   normalizeTaskTitle,
+  removeTasksForScope,
+  renameTasksForScope,
   normalizeTaskTypeId,
   persistTaskBoardState,
   removeScopedTaskFromBoard,
@@ -98,6 +100,8 @@ import {
 } from './environment-config';
 import { hasActivePriorPendingPrompt, shouldDeferQueuedTranscriptPrompt, stalePendingPromptState } from './pendingPromptEnqueue';
 import {
+  applyBranchDiffToMainWorkingTree,
+  buildReviewScopeId,
   cleanupQuarantineWorktree,
   deleteHostRefBestEffort,
   gitRepoCommitDetails,
@@ -109,16 +113,18 @@ import {
   gitIsClean,
   gitIsAncestor,
   gitMergeBase,
+  gitListRemoteBranches,
   gitMergePreviewNameStatusEntries,
   gitRepoChangesSummary,
+  gitResolveRemoteBranchForCreate,
   importBundleHeadToHostRef,
   isHostRepoPullBeforeCreateError,
-  mergeBranchIntoMainWorkingTreeNoCommit,
   resolveBundleImportSourceRefFromListHeads,
   gitStashPop,
   gitStashPush,
   gitTopLevel,
   isRepoPatchApplyError,
+  repoChangeReviewKey,
   quarantineWorktreePath,
 } from './repoOps';
 import { isHubApiAuthorized, isHubApiAuthorizedForWebSocket, rejectWebSocketUpgrade } from './hub-auth';
@@ -150,6 +156,7 @@ import {
 import {
   closeGithubPullRequestForRepoRoot,
   getGithubPullRequestCommitForRepoRoot,
+  inspectGithubAuthStatus,
   inspectGithubRepoForRepoRoot,
   isGithubPullRequestError,
   listGithubPullRequestChangesForRepoRoot,
@@ -290,6 +297,23 @@ function parsePullHostBranchBeforeCreate(raw: unknown): boolean {
   if (value === '0' || value === 'false' || value === 'no' || value === 'off') return false;
   if (value === '1' || value === 'true' || value === 'yes' || value === 'on') return true;
   return true;
+}
+
+type RepoBranchSourceMode = 'host' | 'remote';
+
+function parseRepoBranchSourceMode(raw: unknown): RepoBranchSourceMode {
+  if (raw == null) return 'host';
+  const value = String(raw).trim().toLowerCase();
+  if (!value || value === 'host' || value === 'host-branch' || value === 'current-branch') return 'host';
+  if (value === 'remote' || value === 'remote-branch') return 'remote';
+  throw new Error('invalid repoBranchSource (expected host|remote)');
+}
+
+function parseRemoteBranchName(raw: unknown): string {
+  return String(raw ?? '')
+    .trim()
+    .replace(/^refs\/remotes\//, '')
+    .replace(/^remotes\//, '');
 }
 
 function parseCreateRuntime(raw: unknown): DroneRuntime {
@@ -456,6 +480,37 @@ async function checkHostCommand(command: string): Promise<{ available: boolean; 
   return { available: false, detail: `${command} is not on PATH` };
 }
 
+function githubAuthDetail(auth: Awaited<ReturnType<typeof inspectGithubAuthStatus>>): string {
+  if (auth.tokenSource === 'environment') {
+    return `GitHub auth is available from ${auth.tokenEnvKey ?? 'environment'}.`;
+  }
+  if (auth.tokenSource === 'gh') {
+    return 'GitHub auth is available from host gh auth.';
+  }
+  if (auth.ghCliInstalled) {
+    return 'Host gh is installed but not authenticated. Run gh auth login or set DRONE_HUB_GITHUB_TOKEN / GITHUB_TOKEN / GH_TOKEN.';
+  }
+  return 'Set DRONE_HUB_GITHUB_TOKEN / GITHUB_TOKEN / GH_TOKEN, or install and authenticate host gh.';
+}
+
+async function resolveGithubSettingsResponse(): Promise<any> {
+  const auth = await inspectGithubAuthStatus();
+  return {
+    ok: true,
+    github: {
+      pullRequestTransport: 'github-api',
+      authReady: auth.tokenAvailable,
+      authSource: auth.tokenSource,
+      authEnvKey: auth.tokenEnvKey,
+      authDetail: githubAuthDetail(auth),
+      ghCliInstalled: auth.ghCliInstalled,
+      ghCliAuthenticated: auth.ghCliAuthenticated,
+      ghCliPath: auth.ghCliPath,
+      ghCliVersion: auth.ghCliVersion,
+    },
+  };
+}
+
 async function resolveSetupStatusResponse(): Promise<any> {
   await ensureDefaultProfileForFirstRun();
   const setupState = await ensureHubSetupState();
@@ -483,6 +538,7 @@ async function resolveSetupStatusResponse(): Promise<any> {
     }
   }
   const tmuxCommand = await checkHostCommand('tmux');
+  const githubSettings = await resolveGithubSettingsResponse();
   const hasBaseImage = await new BaseConfigManager().hasBase();
   const dependencies = [
     {
@@ -500,6 +556,14 @@ async function resolveSetupStatusResponse(): Promise<any> {
       blocking: false,
       requiredFor: 'host-runtime drones',
       detail: tmuxCommand.available ? 'Host-runtime drones can launch local daemons.' : 'Install tmux if you plan to use host-runtime drones.',
+    },
+    {
+      id: 'github',
+      label: 'GitHub auth',
+      status: githubSettings.github.authReady ? 'ready' : 'warning',
+      blocking: false,
+      requiredFor: 'pull request actions',
+      detail: githubSettings.github.authDetail,
     },
     {
       id: 'llm',
@@ -913,6 +977,8 @@ async function drainPendingTaskCreatesForDrone(droneId: string, droneEntry: any)
           typeId,
           createdAt,
           updatedAt: createdAt,
+          scopeType: repoPath ? 'repo' : 'global',
+          ...(repoPath ? { scopeValue: repoPath } : {}),
           repoPath,
           droneId,
           droneName: String(latestDrone?.name ?? droneId).trim() || droneId,
@@ -3334,6 +3400,17 @@ const PROMPT_AUTOMATION_WAIT_FOR_IDLE_TIMEOUT_MS = 30 * 60_000;
 const PROMPT_AUTOMATION_WAIT_FOR_PROMPT_TIMEOUT_MS = 30 * 60_000;
 const PROMPT_AUTOMATION_ON_FAILURE_PROMPT_MAX_CHARS = 8_000;
 const PROMPT_AUTOMATION_INTER_RUN_SLEEP_CHUNK_MS = 5_000;
+
+function attachReviewMetadataToPullEntries<T extends { path: string; originalPath: string | null }>(entries: T[]): Array<T & { reviewKey: string; reviewToken: string }> {
+  return entries.map((entry) => {
+    const reviewKey = repoChangeReviewKey(entry.path, entry.originalPath);
+    return {
+      ...entry,
+      reviewKey,
+      reviewToken: reviewKey,
+    };
+  });
+}
 const PROMPT_AUTOMATION_COMPLETION_STALL_RECOVERY_GRACE_MS = 15_000;
 
 type PromptAutomationJobStatus = 'running' | 'completed' | 'failed' | 'stopped';
@@ -7062,6 +7139,8 @@ async function removeDroneById(opts: { id: string; keepVolume: boolean; forget: 
     removedRegistry = await updateRegistry((reg: any) => {
       if (reg?.drones?.[droneId]) {
         delete reg.drones[droneId];
+        const removed = removeTasksForScope(getTaskBoardStateFromRegistry(reg), 'drone', droneId);
+        if (removed.removedCount > 0) persistTaskBoardState(reg, removed.board);
         return true;
       }
       return false;
@@ -7454,6 +7533,8 @@ async function archiveDroneById(opts: {
     regAny.archived[droneId] = archivedEntry;
     if (regAny?.drones?.[droneId]) delete regAny.drones[droneId];
     if (regAny?.pending?.[droneId]) delete regAny.pending[droneId];
+    const removed = removeTasksForScope(getTaskBoardStateFromRegistry(regAny), 'drone', droneId);
+    if (removed.removedCount > 0) persistTaskBoardState(regAny, removed.board);
 
     return {
       hadEntry: true,
@@ -8920,6 +9001,13 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         }
       }
 
+      if (pathname === '/api/settings/github') {
+        if (method === 'GET') {
+          json(res, 200, await resolveGithubSettingsResponse());
+          return;
+        }
+      }
+
       if (pathname === '/api/settings/delete-action') {
         if (method === 'GET') {
           json(res, 200, await resolveDeleteActionSettingsResponse());
@@ -9719,6 +9807,38 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         return;
       }
 
+      // GET /api/repos/branches?repoPath=<absolute-path>
+      if (method === 'GET' && parts.length === 3 && parts[0] === 'api' && parts[1] === 'repos' && parts[2] === 'branches') {
+        const repoPath = String(u.searchParams.get('repoPath') ?? '').trim();
+        if (!repoPath) {
+          json(res, 400, { ok: false, error: 'missing repoPath' });
+          return;
+        }
+        if (!path.isAbsolute(repoPath)) {
+          json(res, 400, { ok: false, error: 'invalid repoPath (expected absolute path)' });
+          return;
+        }
+        try {
+          const listed = await gitListRemoteBranches(repoPath);
+          json(res, 200, {
+            ok: true,
+            repoRoot: listed.repoRoot,
+            hostBranch: listed.hostBranch,
+            remoteBranches: listed.remoteBranches.map((entry) => ({
+              name: entry.ref,
+              remote: entry.remote,
+              branch: entry.branch,
+              headSha: entry.oid,
+            })),
+          });
+          return;
+        } catch (e: any) {
+          const msg = e?.message ?? String(e);
+          json(res, /git repository|git root|missing repo path/i.test(msg) ? 409 : 500, { ok: false, error: msg });
+          return;
+        }
+      }
+
       // DELETE /api/repos?path=<repoPath>
       // Removes a registered repo.
       if (method === 'DELETE' && parts.length === 2 && parts[0] === 'api' && parts[1] === 'repos') {
@@ -10372,6 +10492,14 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         const group = groupRaw ? groupRaw : null;
         const repoRaw = typeof body?.repoPath === 'string' ? body.repoPath.trim() : '';
         let repoPath = repoRaw ? repoRaw : '';
+        let repoBranchSource: RepoBranchSourceMode = 'host';
+        try {
+          repoBranchSource = parseRepoBranchSourceMode(body?.repoBranchSource);
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+          return;
+        }
+        let remoteBranch = parseRemoteBranchName(body?.remoteBranch);
         const pullHostBranchBeforeCreate = parsePullHostBranchBeforeCreate(body?.pullHostBranchBeforeCreate);
         const build = body?.build === true;
         const containerPortRaw = body?.containerPort;
@@ -10442,17 +10570,47 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           json(res, 400, { ok: false, error: 'invalid containerPort' });
           return;
         }
+        if (repoPath && repoBranchSource === 'remote' && runtime === 'host' && !cloneFrom) {
+          json(res, 409, {
+            ok: false,
+            error: 'remote branch checkout is only available for container runtime drones',
+            code: 'remote_branch_requires_container_runtime',
+          });
+          return;
+        }
         if (repoPath && pullHostBranchBeforeCreate && !cloneFrom) {
+          if (repoBranchSource === 'remote') {
+            // Ignore pull preference for remote-branch seeding.
+          } else {
+            try {
+              const pulled = await gitPullHostBranchBeforeCreate(repoPath);
+              repoPath = pulled.repoRoot;
+            } catch (e: any) {
+              const pullError = formatPullHostBranchBeforeCreateError(e);
+              json(res, pullError.status, {
+                ok: false,
+                error: `Failed to pull host branch before creating drone: ${pullError.message}`,
+                code: 'host_branch_pull_before_create_failed',
+                reason: pullError.reason,
+              });
+              return;
+            }
+          }
+        }
+        if (repoPath && repoBranchSource === 'remote' && !cloneFrom) {
+          if (!remoteBranch) {
+            json(res, 400, { ok: false, error: 'missing remoteBranch for repoBranchSource=remote' });
+            return;
+          }
           try {
-            const pulled = await gitPullHostBranchBeforeCreate(repoPath);
-            repoPath = pulled.repoRoot;
+            const resolvedRemote = await gitResolveRemoteBranchForCreate(repoPath, remoteBranch);
+            repoPath = resolvedRemote.repoRoot;
+            remoteBranch = resolvedRemote.remoteBranch;
           } catch (e: any) {
-            const pullError = formatPullHostBranchBeforeCreateError(e);
-            json(res, pullError.status, {
+            json(res, 409, {
               ok: false,
-              error: `Failed to pull host branch before creating drone: ${pullError.message}`,
-              code: 'host_branch_pull_before_create_failed',
-              reason: pullError.reason,
+              error: e?.message ?? String(e),
+              code: 'remote_branch_unavailable',
             });
             return;
           }
@@ -10477,6 +10635,8 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             phase: 'starting',
             message: 'Starting…',
             environment: createdEnvironment,
+            ...(repoPath && !cloneFrom ? { repoSeedSource: repoBranchSource } : {}),
+            ...(repoPath && repoBranchSource === 'remote' && remoteBranch && !cloneFrom ? { repoSeedRemoteBranch: remoteBranch } : {}),
             ...(cloneFromId ? { cloneFrom: cloneFromId, cloneChats: Boolean(cloneChats) } : {}),
             ...(seedPrompt || seedAgent || seedModel
               ? {
@@ -10525,10 +10685,14 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         const defaultPullHostBranchBeforeCreate = parsePullHostBranchBeforeCreate(body?.pullHostBranchBeforeCreate);
         const preflightByIndex: Array<{
           repoPath: string;
+          repoBranchSource: RepoBranchSourceMode;
+          remoteBranch: string;
           pullError: string | null;
           pullStatus?: number;
         }> = Array.from({ length: list.length }, () => ({
           repoPath: '',
+          repoBranchSource: 'host',
+          remoteBranch: '',
           pullError: null,
         }));
         const pullByRepoPath = new Map<
@@ -10541,14 +10705,95 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           const repoRaw = typeof raw?.repoPath === 'string' ? raw.repoPath.trim() : '';
           const repoPath = repoRaw ? repoRaw : '';
           const cloneFromRaw = typeof raw?.cloneFrom === 'string' ? raw.cloneFrom.trim() : '';
+          let runtime: DroneRuntime = 'container';
+          try {
+            runtime = parseCreateRuntime(raw?.runtime);
+          } catch (e: any) {
+            preflightByIndex[index] = {
+              repoPath,
+              repoBranchSource: 'host',
+              remoteBranch: '',
+              pullError: e?.message ?? String(e),
+              pullStatus: 400,
+            };
+            continue;
+          }
+          let repoBranchSource: RepoBranchSourceMode = 'host';
+          try {
+            repoBranchSource = parseRepoBranchSourceMode(raw?.repoBranchSource);
+          } catch (e: any) {
+            preflightByIndex[index] = {
+              repoPath,
+              repoBranchSource: 'host',
+              remoteBranch: '',
+              pullError: e?.message ?? String(e),
+              pullStatus: 400,
+            };
+            continue;
+          }
+          let remoteBranch = parseRemoteBranchName(raw?.remoteBranch);
           const hasPullOverride = Boolean(raw) && Object.prototype.hasOwnProperty.call(raw, 'pullHostBranchBeforeCreate');
           const shouldPullHostBranchBeforeCreate = hasPullOverride
             ? parsePullHostBranchBeforeCreate(raw?.pullHostBranchBeforeCreate)
             : defaultPullHostBranchBeforeCreate;
 
-          if (!repoPath || !shouldPullHostBranchBeforeCreate || cloneFromRaw) {
+          if (!repoPath || cloneFromRaw) {
             preflightByIndex[index] = {
               repoPath,
+              repoBranchSource,
+              remoteBranch,
+              pullError: null,
+            };
+            continue;
+          }
+
+          if (repoBranchSource === 'remote' && runtime === 'host') {
+            preflightByIndex[index] = {
+              repoPath,
+              repoBranchSource,
+              remoteBranch,
+              pullError: 'remote branch checkout is only available for container runtime drones',
+              pullStatus: 409,
+            };
+            continue;
+          }
+
+          if (repoBranchSource === 'remote') {
+            if (!remoteBranch) {
+              preflightByIndex[index] = {
+                repoPath,
+                repoBranchSource,
+                remoteBranch,
+                pullError: 'missing remoteBranch for repoBranchSource=remote',
+                pullStatus: 400,
+              };
+              continue;
+            }
+            try {
+              const resolvedRemote = await gitResolveRemoteBranchForCreate(repoPath, remoteBranch);
+              preflightByIndex[index] = {
+                repoPath: resolvedRemote.repoRoot,
+                repoBranchSource,
+                remoteBranch: resolvedRemote.remoteBranch,
+                pullError: null,
+              };
+            } catch (e: any) {
+              preflightByIndex[index] = {
+                repoPath,
+                repoBranchSource,
+                remoteBranch,
+                pullError: e?.message ?? String(e),
+                pullStatus: 409,
+              };
+            }
+            continue;
+          }
+
+          if (!shouldPullHostBranchBeforeCreate) {
+            preflightByIndex[index] = {
+              repoPath,
+              repoBranchSource,
+              remoteBranch,
               pullError: null,
             };
             continue;
@@ -10563,12 +10808,16 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             const pulled = await pullPromise;
             preflightByIndex[index] = {
               repoPath: pulled.repoRoot,
+              repoBranchSource,
+              remoteBranch,
               pullError: null,
             };
           } catch (e: any) {
             const pullError = formatPullHostBranchBeforeCreateError(e);
             preflightByIndex[index] = {
               repoPath,
+              repoBranchSource,
+              remoteBranch,
               pullError: `Failed to pull host branch before creating drone: ${pullError.message}`,
               pullStatus: pullError.status,
             };
@@ -10603,7 +10852,13 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
                 continue;
               }
 
-              const preflight = preflightByIndex[index] ?? { repoPath: '', pullError: null, pullStatus: undefined };
+              const preflight = preflightByIndex[index] ?? {
+                repoPath: '',
+                repoBranchSource: 'host' as const,
+                remoteBranch: '',
+                pullError: null,
+                pullStatus: undefined,
+              };
               if (preflight.pullError) {
                 rejected.push({
                   name,
@@ -10616,6 +10871,8 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               const groupRaw = typeof raw?.group === 'string' ? raw.group.trim() : '';
               const group = groupRaw ? groupRaw : null;
               const repoPath = preflight.repoPath;
+              const repoBranchSource = preflight.repoBranchSource;
+              const remoteBranch = preflight.remoteBranch;
               let runtime: DroneRuntime = 'container';
               try {
                 runtime = parseCreateRuntime(raw?.runtime);
@@ -10683,6 +10940,10 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
                 phase: 'starting',
                 message: 'Starting…',
                 environment: createdEnvironment,
+                ...(repoPath && !cloneFromId ? { repoSeedSource: repoBranchSource } : {}),
+                ...(repoPath && repoBranchSource === 'remote' && remoteBranch && !cloneFromId
+                  ? { repoSeedRemoteBranch: remoteBranch }
+                  : {}),
                 ...(cloneFromId ? { cloneFrom: cloneFromId, cloneChats: Boolean(cloneChats) } : {}),
                 ...(seedPrompt || seedAgent || seedModel
                   ? {
@@ -12267,6 +12528,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               id: droneId,
               name: droneName,
               repoRoot,
+              reviewScopeId: buildReviewScopeId('working-tree', [repoRoot, droneId]),
               branch: summary.branch,
               counts: summary.counts,
               entries: summary.entries,
@@ -12288,6 +12550,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               id: droneId,
               name: droneName,
               repoRoot,
+              reviewScopeId: buildReviewScopeId('working-tree', [repoRoot, droneId]),
               branch: summary.branch,
               counts: summary.counts,
               entries: summary.entries,
@@ -12796,6 +13059,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               id: droneId,
               name: droneName,
               repoRoot,
+              reviewScopeId: buildReviewScopeId('pull-preview', [repoRoot, droneId, normalizedHeadSha, normalizedHeadSha, normalizedHeadSha]),
               baseSha: normalizedHeadSha,
               headSha: normalizedHeadSha,
               counts: { changed: 0 },
@@ -12825,6 +13089,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         const repoPathInContainer = droneRepoPathInContainer(d);
         const repoPathRaw = String(d?.repoPath ?? '').trim();
         let hostBranchHead: string | null = null;
+        let hostHeadShaForReview: string | null = null;
         let pullPreviewBaseSha: string | undefined;
         const lastPullAny = d?.repo?.lastPull && typeof d.repo.lastPull === 'object' ? d.repo.lastPull : null;
         const lastPullMode = String((lastPullAny as any)?.mode ?? '').trim().toLowerCase();
@@ -12856,7 +13121,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               const lastPullMode = String((lastPullAny as any)?.mode ?? '').trim().toLowerCase();
               const lastExportedHeadSha = String((lastPullAny as any)?.exportedHeadSha ?? '').trim().toLowerCase();
               if (
-                lastPullMode === 'bundle-merge-no-commit' &&
+                (lastPullMode === 'bundle-merge-no-commit' || lastPullMode === 'bundle-apply-no-commit') &&
                 /^[0-9a-f]{40}$/.test(lastExportedHeadSha) &&
                 summary.baseSha === lastExportedHeadSha &&
                 /^[0-9a-f]{40}$/.test(summary.headSha)
@@ -12866,6 +13131,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
                 hostBranchHead = String(hostSummary.branch.head ?? '').trim() || hostBranchHead;
                 const hostHeadSha = String(hostSummary.branch.oid ?? '').trim().toLowerCase();
                 if (/^[0-9a-f]{40}$/.test(hostHeadSha)) {
+                  hostHeadShaForReview = hostHeadSha;
                   const hostContainsLastExport = await gitIsAncestor(repoRoot, lastExportedHeadSha, 'HEAD');
                   if (!hostContainsLastExport) {
                     const recoveryBaseSha = await gitMergeBase(repoRoot, 'HEAD', lastExportedHeadSha);
@@ -12897,6 +13163,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               hostBranchHead = String(hostSummary.branch.head ?? '').trim() || hostBranchHead;
               const hostHeadSha = String(hostSummary.branch.oid ?? '').trim().toLowerCase();
               if (/^[0-9a-f]{40}$/.test(hostHeadSha)) {
+                hostHeadShaForReview = hostHeadSha;
                 const cacheKey = [droneId, repoRoot, hostHeadSha, summary.baseSha, summary.headSha].join('\u0000');
                 const now = Date.now();
                 const cached = pullPreviewHostMergeCache.get(cacheKey);
@@ -12991,10 +13258,17 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             id: droneId,
             name: droneName,
             repoRoot: summary.repoRoot,
+            reviewScopeId: buildReviewScopeId('pull-preview', [
+              summary.repoRoot,
+              droneId,
+              hostHeadShaForReview ?? '',
+              summary.baseSha,
+              summary.headSha,
+            ]),
             baseSha: summary.baseSha,
             headSha: summary.headSha,
             counts: { changed: entriesForPreview.length },
-            entries: entriesForPreview,
+            entries: attachReviewMetadataToPullEntries(entriesForPreview),
             branchContext: {
               hostCurrent: hostBranchHead,
               droneCurrent: summary.branchHead,
@@ -13271,10 +13545,17 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             id: droneId,
             name: droneName,
             repoRoot,
+            reviewScopeId: buildReviewScopeId('pull-request', [
+              pr.repo.owner,
+              pr.repo.repo,
+              pr.pullRequest.number,
+              pr.pullRequest.baseSha,
+              pr.pullRequest.headSha,
+            ]),
             github: pr.repo,
             pullRequest: pr.pullRequest,
             counts: pr.counts,
-            entries: pr.entries,
+            entries: attachReviewMetadataToPullEntries(pr.entries),
           });
           return;
         } catch (e: any) {
@@ -14105,8 +14386,9 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
       }
 
       // POST /api/drones/:id/repo/pull
-      // Pull container repo changes onto the host repo as a normal git merge (no auto-commit).
-      // Exports a bundle from the container, imports it to a temporary host ref, then merges that ref.
+      // Pull container repo changes onto the host repo without creating a merge commit.
+      // Exports a bundle from the container, imports it to a temporary host ref, then
+      // applies the imported branch diff onto the host worktree/index.
       if (
         method === 'POST' &&
         parts.length === 5 &&
@@ -14297,7 +14579,10 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               } catch (e: any) {
                 prePullBaseAdvanceError = e?.message ?? String(e);
               }
-            } else if (lastMode === 'bundle-merge-no-commit' && /^[0-9a-f]{40}$/.test(lastExportedHeadSha)) {
+            } else if (
+              (lastMode === 'bundle-merge-no-commit' || lastMode === 'bundle-apply-no-commit') &&
+              /^[0-9a-f]{40}$/.test(lastExportedHeadSha)
+            ) {
               try {
                 const hostContainsLastExport = await gitIsAncestor(repoRoot, lastExportedHeadSha, 'HEAD');
                 if (!hostContainsLastExport) {
@@ -14470,10 +14755,10 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             throw e;
           }
 
-          // Merge imported drone commits into the host branch.
-          // We intentionally do not auto-commit; users review/resolve and commit as normal.
+          // Apply imported drone changes onto the host branch without leaving MERGE_HEAD.
+          // Users still review/resolve and commit as normal, but the resulting commit remains single-parent.
           hostConflictState = true;
-          await mergeBranchIntoMainWorkingTreeNoCommit({ repoRoot, branch: importRefName });
+          await applyBranchDiffToMainWorkingTree({ repoRoot, branch: importRefName });
 
           await tryAdvanceContainerExportBase();
 
@@ -14487,7 +14772,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             dd.repo.lastPullAt = nowIso();
             dd.repo.lastPullError = null;
             dd.repo.lastPull = {
-              mode: 'bundle-merge-no-commit',
+              mode: 'bundle-apply-no-commit',
               exportFormat: 'bundle',
               exportPath,
               importedRef: importRefName,
@@ -14516,7 +14801,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           json(res, 200, {
             ok: true,
             name: droneName,
-            mode: 'bundle-merge-no-commit',
+            mode: 'bundle-apply-no-commit',
             repoRoot,
             fromRef,
             exportFormat: 'bundle',
@@ -14544,8 +14829,8 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
 
           if (patchErr?.kind === 'patch_apply_conflict') {
             if (!hostConflictState) {
-              const fullMsg = `${msg}\n\nFailed importing bundle or preparing merge. Host repo was not modified.`;
-              hubLog('error', 'Repo pull failed before host merge state', {
+              const fullMsg = `${msg}\n\nFailed importing bundle or preparing host apply. Host repo was not modified.`;
+              hubLog('error', 'Repo pull failed before host apply state', {
                 droneName,
                 repoRoot,
                 fromRef,
@@ -14602,7 +14887,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             }
 
             const guidance = [
-              'Conflicts were applied to your host repo as normal Git merge conflict markers.',
+              'Conflicts were applied to your host repo as normal Git conflict markers.',
               'Conflict marker mapping: <<<<<<< ours is your current host branch; >>>>>>> theirs is the pulled drone branch.',
               'Resolve conflicts in your current branch, then stage and commit as usual.',
               stashed
@@ -14612,7 +14897,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               .filter(Boolean)
               .join(' ');
             const fullMsg = `${msg}\n\n${guidance}`;
-            hubLog('warn', 'Repo pull produced host merge conflicts', {
+            hubLog('warn', 'Repo pull produced host apply conflicts', {
               droneName,
               repoRoot,
               fromRef,
@@ -16029,6 +16314,9 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           if (!rewrittenGroups[newName]) rewrittenGroups[newName] = { name: newName, createdAt: at, updatedAt: at };
           regAny.groups = rewrittenGroups;
 
+          const renamed = renameTasksForScope(getTaskBoardStateFromRegistry(regAny), 'group', oldName, newName);
+          if (renamed.renamedCount > 0) persistTaskBoardState(regAny, renamed.board);
+
           return { ok: true as const, movedDrones, movedPending };
         });
 
@@ -16091,9 +16379,20 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           }
           try {
             await updateRegistry((regLatest: any) => {
-              for (const name of Object.keys(regLatest?.groups ?? {})) {
-                if (isSameOrDescendantGroupPath(name, group)) delete regLatest.groups[name];
+              const removedGroupNames = Object.keys(regLatest?.groups ?? {}).filter((name) =>
+                isSameOrDescendantGroupPath(name, group),
+              );
+              for (const name of removedGroupNames) delete regLatest.groups[name];
+              let board = getTaskBoardStateFromRegistry(regLatest);
+              let boardChanged = false;
+              for (const name of removedGroupNames) {
+                const removed = removeTasksForScope(board, 'group', name);
+                if (removed.removedCount > 0) {
+                  board = removed.board;
+                  boardChanged = true;
+                }
               }
+              if (boardChanged) persistTaskBoardState(regLatest, board);
             });
           } catch {
             // ignore
@@ -16136,9 +16435,20 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               if (regLatest?.pending?.[n] && !regLatest?.drones?.[n]) delete regLatest.pending[n];
             }
             if (!wantsUngrouped) {
-              for (const name of Object.keys(regLatest?.groups ?? {})) {
-                if (isSameOrDescendantGroupPath(name, group)) delete regLatest.groups[name];
+              const removedGroupNames = Object.keys(regLatest?.groups ?? {}).filter((name) =>
+                isSameOrDescendantGroupPath(name, group),
+              );
+              for (const name of removedGroupNames) delete regLatest.groups[name];
+              let board = getTaskBoardStateFromRegistry(regLatest);
+              let boardChanged = false;
+              for (const name of removedGroupNames) {
+                const removed = removeTasksForScope(board, 'group', name);
+                if (removed.removedCount > 0) {
+                  board = removed.board;
+                  boardChanged = true;
+                }
               }
+              if (boardChanged) persistTaskBoardState(regLatest, board);
             }
           });
         } catch {

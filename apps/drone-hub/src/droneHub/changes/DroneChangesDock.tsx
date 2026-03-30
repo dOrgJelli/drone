@@ -1,7 +1,7 @@
 import React from 'react';
 import { requestJson } from '../http';
 import { IconChevron, IconFolder, iconForFilePath } from '../icons';
-import { IconPencil } from '../app/icons';
+import { IconEye, IconEyeOff, IconPencil } from '../app/icons';
 import { provisioningLabel, usePaneReadiness } from '../panes/usePaneReadiness';
 import type {
   RepoChangeEntry,
@@ -37,6 +37,7 @@ import {
   CHANGES_DIFF_VIEW_STORAGE_KEY,
   CHANGES_EXPLORER_ZOOM_STORAGE_KEY,
   CHANGES_EXPLORER_WIDTH_STORAGE_KEY,
+  CHANGES_HIDE_VIEWED_STORAGE_KEY,
   CHANGES_PRIMARY_VIEW_STORAGE_KEY,
   CHANGES_VIEW_STORAGE_KEY,
   readChangesStorage,
@@ -80,6 +81,13 @@ import {
   type DiffKind,
   type ExplorerNode,
 } from './helpers';
+import {
+  readViewedChangesStore,
+  setEntryViewed,
+  viewedStateForEntry,
+  writeViewedChangesStore,
+  type ViewedEntryState,
+} from './viewed';
 
 type ChangesViewMode = 'stacked' | 'split';
 type ChangesContextMode = 'branch' | 'pull-request';
@@ -123,11 +131,103 @@ function pruneRecordKeys<T>(record: Record<string, T>, validKeys: Set<string>): 
   return changed ? next : record;
 }
 
+type ExplorerReviewSummary = {
+  total: number;
+  viewed: number;
+  stale: number;
+  unviewed: number;
+};
+
+function summarizeExplorerReviewState(
+  nodes: ExplorerNode[],
+  getViewedState: (entry: RepoChangeEntry) => ViewedEntryState,
+): Record<string, ExplorerReviewSummary> {
+  const summaries: Record<string, ExplorerReviewSummary> = {};
+
+  function visit(node: ExplorerNode): ExplorerReviewSummary {
+    if (node.kind === 'file') {
+      const entry = node.entry;
+      const viewedState = entry ? getViewedState(entry) : 'unviewed';
+      return {
+        total: 1,
+        viewed: viewedState === 'viewed' ? 1 : 0,
+        stale: viewedState === 'stale' ? 1 : 0,
+        unviewed: viewedState === 'unviewed' ? 1 : 0,
+      };
+    }
+
+    const summary = (node.children ?? []).reduce<ExplorerReviewSummary>(
+      (acc, child) => {
+        const childSummary = visit(child);
+        acc.total += childSummary.total;
+        acc.viewed += childSummary.viewed;
+        acc.stale += childSummary.stale;
+        acc.unviewed += childSummary.unviewed;
+        return acc;
+      },
+      { total: 0, viewed: 0, stale: 0, unviewed: 0 },
+    );
+    summaries[node.path] = summary;
+    return summary;
+  }
+
+  for (const node of nodes) visit(node);
+  return summaries;
+}
+
+function ViewedProgressBadge({
+  viewed,
+  total,
+  stale,
+}: {
+  viewed: number;
+  total: number;
+  stale: number;
+}): React.ReactNode {
+  const safeTotal = Math.max(0, Math.floor(total));
+  if (safeTotal <= 0) return null;
+  const safeViewed = clampNumber(Math.floor(viewed), 0, safeTotal);
+  const safeStale = Math.max(0, Math.floor(stale));
+  const progress = safeTotal > 0 ? safeViewed / safeTotal : 0;
+  const radius = 5;
+  const circumference = 2 * Math.PI * radius;
+  const dashOffset = circumference * (1 - progress);
+
+  return (
+    <span
+      className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[rgba(255,255,255,.03)] px-1.5 py-[1px]"
+      title={`${safeViewed} of ${safeTotal} files viewed${safeStale > 0 ? ` • ${safeStale} changed since viewed` : ''}`}
+    >
+      <span className="relative inline-flex items-center justify-center w-4 h-4">
+        <svg viewBox="0 0 16 16" className="w-4 h-4 -rotate-90" aria-hidden="true">
+          <circle cx="8" cy="8" r={radius} fill="none" stroke="rgba(255,255,255,0.12)" strokeWidth="2" />
+          <circle
+            cx="8"
+            cy="8"
+            r={radius}
+            fill="none"
+            stroke="var(--accent)"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeDasharray={circumference}
+            strokeDashoffset={dashOffset}
+          />
+        </svg>
+      </span>
+      <span className="font-mono tabular-nums text-[var(--fg-secondary)]">{safeViewed}</span>
+      <span className="text-[var(--muted-dim)]">/</span>
+      <span className="font-mono tabular-nums text-[var(--fg-secondary)]">{safeTotal}</span>
+      <span className="text-[var(--muted)]">viewed</span>
+    </span>
+  );
+}
+
 export function DroneChangesDock({
   droneId,
   repoAttached,
   repoPath,
   repoUnavailableReason,
+  fixedContextMode = null,
   disabled,
   hubPhase,
   hubMessage,
@@ -138,6 +238,7 @@ export function DroneChangesDock({
   repoAttached: boolean;
   repoPath: string;
   repoUnavailableReason?: string | null;
+  fixedContextMode?: ChangesContextMode | null;
   disabled: boolean;
   hubPhase?: 'creating' | 'starting' | 'seeding' | 'error' | null;
   hubMessage?: string | null;
@@ -176,13 +277,15 @@ export function DroneChangesDock({
     'pull-preview': null,
     'pull-request': null,
   });
-  const [contextMode, setContextMode] = React.useState<ChangesContextMode>(() =>
-    initialRequestedPullNumberRef.current && initialRequestedPullNumberRef.current > 0
+  const [contextModeState, setContextModeState] = React.useState<ChangesContextMode>(() => {
+    if (fixedContextMode) return fixedContextMode;
+    return initialRequestedPullNumberRef.current && initialRequestedPullNumberRef.current > 0
       ? 'pull-request'
       : readChangesStorage(CHANGES_CONTEXT_STORAGE_KEY) === 'pull-request'
         ? 'pull-request'
-        : 'branch',
-  );
+        : 'branch';
+  });
+  const contextMode = fixedContextMode ?? contextModeState;
   const [primaryView, setPrimaryView] = React.useState<ChangesPrimaryView>(() =>
     readChangesStorage(CHANGES_PRIMARY_VIEW_STORAGE_KEY) === 'commits' ? 'commits' : 'changes',
   );
@@ -199,6 +302,8 @@ export function DroneChangesDock({
     const raw = readChangesStorage(CHANGES_DIFF_VIEW_STORAGE_KEY);
     return raw === 'split' ? 'split' : 'unified';
   });
+  const [hideViewed, setHideViewed] = React.useState<boolean>(() => readChangesStorage(CHANGES_HIDE_VIEWED_STORAGE_KEY) === '1');
+  const [viewedStore, setViewedStore] = React.useState(() => readViewedChangesStore());
 
   const [selectedPath, setSelectedPath] = React.useState<string | null>(null);
   const [selectedCommitSha, setSelectedCommitSha] = React.useState<string | null>(null);
@@ -328,14 +433,21 @@ export function DroneChangesDock({
     writeChangesStorage(CHANGES_DIFF_VIEW_STORAGE_KEY, diffViewType);
   }, [diffViewType]);
   React.useEffect(() => {
+    if (fixedContextMode) return;
     writeChangesStorage(CHANGES_CONTEXT_STORAGE_KEY, contextMode);
-  }, [contextMode]);
+  }, [contextMode, fixedContextMode]);
   React.useEffect(() => {
     writeChangesStorage(CHANGES_PRIMARY_VIEW_STORAGE_KEY, primaryView);
   }, [primaryView]);
   React.useEffect(() => {
     writeChangesStorage(CHANGES_BRANCH_MODE_STORAGE_KEY, branchChangesMode);
   }, [branchChangesMode]);
+  React.useEffect(() => {
+    writeChangesStorage(CHANGES_HIDE_VIEWED_STORAGE_KEY, hideViewed ? '1' : '0');
+  }, [hideViewed]);
+  React.useEffect(() => {
+    writeViewedChangesStore(viewedStore);
+  }, [viewedStore]);
 
   React.useEffect(() => {
     if (explorerManualWidthPx === null) {
@@ -355,35 +467,42 @@ export function DroneChangesDock({
     const onOpenPullRequest = (event: Event) => {
       const detail = (event as CustomEvent<ChangesOpenPullRequestDetail>).detail;
       if (!detail || String(detail.droneId ?? '').trim() !== String(droneId ?? '').trim()) return;
+      if (fixedContextMode === 'branch') return;
       const pullNumber = Number(detail.pullNumber);
       if (!Number.isFinite(pullNumber) || pullNumber <= 0) return;
       const normalizedPullNumber = Math.floor(pullNumber);
       consumeRequestedPullRequestForDrone(droneId);
       setPullRequestNumber(normalizedPullNumber);
-      setContextMode('pull-request');
+      if (!fixedContextMode) setContextModeState('pull-request');
       setRefreshNonce((n) => n + 1);
     };
     window.addEventListener(CHANGES_OPEN_PULL_REQUEST_EVENT, onOpenPullRequest as EventListener);
     return () => window.removeEventListener(CHANGES_OPEN_PULL_REQUEST_EVENT, onOpenPullRequest as EventListener);
-  }, [droneId]);
+  }, [droneId, fixedContextMode]);
 
   React.useEffect(() => {
+    if (fixedContextMode === 'branch') {
+      setPullRequestNumber(selectedPullRequestForDrone(droneId));
+      setContextModeState('branch');
+      return;
+    }
     const requestedPullNumber = consumeRequestedPullRequestForDrone(droneId);
     if (requestedPullNumber && requestedPullNumber > 0) {
       setPullRequestNumber(requestedPullNumber);
-      setContextMode('pull-request');
+      if (!fixedContextMode) setContextModeState('pull-request');
       setRefreshNonce((n) => n + 1);
       return;
     }
     setPullRequestNumber(selectedPullRequestForDrone(droneId));
-    setContextMode('branch');
-  }, [droneId]);
+    if (!fixedContextMode) setContextModeState('branch');
+  }, [droneId, fixedContextMode]);
 
   React.useEffect(() => {
+    if (fixedContextMode) return;
     if (contextMode !== 'pull-request') return;
     if (pullRequestNumber && pullRequestNumber > 0) return;
-    setContextMode('branch');
-  }, [contextMode, pullRequestNumber]);
+    setContextModeState('branch');
+  }, [contextMode, fixedContextMode, pullRequestNumber]);
 
   React.useEffect(() => {
     setPullRequestActionError(null);
@@ -694,12 +813,50 @@ export function DroneChangesDock({
     return sortRepoChangeEntries(toWorkingEntriesFromPull(pullRequestChanges?.entries ?? []));
   }, [pullRequestChanges?.entries]);
 
-  const entries =
+  const allEntries =
     dataMode === 'working-tree'
       ? workingTreeEntries
       : dataMode === 'pull-request'
         ? pullRequestEntriesAsWorkingEntries
         : pullEntriesAsWorkingEntries;
+  const activeReviewScopeId =
+    primaryView !== 'changes'
+      ? null
+      : dataMode === 'working-tree'
+        ? changes?.reviewScopeId ?? null
+        : dataMode === 'pull-request'
+          ? pullRequestChanges?.reviewScopeId ?? null
+          : pullChanges?.reviewScopeId ?? null;
+  const entryViewedStatus = React.useCallback(
+    (entry: RepoChangeEntry): ViewedEntryState => viewedStateForEntry(viewedStore, activeReviewScopeId, entry),
+    [activeReviewScopeId, viewedStore],
+  );
+  const viewedCounts = React.useMemo(() => {
+    let viewed = 0;
+    let stale = 0;
+    for (const entry of allEntries) {
+      const state = entryViewedStatus(entry);
+      if (state === 'viewed') viewed += 1;
+      else if (state === 'stale') stale += 1;
+    }
+    return {
+      viewed,
+      stale,
+      remaining: Math.max(0, allEntries.length - viewed),
+    };
+  }, [allEntries, entryViewedStatus]);
+  const hideViewedButtonLabel =
+    viewedCounts.viewed > 0
+      ? hideViewed
+        ? `Show Viewed (${viewedCounts.viewed})`
+        : `Hide Viewed (${viewedCounts.viewed})`
+      : hideViewed
+        ? 'Show Viewed'
+        : 'Hide Viewed';
+  const entries = React.useMemo(
+    () => (hideViewed ? allEntries.filter((entry) => entryViewedStatus(entry) !== 'viewed') : allEntries),
+    [allEntries, entryViewedStatus, hideViewed],
+  );
   const listLoading =
     dataMode === 'working-tree' ? changesLoading : dataMode === 'pull-request' ? pullRequestLoading : pullLoading;
   const listError =
@@ -788,6 +945,13 @@ export function DroneChangesDock({
     () => (selectedPath ? entries.find((e) => e.path === selectedPath) ?? null : null),
     [entries, selectedPath],
   );
+  const setEntryViewedState = React.useCallback(
+    (entry: RepoChangeEntry, viewed: boolean) => {
+      if (primaryView !== 'changes') return;
+      setViewedStore((prev) => setEntryViewed(prev, activeReviewScopeId, entry, viewed));
+    },
+    [activeReviewScopeId, primaryView],
+  );
 
   React.useEffect(() => {
     if (dataMode !== 'working-tree') return;
@@ -797,7 +961,12 @@ export function DroneChangesDock({
     });
   }, [dataMode, selectedEntry]);
 
+  const allExplorerTree = React.useMemo(() => buildExplorerTree(allEntries), [allEntries]);
   const explorerTree = React.useMemo(() => buildExplorerTree(entries), [entries]);
+  const explorerReviewSummaryByPath = React.useMemo(
+    () => (primaryView === 'changes' ? summarizeExplorerReviewState(allExplorerTree, entryViewedStatus) : {}),
+    [allExplorerTree, entryViewedStatus, primaryView],
+  );
   const commitExplorerTree = React.useMemo(() => buildExplorerTree(commitEntries), [commitEntries]);
   const activeExplorerTree = primaryView === 'commits' ? commitExplorerTree : explorerTree;
   const activeExpandedDirs = primaryView === 'commits' ? expandedCommitDirs : expandedDirs;
@@ -1938,6 +2107,8 @@ export function DroneChangesDock({
 
   function renderFileQuickActions(entry: RepoChangeEntry, alwaysVisible: boolean = false): React.ReactNode {
     const canOpenInEditor = entryPathExistsInCurrentTree(entry, dataMode);
+    const viewedState = entryViewedStatus(entry);
+    const canToggleViewed = primaryView === 'changes' && Boolean(activeReviewScopeId);
     const buttonClassName = `inline-flex items-center justify-center w-6 h-6 rounded border transition-all ${
       alwaysVisible
         ? 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:text-[var(--fg-secondary)] hover:bg-[var(--hover)]'
@@ -1945,6 +2116,28 @@ export function DroneChangesDock({
     }`;
     return (
       <div className="shrink-0 inline-flex items-center gap-1">
+        {canToggleViewed ? (
+          <button
+            type="button"
+            onClick={() => setEntryViewedState(entry, viewedState !== 'viewed')}
+            className={`${buttonClassName} ${
+              viewedState === 'viewed'
+                ? 'border-[var(--accent-muted)] text-[var(--accent)]'
+                : viewedState === 'stale'
+                  ? 'border-[rgba(255,178,36,.35)] text-[var(--yellow)]'
+                  : ''
+            }`}
+            title={
+              viewedState === 'viewed'
+                ? 'Mark file unviewed'
+                : viewedState === 'stale'
+                  ? 'File changed since it was viewed. Mark viewed again.'
+                  : 'Mark file viewed'
+            }
+          >
+            {viewedState === 'viewed' ? <IconEyeOff className="w-3 h-3" /> : <IconEye className="w-3 h-3" />}
+          </button>
+        ) : null}
         <button
           type="button"
           onClick={() => revealEntryInFiles(entry)}
@@ -1971,6 +2164,12 @@ export function DroneChangesDock({
       const indentPx = explorerIndentBasePx + depth * explorerIndentStepPx;
       if (node.kind === 'dir') {
         const open = expandedDirs[node.path] !== false;
+        const reviewSummary = explorerReviewSummaryByPath[node.path];
+        const dirAllViewed = Boolean(
+          reviewSummary && reviewSummary.viewed > 0 && reviewSummary.unviewed === 0 && reviewSummary.stale === 0,
+        );
+        const dirHasChanged = Boolean(reviewSummary && reviewSummary.stale > 0);
+        const dirHasViewed = Boolean(reviewSummary && reviewSummary.viewed > 0);
         return (
           <React.Fragment key={`dir:${node.path}`}>
             <div className="w-full relative" style={{ paddingLeft: `${indentPx}px` }}>
@@ -1992,12 +2191,24 @@ export function DroneChangesDock({
                 onClick={() => {
                   setExpandedDirs((prev) => ({ ...prev, [node.path]: !open }));
                 }}
-                className="w-full text-left px-1 rounded border border-transparent hover:bg-[var(--hover)] flex items-center gap-0.5"
+                className={`w-full text-left px-1 rounded border transition-colors flex items-center gap-0.5 ${
+                  dirAllViewed
+                    ? 'border-transparent opacity-65 hover:bg-[rgba(255,255,255,.03)]'
+                    : dirHasChanged
+                      ? 'border-[rgba(255,178,36,.14)] bg-[rgba(255,178,36,.04)] hover:bg-[rgba(255,178,36,.08)]'
+                      : 'border-transparent hover:bg-[var(--hover)]'
+                }`}
                 style={{
                   height: `${explorerRowHeightPx}px`,
                   minHeight: `${explorerRowHeightPx}px`,
                 }}
-                title={node.path}
+                title={
+                  reviewSummary
+                    ? `${node.path} • ${reviewSummary.unviewed + reviewSummary.stale} remaining • ${reviewSummary.viewed} viewed${
+                        reviewSummary.stale > 0 ? ` • ${reviewSummary.stale} changed since viewed` : ''
+                      }`
+                    : node.path
+                }
               >
                 <span
                   className="inline-flex items-center justify-center flex-shrink-0 text-[var(--muted)]"
@@ -2005,11 +2216,40 @@ export function DroneChangesDock({
                 >
                   <IconFolder size={explorerIconSizePx} />
                 </span>
-                <span className="text-[var(--fg-secondary)] truncate flex-1" style={{ fontSize: `${explorerTextSizePx}px` }}>
+                <span
+                  className={`truncate flex-1 ${dirAllViewed ? 'text-[var(--muted)]' : 'text-[var(--fg-secondary)]'}`}
+                  style={{ fontSize: `${explorerTextSizePx}px` }}
+                >
                   {node.name}
                 </span>
+                {reviewSummary?.stale ? (
+                  <span
+                    className="inline-flex items-center justify-center rounded border px-1 text-[var(--yellow)] border-[rgba(255,178,36,.35)] bg-[rgba(255,178,36,.08)] tabular-nums"
+                    style={{ fontSize: `${Math.max(8, explorerMetaTextSizePx - 1)}px`, height: `${explorerBadgeHeightPx}px` }}
+                    title={`${reviewSummary.stale} file${reviewSummary.stale === 1 ? '' : 's'} changed since viewed`}
+                  >
+                    {reviewSummary.stale} changed
+                  </span>
+                ) : null}
+                {dirHasViewed ? (
+                  <span
+                    className={`inline-flex items-center justify-center rounded border px-1 tabular-nums ${
+                      hideViewed
+                        ? 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.03)] text-[var(--muted)]'
+                        : 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
+                    }`}
+                    style={{ fontSize: `${Math.max(8, explorerMetaTextSizePx - 1)}px`, height: `${explorerBadgeHeightPx}px` }}
+                    title={
+                      hideViewed
+                        ? `${reviewSummary.viewed} viewed file${reviewSummary.viewed === 1 ? '' : 's'} hidden by the filter`
+                        : `${reviewSummary.viewed} viewed file${reviewSummary.viewed === 1 ? '' : 's'}`
+                    }
+                  >
+                    {hideViewed ? `+${reviewSummary.viewed} viewed` : dirAllViewed ? 'All viewed' : `${reviewSummary.viewed} viewed`}
+                  </span>
+                ) : null}
                 <span className="text-[var(--muted-dim)] tabular-nums" style={{ fontSize: `${explorerMetaTextSizePx}px` }}>
-                  {node.count}
+                  {reviewSummary?.total ?? node.count}
                 </span>
               </button>
             </div>
@@ -2021,6 +2261,7 @@ export function DroneChangesDock({
       const entry = node.entry ?? null;
       if (!entry) return null;
       const active = entry.path === selectedPath;
+      const viewedState = entryViewedStatus(entry);
       const FileIcon = iconForFilePath(entry.path);
       return (
         <div
@@ -2039,16 +2280,26 @@ export function DroneChangesDock({
               setSelectedPath(entry.path);
               if (dataMode === 'working-tree') setSplitKind(defaultKindForEntry(entry));
             }}
-            className={`flex-1 min-w-0 text-left px-1 rounded border transition-colors flex items-center gap-0.5 ${
+            className={`flex-1 min-w-0 text-left px-1 rounded border transition-all flex items-center gap-0.5 ${
               active
                 ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)]'
-                : 'border-transparent hover:bg-[var(--hover)]'
+                : viewedState === 'viewed'
+                  ? 'border-transparent opacity-60 hover:bg-[rgba(255,255,255,.03)]'
+                  : viewedState === 'stale'
+                    ? 'border-[rgba(255,178,36,.18)] bg-[rgba(255,178,36,.05)] hover:bg-[rgba(255,178,36,.08)]'
+                    : 'border-transparent hover:bg-[var(--hover)]'
             }`}
             style={{
               height: `${explorerRowHeightPx}px`,
               minHeight: `${explorerRowHeightPx}px`,
             }}
-            title={entry.path}
+            title={
+              viewedState === 'viewed'
+                ? `${entry.path} • viewed`
+                : viewedState === 'stale'
+                  ? `${entry.path} • changed since viewed`
+                  : entry.path
+            }
           >
             <span
               className="inline-flex items-center justify-center flex-shrink-0 text-[var(--muted-dim)]"
@@ -2059,6 +2310,19 @@ export function DroneChangesDock({
             <span className="text-[var(--fg-secondary)] truncate flex-1" style={{ fontSize: `${explorerTextSizePx}px` }}>
               {node.name}
             </span>
+            {viewedState !== 'unviewed' ? (
+              <span
+                className={`inline-flex items-center justify-center rounded border px-1 font-semibold ${
+                  viewedState === 'viewed'
+                    ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
+                    : 'border-[rgba(255,178,36,.35)] bg-[rgba(255,178,36,.08)] text-[var(--yellow)]'
+                }`}
+                style={{ fontSize: `${Math.max(8, explorerMetaTextSizePx - 1)}px`, height: `${explorerBadgeHeightPx}px` }}
+                title={viewedState === 'viewed' ? 'Viewed' : 'Changed since viewed'}
+              >
+                {viewedState === 'viewed' ? 'Viewed' : 'Changed'}
+              </span>
+            ) : null}
             <span
               className={`inline-flex items-center justify-center rounded border font-mono ${badgeTone(entry)}`}
               style={{
@@ -2195,46 +2459,82 @@ export function DroneChangesDock({
       }}
     >
       <div className="px-2.5 py-1.5 border-b border-[var(--border-subtle)] flex items-center justify-between gap-2">
-        <div className="text-[10px] font-semibold text-[var(--muted-dim)] tracking-[0.12em] uppercase" style={{ fontFamily: 'var(--display)' }}>
-          Changes
-        </div>
-        <div data-onboarding-id="changes.viewMode" className="inline-flex items-center gap-1 flex-wrap justify-end">
-          {repoAttached && !disabled ? (
-            <>
-              <span className="text-[9px] uppercase tracking-wide text-[var(--muted-dim)] mr-1" style={{ fontFamily: 'var(--display)' }}>
-                Context
-              </span>
+        <div className="flex items-center gap-2 min-w-0 flex-wrap">
+          <div className="text-[10px] font-semibold text-[var(--muted-dim)] tracking-[0.12em] uppercase" style={{ fontFamily: 'var(--display)' }}>
+            Changes
+          </div>
+          {repoAttached && !disabled && contextMode === 'branch' && primaryView === 'changes' ? (
+            <div className="inline-flex items-center gap-1 flex-wrap">
               <button
                 type="button"
-                onClick={() => setContextMode('branch')}
+                onClick={() => setBranchChangesMode('working-tree')}
                 className={`h-6 px-2 rounded-md border text-[9px] font-semibold tracking-wide uppercase transition-colors ${
-                  contextMode === 'branch'
+                  branchChangesMode === 'working-tree'
                     ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
                     : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:text-[var(--fg-secondary)]'
                 }`}
                 style={{ fontFamily: 'var(--display)' }}
-                title="Inspect the current branch workspace and branch history"
+                title="Working tree changes inside the drone (staged/unstaged)"
               >
-                Branch
+                Working
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  if (!pullRequestNumber) return;
-                  setContextMode('pull-request');
-                }}
-                disabled={!pullRequestNumber}
+                onClick={() => setBranchChangesMode('pull-preview')}
                 className={`h-6 px-2 rounded-md border text-[9px] font-semibold tracking-wide uppercase transition-colors ${
-                  contextMode === 'pull-request'
+                  branchChangesMode === 'pull-preview'
                     ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
-                    : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:text-[var(--fg-secondary)] disabled:opacity-40 disabled:cursor-not-allowed'
+                    : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:text-[var(--fg-secondary)]'
                 }`}
                 style={{ fontFamily: 'var(--display)' }}
-                title={pullRequestNumber ? `Inspect PR #${pullRequestNumber}` : 'Click a PR title in the PRs tab to enter PR context'}
+                title="Apply preview: committed diff from base to drone HEAD (what applying changes would merge)"
               >
-                PR
+                Apply
               </button>
-              <span className="mx-1 text-[var(--border-subtle)]">|</span>
+            </div>
+          ) : null}
+        </div>
+        <div data-onboarding-id="changes.viewMode" className="inline-flex items-center gap-1 flex-wrap justify-end">
+          {repoAttached && !disabled ? (
+            <>
+              {!fixedContextMode ? (
+                <>
+                  <span className="text-[9px] uppercase tracking-wide text-[var(--muted-dim)] mr-1" style={{ fontFamily: 'var(--display)' }}>
+                    Context
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setContextModeState('branch')}
+                    className={`h-6 px-2 rounded-md border text-[9px] font-semibold tracking-wide uppercase transition-colors ${
+                      contextMode === 'branch'
+                        ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
+                        : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:text-[var(--fg-secondary)]'
+                    }`}
+                    style={{ fontFamily: 'var(--display)' }}
+                    title="Inspect the current branch workspace and branch history"
+                  >
+                    Branch
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!pullRequestNumber) return;
+                      setContextModeState('pull-request');
+                    }}
+                    disabled={!pullRequestNumber}
+                    className={`h-6 px-2 rounded-md border text-[9px] font-semibold tracking-wide uppercase transition-colors ${
+                      contextMode === 'pull-request'
+                        ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
+                        : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:text-[var(--fg-secondary)] disabled:opacity-40 disabled:cursor-not-allowed'
+                    }`}
+                    style={{ fontFamily: 'var(--display)' }}
+                    title={pullRequestNumber ? `Inspect PR #${pullRequestNumber}` : 'Click a PR title in the PRs tab to enter PR context'}
+                  >
+                    PR
+                  </button>
+                  <span className="mx-1 text-[var(--border-subtle)]">|</span>
+                </>
+              ) : null}
               <span className="text-[9px] uppercase tracking-wide text-[var(--muted-dim)] mr-1" style={{ fontFamily: 'var(--display)' }}>
                 View
               </span>
@@ -2264,37 +2564,6 @@ export function DroneChangesDock({
               >
                 Commits
               </button>
-              {contextMode === 'branch' && primaryView === 'changes' ? (
-                <>
-                  <span className="mx-1 text-[var(--border-subtle)]">|</span>
-                  <button
-                    type="button"
-                    onClick={() => setBranchChangesMode('working-tree')}
-                    className={`h-6 px-2 rounded-md border text-[9px] font-semibold tracking-wide uppercase transition-colors ${
-                      branchChangesMode === 'working-tree'
-                        ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
-                        : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:text-[var(--fg-secondary)]'
-                    }`}
-                    style={{ fontFamily: 'var(--display)' }}
-                    title="Working tree changes inside the drone (staged/unstaged)"
-                  >
-                    Working
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setBranchChangesMode('pull-preview')}
-                    className={`h-6 px-2 rounded-md border text-[9px] font-semibold tracking-wide uppercase transition-colors ${
-                      branchChangesMode === 'pull-preview'
-                        ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
-                        : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:text-[var(--fg-secondary)]'
-                    }`}
-                    style={{ fontFamily: 'var(--display)' }}
-                    title="Apply preview: committed diff from base to drone HEAD (what applying changes would merge)"
-                  >
-                    Apply
-                  </button>
-                </>
-              ) : null}
               <span className="mx-1 text-[var(--border-subtle)]">|</span>
             </>
           ) : null}
@@ -2354,6 +2623,24 @@ export function DroneChangesDock({
           >
             Side-by-side
           </button>
+          {primaryView === 'changes' ? (
+            <>
+              <span className="mx-1 text-[var(--border-subtle)]">|</span>
+              <button
+                type="button"
+                onClick={() => setHideViewed((prev) => !prev)}
+                className={`h-6 px-2 rounded-md border text-[9px] font-semibold tracking-wide uppercase transition-colors ${
+                  hideViewed
+                    ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
+                    : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:text-[var(--fg-secondary)]'
+                }`}
+                style={{ fontFamily: 'var(--display)' }}
+                title={hideViewed ? 'Show files already marked viewed' : 'Hide files already marked viewed'}
+              >
+                {hideViewedButtonLabel}
+              </button>
+            </>
+          ) : null}
           <span className="ml-1 text-[9px] text-[var(--muted-dim)] font-mono tabular-nums" title={refreshed.title}>
             Updated {refreshed.text}
           </span>
@@ -2467,6 +2754,16 @@ export function DroneChangesDock({
                 )}
               </>
             )}
+            {primaryView === 'changes' ? (
+              <>
+                {activeReviewScopeId ? (
+                  <ViewedProgressBadge viewed={viewedCounts.viewed} total={allEntries.length} stale={viewedCounts.stale} />
+                ) : null}
+                {!activeReviewScopeId ? <MetaChip label="remaining" value={viewedCounts.remaining} /> : null}
+                {viewedCounts.stale > 0 ? <MetaChip label="changed" value={viewedCounts.stale} /> : null}
+                {hideViewed ? <MetaChip label="filter" value="hide-viewed" /> : null}
+              </>
+            ) : null}
           </>
         )}
       </div>
@@ -2631,13 +2928,25 @@ export function DroneChangesDock({
         <div className="flex-1 min-h-0 overflow-auto px-3 py-3 text-[11px] text-[var(--red)]">{listError}</div>
       ) : entries.length === 0 && !listLoading ? (
         <div className="flex-1 min-h-0 overflow-auto px-3 py-3 text-[11px] text-[var(--muted)]">
-          {dataMode === 'pull-request'
-            ? pullRequestNumber
-              ? `No file changes found for PR #${pullRequestNumber}.`
-              : 'No pull request selected.'
-            : dataMode === 'pull-preview'
-              ? 'No apply changes to preview.'
-              : 'Working tree is clean.'}
+          {allEntries.length > 0 && hideViewed ? (
+            <div className="inline-flex flex-col items-start gap-2">
+              <span>All files in this view are marked viewed. Turn off Hide Viewed to revisit them.</span>
+              <button
+                type="button"
+                onClick={() => setHideViewed(false)}
+                className="h-7 px-2.5 rounded-md border border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[10px] font-semibold tracking-wide uppercase text-[var(--accent)] hover:bg-[rgba(92,226,255,.12)]"
+                style={{ fontFamily: 'var(--display)' }}
+              >
+                Show Viewed Files
+              </button>
+            </div>
+          ) : dataMode === 'pull-request' ? (
+            pullRequestNumber ? `No file changes found for PR #${pullRequestNumber}.` : 'No pull request selected.'
+          ) : dataMode === 'pull-preview' ? (
+            'No apply changes to preview.'
+          ) : (
+            'Working tree is clean.'
+          )}
         </div>
       ) : viewMode === 'stacked' ? (
         <div className="flex-1 min-h-0 overflow-auto">

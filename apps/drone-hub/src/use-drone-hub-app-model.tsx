@@ -32,6 +32,7 @@ import { useCreateDraftWorkflowState } from './droneHub/app/use-create-draft-wor
 import { useDroneCreationActions } from './droneHub/app/use-drone-creation-actions';
 import { useChatRuntimeOrchestration } from './droneHub/app/use-chat-runtime-orchestration';
 import { useDroneErrorModalActions } from './droneHub/app/use-drone-error-modal-actions';
+import { useRepoBranchOptions } from './droneHub/app/use-repo-branch-options';
 import { useDroneMutationActions } from './droneHub/app/use-drone-mutation-actions';
 import { useFilesAndPortsPaneState } from './droneHub/app/use-files-and-ports-pane-state';
 import { useFileEditorState } from './droneHub/app/use-file-editor-state';
@@ -45,6 +46,7 @@ import { useUiPreferencesSettings } from './droneHub/app/use-ui-preferences-sett
 import { removeDroneIdsFromSidebarNodeOrderByParent } from './droneHub/app/sidebar-node-order';
 import { useDeleteActionSettings } from './droneHub/app/use-delete-action-settings';
 import { useFilesystemSettings } from './droneHub/app/use-filesystem-settings';
+import { useGithubSettings } from './droneHub/app/use-github-settings';
 import { useProfileSettings } from './droneHub/app/use-profile-settings';
 import { useSetupStatus } from './droneHub/app/use-setup-status';
 import { useSkillLibrary } from './droneHub/app/use-skill-library';
@@ -166,6 +168,8 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     fsExplorerView,
     spawnAgentKey,
     spawnModel,
+    repoBranchSource,
+    repoCreateRemoteBranch,
     pullHostBranchBeforeCreate,
     customAgents,
     customAgentModalOpen,
@@ -204,6 +208,8 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setSpawnAgentKey,
     setSpawnModel,
     rememberSeenModels,
+    setRepoBranchSource,
+    setRepoCreateRemoteBranch,
     setPullHostBranchBeforeCreate,
     setCustomAgents,
     setCustomAgentModalOpen,
@@ -278,6 +284,10 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setDraftSuggestedName,
     setDraftNameSuggestionError,
   } = useCreateDraftWorkflowState();
+  const repoBranchOptionsByPath = useRepoBranchOptions({
+    requestJson,
+    repoPaths: [createRepoPath, chatHeaderRepoPath],
+  });
   const {
     queuedPromptsByDroneChat,
     flushingQueuedKeysRef,
@@ -507,6 +517,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
   });
   useUiPreferencesSettings({ requestJson });
   const deleteActionSettingsState = useDeleteActionSettings(requestJson);
+  const githubSettingsState = useGithubSettings(requestJson);
   const filesystemSettingsState = useFilesystemSettings(requestJson);
   const profileSettingsState = useProfileSettings(requestJson);
   const setupStatusState = useSetupStatus(requestJson);
@@ -1158,6 +1169,8 @@ export function useDroneHubAppModel(): DroneHubAppModel {
       createGroup,
       createRepoPath,
       createInitialMessage,
+      repoBranchSource,
+      repoCreateRemoteBranch,
       pullHostBranchBeforeCreate,
       createMode,
       createRuntime,
@@ -1958,12 +1971,15 @@ export function useDroneHubAppModel(): DroneHubAppModel {
       const shouldPullHostBranchBeforeCreate =
         overrides.pullHostBranchBeforeCreate === true ||
         (overrides.pullHostBranchBeforeCreate !== false && pullHostBranchBeforeCreate);
+      const remoteBranch = String(repoCreateRemoteBranch ?? '').trim();
 
       try {
         const body: any = {
           ...(group ? { group } : {}),
           ...(repoPath ? { repoPath } : {}),
           pullHostBranchBeforeCreate: shouldPullHostBranchBeforeCreate,
+          repoBranchSource,
+          ...(repoBranchSource === 'remote' && remoteBranch ? { remoteBranch } : {}),
           seedChat: 'default',
           ...(seedAgent ? { seedAgent } : {}),
           ...(seedModel ? { seedModel } : {}),
@@ -2003,6 +2019,8 @@ export function useDroneHubAppModel(): DroneHubAppModel {
       chatHeaderRepoPath,
       draftCreateGroup,
       pullHostBranchBeforeCreate,
+      repoBranchSource,
+      repoCreateRemoteBranch,
       resolveAgentKeyToConfig,
       spawnAgentKey,
       spawnModel,
@@ -2331,10 +2349,10 @@ export function useDroneHubAppModel(): DroneHubAppModel {
           onCloseOpenedEditorFile={closeEditorFile}
           onRevealChangesFileInFiles={revealChangesFileInFiles}
           onOpenChangesFileInEditor={openChangesFileInEditor}
-          onOpenPullRequestInChanges={(pane, _pullRequest) => {
+          onOpenPullRequest={(pane, _pullRequest) => {
             setRightPanelOpen(true);
-            if (pane === 'bottom') setRightPanelBottomTab('changes');
-            else setRightPanelTab('changes');
+            if (pane === 'bottom') setRightPanelBottomTab('prs');
+            else setRightPanelTab('prs');
           }}
         />
       );
@@ -2538,10 +2556,15 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     createRepoPath,
     setCreateRepoPath,
     createRepoMenuEntries,
+    createRepoBranchOptions: repoBranchOptionsByPath[String(createRepoPath ?? '').trim()] ?? null,
     createRepoMenuOpen,
     setCreateRepoMenuOpen,
     registeredRepoPaths,
     activeRepoPath,
+    repoBranchSource,
+    setRepoBranchSource,
+    repoCreateRemoteBranch,
+    setRepoCreateRemoteBranch,
     pullHostBranchBeforeCreate,
     setPullHostBranchBeforeCreate,
     cloneIncludeChats,
@@ -2630,6 +2653,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
   const workspaceContentProps: DroneHubWorkspaceContentProps = useDroneHubWorkspaceContentProps({
     appView,
     llmSettingsState,
+    githubSettingsState,
     skillLibraryState,
     deleteActionSettingsState,
     filesystemSettingsState,
@@ -2659,6 +2683,10 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     nowMs,
     createRuntime,
     pullHostBranchBeforeCreate,
+    repoBranchSource,
+    setRepoBranchSource,
+    repoCreateRemoteBranch,
+    setRepoCreateRemoteBranch,
     setCreateRuntime,
     draftCreateMode,
     setDraftCreateMode,
@@ -2667,6 +2695,8 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     draftAutoRenaming,
     spawnAgentConfig,
     createRepoMenuEntries,
+    draftCreateRepoPath: chatHeaderRepoPath,
+    draftRepoBranchOptions: repoBranchOptionsByPath[String(chatHeaderRepoPath ?? '').trim()] ?? null,
     setCustomAgentModalOpen,
     draftCreateName,
     draftCreateGroup,
@@ -2709,6 +2739,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     settingsActiveTab,
     settingsPlaybookFocusId,
     registeredRepoPaths,
+    registryGroupNames,
     setActiveRepoPath,
     setSettingsActiveTab,
     setSettingsPlaybookFocusId,

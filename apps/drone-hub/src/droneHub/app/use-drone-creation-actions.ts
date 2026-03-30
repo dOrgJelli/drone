@@ -5,7 +5,12 @@ import type { ChatSendPayload } from '../chat';
 import type { DraftChatState } from './app-types';
 import { attachmentRefsFromPayload, normalizeChatImageAttachmentPayloads } from './chat-attachment-payloads';
 import { createDraftQueuedPrompt } from './draft-chat-queue';
-import { buildDraftDroneCreatePayload, runtimeSupportsCustomAgents } from './drone-create-runtime';
+import {
+  buildDraftDroneCreatePayload,
+  runtimeSupportsCustomAgents,
+  type RepoBranchSelectionState,
+  type RepoBranchSourceMode,
+} from './drone-create-runtime';
 import { makeId } from './helpers';
 import { allocateUntitledDisplayName } from './name-helpers';
 import {
@@ -49,6 +54,8 @@ type UseDroneCreationActionsArgs = {
   createGroup: string;
   createRepoPath: string;
   createInitialMessage: string;
+  repoBranchSource: RepoBranchSourceMode;
+  repoCreateRemoteBranch: string;
   pullHostBranchBeforeCreate: boolean;
   createMode: 'create' | 'clone';
   createRuntime: 'container' | 'host';
@@ -151,6 +158,8 @@ export function useDroneCreationActions({
   createGroup,
   createRepoPath,
   createInitialMessage,
+  repoBranchSource,
+  repoCreateRemoteBranch,
   pullHostBranchBeforeCreate,
   createMode,
   createRuntime,
@@ -364,6 +373,13 @@ export function useDroneCreationActions({
     const seedPrompt = createInitialMessage.trim();
     const isClone = createMode === 'clone' && Boolean(cloneSourceId);
     const runtime = createMode === 'clone' ? 'container' : createRuntime;
+    const remoteBranch = repoCreateRemoteBranch.trim();
+    const effectiveRepoBranchSource: RepoBranchSourceMode = runtime === 'host' ? 'host' : repoBranchSource;
+    const repoBranchSelection: RepoBranchSelectionState = {
+      repoBranchSource: effectiveRepoBranchSource,
+      pullHostBranchBeforeCreate,
+      remoteBranch,
+    };
     const seedAgent = isClone && cloneIncludeChats ? null : resolveAgentKeyToConfig(spawnAgentKey);
     const seedModel = isClone && cloneIncludeChats ? null : spawnModelForSeed;
     if (runtime === 'host' && seedAgent?.kind === 'custom') {
@@ -402,6 +418,10 @@ export function useDroneCreationActions({
       setCreateError(`Duplicate name(s) in list: ${preview}${extra}.`);
       return;
     }
+    if (repoPath && !isClone && repoBranchSelection.repoBranchSource === 'remote' && !repoBranchSelection.remoteBranch) {
+      setCreateError('Choose a remote branch before creating a repo drone from a remote branch.');
+      return;
+    }
 
     setCreating(true);
     setCreateError(null);
@@ -430,7 +450,11 @@ export function useDroneCreationActions({
             runtime,
             ...(group ? { group } : {}),
             ...(repoPath ? { repoPath } : {}),
-            pullHostBranchBeforeCreate,
+            pullHostBranchBeforeCreate: repoBranchSelection.pullHostBranchBeforeCreate,
+            repoBranchSource: repoBranchSelection.repoBranchSource,
+            ...(repoBranchSelection.repoBranchSource === 'remote' && repoBranchSelection.remoteBranch
+              ? { remoteBranch: repoBranchSelection.remoteBranch }
+              : {}),
             ...(isClone && cloneSourceId
               ? { cloneFrom: cloneSourceId, cloneChats: Boolean(cloneIncludeChats) }
               : {}),
@@ -530,6 +554,8 @@ export function useDroneCreationActions({
     addOptimisticStartupSeeds,
     clearOptimisticStartupSeeds,
     pullHostBranchBeforeCreate,
+    repoBranchSource,
+    repoCreateRemoteBranch,
     hasWhitespaceInNameRaw,
     isValidDroneName,
     preferredSelectedDroneHoldUntilRef,
@@ -594,6 +620,8 @@ export function useDroneCreationActions({
       const name = nameRaw.trim();
       const group = String(opts?.group ?? draftCreateGroup ?? '').trim();
       const repoPath = String(draftCreateRepoPath ?? '').trim();
+      const remoteBranch = String(repoCreateRemoteBranch ?? '').trim();
+      const effectiveRepoBranchSource: RepoBranchSourceMode = createRuntime === 'host' ? 'host' : repoBranchSource;
       if (!createWithoutChat && !prompt && !automationPrompt && !hasDraftAttachments) {
         setDraftCreateError('Send a first message or run an automation before creating a drone.');
         return false;
@@ -608,6 +636,10 @@ export function useDroneCreationActions({
       }
       if (name && drones.some((d) => d.name === name)) {
         setDraftCreateError(`A drone named "${name}" already exists.`);
+        return false;
+      }
+      if (repoPath && effectiveRepoBranchSource === 'remote' && !remoteBranch) {
+        setDraftCreateError('Choose a remote branch before creating a repo drone from a remote branch.');
         return false;
       }
 
@@ -646,7 +678,11 @@ export function useDroneCreationActions({
           group,
           repoPath,
           runtime,
-          pullHostBranchBeforeCreate,
+          repoBranchSelection: {
+            repoBranchSource: effectiveRepoBranchSource,
+            pullHostBranchBeforeCreate,
+            remoteBranch,
+          },
           seedAgent,
           seedModel,
           prompt: shouldSeedPromptViaCreate ? prompt : '',
@@ -813,6 +849,8 @@ export function useDroneCreationActions({
       clearOptimisticStartupSeeds,
       enqueueQueuedPrompt,
       pullHostBranchBeforeCreate,
+      repoBranchSource,
+      repoCreateRemoteBranch,
       preferredSelectedDroneHoldUntilRef,
       preferredSelectedDroneRef,
       rememberSeenModels,

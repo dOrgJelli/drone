@@ -4,11 +4,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import {
+  applyBranchDiffToMainWorkingTree,
+  buildWorkingTreeRepoChangeReviewToken,
   gitPullHostBranchBeforeCreate,
+  gitListRemoteBranches,
+  gitRepoChangesSummary,
+  gitResolveRemoteBranchForCreate,
   deleteHostRefBestEffort,
   HostRepoPullBeforeCreateError,
   importBundleHeadToHostRef,
-  mergeBranchIntoMainWorkingTreeNoCommit,
   RepoPatchApplyError,
 } from '../src/hub/repoOps';
 
@@ -130,6 +134,40 @@ describe('repoOps git-native pull helpers', () => {
     }
   });
 
+  test('lists remote branches and resolves a selected remote branch for repo seeding', async () => {
+    const remoteRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'drone-repo-ops-remote-list-'));
+    const { repoRoot: sourceRepo, cleanup: cleanupSource } = mkRepo();
+    const hostClone = fs.mkdtempSync(path.join(os.tmpdir(), 'drone-repo-ops-host-list-'));
+    try {
+      runOrThrow('git', ['init', '--bare'], remoteRoot);
+      runOrThrow('git', ['remote', 'add', 'origin', remoteRoot], sourceRepo);
+      writeAndCommit(sourceRepo, 'base.txt', 'base\n', 'init');
+      runOrThrow('git', ['push', '-u', 'origin', 'main'], sourceRepo);
+      runOrThrow('git', ['checkout', '-b', 'release/next'], sourceRepo);
+      writeAndCommit(sourceRepo, 'release.txt', 'next\n', 'release');
+      runOrThrow('git', ['push', '-u', 'origin', 'release/next'], sourceRepo);
+
+      runOrThrow('git', ['clone', '-b', 'main', remoteRoot, hostClone]);
+      runOrThrow('git', ['fetch', '--all', '--prune'], hostClone);
+
+      const listed = await gitListRemoteBranches(hostClone);
+      expect(listed.repoRoot).toBe(hostClone);
+      expect(listed.hostBranch).toBe('main');
+      expect(listed.remoteBranches.map((entry) => entry.ref)).toContain('origin/main');
+      expect(listed.remoteBranches.map((entry) => entry.ref)).toContain('origin/release/next');
+      expect(listed.remoteBranches.some((entry) => entry.ref.endsWith('/HEAD'))).toBe(false);
+
+      const resolved = await gitResolveRemoteBranchForCreate(hostClone, 'origin/release/next');
+      expect(resolved.repoRoot).toBe(hostClone);
+      expect(resolved.remoteBranch).toBe('origin/release/next');
+      expect(resolved.oid).toMatch(/^[0-9a-f]{40}$/);
+    } finally {
+      cleanupSource();
+      fs.rmSync(remoteRoot, { recursive: true, force: true });
+      fs.rmSync(hostClone, { recursive: true, force: true });
+    }
+  });
+
   test('imports a revision-range bundle into a temporary host ref and supports cleanup', async () => {
     const { repoRoot, cleanup } = mkRepo();
     try {
@@ -176,7 +214,7 @@ describe('repoOps git-native pull helpers', () => {
     }
   });
 
-  test('mergeBranchIntoMainWorkingTreeNoCommit creates a normal merge state on success', async () => {
+  test('applyBranchDiffToMainWorkingTree stages imported changes without leaving merge state', async () => {
     const { repoRoot, cleanup } = mkRepo();
     try {
       writeAndCommit(repoRoot, 'base.txt', 'base\n', 'init');
@@ -184,22 +222,24 @@ describe('repoOps git-native pull helpers', () => {
       writeAndCommit(repoRoot, 'feature.txt', 'feature\n', 'feature work');
       runOrThrow('git', ['checkout', 'main'], repoRoot);
 
-      await mergeBranchIntoMainWorkingTreeNoCommit({ repoRoot, branch: 'feature' });
+      await applyBranchDiffToMainWorkingTree({ repoRoot, branch: 'feature' });
 
-      const mergeHead = runOrThrow('git', ['rev-parse', '--verify', 'MERGE_HEAD'], repoRoot).trim();
-      expect(mergeHead.length).toBe(40);
       const status = runOrThrow('git', ['status', '--porcelain'], repoRoot);
       expect(status.trim().length).toBeGreaterThan(0);
+      const mergeHead = run('git', ['rev-parse', '--verify', 'MERGE_HEAD'], repoRoot);
+      expect(mergeHead.code).not.toBe(0);
 
-      runOrThrow('git', ['merge', '--abort'], repoRoot);
-      const clean = runOrThrow('git', ['status', '--porcelain'], repoRoot).trim();
-      expect(clean).toBe('');
+      runOrThrow('git', ['commit', '-m', 'apply imported changes'], repoRoot);
+      const parents = runOrThrow('git', ['rev-list', '--parents', '-n', '1', 'HEAD'], repoRoot)
+        .trim()
+        .split(/\s+/);
+      expect(parents).toHaveLength(2);
     } finally {
       cleanup();
     }
   });
 
-  test('mergeBranchIntoMainWorkingTreeNoCommit reports conflict files for merge conflicts', async () => {
+  test('applyBranchDiffToMainWorkingTree reports conflict files without leaving merge state', async () => {
     const { repoRoot, cleanup } = mkRepo();
     try {
       writeAndCommit(repoRoot, 'conflict.txt', 'same\n', 'init');
@@ -210,7 +250,7 @@ describe('repoOps git-native pull helpers', () => {
 
       let err: unknown = null;
       try {
-        await mergeBranchIntoMainWorkingTreeNoCommit({ repoRoot, branch: 'feature' });
+        await applyBranchDiffToMainWorkingTree({ repoRoot, branch: 'feature' });
       } catch (e) {
         err = e;
       }
@@ -218,6 +258,7 @@ describe('repoOps git-native pull helpers', () => {
       expect(err).toBeInstanceOf(RepoPatchApplyError);
       const patchErr = err as RepoPatchApplyError;
       expect(patchErr.kind).toBe('patch_apply_conflict');
+      expect(patchErr.patchName).toBe('feature');
       expect(patchErr.conflictFiles).toContain('conflict.txt');
 
       const unmerged = runOrThrow('git', ['diff', '--name-only', '--diff-filter=U'], repoRoot)
@@ -225,8 +266,8 @@ describe('repoOps git-native pull helpers', () => {
         .map((l) => l.trim())
         .filter(Boolean);
       expect(unmerged).toContain('conflict.txt');
-
-      runOrThrow('git', ['merge', '--abort'], repoRoot);
+      const mergeHead = run('git', ['rev-parse', '--verify', 'MERGE_HEAD'], repoRoot);
+      expect(mergeHead.code).not.toBe(0);
     } finally {
       cleanup();
     }
@@ -248,6 +289,22 @@ describe('repoOps git-native pull helpers', () => {
         err = e;
       }
       expect(String((err as any)?.message ?? err)).toContain('bundle not found');
+    } finally {
+      cleanup();
+    }
+  });
+
+  test('gitRepoChangesSummary uses git-compatible worktree hashing for review tokens', async () => {
+    const { repoRoot, cleanup } = mkRepo();
+    try {
+      writeAndCommit(repoRoot, 'a.txt', 'one\n', 'init');
+      fs.writeFileSync(path.join(repoRoot, 'a.txt'), 'one\ntwo\n', 'utf8');
+
+      const summary = await gitRepoChangesSummary(repoRoot);
+      const entry = summary.entries.find((item) => item.path === 'a.txt');
+      expect(entry).toBeTruthy();
+      const gitBlobHash = runOrThrow('git', ['hash-object', '--no-filters', '--', 'a.txt'], repoRoot).trim().toLowerCase();
+      expect(entry?.reviewToken).toBe(buildWorkingTreeRepoChangeReviewToken(entry!, gitBlobHash));
     } finally {
       cleanup();
     }
