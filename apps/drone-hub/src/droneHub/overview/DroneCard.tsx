@@ -246,24 +246,6 @@ export function DroneCard({
                   : 'opacity-0 pointer-events-none group-hover/drone:opacity-100 group-hover/drone:pointer-events-auto'
               }`}
             >
-              {canClone && (
-                <button
-                  type="button"
-                  onClick={(e) => { stopCardSelection(e); onClone(); }}
-                  onMouseDown={stopCardSelection}
-                  onPointerDown={stopCardSelection}
-                  disabled={Boolean(cloneDisabled)}
-                  className={`inline-flex items-center justify-center w-5 h-5 rounded border transition-all ${
-                    cloneDisabled
-                      ? 'opacity-50 cursor-not-allowed bg-[var(--panel-raised)] border-[var(--border-subtle)] text-[var(--muted)]'
-                      : 'bg-[var(--accent-subtle)] border-[var(--accent-muted)] text-[var(--accent)] hover:shadow-[var(--glow-accent)]'
-                  }`}
-                  title={`Clone "${shownName}"`}
-                  aria-label={`Clone "${shownName}"`}
-                >
-                  <IconClone className="opacity-90" />
-                </button>
-              )}
               {canCreateChat && (
                 <button
                   type="button"
@@ -280,6 +262,24 @@ export function DroneCard({
                   aria-label={`Create chat on "${shownName}"`}
                 >
                   <IconPlus className="opacity-90" />
+                </button>
+              )}
+              {canClone && (
+                <button
+                  type="button"
+                  onClick={(e) => { stopCardSelection(e); onClone(); }}
+                  onMouseDown={stopCardSelection}
+                  onPointerDown={stopCardSelection}
+                  disabled={Boolean(cloneDisabled)}
+                  className={`inline-flex items-center justify-center w-5 h-5 rounded border transition-all ${
+                    cloneDisabled
+                      ? 'opacity-50 cursor-not-allowed bg-[var(--panel-raised)] border-[var(--border-subtle)] text-[var(--muted)]'
+                      : 'bg-[var(--accent-subtle)] border-[var(--accent-muted)] text-[var(--accent)] hover:shadow-[var(--glow-accent)]'
+                  }`}
+                  title={`Clone "${shownName}"`}
+                  aria-label={`Clone "${shownName}"`}
+                >
+                  <IconClone className="opacity-90" />
                 </button>
               )}
               {canRename && (

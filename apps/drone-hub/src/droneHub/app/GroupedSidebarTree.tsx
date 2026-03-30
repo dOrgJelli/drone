@@ -42,6 +42,15 @@ type FolderEditorState = {
   pending: boolean;
 };
 
+type ChatEditorState = {
+  mode: 'create' | 'rename';
+  droneId: string;
+  targetChatName: string | null;
+  value: string;
+  error: string | null;
+  pending: boolean;
+};
+
 type GroupedSidebarTreeProps = {
   sidebarGroups: SidebarGroup[];
   sidebarDensityMode: SidebarDensityMode;
@@ -99,7 +108,23 @@ type GroupedSidebarTreeProps = {
     chatName: string,
   ) => Promise<{ ok: boolean; deletedDrone?: boolean; error?: string | null }>;
   onOpenCloneModal: (drone: DroneSummary) => void;
-  onCreateDroneChat: (drone: DroneSummary) => void;
+  onCreateDroneChat: (
+    drone: DroneSummary,
+    chatName: string,
+  ) => Promise<{ ok: boolean; chatName?: string; error?: string | null }>;
+  onRenameDroneChat: (
+    droneId: string,
+    chatName: string,
+    newName: string,
+  ) => Promise<{ ok: boolean; chatName?: string; error?: string | null }>;
+  chatEditor: ChatEditorState | null;
+  chatEditorInputRef: React.RefObject<HTMLInputElement>;
+  onOpenCreateDroneChat: (drone: DroneSummary) => void;
+  onStartRenameDroneChat: (droneId: string, chatName: string) => void;
+  onChatEditorValueChange: (next: string) => void;
+  onSubmitChatEditor: () => void;
+  onBlurChatEditor: () => void;
+  onCancelChatEditor: () => void;
   onRenameDrone: (droneId: string) => void;
   onSetDroneBaseImage: (droneId: string) => void;
   onDeleteDrone: (droneId: string) => void;
@@ -329,6 +354,13 @@ function GroupedSidebarChatRow({ drone, chatName, isOptimistic }: { drone: Drone
     setSelectedSidebarNodeId,
     onSelectDroneChat,
     dragOverChat,
+    chatEditor,
+    chatEditorInputRef,
+    onStartRenameDroneChat,
+    onChatEditorValueChange,
+    onSubmitChatEditor,
+    onBlurChatEditor,
+    onCancelChatEditor,
     deletingChats,
     handleDeleteChat,
     shouldSuppressClick,
@@ -362,6 +394,39 @@ function GroupedSidebarChatRow({ drone, chatName, isOptimistic }: { drone: Drone
         ? 'pt-3'
         : 'pb-3'
       : '';
+  const editing = chatEditor?.mode === 'rename' && chatEditor.droneId === drone.id && chatEditor.targetChatName === chatName;
+
+  if (editing) {
+    return (
+      <div className={`flex flex-col gap-0.5 transition-[margin] duration-150 ${reorderPreviewClass}`}>
+        <div className={`flex items-center gap-1.5 rounded border border-[var(--accent-muted)] bg-[var(--accent-subtle)] ${densityClasses.chatRow}`}>
+          <span className="inline-flex flex-shrink-0 items-center">
+            <IconChatThread className={densityClasses.icon} />
+          </span>
+          <input
+            ref={chatEditorInputRef}
+            type="text"
+            value={chatEditor?.value ?? ''}
+            onChange={(event) => onChatEditorValueChange(event.target.value)}
+            onBlur={onBlurChatEditor}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                onSubmitChatEditor();
+              } else if (event.key === 'Escape') {
+                event.preventDefault();
+                onCancelChatEditor();
+              }
+            }}
+            placeholder="Chat name"
+            className="min-w-0 flex-1 rounded border border-[var(--accent-muted)] bg-[rgba(15,18,28,.88)] px-2 py-1 font-mono text-[11px] text-[var(--fg)] focus:border-[var(--accent)] focus:outline-none"
+          />
+          {chatEditor?.pending ? <IconSpinner className="opacity-90 text-[var(--accent)]" /> : null}
+        </div>
+        {chatEditor?.error ? <div className="px-1 text-[10px] text-[var(--red)]">{chatEditor.error}</div> : null}
+      </div>
+    );
+  }
 
   return (
     <div ref={setDropNodeRef} className={`flex flex-col gap-0.5 transition-[margin] duration-150 ${reorderPreviewClass}`}>
@@ -406,21 +471,37 @@ function GroupedSidebarChatRow({ drone, chatName, isOptimistic }: { drone: Drone
           ) : null}
         </button>
         {chatName !== 'default' ? (
-          <button
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              void handleDeleteChat(drone.id, chatName);
-            }}
-            onPointerDown={(event) => event.stopPropagation()}
-            onMouseDown={(event) => event.stopPropagation()}
-            disabled={Boolean(deletingChats[`${drone.id}:${chatName}`])}
-            className={`inline-flex ${densityClasses.chatDeleteWidth} flex-shrink-0 items-center justify-center rounded border border-[rgba(255,90,90,.2)] bg-[var(--red-subtle)] text-[var(--red)] opacity-0 pointer-events-none transition-all group-hover/chat-row:opacity-100 group-hover/chat-row:pointer-events-auto disabled:opacity-50`}
-            title={`Delete chat "${chatName}"`}
-            aria-label={`Delete chat "${chatName}"`}
-          >
-            {deletingChats[`${drone.id}:${chatName}`] ? <IconSpinner className="opacity-90" /> : <IconTrash className="opacity-90" />}
-          </button>
+          <>
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onStartRenameDroneChat(drone.id, chatName);
+              }}
+              onPointerDown={(event) => event.stopPropagation()}
+              onMouseDown={(event) => event.stopPropagation()}
+              className={`inline-flex ${densityClasses.chatDeleteWidth} flex-shrink-0 items-center justify-center rounded border bg-[rgba(80,130,255,.10)] border-[rgba(90,140,255,.22)] text-[rgb(124,170,255)] opacity-0 pointer-events-none transition-all group-hover/chat-row:opacity-100 group-hover/chat-row:pointer-events-auto hover:bg-[rgba(80,130,255,.16)]`}
+              title={`Rename chat "${chatName}"`}
+              aria-label={`Rename chat "${chatName}"`}
+            >
+              <IconPencil className="opacity-90" />
+            </button>
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                void handleDeleteChat(drone.id, chatName);
+              }}
+              onPointerDown={(event) => event.stopPropagation()}
+              onMouseDown={(event) => event.stopPropagation()}
+              disabled={Boolean(deletingChats[`${drone.id}:${chatName}`])}
+              className={`inline-flex ${densityClasses.chatDeleteWidth} flex-shrink-0 items-center justify-center rounded border border-[rgba(255,90,90,.2)] bg-[var(--red-subtle)] text-[var(--red)] opacity-0 pointer-events-none transition-all group-hover/chat-row:opacity-100 group-hover/chat-row:pointer-events-auto disabled:opacity-50`}
+              title={`Delete chat "${chatName}"`}
+              aria-label={`Delete chat "${chatName}"`}
+            >
+              {deletingChats[`${drone.id}:${chatName}`] ? <IconSpinner className="opacity-90" /> : <IconTrash className="opacity-90" />}
+            </button>
+          </>
         ) : (
           <span className={`${densityClasses.chatPlaceholderWidth} flex-shrink-0`} />
         )}
@@ -445,13 +526,19 @@ function GroupedSidebarDroneRow({ node, groupPath, nested = false }: { node: Sid
     deletingDrones,
     renamingDrones,
     settingBaseImages,
+    chatEditor,
     selectedSidebarNodeId,
     setSelectedSidebarNodeId,
     onSelectDroneCard,
     selectedDrone,
     activeChatName,
     onOpenCloneModal,
-    onCreateDroneChat,
+    onOpenCreateDroneChat,
+    onChatEditorValueChange,
+    onSubmitChatEditor,
+    onBlurChatEditor,
+    onCancelChatEditor,
+    chatEditorInputRef,
     onRenameDrone,
     onSetDroneBaseImage,
     onDeleteDrone,
@@ -498,6 +585,7 @@ function GroupedSidebarDroneRow({ node, groupPath, nested = false }: { node: Sid
     disabled: chats.length <= 1,
   });
   const hasOnlyDefaultChat = chats.length === 1 && chats[0] === 'default';
+  const showCreateChatEditor = chatEditor?.mode === 'create' && chatEditor.droneId === drone.id;
   const defaultChatNodeId = createCanvasChatNodeId(drone.id, 'default');
   const showBusy =
     !isDroneStartingOrSeeding(drone.hubPhase) && hasOnlyDefaultChat && busyChatNodeIdSet.has(defaultChatNodeId);
@@ -552,8 +640,8 @@ function GroupedSidebarDroneRow({ node, groupPath, nested = false }: { node: Sid
           dragging={isDragging}
           dragAttributes={attributes as unknown as Record<string, unknown>}
           dragListeners={listeners as unknown as Record<string, unknown>}
+          onCreateChat={() => onOpenCreateDroneChat(drone)}
           onClone={() => onOpenCloneModal(drone)}
-          onCreateChat={() => onCreateDroneChat(drone)}
           onRename={() => onRenameDrone(drone.id)}
           onSetBaseImage={() => onSetDroneBaseImage(drone.id)}
           onDelete={() => onDeleteDrone(drone.id)}
@@ -597,8 +685,37 @@ function GroupedSidebarDroneRow({ node, groupPath, nested = false }: { node: Sid
           deleteBusy={Boolean(deletingDrones[drone.id])}
         />
       </div>
-      {chats.length > 1 ? (
+      {chats.length > 1 || showCreateChatEditor ? (
         <div ref={setChatTailDropNodeRef} className={`${densityClasses.chatBlockIndent} flex flex-col gap-0.5`}>
+          {showCreateChatEditor ? (
+            <div className="flex flex-col gap-0.5">
+              <div className={`flex items-center gap-1.5 rounded border border-[var(--accent-muted)] bg-[var(--accent-subtle)] ${densityClasses.chatRow}`}>
+                <span className="inline-flex flex-shrink-0 items-center">
+                  <IconChatThread className={densityClasses.icon} />
+                </span>
+                <input
+                  ref={chatEditorInputRef}
+                  type="text"
+                  value={chatEditor?.value ?? ''}
+                  onChange={(event) => onChatEditorValueChange(event.target.value)}
+                  onBlur={onBlurChatEditor}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault();
+                      onSubmitChatEditor();
+                    } else if (event.key === 'Escape') {
+                      event.preventDefault();
+                      onCancelChatEditor();
+                    }
+                  }}
+                  placeholder="Chat name"
+                  className="min-w-0 flex-1 rounded border border-[var(--accent-muted)] bg-[rgba(15,18,28,.88)] px-2 py-1 font-mono text-[11px] text-[var(--fg)] focus:border-[var(--accent)] focus:outline-none"
+                />
+                {chatEditor?.pending ? <IconSpinner className="opacity-90 text-[var(--accent)]" /> : null}
+              </div>
+              {chatEditor?.error ? <div className="px-1 text-[10px] text-[var(--red)]">{chatEditor.error}</div> : null}
+            </div>
+          ) : null}
           {chats.map((chatName) => (
             <GroupedSidebarChatRow key={`${drone.id}:${chatName}`} drone={drone} chatName={chatName} isOptimistic={isOptimistic} />
           ))}

@@ -431,6 +431,15 @@ type FolderEditorState = {
   pending: boolean;
 };
 
+type ChatEditorState = {
+  mode: 'create' | 'rename';
+  droneId: string;
+  targetChatName: string | null;
+  value: string;
+  error: string | null;
+  pending: boolean;
+};
+
 type SidebarFolderTreeNodeProps = {
   node: SidebarFolderNode;
   activeRepoPath: string;
@@ -810,7 +819,15 @@ export type DroneSidebarProps = {
     chatName: string,
   ) => Promise<{ ok: boolean; deletedDrone?: boolean; error?: string | null }>;
   onOpenCloneModal: (drone: DroneSummary) => void;
-  onCreateDroneChat: (drone: DroneSummary) => void;
+  onCreateDroneChat: (
+    drone: DroneSummary,
+    chatName: string,
+  ) => Promise<{ ok: boolean; chatName?: string; error?: string | null }>;
+  onRenameDroneChat: (
+    droneId: string,
+    chatName: string,
+    newName: string,
+  ) => Promise<{ ok: boolean; chatName?: string; error?: string | null }>;
   onRenameDrone: (droneId: string) => void;
   onSetDroneBaseImage: (droneId: string) => void;
   onDeleteDrone: (droneId: string) => void;
@@ -871,6 +888,7 @@ export function DroneSidebar({
   onDeleteDroneChat,
   onOpenCloneModal,
   onCreateDroneChat,
+  onRenameDroneChat,
   onRenameDrone,
   onSetDroneBaseImage,
   onDeleteDrone,
@@ -935,6 +953,7 @@ export function DroneSidebar({
   const [selectedSidebarNodeId, setSelectedSidebarNodeId] = React.useState<string | null>(null);
   const [selectedFolderPath, setSelectedFolderPath] = React.useState<string | null>(null);
   const [folderEditor, setFolderEditor] = React.useState<FolderEditorState | null>(null);
+  const [chatEditor, setChatEditor] = React.useState<ChatEditorState | null>(null);
   const [collapsedDroneSections, setCollapsedDroneSections] = React.useState<Record<string, boolean>>({});
   const [dragOverGroup, setDragOverGroup] = React.useState<string | null>(null);
   const [dragOverUngrouped, setDragOverUngrouped] = React.useState(false);
@@ -944,6 +963,7 @@ export function DroneSidebar({
   } | null>(null);
   const createGroupInputRef = React.useRef<HTMLInputElement | null>(null);
   const folderEditorInputRef = React.useRef<HTMLInputElement>(null);
+  const chatEditorInputRef = React.useRef<HTMLInputElement>(null);
   const headerActionsMenuRef = React.useRef<HTMLDivElement | null>(null);
   const footerOptionsMenuRef = React.useRef<HTMLDivElement | null>(null);
   const collapseTimerRef = React.useRef<number | null>(null);
@@ -1035,6 +1055,23 @@ export function DroneSidebar({
     return () => window.cancelAnimationFrame(id);
   }, [folderEditorFocusKey]);
 
+  const chatEditorFocusKey = React.useMemo(
+    () =>
+      chatEditor
+        ? `${chatEditor.mode}:${chatEditor.droneId}:${chatEditor.targetChatName ?? ''}`
+        : null,
+    [chatEditor],
+  );
+
+  React.useEffect(() => {
+    if (!chatEditorFocusKey) return;
+    const id = window.requestAnimationFrame(() => {
+      chatEditorInputRef.current?.focus();
+      chatEditorInputRef.current?.select();
+    });
+    return () => window.cancelAnimationFrame(id);
+  }, [chatEditorFocusKey]);
+
   const closeCreateGroupInline = React.useCallback(() => {
     if (creatingGroupMove) return;
     setCreateGroupTargetDroneIds(null);
@@ -1050,12 +1087,57 @@ export function DroneSidebar({
     setFolderEditor((prev) => (prev ? { ...prev, value: next, error: null } : prev));
   }, []);
 
+  const closeChatEditor = React.useCallback(() => {
+    setChatEditor(null);
+  }, []);
+
+  const updateChatEditorValue = React.useCallback((next: string) => {
+    setChatEditor((prev) => (prev ? { ...prev, value: next, error: null } : prev));
+  }, []);
+
+  const openDroneChatCreate = React.useCallback(
+    (drone: DroneSummary) => {
+      const droneId = String(drone?.id ?? '').trim();
+      if (!droneId) return;
+      const existingChats = Array.isArray(drone?.chats) && drone.chats.length > 0 ? drone.chats : ['default'];
+      const seedName = `chat-${Math.max(1, existingChats.length + 1)}`;
+      setSelectedSidebarNodeId(sidebarDroneNodeId(droneId));
+      setFolderEditor(null);
+      setChatEditor({
+        mode: 'create',
+        droneId,
+        targetChatName: null,
+        value: seedName,
+        error: null,
+        pending: false,
+      });
+    },
+    [],
+  );
+
+  const startRenameDroneChat = React.useCallback((droneIdRaw: string, chatNameRaw: string) => {
+    const droneId = String(droneIdRaw ?? '').trim();
+    const chatName = String(chatNameRaw ?? '').trim() || 'default';
+    if (!droneId || !chatName || chatName === 'default') return;
+    setSelectedSidebarNodeId(sidebarChatSidebarNodeId(droneId, chatName));
+    setFolderEditor(null);
+    setChatEditor({
+      mode: 'rename',
+      droneId,
+      targetChatName: chatName,
+      value: chatName,
+      error: null,
+      pending: false,
+    });
+  }, []);
+
   const openFolderCreate = React.useCallback(
     (parentPathRaw: string | null, opts?: { anchorPath?: string | null }) => {
       const parentPath = String(parentPathRaw ?? '').trim() || null;
       const anchorPath = String(opts?.anchorPath ?? '').trim() || parentPath;
       if (parentPath && collapsedGroups[parentPath]) onToggleGroupCollapsed(parentPath);
       setSelectedFolderPath(anchorPath);
+      setChatEditor(null);
       setFolderEditor({
         mode: 'create',
         parentPath,
@@ -1073,6 +1155,7 @@ export function DroneSidebar({
     const group = String(groupRaw ?? '').trim();
     if (!group || isUngroupedGroupName(group)) return;
     setSelectedFolderPath(group);
+    setChatEditor(null);
     setFolderEditor({
       mode: 'rename',
       parentPath: sidebarGroupParentPath(group),
@@ -1175,6 +1258,55 @@ export function DroneSidebar({
     }
     void submitFolderEditor();
   }, [folderEditor, submitFolderEditor]);
+
+  const submitChatEditor = React.useCallback(async () => {
+    const draft = chatEditor;
+    if (!draft || draft.pending) return;
+    const chatName = String(draft.value ?? '').trim();
+    if (!chatName) {
+      setChatEditor((prev) => (prev ? { ...prev, error: 'Chat name is required.' } : prev));
+      return;
+    }
+
+    setChatEditor((prev) => (prev ? { ...prev, pending: true, error: null } : prev));
+    if (draft.mode === 'create') {
+      const drone = sidebarDroneById[draft.droneId];
+      if (!drone) {
+        setChatEditor((prev) => (prev ? { ...prev, pending: false, error: 'Drone is unavailable.' } : prev));
+        return;
+      }
+      const result = await onCreateDroneChat(drone, chatName);
+      if (!result.ok) {
+        setChatEditor((prev) => (prev ? { ...prev, pending: false, error: result.error || 'Create chat failed.' } : prev));
+        return;
+      }
+      const nextChatName = String(result.chatName ?? chatName).trim() || chatName;
+      setSelectedSidebarNodeId(sidebarChatSidebarNodeId(draft.droneId, nextChatName));
+      setChatEditor(null);
+      return;
+    }
+
+    const targetChatName = String(draft.targetChatName ?? '').trim();
+    const result = await onRenameDroneChat(draft.droneId, targetChatName, chatName);
+    if (!result.ok) {
+      setChatEditor((prev) => (prev ? { ...prev, pending: false, error: result.error || 'Rename chat failed.' } : prev));
+      return;
+    }
+    const nextChatName = String(result.chatName ?? chatName).trim() || chatName;
+    setSelectedSidebarNodeId(sidebarChatSidebarNodeId(draft.droneId, nextChatName));
+    setChatEditor(null);
+  }, [chatEditor, onCreateDroneChat, onRenameDroneChat, setSelectedSidebarNodeId, sidebarDroneById]);
+
+  const blurChatEditor = React.useCallback(() => {
+    const draft = chatEditor;
+    if (!draft || draft.pending) return;
+    const chatName = String(draft.value ?? '').trim();
+    if (!chatName) {
+      setChatEditor(null);
+      return;
+    }
+    void submitChatEditor();
+  }, [chatEditor, submitChatEditor]);
 
   const moveFolderIntoGroup = React.useCallback(
     async (sourceGroupRaw: string, targetGroupRaw: string) => {
@@ -1655,6 +1787,13 @@ export function DroneSidebar({
   }, [selectedFolderPath, visibleSidebarFolderPathSet]);
 
   React.useEffect(() => {
+    const droneId = String(chatEditor?.droneId ?? '').trim();
+    if (!droneId) return;
+    if (sidebarDroneById[droneId]) return;
+    setChatEditor(null);
+  }, [chatEditor, sidebarDroneById]);
+
+  React.useEffect(() => {
     const droneId = String(selectedDrone ?? '').trim();
     if (!droneId) return;
     const nextNodeId =
@@ -1720,6 +1859,7 @@ export function DroneSidebar({
     onDeleteDroneChat,
     onOpenCloneModal,
     onCreateDroneChat,
+    onRenameDroneChat,
     onRenameDrone,
     onSetDroneBaseImage,
     onDeleteDrone,
@@ -2135,6 +2275,15 @@ export function DroneSidebar({
                       onDeleteDroneChat={onDeleteDroneChat}
                       onOpenCloneModal={onOpenCloneModal}
                       onCreateDroneChat={onCreateDroneChat}
+                      onRenameDroneChat={onRenameDroneChat}
+                      chatEditor={chatEditor}
+                      chatEditorInputRef={chatEditorInputRef}
+                      onOpenCreateDroneChat={openDroneChatCreate}
+                      onStartRenameDroneChat={startRenameDroneChat}
+                      onChatEditorValueChange={updateChatEditorValue}
+                      onSubmitChatEditor={submitChatEditor}
+                      onBlurChatEditor={blurChatEditor}
+                      onCancelChatEditor={closeChatEditor}
                       onRenameDrone={onRenameDrone}
                       onSetDroneBaseImage={onSetDroneBaseImage}
                       onDeleteDrone={onDeleteDrone}

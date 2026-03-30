@@ -2102,17 +2102,16 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     ],
   );
   const createDroneChat = React.useCallback(
-    async (drone: DroneSummary): Promise<void> => {
+    async (
+      drone: DroneSummary,
+      chatNameRaw: string,
+    ): Promise<{ ok: boolean; chatName?: string; error?: string | null }> => {
       const droneId = String(drone?.id ?? '').trim();
-      if (!droneId) return;
+      if (!droneId) return { ok: false, error: 'Missing drone id.' };
       const availableChats = Array.isArray(drone?.chats) && drone.chats.length > 0 ? drone.chats : ['default'];
-      const seed = `chat-${Math.max(1, availableChats.length + 1)}`;
-      const raw = window.prompt('New chat name', seed);
-      if (raw == null) return;
-      const chatName = String(raw ?? '').trim();
+      const chatName = String(chatNameRaw ?? '').trim();
       if (!chatName) {
-        window.alert('Chat name is required.');
-        return;
+        return { ok: false, error: 'Chat name is required.' };
       }
       const copyFromChat =
         selectedDrone === droneId
@@ -2126,8 +2125,9 @@ export function useDroneHubAppModel(): DroneHubAppModel {
         });
         setSelectedDrone(droneId);
         setSelectedChat(chatName);
+        return { ok: true, chatName, error: null };
       } catch (err: any) {
-        window.alert(err?.message ?? String(err));
+        return { ok: false, error: err?.message ?? String(err) };
       }
     },
     [requestJson, selectedChat, selectedDrone, setSelectedChat, setSelectedDrone],
@@ -2537,6 +2537,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     selectDroneCard,
     selectDroneChat,
     createDroneChat,
+    renameCanvasChat,
     deleteCanvasChat,
     openCloneModal,
     renameDrone,
