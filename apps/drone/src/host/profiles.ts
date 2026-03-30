@@ -16,6 +16,8 @@ function repoRootDir(): string {
 }
 
 export function repoDataRootDir(): string {
+  const explicit = process.env.DRONE_REPO_DATA_DIR?.trim();
+  if (explicit) return path.resolve(explicit);
   return path.join(repoRootDir(), 'data');
 }
 
