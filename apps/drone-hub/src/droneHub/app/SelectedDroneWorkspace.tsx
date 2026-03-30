@@ -4,7 +4,6 @@ import {
   AutomationLaneStatusCard,
   ChatInput,
   type ChatSendPayload,
-  ChatTabs,
   CollapsibleOutput,
   EmptyState,
   PendingTranscriptTurn,
@@ -41,7 +40,6 @@ import { useDroneHubUiStore, useSelectedDroneWorkspaceUiState } from './use-dron
 import { usePromptAutomationState } from './use-prompt-automation-state';
 import { HeaderPullRequestShortcuts } from './HeaderPullRequestShortcuts';
 import { buildPendingTimelineBlocks } from './pending-timeline-blocks';
-import { orderSidebarEntries } from './sidebar-group-order';
 import {
   buildPendingPromptLoopGroups,
   buildTranscriptTimelineBlocks,
@@ -55,8 +53,6 @@ import {
   parseGithubPullRequestHref,
 } from './selected-drone-workspace-utils';
 import { useFleetAssignmentDropState } from './use-fleet-assignment-drop-state';
-
-const EMPTY_SIDEBAR_CHAT_ORDER: string[] = [];
 
 type LaunchHint =
   | {
@@ -376,9 +372,6 @@ export function SelectedDroneWorkspace({
   const chatDraftValue = useDroneHubUiStore((s) => s.chatInputDrafts[chatDraftKey] ?? '');
   const setChatInputDraft = useDroneHubUiStore((s) => s.setChatInputDraft);
   const automations = useDroneHubUiStore((s) => s.automations);
-  const sidebarChatOrder = useDroneHubUiStore(
-    (s) => s.sidebarChatOrderByDrone[currentDrone.id] ?? EMPTY_SIDEBAR_CHAT_ORDER,
-  );
   const {
     promptAutomationJob,
     cancelQueuedAutomationErrorById,
@@ -589,114 +582,6 @@ export function SelectedDroneWorkspace({
     },
     [currentDrone.hubPhase, currentDrone.id, currentDroneRepoAttached, setRightPanelOpen, setRightPanelTab],
   );
-
-  const availableChats = React.useMemo(() => {
-    const list = Array.isArray(currentDrone.chats) ? currentDrone.chats : [];
-    const out: string[] = [];
-    const seen = new Set<string>();
-    for (const raw of list) {
-      const name = String(raw ?? '').trim();
-      if (!name || seen.has(name)) continue;
-      seen.add(name);
-      out.push(name);
-    }
-    return orderSidebarEntries(out, sidebarChatOrder, (chatName) => chatName);
-  }, [currentDrone.chats, sidebarChatOrder]);
-  const hasChats = availableChats.length > 0;
-  const [chatMutationBusy, setChatMutationBusy] = React.useState<null | 'create' | 'rename' | 'delete'>(null);
-  const [pendingChatSelection, setPendingChatSelection] = React.useState<string | null>(null);
-
-  React.useEffect(() => {
-    setPendingChatSelection(null);
-  }, [currentDrone.id]);
-
-  React.useEffect(() => {
-    const pending = String(pendingChatSelection ?? '').trim();
-    if (!pending) return;
-    if (!availableChats.includes(pending)) return;
-    setSelectedChat(pending);
-    setPendingChatSelection(null);
-  }, [availableChats, pendingChatSelection, setSelectedChat]);
-
-  const createChat = React.useCallback(async () => {
-    const seed = `chat-${Math.max(1, availableChats.length + 1)}`;
-    const raw = window.prompt('New chat name', seed);
-    if (raw == null) return;
-    const chatName = String(raw ?? '').trim();
-    if (!chatName) {
-      setChatInfoError('Chat name is required.');
-      return;
-    }
-    setChatMutationBusy('create');
-    try {
-      await requestJson<{ ok: true }>(`/api/drones/${encodeURIComponent(currentDrone.id)}/chats`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ name: chatName, ...(hasChats ? { copyFromChat: activeChatName } : {}) }),
-      });
-      setPendingChatSelection(chatName);
-      setChatInfoError(null);
-    } catch (e: any) {
-      reportChatMutationError('Create chat', e);
-    } finally {
-      setChatMutationBusy(null);
-    }
-  }, [activeChatName, availableChats.length, currentDrone.id, hasChats, reportChatMutationError, setChatInfoError]);
-
-  const renameActiveChat = React.useCallback(async () => {
-    if (activeChatName === 'default') {
-      setChatInfoError('Default chat cannot be renamed.');
-      return;
-    }
-    const raw = window.prompt('Rename chat', activeChatName);
-    if (raw == null) return;
-    const newName = String(raw ?? '').trim();
-    if (!newName || newName === activeChatName) return;
-    setChatMutationBusy('rename');
-    try {
-      await requestJson<{ ok: true }>(
-        `/api/drones/${encodeURIComponent(currentDrone.id)}/chats/${encodeURIComponent(activeChatName)}/rename`,
-        {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ newName }),
-        },
-      );
-      setPendingChatSelection(newName);
-      setChatInfoError(null);
-    } catch (e: any) {
-      reportChatMutationError('Rename chat', e);
-    } finally {
-      setChatMutationBusy(null);
-    }
-  }, [activeChatName, currentDrone.id, reportChatMutationError, setChatInfoError]);
-
-  const deleteActiveChat = React.useCallback(async () => {
-    if (activeChatName === 'default') {
-      setChatInfoError('Default chat cannot be deleted.');
-      return;
-    }
-    const actionLabel = deleteMode === 'archive' ? 'Archive' : 'Delete';
-    const confirmMessage =
-      deleteMode === 'archive'
-        ? `Archive chat "${activeChatName}"?\n\nYou can restore it from Settings > Archive before it auto-deletes.`
-        : `Delete chat "${activeChatName}"?`;
-    if (!window.confirm(confirmMessage)) return;
-    setChatMutationBusy('delete');
-    try {
-      await requestJson<{ ok: true }>(
-        `/api/drones/${encodeURIComponent(currentDrone.id)}/chats/${encodeURIComponent(activeChatName)}`,
-        { method: 'DELETE' },
-      );
-      setSelectedChat('default');
-      setPendingChatSelection('default');
-      setChatInfoError(null);
-    } catch (e: any) {
-      reportChatMutationError(`${actionLabel} chat`, e);
-    } finally {
-      setChatMutationBusy(null);
-    }
-  }, [activeChatName, currentDrone.id, deleteMode, reportChatMutationError, setChatInfoError, setSelectedChat]);
 
   return (
     <>
@@ -995,57 +880,13 @@ export function SelectedDroneWorkspace({
           ) : null}
           {/* Separator */}
           <div className="w-px h-4 bg-[var(--border-subtle)]" />
-          {/* Chat tabs + management */}
-          <div className="flex items-center gap-1.5 min-w-0">
-            {availableChats.length > 0 && <ChatTabs chats={availableChats} selected={selectedChat} onSelect={setSelectedChat} />}
-            <button
-              type="button"
-              onClick={() => void createChat()}
-              disabled={Boolean(chatMutationBusy)}
-              className={`inline-flex items-center h-6 px-2 rounded border text-[9px] font-semibold tracking-wide uppercase transition-all ${
-                chatMutationBusy
-                  ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
-                  : 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)] hover:text-[var(--muted)] hover:border-[var(--border)]'
-              }`}
-              style={{ fontFamily: 'var(--display)' }}
-              title="Create a new chat on this drone"
-            >
-              {chatMutationBusy === 'create' ? 'Creating...' : 'New'}
-            </button>
-            <button
-              type="button"
-              onClick={() => void renameActiveChat()}
-              disabled={Boolean(chatMutationBusy) || activeChatName === 'default'}
-              className={`inline-flex items-center h-6 px-2 rounded border text-[9px] font-semibold tracking-wide uppercase transition-all ${
-                chatMutationBusy || activeChatName === 'default'
-                  ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
-                  : 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)] hover:text-[var(--muted)] hover:border-[var(--border)]'
-              }`}
-              style={{ fontFamily: 'var(--display)' }}
-              title={activeChatName === 'default' ? 'Default chat cannot be renamed' : 'Rename selected chat'}
-            >
-              Rename
-            </button>
-            <button
-              type="button"
-              onClick={() => void deleteActiveChat()}
-              disabled={Boolean(chatMutationBusy) || activeChatName === 'default'}
-              className={`inline-flex items-center h-6 px-2 rounded border text-[9px] font-semibold tracking-wide uppercase transition-all ${
-                chatMutationBusy || activeChatName === 'default'
-                  ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
-                  : 'bg-[rgba(255,255,255,.02)] border-[rgba(255,90,90,.25)] text-[var(--muted-dim)] hover:text-[var(--red)] hover:border-[rgba(255,90,90,.45)]'
-              }`}
-              style={{ fontFamily: 'var(--display)' }}
-              title={
-                activeChatName === 'default'
-                  ? 'Default chat cannot be deleted'
-                  : deleteMode === 'archive'
-                    ? 'Archive selected chat'
-                    : 'Delete selected chat'
-              }
-            >
-              {chatMutationBusy === 'delete' ? (deleteMode === 'archive' ? 'Archiving...' : 'Deleting...') : deleteMode === 'archive' ? 'Archive' : 'Delete'}
-            </button>
+          <div
+            className="inline-flex items-center gap-1.5 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]"
+            style={{ fontFamily: 'var(--display)' }}
+            title={`Open chat: ${activeChatName}`}
+          >
+            Chat
+            <span className="font-mono normal-case tracking-normal text-[11px] text-[var(--fg-secondary)]">{activeChatName}</span>
           </div>
           {/* Spacer */}
           <div className="flex-1" />
