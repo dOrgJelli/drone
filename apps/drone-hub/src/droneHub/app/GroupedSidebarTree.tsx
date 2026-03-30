@@ -631,7 +631,7 @@ function GroupedSidebarFolderRow({ node }: { node: SidebarTreeFolderNode }) {
                 ? 'border border-[rgba(255,255,255,.08)] bg-[rgba(255,255,255,.045)]'
                 : 'border border-transparent hover:border-[rgba(255,255,255,.06)] hover:bg-[rgba(255,255,255,.03)]'
           } ${isDragging ? 'opacity-60' : isHiddenGroup ? 'opacity-70' : ''}`}
-          style={{ paddingLeft: `${Math.max(0, node.depth) * 6}px` }}
+          style={{ paddingLeft: `${Math.max(0, node.depth - 1) * 2}px` }}
         >
           <button
             type="button"
