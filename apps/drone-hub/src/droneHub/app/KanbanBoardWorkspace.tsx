@@ -400,8 +400,9 @@ export function KanbanBoardWorkspace({
   const filteredSelectionActive = selectedTypeIdSet.size > 0 && selectedTypeIdSet.size < activeTaskTypes.length;
   const repoFilterActive = Boolean(selectedRepoPath);
   const boardFilterActive = filteredSelectionActive || repoFilterActive;
-  const dragInteractionLocked = controlsLocked || boardFilterActive;
-  const laneStructureLocked = controlsLocked || boardFilterActive;
+  const dragInteractionLocked = controlsLocked || filteredSelectionActive;
+  const laneStructureLocked = controlsLocked || filteredSelectionActive;
+  const laneDeleteLocked = controlsLocked || filteredSelectionActive || repoFilterActive;
   const addTaskLocked = controlsLocked || filteredSelectionActive;
   const cardsForSelectedRepo = React.useMemo(() => {
     const out: KanbanCard[] = [];
@@ -693,7 +694,7 @@ export function KanbanBoardWorkspace({
   const handleDragEnd = React.useCallback(
     (event: DragEndEvent) => {
       setActiveDragCardId(null);
-      if (boardFilterActive) return;
+      if (filteredSelectionActive) return;
       const activeCardId = String(event.active.id ?? '').trim();
       const overId = String(event.over?.id ?? '').trim();
       if (!activeCardId || !event.over || !overId) return;
@@ -729,7 +730,7 @@ export function KanbanBoardWorkspace({
         }),
       );
     },
-    [board, boardFilterActive, onBoardChange],
+    [board, filteredSelectionActive, onBoardChange],
   );
 
   const handleDragCancel = React.useCallback(() => {
@@ -1170,10 +1171,10 @@ export function KanbanBoardWorkspace({
               />
             </>
           ) : null}
-          {boardFilterActive ? (
+          {filteredSelectionActive ? (
             <div className="mx-6 mb-4 flex items-center gap-2 rounded-lg border border-[rgba(255,178,36,.16)] bg-[rgba(255,178,36,.06)] px-3 py-2 text-[10px] text-[var(--yellow)]">
               <span className="h-1 w-1 rounded-full bg-[var(--yellow)]" />
-              Drag-and-drop and lane edits are disabled while board filters are active.
+              Drag-and-drop and lane edits are disabled while task-type filters are active.
             </div>
           ) : null}
         </div>
@@ -1231,14 +1232,20 @@ export function KanbanBoardWorkspace({
                       <button
                         type="button"
                         onClick={() => removeLane(lane.id)}
-                        disabled={laneStructureLocked || board.lanes.length <= 1}
+                        disabled={laneDeleteLocked || board.lanes.length <= 1}
                         className={`inline-flex h-7 w-7 items-center justify-center rounded-lg transition-all ${
-                          laneStructureLocked || board.lanes.length <= 1
+                          laneDeleteLocked || board.lanes.length <= 1
                             ? 'cursor-not-allowed text-[var(--muted-dim)] opacity-20'
                             : 'text-[var(--muted-dim)] hover:bg-[rgba(255,90,90,.1)] hover:text-[var(--red)]'
                         }`}
                         title={
-                          laneStructureLocked ? 'Clear filters to edit lanes' : board.lanes.length <= 1 ? 'Keep at least one lane' : 'Delete lane'
+                          filteredSelectionActive
+                            ? 'Clear task-type filters to delete lanes'
+                            : repoFilterActive
+                              ? 'Clear the repo filter to delete lanes'
+                              : board.lanes.length <= 1
+                                ? 'Keep at least one lane'
+                                : 'Delete lane'
                         }
                       >
                         <IconTrash className="opacity-80" />
