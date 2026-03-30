@@ -3,6 +3,7 @@ import {
   PromptLoopTranscriptGroup,
   AutomationLaneStatusCard,
   ChatInput,
+  type DroneHubTask,
   type ChatSendPayload,
   CollapsibleOutput,
   EmptyState,
@@ -134,6 +135,11 @@ type SelectedDroneWorkspaceProps = {
   nowMs: number;
   parsingJobsByTurn: Record<number, unknown>;
   parseJobsFromAgentMessage: (opts: { turn: number; message: string }) => void;
+  spawnDroneHubTaskFromAgentMessage: (opts: {
+    sourceDroneId: string;
+    sourceChatName: string;
+    task: DroneHubTask;
+  }) => Promise<{ ok: boolean; error?: string | null }>;
   tldrByMessageId: Record<string, TldrState | null>;
   showTldrByMessageId: Record<string, boolean>;
   toggleTldrForAgentMessage: (item: TranscriptItem) => void;
@@ -247,6 +253,7 @@ export function SelectedDroneWorkspace({
   nowMs,
   parsingJobsByTurn,
   parseJobsFromAgentMessage,
+  spawnDroneHubTaskFromAgentMessage,
   tldrByMessageId,
   showTldrByMessageId,
   toggleTldrForAgentMessage,
@@ -1337,6 +1344,13 @@ export function SelectedDroneWorkspace({
                           nowMs={nowMs}
                           parsingJobs={Boolean(parsingJobsByTurn[block.item.turn])}
                           onCreateJobs={parseJobsFromAgentMessage}
+                          onSpawnDroneHubTask={(task) =>
+                            spawnDroneHubTaskFromAgentMessage({
+                              sourceDroneId: currentDrone.id,
+                              sourceChatName: resolveChatNameForDrone(currentDrone, selectedChat || 'default'),
+                              task,
+                            })
+                          }
                           messageId={messageId}
                           tldr={tldrByMessageId[messageId] ?? null}
                           showTldr={Boolean(showTldrByMessageId[messageId])}

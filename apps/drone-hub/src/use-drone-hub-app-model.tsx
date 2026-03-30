@@ -2,6 +2,7 @@ import React from 'react';
 import {
   type ChatAgentConfig,
   isValidDroneNameDashCase,
+  normalizeChatInfoPayload,
 } from './domain';
 import { requestJson } from './droneHub/http';
 import { activeProfileStorageId, persistProfileStorageIdOverride } from './profile-storage';
@@ -1607,6 +1608,106 @@ export function useDroneHubAppModel(): DroneHubAppModel {
       updateSpawnContextForRepo,
     ],
   );
+  const spawnDroneHubTaskFromAgentMessage = React.useCallback(
+    async (opts: {
+      sourceDroneId: string;
+      sourceChatName: string;
+      task: { name: string; description: string };
+    }): Promise<{ ok: boolean; error?: string | null }> => {
+      const sourceDroneId = String(opts?.sourceDroneId ?? '').trim();
+      const sourceChatName = String(opts?.sourceChatName ?? 'default').trim() || 'default';
+      const taskNameRaw = String(opts?.task?.name ?? '').replace(/[\r\n]+/g, ' ').trim();
+      const taskDescription = String(opts?.task?.description ?? '').trim();
+      if (!sourceDroneId) return { ok: false, error: 'Source drone is unavailable.' };
+      if (!taskDescription) return { ok: false, error: 'Task description is empty.' };
+
+      const sourceDrone = drones.find((drone) => drone.id === sourceDroneId) ?? null;
+      if (!sourceDrone) return { ok: false, error: 'Source drone is unavailable.' };
+      if (String(sourceDrone.runtime ?? 'container').trim().toLowerCase() === 'host') {
+        return { ok: false, error: 'Host runtime drones cannot be cloned.' };
+      }
+
+      const sourceContext = resolveNewDroneContextFromCurrentSelection(sourceDrone);
+      const baseName = taskNameRaw.length > 80 ? taskNameRaw.slice(0, 80).trim() : taskNameRaw;
+      const siblingNames = new Set(drones.map((drone) => String(drone?.name ?? '').trim()).filter(Boolean));
+      const requestedName = (() => {
+        const clean = baseName || 'Task clone';
+        if (!siblingNames.has(clean)) return clean;
+        for (let i = 2; i < 1000; i += 1) {
+          const suffix = ` (${i})`;
+          const candidate =
+            clean.length + suffix.length > 80
+              ? `${clean.slice(0, Math.max(1, 80 - suffix.length)).trimEnd()}${suffix}`
+              : `${clean}${suffix}`;
+          if (!siblingNames.has(candidate)) return candidate;
+        }
+        return clean;
+      })();
+
+      let seedAgent: ChatAgentConfig | null = null;
+      let seedModel: string | null = null;
+      try {
+        const data = await requestJson<any>(
+          `/api/drones/${encodeURIComponent(sourceDroneId)}/chats/${encodeURIComponent(sourceChatName)}`,
+        );
+        const chatInfo = normalizeChatInfoPayload(data);
+        seedAgent = chatInfo.agent;
+        seedModel = chatInfo.agent.kind === 'builtin' ? chatInfo.model : null;
+      } catch {
+        const selectedChatName = String(effectiveChatInfo?.chat ?? '').trim() || 'default';
+        if (selectedDrone === sourceDroneId && effectiveChatInfo && selectedChatName === sourceChatName) {
+          seedAgent = effectiveChatInfo.agent;
+          seedModel = effectiveChatInfo.agent.kind === 'builtin' ? effectiveChatInfo.model : null;
+        }
+      }
+
+      try {
+        const response = await queueDrones([
+          {
+            name: requestedName,
+            runtime: 'container',
+            ...(sourceContext.group ? { group: sourceContext.group } : {}),
+            ...(sourceContext.repoPath ? { repoPath: sourceContext.repoPath } : {}),
+            cloneFrom: sourceDroneId,
+            cloneChats: false,
+            ...(seedAgent ? { seedAgent } : {}),
+            ...(seedModel ? { seedModel } : {}),
+            seedChat: 'default',
+            seedPrompt: taskDescription,
+          },
+        ]);
+        const accepted = Array.isArray(response?.accepted) ? response.accepted[0] : null;
+        if (!accepted?.id) {
+          const rejected = Array.isArray(response?.rejected) ? response.rejected[0] : null;
+          return {
+            ok: false,
+            error: String((rejected as any)?.error ?? 'Failed to queue drone.').trim() || 'Failed to queue drone.',
+          };
+        }
+
+        if (seedModel) rememberSeenModels([seedModel]);
+        rememberStartupSeed(
+          [{ id: String(accepted.id), name: String(accepted.name ?? requestedName).trim() || requestedName }],
+          {
+            runtime: 'container',
+            agent: seedAgent,
+            model: seedModel,
+            prompt: taskDescription,
+            chatName: 'default',
+            group: sourceContext.group || null,
+            repoPath: sourceContext.repoPath || null,
+          },
+        );
+        return { ok: true, error: null };
+      } catch (error: any) {
+        return {
+          ok: false,
+          error: String(error?.message ?? error ?? 'Failed to queue drone.').trim() || 'Failed to queue drone.',
+        };
+      }
+    },
+    [drones, effectiveChatInfo, queueDrones, rememberSeenModels, rememberStartupSeed, requestJson, selectedDrone],
+  );
   useDroneHubLifecycleEffects({
     normalizeCreateRepoPath,
     setCreateRepoPath,
@@ -2810,6 +2911,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     deletingDrones,
     optimisticallyDeletedDrones,
     parseJobsFromAgentMessage,
+    spawnDroneHubTaskFromAgentMessage,
     drones,
     dronesLoading,
     sidebarDrones,

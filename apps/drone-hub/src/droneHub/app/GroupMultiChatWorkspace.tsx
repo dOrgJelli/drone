@@ -1,6 +1,6 @@
 import React from 'react';
 import { useShallow } from 'zustand/react/shallow';
-import { ChatInput, type ChatSendPayload, EmptyState } from '../chat';
+import { ChatInput, type ChatSendPayload, type DroneHubTask, EmptyState } from '../chat';
 import { GroupMultiChatColumn } from './GroupMultiChatColumn';
 import {
   GROUP_MULTI_CHAT_COLUMN_WIDTH_DEFAULT_PX,
@@ -30,6 +30,11 @@ type GroupMultiChatWorkspaceProps = {
   onDeleteDrone: (droneId: string) => void;
   deletingDrones: Record<string, boolean>;
   onParseJobsFromAgentMessage: (opts: { turn: number; message: string }) => void;
+  onSpawnDroneHubTaskFromAgentMessage: (opts: {
+    sourceDroneId: string;
+    sourceChatName: string;
+    task: DroneHubTask;
+  }) => Promise<{ ok: boolean; error?: string | null }>;
 };
 
 export function GroupMultiChatWorkspace({
@@ -43,6 +48,7 @@ export function GroupMultiChatWorkspace({
   onDeleteDrone,
   deletingDrones,
   onParseJobsFromAgentMessage,
+  onSpawnDroneHubTaskFromAgentMessage,
 }: GroupMultiChatWorkspaceProps) {
   const {
     selectedChat,
@@ -253,6 +259,7 @@ export function GroupMultiChatWorkspace({
                   onDeleteDrone={() => onDeleteDrone(d.id)}
                   deleteBusy={Boolean(deletingDrones[d.id])}
                   onCreateJobs={onParseJobsFromAgentMessage}
+                  onSpawnDroneHubTask={onSpawnDroneHubTaskFromAgentMessage}
                   columnWidthPx={groupMultiChatColumnWidth}
                   onRuntimeStateChange={(next) => onColumnRuntimeStateChange(d.id, next)}
                 />

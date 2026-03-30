@@ -4,8 +4,11 @@ import type { TranscriptItem } from '../types';
 import { useDroneHubUiStore } from '../app/use-drone-hub-ui-store';
 import { copyText } from '../app/clipboard';
 import { CollapsibleMarkdown } from './CollapsibleMarkdown';
+import { DroneHubTaskList } from './DroneHubTaskList';
 import { ImageAttachmentChips, isAttachmentOnlyPrompt, normalizeImageAttachmentRefs } from './ImageAttachmentChips';
 import type { MarkdownFileReference } from './MarkdownMessage';
+import type { DroneHubTask } from './drone-hub-task-parser';
+import { extractDroneHubTasksFromAgentMessage } from './drone-hub-task-parser';
 import { IconBot, IconCopy, IconImage, IconJobs, IconSpinner, IconTldr, IconUser } from './icons';
 
 type TldrState =
@@ -247,6 +250,7 @@ export const TranscriptTurn = React.memo(
     nowMs,
     parsingJobs,
     onCreateJobs,
+    onSpawnDroneHubTask,
     messageId,
     tldr,
     showTldr,
@@ -262,6 +266,7 @@ export const TranscriptTurn = React.memo(
     nowMs: number;
     parsingJobs: boolean;
     onCreateJobs: (opts: { turn: number; message: string }) => void;
+    onSpawnDroneHubTask: (task: DroneHubTask) => Promise<{ ok: boolean; error?: string | null }>;
     messageId: string;
     tldr: TldrState | null;
     showTldr: boolean;
@@ -281,6 +286,12 @@ export const TranscriptTurn = React.memo(
     const attachments = normalizeImageAttachmentRefs((item as any).attachments);
     const promptText = isAttachmentOnlyPrompt(item.prompt, attachments) ? '' : item.prompt;
     const cleaned = item.ok ? stripAnsi(item.output) : stripAnsi(item.error || 'failed');
+    const extractedTaskData = React.useMemo(
+      () => (item.ok ? extractDroneHubTasksFromAgentMessage(cleaned) : { cleanedText: cleaned, tasks: [] }),
+      [cleaned, item.ok],
+    );
+    const cleanedAgentMessage = extractedTaskData.cleanedText;
+    const droneHubTasks = extractedTaskData.tasks;
     const promptIso = item.promptAt || item.at;
     const agentIso = item.completedAt || item.at;
     const tldrStatus = tldr?.status ?? 'idle';
@@ -294,10 +305,10 @@ export const TranscriptTurn = React.memo(
         : tldrStatus === 'error'
           ? `TLDR failed: ${tldrError || 'unknown error'}`
           : 'Generating TLDR…'
-      : cleaned;
+      : cleanedAgentMessage;
     const inlineImages = React.useMemo(
-      () => collectInlineAgentImages(cleaned, droneId, droneHomePath),
-      [cleaned, droneId, droneHomePath],
+      () => collectInlineAgentImages(cleanedAgentMessage, droneId, droneHomePath),
+      [cleanedAgentMessage, droneId, droneHomePath],
     );
     const [failedInlineImagesById, setFailedInlineImagesById] = React.useState<Record<string, true>>({});
     const showInlineImages = Boolean(
@@ -337,7 +348,7 @@ export const TranscriptTurn = React.memo(
     );
 
     const userCopyText = String(promptText ?? '');
-    const agentCopyText = String(cleaned ?? '');
+    const agentCopyText = String(cleanedAgentMessage ?? '');
     const showCopiedToast = React.useCallback((role: 'user' | 'agent') => {
       setCopiedToastRole(role);
       if (copiedToastTimerRef.current != null) clearTimeout(copiedToastTimerRef.current);
@@ -466,14 +477,19 @@ export const TranscriptTurn = React.memo(
                   <IconCopy className="w-3.5 h-3.5 opacity-90" />
                 </button>
               ) : null}
-              <CollapsibleMarkdown
-                text={displayedText}
-                fadeTo={item.ok ? 'var(--accent-subtle)' : 'var(--red-subtle)'}
-                className={`dh-markdown--transcript ${showingTldr ? 'dh-markdown--muted' : item.ok ? 'dh-markdown--agent' : 'dh-markdown--error'}`}
-                preserveLeadParagraph
-                onOpenFileReference={onOpenFileReference}
-                onOpenLink={onOpenLink}
-              />
+              {displayedText ? (
+                <CollapsibleMarkdown
+                  text={displayedText}
+                  fadeTo={item.ok ? 'var(--accent-subtle)' : 'var(--red-subtle)'}
+                  className={`dh-markdown--transcript ${showingTldr ? 'dh-markdown--muted' : item.ok ? 'dh-markdown--agent' : 'dh-markdown--error'}`}
+                  preserveLeadParagraph
+                  onOpenFileReference={onOpenFileReference}
+                  onOpenLink={onOpenLink}
+                />
+              ) : null}
+              {item.ok && droneHubTasks.length > 0 ? (
+                <DroneHubTaskList tasks={droneHubTasks} onSpawnTask={onSpawnDroneHubTask} />
+              ) : null}
               {showInlineImages && (
                 <div className="mt-2">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 items-start">
@@ -553,7 +569,7 @@ export const TranscriptTurn = React.memo(
                 {item.ok && (
                   <button
                     type="button"
-                    onClick={() => onCreateJobs({ turn: item.turn, message: cleaned })}
+                    onClick={() => onCreateJobs({ turn: item.turn, message: cleanedAgentMessage })}
                     disabled={parsingJobs}
                     className={`inline-flex items-center justify-center w-7 h-7 rounded border transition-opacity ${
                       parsingJobs ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
@@ -584,6 +600,7 @@ export const TranscriptTurn = React.memo(
     (a.item.error ?? '') === (b.item.error ?? '') &&
     a.parsingJobs === b.parsingJobs &&
     a.onCreateJobs === b.onCreateJobs &&
+    a.onSpawnDroneHubTask === b.onSpawnDroneHubTask &&
     a.messageId === b.messageId &&
     a.showTldr === b.showTldr &&
     (a.tldr?.status ?? 'idle') === (b.tldr?.status ?? 'idle') &&
