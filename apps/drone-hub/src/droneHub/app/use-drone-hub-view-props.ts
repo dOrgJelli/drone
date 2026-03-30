@@ -641,6 +641,8 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
       : null,
     kanbanBoardWorkspaceProps: kanbanBoardOpen
       ? {
+          initialRepoPath: activeRepoPath,
+          registeredRepoPaths,
           board: kanbanBoard,
           taskPlaybookButtons,
           taskPlaybookButtonsLoading,

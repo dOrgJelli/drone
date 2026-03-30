@@ -1,6 +1,7 @@
 import React from 'react';
 import type { KanbanBoardState, KanbanCard, KanbanLane } from './kanban-board-state';
 import { IconTrash } from './icons';
+import { playbookRunsRepoLabel } from './playbook-runs-ui';
 
 type FlatTask = {
   card: KanbanCard;
@@ -61,6 +62,7 @@ export function KanbanTableView({
           <tr>
             <th className="text-left">Task</th>
             <th className="text-left w-[120px]">Lane</th>
+            <th className="text-left w-[120px]">Repo</th>
             <th className="text-left w-[100px]">Type</th>
             <th className="text-left w-[90px]">Created</th>
             <th className="text-left w-[90px]">Updated</th>
@@ -74,7 +76,7 @@ export function KanbanTableView({
               <tr
                 key={`${lane.id}:${card.id}`}
                 onClick={() => onOpenCard(lane.id, card.id)}
-                className={controlsLocked ? 'opacity-60' : 'cursor-pointer'}
+                className={`group/row ${controlsLocked ? 'opacity-60' : 'cursor-pointer'}`}
               >
                 <td>
                   <span className="text-[12.5px] font-medium text-[var(--fg)] leading-snug">
@@ -85,6 +87,11 @@ export function KanbanTableView({
                   <span className="inline-flex items-center gap-1.5 text-[11px] text-[var(--muted)]">
                     <span className="inline-block h-[7px] w-[7px] rounded-sm shrink-0" style={{ backgroundColor: accent }} />
                     <span className="truncate max-w-[90px]">{lane.title || 'Untitled'}</span>
+                  </span>
+                </td>
+                <td>
+                  <span className="text-[10px] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--code)' }} title={card.repoPath || undefined}>
+                    {card.repoPath ? playbookRunsRepoLabel(card.repoPath) : 'No repo'}
                   </span>
                 </td>
                 <td>

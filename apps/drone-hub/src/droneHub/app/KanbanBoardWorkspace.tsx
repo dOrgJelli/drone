@@ -41,11 +41,13 @@ import { KanbanTableView } from './KanbanTableView';
 import { KanbanTaskDetailsDialog } from './KanbanTaskDetailsDialog';
 import { KanbanTaskPlaybookButtonEditor } from './KanbanTaskPlaybookButtonEditor';
 import { KanbanTaskTypeEditor } from './KanbanTaskTypeEditor';
+import { playbookRunsRepoLabel } from './playbook-runs-ui';
 import { SpawnContextToolbar } from './SpawnContextToolbar';
-
-type BoardViewMode = 'board' | 'table';
+import { useDroneHubUiStore } from './use-drone-hub-ui-store';
 
 type KanbanBoardWorkspaceProps = {
+  initialRepoPath: string;
+  registeredRepoPaths: string[];
   board: KanbanBoardState;
   taskPlaybookButtons: TaskPlaybookButton[];
   taskPlaybookButtonsLoading: boolean;
@@ -82,7 +84,8 @@ type KanbanCardLocation = {
 type SortableKanbanCardProps = {
   card: KanbanCard;
   laneId: string;
-  controlsLocked: boolean;
+  dragLocked: boolean;
+  editLocked: boolean;
   selected: boolean;
   activeDragCardId: string | null;
   taskTypeLabel: string;
@@ -92,7 +95,8 @@ type SortableKanbanCardProps = {
 
 type KanbanLaneCardsProps = {
   lane: KanbanLane;
-  controlsLocked: boolean;
+  dragLocked: boolean;
+  editLocked: boolean;
   selectedCardRef: KanbanCardRef | null;
   activeDragCardId: string | null;
   taskTypeLabelById: Record<string, string>;
@@ -101,6 +105,7 @@ type KanbanLaneCardsProps = {
 };
 
 const LANE_ACCENTS = ['#E0C84F', '#6AABFF', '#F5A623', '#34D399', '#C084FC', '#F472B6'] as const;
+const NO_REPO_FILTER_VALUE = '__kanban-no-repo__';
 
 function isEditablePasteTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -123,6 +128,18 @@ function cardCountLabel(count: number): string {
 
 function laneAccent(index: number): string {
   return LANE_ACCENTS[index % LANE_ACCENTS.length] ?? '#9DCAFF';
+}
+
+function normalizeCardRepoPath(repoPathRaw: unknown): string {
+  return String(repoPathRaw ?? '').trim();
+}
+
+function matchesRepoFilter(repoPathRaw: unknown, selectedRepoPathRaw: string): boolean {
+  const repoPath = normalizeCardRepoPath(repoPathRaw);
+  const selectedRepoPath = String(selectedRepoPathRaw ?? '').trim();
+  if (!selectedRepoPath) return true;
+  if (selectedRepoPath === NO_REPO_FILTER_VALUE) return !repoPath;
+  return repoPath === selectedRepoPath;
 }
 
 function findKanbanCardLocation(board: KanbanBoardState, cardIdRaw: string): KanbanCardLocation | null {
@@ -190,7 +207,8 @@ function KanbanLaneEndDropTarget({ laneId, controlsLocked }: { laneId: string; c
 function SortableKanbanCard({
   card,
   laneId,
-  controlsLocked,
+  dragLocked,
+  editLocked,
   selected,
   activeDragCardId,
   taskTypeLabel,
@@ -207,7 +225,7 @@ function SortableKanbanCard({
   } = useSortable({
     id: card.id,
     data: { type: 'card', laneId },
-    disabled: controlsLocked,
+    disabled: dragLocked,
   });
   const style = React.useMemo(
     () => ({
@@ -224,20 +242,20 @@ function SortableKanbanCard({
       ref={setNodeRef}
       style={style}
       {...attributes}
-      {...(controlsLocked ? {} : listeners)}
+      {...(dragLocked ? {} : listeners)}
       onClick={(event) => {
         if (isCardControlTarget(event.target)) return;
         onOpenCard(laneId, card.id);
       }}
       className={`dh-kanban-card group animate-card-enter px-3.5 py-2.5 ${
         selected ? 'is-selected' : ''
-      } ${dragging ? 'is-dragging' : ''} ${controlsLocked ? '' : 'cursor-grab touch-none active:cursor-grabbing'}`}
+      } ${dragging ? 'is-dragging' : ''} ${dragLocked ? '' : 'cursor-grab touch-none active:cursor-grabbing'}`}
     >
       <div className="flex items-center gap-2">
         <div className="min-w-0 flex-1">
           <div
             className={`w-full bg-transparent text-left text-[12.5px] font-medium leading-snug ${
-              controlsLocked ? 'cursor-not-allowed text-[var(--muted)] opacity-70' : 'text-[var(--fg)]'
+              editLocked ? 'cursor-not-allowed text-[var(--muted)] opacity-70' : 'text-[var(--fg)]'
             }`}
           >
             {card.title || 'Untitled task'}
@@ -254,13 +272,13 @@ function SortableKanbanCard({
             onRemoveCard(laneId, card.id);
           }}
           onPointerDown={stopCardDragActivation}
-          disabled={controlsLocked}
+          disabled={editLocked}
           className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md transition-all ${
-            controlsLocked
+            editLocked
               ? 'cursor-not-allowed text-[var(--muted-dim)] opacity-20'
               : 'text-[var(--muted-dim)] opacity-0 group-hover:opacity-100 hover:bg-[rgba(255,90,90,.12)] hover:text-[var(--red)]'
           }`}
-          title={controlsLocked ? 'Board is loading' : 'Delete task'}
+          title={editLocked ? 'Board is loading' : 'Delete task'}
         >
           <IconTrash className="opacity-80" />
         </button>
@@ -283,7 +301,8 @@ function DragOverlayKanbanCard({ card, taskTypeLabel }: { card: KanbanCard; task
 
 function KanbanLaneCards({
   lane,
-  controlsLocked,
+  dragLocked,
+  editLocked,
   selectedCardRef,
   activeDragCardId,
   taskTypeLabelById,
@@ -296,7 +315,7 @@ function KanbanLaneCards({
     <div className="space-y-2 p-1">
       <SortableContext items={cardIds} strategy={verticalListSortingStrategy}>
         {lane.cards.length === 0 ? (
-          <EmptyKanbanLaneDropTarget laneId={lane.id} controlsLocked={controlsLocked} />
+          <EmptyKanbanLaneDropTarget laneId={lane.id} controlsLocked={dragLocked} />
         ) : (
           <>
             {lane.cards.map((card) => (
@@ -304,7 +323,8 @@ function KanbanLaneCards({
                 key={card.id}
                 card={card}
                 laneId={lane.id}
-                controlsLocked={controlsLocked}
+                dragLocked={dragLocked}
+                editLocked={editLocked}
                 selected={selectedCardRef?.laneId === lane.id && selectedCardRef?.cardId === card.id}
                 activeDragCardId={activeDragCardId}
                 taskTypeLabel={taskTypeLabelById[card.typeId] ?? card.typeId}
@@ -312,7 +332,7 @@ function KanbanLaneCards({
                 onRemoveCard={onRemoveCard}
               />
             ))}
-            <KanbanLaneEndDropTarget laneId={lane.id} controlsLocked={controlsLocked} />
+            <KanbanLaneEndDropTarget laneId={lane.id} controlsLocked={dragLocked} />
           </>
         )}
       </SortableContext>
@@ -321,6 +341,8 @@ function KanbanLaneCards({
 }
 
 export function KanbanBoardWorkspace({
+  initialRepoPath,
+  registeredRepoPaths,
   board,
   taskPlaybookButtons,
   taskPlaybookButtonsLoading,
@@ -345,7 +367,12 @@ export function KanbanBoardWorkspace({
 }: KanbanBoardWorkspaceProps) {
   const rootRef = React.useRef<HTMLDivElement | null>(null);
   const controlsLocked = boardLoading;
-  const [viewMode, setViewMode] = React.useState<BoardViewMode>('board');
+  const kanbanBoardSelectionInitialized = useDroneHubUiStore((s) => s.kanbanBoardSelectionInitialized);
+  const setKanbanBoardSelectionInitialized = useDroneHubUiStore((s) => s.setKanbanBoardSelectionInitialized);
+  const selectedRepoPath = useDroneHubUiStore((s) => s.kanbanBoardSelectedRepoPath);
+  const setStoredSelectedRepoPath = useDroneHubUiStore((s) => s.setKanbanBoardSelectedRepoPath);
+  const viewMode = useDroneHubUiStore((s) => s.kanbanBoardViewMode);
+  const setViewMode = useDroneHubUiStore((s) => s.setKanbanBoardViewMode);
   const [selectedTypeIds, setSelectedTypeIds] = React.useState<string[]>([]);
   const [typesEditorOpen, setTypesEditorOpen] = React.useState(false);
   const [selectedCardRef, setSelectedCardRef] = React.useState<KanbanCardRef | null>(null);
@@ -354,6 +381,14 @@ export function KanbanBoardWorkspace({
   const [taskButtonError, setTaskButtonError] = React.useState<string | null>(null);
   const pendingGeneratedTitleByCardIdRef = React.useRef(new Map<string, string>());
   const laneCount = board.lanes.length;
+  const initialRepoPathNormalized = React.useMemo(() => String(initialRepoPath ?? '').trim(), [initialRepoPath]);
+  const setSelectedRepoPath = React.useCallback(
+    (next: string | ((current: string) => string)) => {
+      setKanbanBoardSelectionInitialized(true);
+      setStoredSelectedRepoPath(next);
+    },
+    [setKanbanBoardSelectionInitialized, setStoredSelectedRepoPath],
+  );
   const activeTaskTypes = React.useMemo(
     () => board.taskTypes.filter((item) => item.active !== false),
     [board.taskTypes],
@@ -363,17 +398,66 @@ export function KanbanBoardWorkspace({
     [activeTaskTypes, selectedTypeIds],
   );
   const filteredSelectionActive = selectedTypeIdSet.size > 0 && selectedTypeIdSet.size < activeTaskTypes.length;
-  const boardInteractionLocked = controlsLocked || filteredSelectionActive;
+  const repoFilterActive = Boolean(selectedRepoPath);
+  const boardFilterActive = filteredSelectionActive || repoFilterActive;
+  const dragInteractionLocked = controlsLocked || boardFilterActive;
+  const laneStructureLocked = controlsLocked || boardFilterActive;
+  const addTaskLocked = controlsLocked || filteredSelectionActive;
+  const cardsForSelectedRepo = React.useMemo(() => {
+    const out: KanbanCard[] = [];
+    for (const lane of board.lanes) {
+      for (const card of lane.cards) {
+        if (!matchesRepoFilter(card.repoPath, selectedRepoPath)) continue;
+        out.push(card);
+      }
+    }
+    return out;
+  }, [board.lanes, selectedRepoPath]);
+  const typeTaskCountById = React.useMemo(() => {
+    const next: Record<string, number> = {};
+    for (const card of cardsForSelectedRepo) next[card.typeId] = (next[card.typeId] ?? 0) + 1;
+    return next;
+  }, [cardsForSelectedRepo]);
+  const cardsForSelectedTypes = React.useMemo(() => {
+    if (!filteredSelectionActive) {
+      return board.lanes.flatMap((lane) => lane.cards);
+    }
+    const out: KanbanCard[] = [];
+    for (const lane of board.lanes) {
+      for (const card of lane.cards) {
+        if (!selectedTypeIdSet.has(card.typeId)) continue;
+        out.push(card);
+      }
+    }
+    return out;
+  }, [board.lanes, filteredSelectionActive, selectedTypeIdSet]);
+  const repoTaskCountByPath = React.useMemo(() => {
+    const next: Record<string, number> = {};
+    for (const card of cardsForSelectedTypes) {
+      const repoPath = normalizeCardRepoPath(card.repoPath);
+      if (!repoPath) continue;
+      next[repoPath] = (next[repoPath] ?? 0) + 1;
+    }
+    return next;
+  }, [cardsForSelectedTypes]);
+  const noRepoTaskCount = React.useMemo(
+    () => cardsForSelectedTypes.reduce((sum, card) => sum + (normalizeCardRepoPath(card.repoPath) ? 0 : 1), 0),
+    [cardsForSelectedTypes],
+  );
   const visibleBoard = React.useMemo(() => {
-    if (!filteredSelectionActive) return board;
+    if (!boardFilterActive) return board;
     return {
       ...board,
       lanes: board.lanes.map((lane) => ({
         ...lane,
-        cards: lane.cards.filter((card) => selectedTypeIdSet.has(card.typeId)),
+        cards: lane.cards.filter(
+          (card) =>
+            (!filteredSelectionActive || selectedTypeIdSet.has(card.typeId)) &&
+            matchesRepoFilter(card.repoPath, selectedRepoPath),
+        ),
       })),
     };
-  }, [board, filteredSelectionActive, selectedTypeIdSet]);
+  }, [board, boardFilterActive, filteredSelectionActive, selectedRepoPath, selectedTypeIdSet]);
   const taskTypeLabelById = React.useMemo(
     () => Object.fromEntries(board.taskTypes.map((item) => [item.id, item.label])),
     [board.taskTypes],
@@ -418,6 +502,25 @@ export function KanbanBoardWorkspace({
     const availablePlaybookIds = new Set(playbooks.map((playbook) => playbook.id));
     return taskPlaybookButtons.filter((button) => button.taskTypeIds.includes(cardTypeId) && availablePlaybookIds.has(button.playbookId));
   }, [playbooks, selectedCardEntry?.card.typeId, taskPlaybookButtons]);
+
+  React.useEffect(() => {
+    if (kanbanBoardSelectionInitialized) return;
+    if (!initialRepoPathNormalized) return;
+    setStoredSelectedRepoPath(initialRepoPathNormalized);
+    setKanbanBoardSelectionInitialized(true);
+  }, [
+    initialRepoPathNormalized,
+    kanbanBoardSelectionInitialized,
+    setKanbanBoardSelectionInitialized,
+    setStoredSelectedRepoPath,
+  ]);
+
+  React.useEffect(() => {
+    if (!selectedRepoPath || selectedRepoPath === NO_REPO_FILTER_VALUE) return;
+    if (registeredRepoPaths.length === 0) return;
+    if (registeredRepoPaths.includes(selectedRepoPath)) return;
+    setSelectedRepoPath('');
+  }, [registeredRepoPaths, selectedRepoPath, setSelectedRepoPath]);
 
   React.useEffect(() => {
     if (selectedCardRef && !selectedCardEntry) setSelectedCardRef(null);
@@ -487,15 +590,17 @@ export function KanbanBoardWorkspace({
   const addCard = React.useCallback(
     (
       laneIdRaw: string,
-      seed?: Partial<Pick<ReturnType<typeof createKanbanCard>, 'title' | 'description' | 'typeId'>>,
+      seed?: Partial<Pick<ReturnType<typeof createKanbanCard>, 'title' | 'description' | 'typeId' | 'repoPath'>>,
     ): ReturnType<typeof createKanbanCard> | null => {
       const laneId = String(laneIdRaw ?? '').trim();
       if (!laneId) return null;
       const timestamp = new Date().toISOString();
+      const defaultRepoPath = selectedRepoPath && selectedRepoPath !== NO_REPO_FILTER_VALUE ? selectedRepoPath : '';
       const nextCard = createKanbanCard({
         title: seed?.title ?? 'Untitled task',
         description: seed?.description ?? '',
         typeId: seed?.typeId ?? defaultCreateTypeId,
+        repoPath: seed?.repoPath ?? defaultRepoPath,
         createdAt: timestamp,
         updatedAt: timestamp,
       }, defaultCreateTypeId);
@@ -513,11 +618,11 @@ export function KanbanBoardWorkspace({
       setSelectedCardRef({ laneId, cardId: nextCard.id });
       return nextCard;
     },
-    [defaultCreateTypeId, onBoardChange],
+    [defaultCreateTypeId, onBoardChange, selectedRepoPath],
   );
 
   const updateCard = React.useCallback(
-    (laneIdRaw: string, cardIdRaw: string, patch: { title?: string; description?: string; typeId?: string }) => {
+    (laneIdRaw: string, cardIdRaw: string, patch: { title?: string; description?: string; typeId?: string; repoPath?: string | null }) => {
       const laneId = String(laneIdRaw ?? '').trim();
       const cardId = String(cardIdRaw ?? '').trim();
       if (!laneId || !cardId) return;
@@ -530,15 +635,23 @@ export function KanbanBoardWorkspace({
                 ...lane,
                 cards: lane.cards.map((card) =>
                   card.id === cardId
-                    ? {
-                        ...card,
-                        ...(Object.prototype.hasOwnProperty.call(patch, 'title') ? { title: String(patch.title ?? '') } : {}),
-                        ...(Object.prototype.hasOwnProperty.call(patch, 'description')
-                          ? { description: String(patch.description ?? '') }
-                          : {}),
-                        ...(Object.prototype.hasOwnProperty.call(patch, 'typeId') ? { typeId: String(patch.typeId ?? '') } : {}),
-                        updatedAt: new Date().toISOString(),
-                      }
+                    ? (() => {
+                        const nextCard: KanbanCard = {
+                          ...card,
+                          ...(Object.prototype.hasOwnProperty.call(patch, 'title') ? { title: String(patch.title ?? '') } : {}),
+                          ...(Object.prototype.hasOwnProperty.call(patch, 'description')
+                            ? { description: String(patch.description ?? '') }
+                            : {}),
+                          ...(Object.prototype.hasOwnProperty.call(patch, 'typeId') ? { typeId: String(patch.typeId ?? '') } : {}),
+                          updatedAt: new Date().toISOString(),
+                        };
+                        if (Object.prototype.hasOwnProperty.call(patch, 'repoPath')) {
+                          const nextRepoPath = normalizeCardRepoPath(patch.repoPath);
+                          if (nextRepoPath) nextCard.repoPath = nextRepoPath;
+                          else delete nextCard.repoPath;
+                        }
+                        return nextCard;
+                      })()
                     : card,
                 ),
               }
@@ -580,7 +693,7 @@ export function KanbanBoardWorkspace({
   const handleDragEnd = React.useCallback(
     (event: DragEndEvent) => {
       setActiveDragCardId(null);
-      if (filteredSelectionActive) return;
+      if (boardFilterActive) return;
       const activeCardId = String(event.active.id ?? '').trim();
       const overId = String(event.over?.id ?? '').trim();
       if (!activeCardId || !event.over || !overId) return;
@@ -616,7 +729,7 @@ export function KanbanBoardWorkspace({
         }),
       );
     },
-    [board, filteredSelectionActive, onBoardChange],
+    [board, boardFilterActive, onBoardChange],
   );
 
   const handleDragCancel = React.useCallback(() => {
@@ -823,7 +936,7 @@ export function KanbanBoardWorkspace({
                     </span>
                   </div>
                   <div className="mt-1.5 text-[11px] text-[var(--muted)] leading-relaxed max-w-[52ch]">
-                    Organize work across lanes. Paste text to create tasks, drag to reorder, filter by type.
+                    Organize work across lanes. Paste text to create tasks, drag to reorder, and filter by type or repo.
                   </div>
                 </div>
               </div>
@@ -871,9 +984,9 @@ export function KanbanBoardWorkspace({
                 <button
                   type="button"
                   onClick={addLane}
-                  disabled={boardInteractionLocked}
+                  disabled={laneStructureLocked}
                   className={`inline-flex h-8 items-center gap-1.5 rounded-lg px-3 text-[10px] font-semibold uppercase tracking-wide transition-all ${
-                    boardInteractionLocked
+                    laneStructureLocked
                       ? 'cursor-not-allowed bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] opacity-40'
                       : 'bg-[var(--accent)] text-[var(--accent-fg)] hover:brightness-110 shadow-[0_0_12px_rgba(167,139,250,.15)]'
                   }`}
@@ -919,6 +1032,9 @@ export function KanbanBoardWorkspace({
               repoContainerClassName="min-w-0"
             />
             <div className="flex flex-wrap items-center gap-1.5">
+              <span className="mr-0.5 text-[9px] font-semibold uppercase tracking-[0.1em] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+                Type
+              </span>
               <button
                 type="button"
                 onClick={clearTypeFilters}
@@ -930,6 +1046,9 @@ export function KanbanBoardWorkspace({
                 style={{ fontFamily: 'var(--display)' }}
               >
                 All
+                <span className="ml-1.5 text-[9px] opacity-60" style={{ fontFamily: 'var(--code)' }}>
+                  {cardsForSelectedRepo.length}
+                </span>
               </button>
               {activeTaskTypes.map((taskType) => {
                 const typeSelected = selectedTypeIdSet.has(taskType.id);
@@ -947,6 +1066,69 @@ export function KanbanBoardWorkspace({
                   >
                     {typeSelected && <span className="h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />}
                     {taskType.label}
+                    <span className="text-[9px] opacity-50" style={{ fontFamily: 'var(--code)' }}>
+                      {typeTaskCountById[taskType.id] ?? 0}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="h-4 w-px bg-[var(--border-subtle)]" />
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="mr-0.5 text-[9px] font-semibold uppercase tracking-[0.1em] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+                Repo
+              </span>
+              <button
+                type="button"
+                onClick={() => setSelectedRepoPath('')}
+                className={`inline-flex h-8 items-center rounded-lg px-3 text-[10px] font-semibold uppercase tracking-wide transition-all ${
+                  selectedRepoPath === ''
+                    ? 'bg-[var(--fg)] text-[var(--panel)] shadow-[0_2px_8px_rgba(0,0,0,.2)]'
+                    : 'bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.07)] hover:text-[var(--fg)]'
+                }`}
+                style={{ fontFamily: 'var(--display)' }}
+              >
+                All
+                <span className="ml-1.5 text-[9px] opacity-60" style={{ fontFamily: 'var(--code)' }}>
+                  {cardsForSelectedTypes.length}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedRepoPath((current) => (current === NO_REPO_FILTER_VALUE ? '' : NO_REPO_FILTER_VALUE))}
+                className={`inline-flex h-8 items-center gap-1.5 rounded-lg px-3 text-[10px] font-semibold uppercase tracking-wide transition-all ${
+                  selectedRepoPath === NO_REPO_FILTER_VALUE
+                    ? 'bg-[rgba(167,139,250,.16)] text-[var(--accent)] border border-[rgba(167,139,250,.2)]'
+                    : 'bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] border border-transparent hover:bg-[rgba(255,255,255,.07)] hover:text-[var(--fg)]'
+                }`}
+                style={{ fontFamily: 'var(--display)' }}
+              >
+                {selectedRepoPath === NO_REPO_FILTER_VALUE && <span className="h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />}
+                No repo
+                <span className="text-[9px] opacity-50" style={{ fontFamily: 'var(--code)' }}>
+                  {noRepoTaskCount}
+                </span>
+              </button>
+              {registeredRepoPaths.map((repoPath) => {
+                const active = selectedRepoPath === repoPath;
+                return (
+                  <button
+                    key={repoPath}
+                    type="button"
+                    onClick={() => setSelectedRepoPath((current) => (current === repoPath ? '' : repoPath))}
+                    className={`inline-flex h-8 items-center gap-1.5 rounded-lg px-3 text-[10px] font-semibold uppercase tracking-wide transition-all ${
+                      active
+                        ? 'bg-[rgba(167,139,250,.16)] text-[var(--accent)] border border-[rgba(167,139,250,.2)]'
+                        : 'bg-[rgba(255,255,255,.04)] text-[var(--muted-dim)] border border-transparent hover:bg-[rgba(255,255,255,.07)] hover:text-[var(--fg)]'
+                    }`}
+                    style={{ fontFamily: 'var(--display)' }}
+                    title={repoPath}
+                  >
+                    {active && <span className="h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />}
+                    {playbookRunsRepoLabel(repoPath)}
+                    <span className="text-[9px] opacity-50" style={{ fontFamily: 'var(--code)' }}>
+                      {repoTaskCountByPath[repoPath] ?? 0}
+                    </span>
                   </button>
                 );
               })}
@@ -988,10 +1170,10 @@ export function KanbanBoardWorkspace({
               />
             </>
           ) : null}
-          {filteredSelectionActive ? (
+          {boardFilterActive ? (
             <div className="mx-6 mb-4 flex items-center gap-2 rounded-lg border border-[rgba(255,178,36,.16)] bg-[rgba(255,178,36,.06)] px-3 py-2 text-[10px] text-[var(--yellow)]">
               <span className="h-1 w-1 rounded-full bg-[var(--yellow)]" />
-              Drag-and-drop is disabled while task-type filters are active.
+              Drag-and-drop and lane edits are disabled while board filters are active.
             </div>
           ) : null}
         </div>
@@ -1001,7 +1183,7 @@ export function KanbanBoardWorkspace({
       {viewMode === 'table' ? (
         <KanbanTableView
           board={visibleBoard}
-          controlsLocked={boardInteractionLocked}
+          controlsLocked={controlsLocked}
           taskTypeLabelById={taskTypeLabelById}
           laneAccent={laneAccent}
           onOpenCard={openCard}
@@ -1029,10 +1211,10 @@ export function KanbanBoardWorkspace({
                           <input
                             value={lane.title}
                             onChange={(event) => updateLaneTitle(lane.id, event.target.value)}
-                            disabled={boardInteractionLocked}
+                            disabled={laneStructureLocked}
                             placeholder={`Lane ${laneIdx + 1}`}
                             className={`min-w-0 flex-1 bg-transparent font-semibold tracking-tight focus:outline-none ${
-                              controlsLocked ? 'cursor-not-allowed opacity-70' : ''
+                              laneStructureLocked ? 'cursor-not-allowed opacity-70' : ''
                             }`}
                             style={{ fontFamily: 'var(--display)' }}
                           />
@@ -1049,14 +1231,14 @@ export function KanbanBoardWorkspace({
                       <button
                         type="button"
                         onClick={() => removeLane(lane.id)}
-                        disabled={boardInteractionLocked || board.lanes.length <= 1}
+                        disabled={laneStructureLocked || board.lanes.length <= 1}
                         className={`inline-flex h-7 w-7 items-center justify-center rounded-lg transition-all ${
-                          boardInteractionLocked || board.lanes.length <= 1
+                          laneStructureLocked || board.lanes.length <= 1
                             ? 'cursor-not-allowed text-[var(--muted-dim)] opacity-20'
                             : 'text-[var(--muted-dim)] hover:bg-[rgba(255,90,90,.1)] hover:text-[var(--red)]'
                         }`}
                         title={
-                          boardInteractionLocked ? 'Clear filters to edit lanes' : board.lanes.length <= 1 ? 'Keep at least one lane' : 'Delete lane'
+                          laneStructureLocked ? 'Clear filters to edit lanes' : board.lanes.length <= 1 ? 'Keep at least one lane' : 'Delete lane'
                         }
                       >
                         <IconTrash className="opacity-80" />
@@ -1066,7 +1248,8 @@ export function KanbanBoardWorkspace({
                     <div className="flex-1 min-h-0 overflow-y-auto px-2 pt-2 pb-1">
                       <KanbanLaneCards
                         lane={lane}
-                        controlsLocked={boardInteractionLocked}
+                        dragLocked={dragInteractionLocked}
+                        editLocked={controlsLocked}
                         selectedCardRef={selectedCardRef}
                         activeDragCardId={activeDragCardId}
                         taskTypeLabelById={taskTypeLabelById}
@@ -1079,9 +1262,9 @@ export function KanbanBoardWorkspace({
                       <button
                         type="button"
                         onClick={() => addCard(lane.id)}
-                        disabled={boardInteractionLocked}
+                        disabled={addTaskLocked}
                         className={`inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-lg border border-dashed text-[10px] font-semibold uppercase tracking-wide transition-all ${
-                          boardInteractionLocked
+                          addTaskLocked
                             ? 'cursor-not-allowed border-[rgba(255,255,255,.06)] bg-transparent text-[var(--muted-dim)] opacity-40'
                             : 'border-[rgba(255,255,255,.1)] bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)] hover:border-[var(--accent-muted)] hover:bg-[rgba(167,139,250,.06)] hover:text-[var(--accent)]'
                         }`}
@@ -1098,9 +1281,9 @@ export function KanbanBoardWorkspace({
               <button
                 type="button"
                 onClick={addLane}
-                disabled={boardInteractionLocked}
+                disabled={laneStructureLocked}
                 className={`inline-flex h-full min-h-[200px] w-[80px] flex-col items-center justify-center gap-2 rounded-2xl border border-dashed transition-all ${
-                  boardInteractionLocked
+                  laneStructureLocked
                     ? 'cursor-not-allowed border-[rgba(255,255,255,.06)] text-[var(--muted-dim)] opacity-30'
                     : 'border-[rgba(255,255,255,.08)] text-[var(--muted-dim)] hover:border-[var(--accent-muted)] hover:bg-[rgba(167,139,250,.04)] hover:text-[var(--accent)]'
                 }`}
@@ -1119,6 +1302,7 @@ export function KanbanBoardWorkspace({
       <KanbanTaskDetailsDialog
         card={selectedCardEntry?.card ?? null}
         laneTitle={selectedCardEntry?.lane.title ?? null}
+        registeredRepoPaths={registeredRepoPaths}
         taskTypes={board.taskTypes}
         taskPlaybookButtons={visibleTaskPlaybookButtons}
         controlsLocked={controlsLocked}

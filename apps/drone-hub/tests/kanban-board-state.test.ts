@@ -20,7 +20,7 @@ describe('kanban board state helpers', () => {
         {
           title: ' Backlog ',
           cards: [
-            { title: ' Wire board mode ', description: 'Add workspace routing.' },
+            { title: ' Wire board mode ', description: 'Add workspace routing.', repoPath: '/tmp/repo-a' },
             { id: 'task-2', title: ' polish ', description: 42 },
           ],
         },
@@ -33,6 +33,7 @@ describe('kanban board state helpers', () => {
       expect.objectContaining({
         title: 'Wire board mode',
         description: 'Add workspace routing.',
+        repoPath: '/tmp/repo-a',
       }),
       expect.objectContaining({
         id: 'task-2',

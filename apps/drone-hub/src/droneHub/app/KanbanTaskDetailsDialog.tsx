@@ -3,11 +3,13 @@ import type { KanbanCard, KanbanTaskType } from './kanban-board-state';
 import { KANBAN_TASK_UNTITLED_FALLBACK, resolveCommittedKanbanTaskTitle } from './kanban-task-details-dialog-state';
 import { MarkdownMessage } from '../chat/MarkdownMessage';
 import { IconPencil } from './icons';
+import { playbookRunsRepoLabel } from './playbook-runs-ui';
 import type { TaskPlaybookButton } from '../types';
 
 type KanbanTaskDetailsDialogProps = {
   card: KanbanCard | null;
   laneTitle: string | null;
+  registeredRepoPaths: string[];
   taskTypes: KanbanTaskType[];
   taskPlaybookButtons: TaskPlaybookButton[];
   controlsLocked: boolean;
@@ -16,7 +18,7 @@ type KanbanTaskDetailsDialogProps = {
   taskButtonError: string | null;
   onClose: () => void;
   onTitleDraftChange: () => void;
-  onUpdate: (patch: { title?: string; description?: string; typeId?: string }) => void;
+  onUpdate: (patch: { title?: string; description?: string; typeId?: string; repoPath?: string | null }) => void;
   onDelete: () => void;
   onOpenCreatorDrone: () => void;
   onRunTaskPlaybookButton: (buttonId: string) => void;
@@ -25,6 +27,7 @@ type KanbanTaskDetailsDialogProps = {
 export function KanbanTaskDetailsDialog({
   card,
   laneTitle,
+  registeredRepoPaths,
   taskTypes,
   taskPlaybookButtons,
   controlsLocked,
@@ -95,10 +98,17 @@ export function KanbanTaskDetailsDialog({
     }
   }, [editingDescription]);
 
+  const repoPath = String(card?.repoPath ?? '').trim();
+  const repoOptions = React.useMemo(() => {
+    const out = Array.from(new Set(registeredRepoPaths.map((item) => String(item ?? '').trim()).filter(Boolean)));
+    if (repoPath && !out.includes(repoPath)) out.push(repoPath);
+    return out;
+  }, [registeredRepoPaths, repoPath]);
+
   if (!card) return null;
   const activeTaskTypes = taskTypes.filter((item) => item.active !== false || item.id === card.typeId);
   const hasDescription = Boolean(card.description?.trim());
-  const taskButtonsDisabledReason = String(card.repoPath ?? '').trim() ? null : 'This task does not have a repo path yet.';
+  const taskButtonsDisabledReason = repoPath ? null : 'This task does not have a repo attached yet.';
 
   return (
     <div
@@ -154,7 +164,7 @@ export function KanbanTaskDetailsDialog({
         </div>
 
         <div className="flex flex-col gap-5 px-6 py-6">
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_180px]">
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_180px_220px]">
             <div className="flex flex-col gap-2">
               <label className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>Title</label>
               <input
@@ -182,6 +192,24 @@ export function KanbanTaskDetailsDialog({
                 {activeTaskTypes.map((taskType) => (
                   <option key={taskType.id} value={taskType.id}>
                     {taskType.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex flex-col gap-2">
+              <label className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>Repo</label>
+              <select
+                value={repoPath}
+                onChange={(event) => onUpdate({ repoPath: event.target.value || null })}
+                disabled={controlsLocked}
+                className="h-10 rounded-lg border border-[var(--border-subtle)] bg-[rgba(0,0,0,.2)] px-3 text-[12px] text-[var(--fg)] transition-colors focus:outline-none focus:border-[var(--accent-muted)] disabled:cursor-not-allowed disabled:opacity-60"
+                title={repoPath || undefined}
+              >
+                <option value="">No repo</option>
+                {repoOptions.map((optionRepoPath) => (
+                  <option key={optionRepoPath} value={optionRepoPath}>
+                    {playbookRunsRepoLabel(optionRepoPath)}
+                    {!registeredRepoPaths.includes(optionRepoPath) ? ' (unregistered)' : ''}
                   </option>
                 ))}
               </select>
@@ -281,6 +309,7 @@ export function KanbanTaskDetailsDialog({
               {[
                 ['Created', card.createdAt],
                 ['Updated', card.updatedAt],
+                ['Repo', repoPath || 'No repo'],
                 ['Playbook', card.playbookLabel],
                 ['Creator', card.droneName],
               ].map(([label, value]) => (
