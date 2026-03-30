@@ -83,8 +83,13 @@ function transcriptBlockSortMs(block: TranscriptRenderBlock): number {
   return parseIsoMs(first?.promptAt ?? first?.at);
 }
 
-function pendingPromptSortMs(item: PendingPrompt): number {
-  return parseIsoMs(item.at || item.updatedAt);
+export function pendingPromptTimelineSortMs(item: PendingPrompt): number {
+  const queuedMs = parseIsoMs(item.at);
+  const activeMs = parseIsoMs(item.updatedAt ?? item.at);
+  if (item.state === 'sending' || item.state === 'sent') {
+    return activeMs || queuedMs;
+  }
+  return queuedMs || activeMs;
 }
 
 export function buildTranscriptTimelineBlocks(opts: {
@@ -107,7 +112,7 @@ export function buildTranscriptTimelineBlocks(opts: {
       kind: 'pending-prompt',
       key: `pending-prompt:${item.id}`,
       item,
-      sortMs: pendingPromptSortMs(item),
+      sortMs: pendingPromptTimelineSortMs(item),
       order: order++,
     });
   }

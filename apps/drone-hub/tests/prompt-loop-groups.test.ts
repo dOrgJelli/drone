@@ -28,6 +28,16 @@ function failedPendingPrompt(id: string, at: string, updatedAt: string): Pending
   };
 }
 
+function activePendingPrompt(id: string, at: string, updatedAt: string): PendingPrompt {
+  return {
+    id,
+    at,
+    updatedAt,
+    prompt: `prompt:${id}`,
+    state: 'sent',
+  };
+}
+
 describe('buildTranscriptTimelineBlocks', () => {
   test('keeps failed pending prompts in chronological position based on prompt time', () => {
     const transcriptRenderBlocks = buildTranscriptRenderBlocks([
@@ -47,6 +57,27 @@ describe('buildTranscriptTimelineBlocks', () => {
       kind: 'pending-prompt',
       item: {
         id: 'failed-mid',
+      },
+    });
+  });
+
+  test('sorts active pending prompts by their active timestamp instead of original queue time', () => {
+    const transcriptRenderBlocks = buildTranscriptRenderBlocks([
+      transcriptTurn('completed-first', '2026-03-29T10:05:00.000Z'),
+    ]);
+
+    const out = buildTranscriptTimelineBlocks({
+      transcriptRenderBlocks,
+      pendingPlainPrompts: [
+        activePendingPrompt('waiting-second', '2026-03-29T10:01:00.000Z', '2026-03-29T10:06:00.000Z'),
+      ],
+    });
+
+    expect(out.map((item) => item.kind)).toEqual(['turn', 'pending-prompt']);
+    expect(out[1]).toMatchObject({
+      kind: 'pending-prompt',
+      item: {
+        id: 'waiting-second',
       },
     });
   });
