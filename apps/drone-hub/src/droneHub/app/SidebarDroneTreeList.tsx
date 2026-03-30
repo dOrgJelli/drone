@@ -6,7 +6,7 @@ import type { DroneSummary } from '../types';
 import { createCanvasChatNodeId } from './app-config';
 import { normalizedDroneChats } from './chat-node-helpers';
 import { isDroneStartingOrSeeding } from './helpers';
-import { IconSpinner, IconTrash } from './icons';
+import { IconDrone, IconSpinner, IconTrash } from './icons';
 import {
   createSidebarChatDragData,
   parseDroneHubDragData,
@@ -221,6 +221,7 @@ function SidebarDroneRow({
           busy={busy}
           unreadAgentMessage={unread}
           showGroup={showGroup}
+          leadingIcon={<IconDrone className="h-3.5 w-3.5 text-[var(--muted-dim)] opacity-75" />}
           onClick={(rowOpts) => onSelectDroneCard(drone.id, rowOpts)}
           dragNodeRef={setDragNodeRef}
           draggable={!dragDisabled}

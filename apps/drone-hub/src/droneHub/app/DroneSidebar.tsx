@@ -3,7 +3,8 @@ import { useDndMonitor, useDraggable, useDroppable, type DragEndEvent, type Drag
 import { isUngroupedGroupName } from '../../domain';
 import type { DroneSummary, RepoSummary } from '../types';
 import { compareDronesByNewestFirst } from './helpers';
-import { IconAutoMinimize, IconBoard, IconChevron, IconColumns, IconEye, IconEyeOff, IconFolder, IconList, IconPencil, IconPlus, IconPlusDouble, IconSettings, IconSidebarCollapse, IconSidebarExpand, IconSpinner, IconTrash, IconTreeView, SkeletonLine } from './icons';
+import { dropdownMenuItemBaseClass, dropdownPanelBaseClass, useDropdownDismiss } from '../../ui/dropdown';
+import { IconAutoMinimize, IconBoard, IconChevron, IconColumns, IconEye, IconEyeOff, IconFolder, IconList, IconMore, IconPencil, IconPlus, IconPlusDouble, IconSettings, IconSidebarCollapse, IconSidebarExpand, IconSpinner, IconTrash, IconTreeView, SkeletonLine } from './icons';
 import { SidebarDroneTreeList, sidebarInlineSectionKey, type SidebarInlineSectionKind } from './SidebarDroneTreeList';
 import { GroupedSidebarTree } from './GroupedSidebarTree';
 import {
@@ -928,9 +929,13 @@ export function DroneSidebar({
   } | null>(null);
   const createGroupInputRef = React.useRef<HTMLInputElement | null>(null);
   const folderEditorInputRef = React.useRef<HTMLInputElement>(null);
+  const headerActionsMenuRef = React.useRef<HTMLDivElement | null>(null);
+  const footerOptionsMenuRef = React.useRef<HTMLDivElement | null>(null);
   const collapseTimerRef = React.useRef<number | null>(null);
   const expandTimerRef = React.useRef<number | null>(null);
   const lastAutoCollapsedAtRef = React.useRef<number>(0);
+  const [headerActionsMenuOpen, setHeaderActionsMenuOpen] = React.useState(false);
+  const [footerOptionsMenuOpen, setFooterOptionsMenuOpen] = React.useState(false);
   const hiddenSidebarGroupTokenSet = React.useMemo(() => new Set(hiddenSidebarGroups), [hiddenSidebarGroups]);
   const isRepoGroupingMode = sidebarGroupingMode === 'repos';
   const {
@@ -979,6 +984,8 @@ export function DroneSidebar({
     },
     [clearCollapseTimer, clearExpandTimer],
   );
+  useDropdownDismiss(headerActionsMenuRef, headerActionsMenuOpen, setHeaderActionsMenuOpen);
+  useDropdownDismiss(footerOptionsMenuRef, footerOptionsMenuOpen, setFooterOptionsMenuOpen);
 
   React.useEffect(() => {
     if (sidebarAutoMinimize) return;
@@ -1787,37 +1794,61 @@ export function DroneSidebar({
               >
                 <IconBoard className="opacity-80" />
               </button>
-              <button
-                type="button"
-                onClick={onOpenPlaybookRuns}
-                className={`inline-flex items-center justify-center w-7 h-7 rounded border transition-all ${
-                  playbookRunsOpen
-                    ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
-                    : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:text-[var(--accent)] hover:border-[var(--accent-muted)] hover:bg-[var(--accent-subtle)]'
-                }`}
-                title="Open playbook runs"
-                aria-label="Open playbook runs"
-              >
-                <IconList className="opacity-80" />
-              </button>
-              <button
-                type="button"
-                onClick={() => setAppView((prev) => (prev === 'settings' ? 'workspace' : 'settings'))}
-                className={`inline-flex items-center justify-center w-7 h-7 rounded border transition-all ${
-                  appView === 'settings'
-                    ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
-                    : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:text-[var(--accent)] hover:border-[var(--accent-muted)] hover:bg-[var(--accent-subtle)]'
-                }`}
-                title={appView === 'settings' ? 'Back to workspace' : 'Open settings'}
-                aria-label={appView === 'settings' ? 'Back to workspace' : 'Open settings'}
-              >
-                <IconSettings className="opacity-80" />
-              </button>
+              <div ref={headerActionsMenuRef} className="relative">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFooterOptionsMenuOpen(false);
+                    setHeaderActionsMenuOpen((prev) => !prev);
+                  }}
+                  className={`inline-flex items-center justify-center w-7 h-7 rounded border transition-all ${
+                    headerActionsMenuOpen
+                      ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
+                      : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:text-[var(--accent)] hover:border-[var(--accent-muted)] hover:bg-[var(--accent-subtle)]'
+                  }`}
+                  title="More sidebar actions"
+                  aria-label="More sidebar actions"
+                  aria-haspopup="menu"
+                  aria-expanded={headerActionsMenuOpen}
+                >
+                  <IconMore className="opacity-85" />
+                </button>
+                {headerActionsMenuOpen ? (
+                  <div className={`absolute right-0 mt-2 w-[220px] z-50 ${dropdownPanelBaseClass}`} role="menu">
+                    <div className="py-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setHeaderActionsMenuOpen(false);
+                          onOpenPlaybookRuns();
+                        }}
+                        className={`${dropdownMenuItemBaseClass} flex items-center justify-between text-[var(--fg-secondary)] hover:bg-[var(--hover)]`}
+                        role="menuitem"
+                      >
+                        <span>Playbook runs</span>
+                        <IconList className={playbookRunsOpen ? 'opacity-80 text-[var(--accent)]' : 'opacity-65'} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setHeaderActionsMenuOpen(false);
+                          setAppView((prev) => (prev === 'settings' ? 'workspace' : 'settings'));
+                        }}
+                        className={`${dropdownMenuItemBaseClass} flex items-center justify-between text-[var(--fg-secondary)] hover:bg-[var(--hover)]`}
+                        role="menuitem"
+                      >
+                        <span>{appView === 'settings' ? 'Back to workspace' : 'Open settings'}</span>
+                        <IconSettings className={appView === 'settings' ? 'opacity-80 text-[var(--accent)]' : 'opacity-65'} />
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
             </div>
           </div>
         </div>
 
-        <div className="flex-1 min-h-0 overflow-y-auto px-2 py-2">
+        <div className="flex-1 min-h-0 overflow-y-auto px-2 py-1.5">
           {dronesError && (
             <div className="mx-2 mb-2 p-3 rounded border border-[rgba(255,90,90,.15)] bg-[var(--red-subtle)] text-xs text-[var(--red)]">
               Failed to load drones: {dronesError}
@@ -1927,11 +1958,11 @@ export function DroneSidebar({
             </div>
           )}
           {(dronesLoading || sidebarDrones.length > 0 || Boolean(visibleDraftSidebarPlaceholder) || Boolean(activeRepoPath)) && (
-            <div className="mb-2 flex items-center gap-2 px-1">
+            <div className="mb-1.5 flex items-center gap-2 px-1">
               <button
                 type="button"
                 onClick={onOpenDraftChatComposer}
-                className={`inline-flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md border px-3 text-[10px] font-semibold uppercase tracking-[0.12em] transition-all ${
+                className={`inline-flex h-7 min-w-0 flex-1 items-center gap-2 rounded-md border px-3 text-[10px] font-semibold uppercase tracking-[0.12em] transition-all ${
                   draftChat
                     ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)] shadow-[0_0_0_1px_rgba(167,139,250,.12)]'
                     : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:text-[var(--accent)] hover:border-[var(--accent-muted)] hover:bg-[var(--accent-subtle)]'
@@ -1946,7 +1977,7 @@ export function DroneSidebar({
               <button
                 type="button"
                 onClick={onOpenCreateModal}
-                className="inline-flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] transition-all hover:text-[var(--accent)] hover:border-[var(--accent-muted)] hover:bg-[var(--accent-subtle)]"
+                className="inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] transition-all hover:text-[var(--accent)] hover:border-[var(--accent-muted)] hover:bg-[var(--accent-subtle)]"
                 title="Create multiple drones"
                 aria-label="Create multiple drones"
               >
@@ -2241,31 +2272,25 @@ export function DroneSidebar({
           )}
         </div>
 
-        <div className="flex-shrink-0 px-3 py-2.5 border-t border-[var(--border)] flex items-start justify-between gap-2">
-          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+        <div className="flex-shrink-0 px-3 py-2 border-t border-[var(--border)] flex items-center justify-between gap-2">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5">
             {(sidebarHiddenGroupCount > 0 || showHiddenSidebarGroups) && (
-              <button
-                type="button"
-                onClick={() => setShowHiddenSidebarGroups((prev) => !prev)}
-                className={`inline-flex items-center gap-2 self-start rounded border px-2 py-1 text-[10px] font-semibold tracking-wide uppercase transition-all ${
+              <div
+                className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.14em] ${
                   showHiddenSidebarGroups
                     ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
-                    : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)] hover:text-[var(--muted)] hover:border-[var(--border)] hover:bg-[var(--hover)]'
+                    : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)]'
                 }`}
                 style={{ fontFamily: 'var(--display)' }}
                 title={
                   showHiddenSidebarGroups
-                    ? `Hide temporarily revealed groups${sidebarHiddenGroupCount > 0 ? ` (${sidebarHiddenGroupCount})` : ''}`
-                    : `Show hidden groups${sidebarHiddenGroupCount > 0 ? ` (${sidebarHiddenGroupCount})` : ''}`
+                    ? `Showing hidden groups${sidebarHiddenGroupCount > 0 ? ` (${sidebarHiddenGroupCount})` : ''}`
+                    : `${sidebarHiddenGroupCount} hidden group${sidebarHiddenGroupCount === 1 ? '' : 's'}`
                 }
-                aria-pressed={showHiddenSidebarGroups}
               >
-                {showHiddenSidebarGroups ? <IconEyeOff className="opacity-90" /> : <IconEye className="opacity-90" />}
-                <span>
-                  {showHiddenSidebarGroups ? 'Hide hidden' : 'Show hidden'}
-                  {sidebarHiddenGroupCount > 0 ? ` ${sidebarHiddenGroupCount}` : ''}
-                </span>
-              </button>
+                <span>{showHiddenSidebarGroups ? 'Hidden visible' : 'Hidden'}</span>
+                {sidebarHiddenGroupCount > 0 ? <span>{sidebarHiddenGroupCount}</span> : null}
+              </div>
             )}
           </div>
           <div className="flex items-center gap-1">
@@ -2295,40 +2320,62 @@ export function DroneSidebar({
             >
               {viewMode === 'grouped' ? <IconTreeView className="opacity-90" /> : <IconList className="opacity-90" />}
             </SidebarIconButton>
-            <SidebarIconButton
-              onClick={() => setAutoDelete((prev) => !prev)}
-              aria-pressed={autoDelete}
-              className={`border ${
-                autoDelete
-                  ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
-                  : 'border-[var(--border-subtle)] text-[var(--muted-dim)] hover:text-[var(--muted)] hover:border-[var(--border)] hover:bg-[var(--hover)]'
-              }`}
-              title="When enabled, delete/archive actions won't ask for confirmation."
-              ariaLabel="Toggle skip delete confirmation"
-            >
-              <IconTrash className="opacity-90" />
-            </SidebarIconButton>
-            <SidebarIconButton
-              onClick={() => setSidebarAutoMinimize((prev) => !prev)}
-              aria-pressed={sidebarAutoMinimize}
-              className={`border ${
-                sidebarAutoMinimize
-                  ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
-                  : 'border-[var(--border-subtle)] text-[var(--muted-dim)] hover:text-[var(--muted)] hover:border-[var(--border)] hover:bg-[var(--hover)]'
-              }`}
-              title={
-                sidebarAutoMinimize
-                  ? 'Disable auto-minimize sidebar'
-                  : 'Enable auto-minimize sidebar'
-              }
-              ariaLabel={
-                sidebarAutoMinimize
-                  ? 'Disable auto-minimize sidebar'
-                  : 'Enable auto-minimize sidebar'
-              }
-            >
-              <IconAutoMinimize className="opacity-90" />
-            </SidebarIconButton>
+            <div ref={footerOptionsMenuRef} className="relative">
+              <button
+                type="button"
+                onClick={() => {
+                  setHeaderActionsMenuOpen(false);
+                  setFooterOptionsMenuOpen((prev) => !prev);
+                }}
+                className={`inline-flex items-center justify-center w-7 h-7 rounded border transition-all ${
+                  footerOptionsMenuOpen
+                    ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
+                    : 'border-[var(--border-subtle)] text-[var(--muted-dim)] hover:text-[var(--muted)] hover:border-[var(--border)] hover:bg-[var(--hover)]'
+                }`}
+                title="Sidebar options"
+                aria-label="Sidebar options"
+                aria-haspopup="menu"
+                aria-expanded={footerOptionsMenuOpen}
+              >
+                <IconMore className="opacity-85" />
+              </button>
+              {footerOptionsMenuOpen ? (
+                <div className={`absolute right-0 bottom-full mb-2 w-[240px] z-50 ${dropdownPanelBaseClass}`} role="menu">
+                  <div className="py-1">
+                    <button
+                      type="button"
+                      onClick={() => setShowHiddenSidebarGroups((prev) => !prev)}
+                      className={`${dropdownMenuItemBaseClass} flex items-center justify-between text-[var(--fg-secondary)] hover:bg-[var(--hover)]`}
+                      role="menuitem"
+                    >
+                      <span>
+                        {showHiddenSidebarGroups ? 'Hide hidden groups' : 'Show hidden groups'}
+                        {sidebarHiddenGroupCount > 0 ? ` (${sidebarHiddenGroupCount})` : ''}
+                      </span>
+                      {showHiddenSidebarGroups ? <IconEyeOff className="opacity-80 text-[var(--accent)]" /> : <IconEye className="opacity-65" />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAutoDelete((prev) => !prev)}
+                      className={`${dropdownMenuItemBaseClass} flex items-center justify-between text-[var(--fg-secondary)] hover:bg-[var(--hover)]`}
+                      role="menuitem"
+                    >
+                      <span>{autoDelete ? 'Delete confirm off' : 'Delete confirm on'}</span>
+                      <IconTrash className={autoDelete ? 'opacity-80 text-[var(--accent)]' : 'opacity-65'} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSidebarAutoMinimize((prev) => !prev)}
+                      className={`${dropdownMenuItemBaseClass} flex items-center justify-between text-[var(--fg-secondary)] hover:bg-[var(--hover)]`}
+                      role="menuitem"
+                    >
+                      <span>{sidebarAutoMinimize ? 'Disable auto-minimize' : 'Enable auto-minimize'}</span>
+                      <IconAutoMinimize className={sidebarAutoMinimize ? 'opacity-80 text-[var(--accent)]' : 'opacity-65'} />
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
             <SidebarIconButton
               onClick={collapseSidebarWithGuard}
               className="text-[var(--muted-dim)] hover:text-[var(--muted)] hover:bg-[var(--hover)]"
