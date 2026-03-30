@@ -261,7 +261,7 @@ function normalizeViewMode(value: unknown): ViewMode {
 }
 
 function normalizeSidebarGroupingMode(value: unknown): SidebarGroupingMode {
-  return value === 'repos' ? 'repos' : 'groups';
+  return value === 'groups' ? 'groups' : 'repos';
 }
 
 function normalizeOutputView(value: unknown): OutputView {
@@ -402,7 +402,7 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
       chatHeaderRepoPath: '',
       sidebarReposCollapsed: false,
       sidebarAutoMinimize: false,
-      sidebarGroupingMode: 'groups',
+      sidebarGroupingMode: 'repos',
       appView: 'workspace',
       viewMode: 'grouped',
       collapsedGroups: {},
@@ -881,6 +881,7 @@ export function useDroneSidebarUiState() {
       setSidebarReposCollapsed: s.setSidebarReposCollapsed,
       setSidebarAutoMinimize: s.setSidebarAutoMinimize,
       setSidebarGroupingMode: s.setSidebarGroupingMode,
+      setCollapsedGroups: s.setCollapsedGroups,
       setSidebarGroupOrder: s.setSidebarGroupOrder,
       setSidebarDroneOrderByGroup: s.setSidebarDroneOrderByGroup,
       setSidebarNodeOrderByParent: s.setSidebarNodeOrderByParent,

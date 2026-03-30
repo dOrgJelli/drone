@@ -17,6 +17,7 @@ import { IconFolder } from './icons';
 
 export type SidebarFolderDragData = {
   type: 'sidebar-folder';
+  folderNodeId: string;
   folderPath: string;
   label: string;
 };
@@ -68,10 +69,11 @@ export function parseDroneHubDragData(value: unknown): DroneHubDragData | null {
   if (!value || typeof value !== 'object') return null;
   const type = String((value as DroneHubDragData).type ?? '').trim();
   if (type === 'sidebar-folder') {
+    const folderNodeId = String((value as SidebarFolderDragData).folderNodeId ?? '').trim();
     const folderPath = String((value as SidebarFolderDragData).folderPath ?? '').trim();
     const label = String((value as SidebarFolderDragData).label ?? '').trim();
-    if (!folderPath || !label) return null;
-    return { type: 'sidebar-folder', folderPath, label };
+    if (!folderNodeId || !folderPath || !label) return null;
+    return { type: 'sidebar-folder', folderNodeId, folderPath, label };
   }
   if (type === 'sidebar-group') {
     const groupRef = (value as SidebarGroupDragData).groupRef;

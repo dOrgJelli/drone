@@ -7,7 +7,7 @@ import { createCanvasChatNodeId } from './app-config';
 import { normalizedDroneChats } from './chat-node-helpers';
 import { createSidebarChatDragData, parseDroneHubDragData, useDroneHubActiveDrag, type SidebarDroneDragData } from './drone-hub-dnd';
 import { isDroneStartingOrSeeding } from './helpers';
-import { IconColumns, IconEye, IconEyeOff, IconFolder, IconPencil, IconPlus, IconSpinner, IconTrash } from './icons';
+import { IconChatThread, IconColumns, IconDrone, IconEye, IconEyeOff, IconFolder, IconPencil, IconPlus, IconSpinner, IconTrash } from './icons';
 import { buildSidebarDroneTree, type SidebarDroneTree } from './sidebar-drone-tree';
 import { buildSidebarNodeTree, type SidebarNodeTreeModel, type SidebarTreeDroneNode, type SidebarTreeFolderNode, type SidebarTreeNode } from './sidebar-node-tree';
 import {
@@ -123,12 +123,20 @@ function useGroupedSidebarTreeContext(): GroupedSidebarTreeContextValue {
   return value;
 }
 
-function groupedFolderDragData(pathRaw: string): { type: 'sidebar-folder'; folderPath: string; label: string } {
-  const folderPath = String(pathRaw ?? '').trim();
+function groupedFolderDragData(args: { nodeId: string; folderPath: string; label: string }): {
+  type: 'sidebar-folder';
+  folderNodeId: string;
+  folderPath: string;
+  label: string;
+} {
+  const folderNodeId = String(args.nodeId ?? '').trim();
+  const folderPath = String(args.folderPath ?? '').trim();
+  const label = String(args.label ?? '').trim();
   return {
     type: 'sidebar-folder',
+    folderNodeId,
     folderPath,
-    label: sidebarGroupBaseName(folderPath) || folderPath,
+    label: label || sidebarGroupBaseName(folderPath) || folderPath,
   };
 }
 
@@ -206,60 +214,9 @@ function chatReorderDropId(droneIdRaw: string, chatNameRaw: string): string {
   return `sidebar-grouped-chat-reorder:${droneId}:${chatName}`;
 }
 
-function GroupedSidebarDragShadowSlot() {
-  const activeDrag = useDroneHubActiveDrag();
-  if (!activeDrag) return null;
-  if (activeDrag.type === 'sidebar-chat') {
-    return (
-      <div className="rounded border border-[rgba(167,139,250,.28)] bg-[rgba(167,139,250,.08)] px-2 py-1.5 text-[11px] text-[var(--fg-secondary)] shadow-[0_10px_24px_rgba(0,0,0,.18)]">
-        <div className="flex items-center gap-1.5">
-          <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-[var(--accent)] opacity-70" />
-          <span className="min-w-0 flex-1 truncate font-mono">{activeDrag.label}</span>
-        </div>
-      </div>
-    );
-  }
-  if (activeDrag.type === 'sidebar-folder' || activeDrag.type === 'sidebar-group') {
-    const label = activeDrag.type === 'sidebar-folder' ? activeDrag.label : activeDrag.groupLabel;
-    return (
-      <div className="rounded-md border border-[rgba(167,139,250,.28)] bg-[rgba(167,139,250,.08)] px-2 py-1.5 text-[11px] text-[var(--fg-secondary)] shadow-[0_10px_24px_rgba(0,0,0,.18)]">
-        <div className="flex min-w-0 items-center gap-1.5">
-          <IconFolder className="h-3.5 w-3.5 flex-shrink-0 text-[var(--muted-dim)] opacity-80" />
-          <span className="min-w-0 flex-1 truncate font-medium">{label}</span>
-        </div>
-      </div>
-    );
-  }
-  if (activeDrag.type === 'sidebar-drone') {
-    return (
-      <div className="opacity-80 shadow-[0_10px_24px_rgba(0,0,0,.18)]">
-        <DroneCard
-          drone={{
-            id: activeDrag.droneId,
-            name: activeDrag.label,
-            createdAt: new Date().toISOString(),
-            repoAttached: false,
-            repoPath: '',
-            group: null,
-            containerPort: 0,
-            hostPort: null,
-            statusOk: true,
-            statusError: null,
-            chats: ['default'],
-            hubPhase: null,
-            hubMessage: null,
-            busy: false,
-          }}
-          displayName={activeDrag.droneIds.length > 1 ? `${activeDrag.droneIds.length} drones` : activeDrag.label}
-          selected={true}
-          dragging={false}
-          draggable={false}
-          onClick={() => {}}
-        />
-      </div>
-    );
-  }
-  return null;
+function folderGroupPath(node: SidebarTreeFolderNode | null | undefined): string | null {
+  if (!node) return null;
+  return String(node.groupPath ?? node.path ?? '').trim() || null;
 }
 
 function GroupedSidebarChatRow({ drone, chatName, isOptimistic }: { drone: DroneSummary; chatName: string; isOptimistic: boolean }) {
@@ -304,17 +261,12 @@ function GroupedSidebarChatRow({ drone, chatName, isOptimistic }: { drone: Drone
   const reorderPreviewClass =
     dragOverChat?.key === `${drone.id}:${chatName}`
       ? dragOverChat.placement === 'before'
-        ? 'pt-1'
-        : 'pb-1'
+        ? 'pt-3'
+        : 'pb-3'
       : '';
 
   return (
     <div ref={setDropNodeRef} className={`flex flex-col gap-0.5 transition-[margin] duration-150 ${reorderPreviewClass}`}>
-      {dragOverChat?.key === `${drone.id}:${chatName}` && dragOverChat.placement === 'before' ? (
-        <div className="mb-2 w-full">
-          <GroupedSidebarDragShadowSlot />
-        </div>
-      ) : null}
       <div className="relative flex items-stretch gap-1 group/chat-row">
         <button
           ref={setDragNodeRef}
@@ -327,7 +279,7 @@ function GroupedSidebarChatRow({ drone, chatName, isOptimistic }: { drone: Drone
             setSelectedSidebarNodeId(sidebarChatId);
             onSelectDroneChat(drone.id, chatName);
           }}
-          className={`flex h-7 flex-1 items-center gap-1.5 rounded border px-2 text-left text-[11px] transition-all ${
+          className={`relative flex h-7 flex-1 items-center gap-1.5 rounded border px-2 text-left text-[11px] transition-all ${
             selected
               ? 'border-[var(--accent-muted)] bg-[var(--selected)] text-[var(--fg)]'
               : active
@@ -337,8 +289,12 @@ function GroupedSidebarChatRow({ drone, chatName, isOptimistic }: { drone: Drone
           title={`${uiDroneName(drone.name)} / ${chatName}`}
         >
           {active ? (
-            <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-[var(--accent)]" />
-          ) : !busyChatNodeIdSet.has(chatNodeId) && unreadAgentMessageByChatNodeId[chatNodeId] ? (
+            <span className="absolute left-0 top-1 bottom-1 w-[2px] rounded-full bg-[var(--accent)]" />
+          ) : null}
+          <span className="inline-flex flex-shrink-0 items-center text-[var(--muted-dim)] opacity-75">
+            <IconChatThread className="h-3.5 w-3.5" />
+          </span>
+          {!active && !busyChatNodeIdSet.has(chatNodeId) && unreadAgentMessageByChatNodeId[chatNodeId] ? (
             <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-[var(--yellow)]" />
           ) : (
             <span className="h-1.5 w-1.5 flex-shrink-0" />
@@ -370,11 +326,6 @@ function GroupedSidebarChatRow({ drone, chatName, isOptimistic }: { drone: Drone
           <span className="w-7 flex-shrink-0" />
         )}
       </div>
-      {dragOverChat?.key === `${drone.id}:${chatName}` && dragOverChat.placement === 'after' ? (
-        <div className="mt-2 w-full">
-          <GroupedSidebarDragShadowSlot />
-        </div>
-      ) : null}
     </div>
   );
 }
@@ -458,12 +409,12 @@ function GroupedSidebarDroneRow({ node, groupPath, nested = false }: { node: Sid
   const reorderPreviewClass =
     dragOverTreeTarget?.nodeId === node.id
       ? dragOverTreeTarget.placement === 'before'
-        ? 'pt-1'
+        ? 'pt-3'
         : dragOverTreeTarget.placement === 'after'
-          ? 'pb-1'
+          ? 'pb-3'
           : ''
       : isChatTailOver
-        ? 'pb-1'
+        ? 'pb-3'
         : '';
   const showChatTailPreview =
     isChatTailOver && (activeDrag?.type === 'sidebar-drone' || activeDrag?.type === 'sidebar-folder');
@@ -472,17 +423,14 @@ function GroupedSidebarDroneRow({ node, groupPath, nested = false }: { node: Sid
 
   return (
     <div className={`flex flex-col gap-0.5 transition-[margin] duration-150 ${nested ? 'ml-4' : ''} ${reorderPreviewClass}`}>
-      {dragOverTreeTarget?.nodeId === node.id && dragOverTreeTarget.placement === 'before' ? (
-        <div className="mb-2">
-          <GroupedSidebarDragShadowSlot />
-        </div>
-      ) : null}
       <div ref={setDropNodeRef} data-sidebar-node-anchor-id={node.id} className="relative">
         <DroneCard
           drone={drone}
           displayName={uiDroneName(drone.name)}
           selected={selected}
           active={showOpenDefaultChatIndicator}
+          activeIndicatorStyle="edge"
+          leadingIcon={<IconDrone className="h-3.5 w-3.5 text-[var(--muted-dim)] opacity-75" />}
           selectionTone="muted"
           showSelectionEdge={false}
           busy={showBusy}
@@ -553,11 +501,6 @@ function GroupedSidebarDroneRow({ node, groupPath, nested = false }: { node: Sid
           ))}
         </div>
       ) : null}
-      {showAfterPreview ? (
-        <div className="mt-2">
-          <GroupedSidebarDragShadowSlot />
-        </div>
-      ) : null}
     </div>
   );
 }
@@ -590,17 +533,23 @@ function GroupedSidebarFolderRow({ node }: { node: SidebarTreeFolderNode }) {
     onDeleteGroup,
     shouldSuppressClick,
   } = useGroupedSidebarTreeContext();
-  const groupRef = React.useMemo(() => ({ group: node.path, kind: 'group' as const }), [node.path]);
+  const folderPath = folderGroupPath(node) ?? node.path;
+  const isVirtualGroup = node.groupKind === 'repo' && !node.groupPath;
+  const groupRef = React.useMemo(
+    () => ({ group: folderPath, kind: node.groupKind }),
+    [folderPath, node.groupKind],
+  );
   const groupToken = React.useMemo(() => sidebarGroupOrderToken(groupRef), [groupRef]);
-  const collapsed = Boolean(collapsedGroups[node.path]);
-  const isSelected = selectedSidebarNodeId === node.id || selectedFolderPath === node.path;
+  const collapsed = Boolean(collapsedGroups[folderPath]);
+  const isSelected = selectedSidebarNodeId === node.id || selectedFolderPath === folderPath;
   const isHiddenGroup = hiddenSidebarGroupTokenSet.has(groupToken);
-  const showEditorInline = folderEditor?.targetPath === node.path && folderEditor.mode === 'rename';
-  const showCreateInline = folderEditor?.parentPath === node.path && folderEditor.mode === 'create';
+  const showEditorInline = folderEditor?.targetPath === folderPath && folderEditor.mode === 'rename';
+  const showCreateInline = folderEditor?.parentPath === folderPath && folderEditor.mode === 'create';
   const childIds = nodeTree.childIdsByParent[node.id] ?? [];
   const { attributes, listeners, isDragging, setNodeRef: setDragNodeRef } = useDraggable({
-    id: `sidebar-folder:${node.path}`,
-    data: groupedFolderDragData(node.path),
+    id: `sidebar-folder:${node.id}`,
+    data: groupedFolderDragData({ nodeId: node.id, folderPath, label: node.label }),
+    disabled: isVirtualGroup,
   });
   const { setNodeRef: setDropNodeRef } = useDroppable({
     id: `sidebar-tree-node:${node.id}`,
@@ -610,6 +559,7 @@ function GroupedSidebarFolderRow({ node }: { node: SidebarTreeFolderNode }) {
       kind: 'folder',
       parentId: node.parentId,
     },
+    disabled: isVirtualGroup,
   });
   const { setNodeRef: setBodyDropNodeRef } = useDroppable({
     id: `sidebar-tree-folder-body:${node.id}`,
@@ -617,7 +567,7 @@ function GroupedSidebarFolderRow({ node }: { node: SidebarTreeFolderNode }) {
       type: 'sidebar-tree-folder-body',
       nodeId: node.id,
     },
-    disabled: collapsed,
+    disabled: collapsed || isVirtualGroup,
   });
   const setHeaderRef = React.useCallback(
     (element: HTMLDivElement | null) => {
@@ -632,19 +582,14 @@ function GroupedSidebarFolderRow({ node }: { node: SidebarTreeFolderNode }) {
   const reorderPreviewClass =
     dragOverTreeTarget?.nodeId === node.id
       ? dragOverTreeTarget.placement === 'before'
-        ? 'pt-1'
+        ? 'pt-3'
         : dragOverTreeTarget.placement === 'after'
-          ? 'pb-1'
+          ? 'pb-3'
           : ''
       : '';
 
   return (
     <div className={`flex flex-col gap-0.5 transition-[margin] duration-150 ${reorderPreviewClass}`}>
-      {dragOverTreeTarget?.nodeId === node.id && dragOverTreeTarget.placement === 'before' ? (
-        <div className="mb-2">
-          <GroupedSidebarDragShadowSlot />
-        </div>
-      ) : null}
       <div ref={setHeaderRef} data-sidebar-node-anchor-id={node.id} className="relative">
         <div
           className={`group/folder-row relative flex min-h-8 items-center gap-1 rounded-md pr-1 transition-colors ${
@@ -662,13 +607,13 @@ function GroupedSidebarFolderRow({ node }: { node: SidebarTreeFolderNode }) {
             onClick={() => {
               if (shouldSuppressClick()) return;
               if (isSelected) {
-                onToggleGroupCollapsed(node.path);
+                onToggleGroupCollapsed(folderPath);
                 return;
               }
               setSelectedSidebarNodeId(node.id);
-              onSelectFolder(node.path);
+              onSelectFolder(folderPath);
             }}
-            onDoubleClick={() => onToggleGroupCollapsed(node.path)}
+            onDoubleClick={() => onToggleGroupCollapsed(folderPath)}
             {...(attributes as unknown as Record<string, unknown>)}
             {...(listeners as unknown as Record<string, unknown>)}
           >
@@ -693,34 +638,42 @@ function GroupedSidebarFolderRow({ node }: { node: SidebarTreeFolderNode }) {
                   className="min-w-0 flex-1 rounded border border-[var(--accent-muted)] bg-[rgba(0,0,0,.2)] px-1.5 py-0.5 text-[11px] text-[var(--fg)] focus:outline-none"
                 />
               ) : (
-                <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-[var(--fg-secondary)]" title={node.path}>
+                <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-[var(--fg-secondary)]" title={folderPath}>
                   {node.label}
                 </span>
               )}
             </div>
           </button>
-          <div className="relative w-[120px] flex-shrink-0">
+          <div
+            className={`relative ml-2 flex flex-shrink-0 items-center justify-end transition-[min-width] duration-150 ${
+              isVirtualGroup ? 'group-hover/folder-row:min-w-[80px]' : 'group-hover/folder-row:min-w-[136px]'
+            }`}
+          >
             <div className="absolute inset-0 flex items-center justify-end pr-1 text-[10px] font-mono text-[var(--muted-dim)] transition-opacity duration-150 group-hover/folder-row:opacity-0">
               {node.totalDroneCount}
             </div>
             <div className="absolute inset-y-0 right-0 flex items-center justify-end gap-1 opacity-0 transition-all group-hover/folder-row:opacity-100">
-              <button
-                type="button"
-                onClick={() => onOpenFolderCreate(node.path)}
-                className="inline-flex h-6 w-6 items-center justify-center rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)] transition-all hover:border-[var(--accent-muted)] hover:bg-[var(--accent-subtle)] hover:text-[var(--accent)]"
-                title={`New subfolder in "${node.label}"`}
-              >
-                <IconPlus className="opacity-90" />
-              </button>
-              <button
-                type="button"
-                onClick={() => onStartRenameFolder(node.path)}
-                disabled={Boolean(deletingGroups[node.path]) || Boolean(renamingGroups[node.path])}
-                className="inline-flex h-6 w-6 items-center justify-center rounded border bg-[rgba(167,139,250,.08)] border-[rgba(167,139,250,.18)] text-[var(--accent)] transition-all hover:bg-[rgba(167,139,250,.12)] disabled:opacity-50"
-                title={`Rename folder "${node.label}"`}
-              >
-                {renamingGroups[node.path] ? <IconSpinner className="opacity-90" /> : <IconPencil className="opacity-90" />}
-              </button>
+              {!isVirtualGroup ? (
+                <button
+                  type="button"
+                  onClick={() => onOpenFolderCreate(folderPath)}
+                  className="inline-flex h-6 w-6 items-center justify-center rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)] transition-all hover:border-[var(--accent-muted)] hover:bg-[var(--accent-subtle)] hover:text-[var(--accent)]"
+                  title={`New subfolder in "${node.label}"`}
+                >
+                  <IconPlus className="opacity-90" />
+                </button>
+              ) : null}
+              {!isVirtualGroup ? (
+                <button
+                  type="button"
+                  onClick={() => onStartRenameFolder(folderPath)}
+                  disabled={Boolean(deletingGroups[folderPath]) || Boolean(renamingGroups[folderPath])}
+                  className="inline-flex h-6 w-6 items-center justify-center rounded border bg-[rgba(167,139,250,.08)] border-[rgba(167,139,250,.18)] text-[var(--accent)] transition-all hover:bg-[rgba(167,139,250,.12)] disabled:opacity-50"
+                  title={`Rename folder "${node.label}"`}
+                >
+                  {renamingGroups[folderPath] ? <IconSpinner className="opacity-90" /> : <IconPencil className="opacity-90" />}
+                </button>
+              ) : null}
               <button
                 type="button"
                 onClick={() => toggleSidebarGroupHidden(groupRef)}
@@ -735,9 +688,9 @@ function GroupedSidebarFolderRow({ node }: { node: SidebarTreeFolderNode }) {
               </button>
               <button
                 type="button"
-                onClick={() => onOpenGroupMultiChat(node.path)}
+                onClick={() => onOpenGroupMultiChat(folderPath)}
                 className={`inline-flex h-6 w-6 items-center justify-center rounded border transition-all ${
-                  selectedGroupMultiChat === node.path
+                  selectedGroupMultiChat === folderPath
                     ? 'bg-[var(--accent-subtle)] border-[var(--accent-muted)] text-[var(--accent)]'
                     : 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)] hover:border-[var(--accent-muted)] hover:bg-[var(--accent-subtle)] hover:text-[var(--accent)]'
                 }`}
@@ -747,12 +700,21 @@ function GroupedSidebarFolderRow({ node }: { node: SidebarTreeFolderNode }) {
               </button>
               <button
                 type="button"
-                onClick={() => onDeleteGroup(node.path, node.totalDroneCount, { kind: 'group', label: node.path })}
-                disabled={Boolean(deletingGroups[node.path]) || Boolean(renamingGroups[node.path])}
+                onClick={() =>
+                  onDeleteGroup(folderPath, node.totalDroneCount, {
+                    kind: node.groupKind,
+                    label: node.label,
+                    repoPath:
+                      isVirtualGroup && node.path.startsWith('repo:') && node.path !== 'repo:ungrouped'
+                        ? node.path.slice('repo:'.length)
+                        : null,
+                  })
+                }
+                disabled={Boolean(deletingGroups[folderPath]) || Boolean(renamingGroups[folderPath])}
                 className="inline-flex h-6 w-6 items-center justify-center rounded border border-[rgba(255,90,90,.2)] bg-[var(--red-subtle)] text-[var(--red)] transition-all hover:bg-[rgba(255,90,90,.15)] disabled:opacity-50"
                 title={`Delete folder "${node.label}"`}
               >
-                {deletingGroups[node.path] ? <IconSpinner className="opacity-90" /> : <IconTrash className="opacity-90" />}
+                {deletingGroups[folderPath] ? <IconSpinner className="opacity-90" /> : <IconTrash className="opacity-90" />}
               </button>
             </div>
           </div>
@@ -789,23 +751,13 @@ function GroupedSidebarFolderRow({ node }: { node: SidebarTreeFolderNode }) {
           ) : null}
           {childIds.map((childId) => (
             <div key={childId} data-sidebar-node-id={childId}>
-              <GroupedSidebarNodeEntry nodeId={childId} groupPath={node.path} />
+              <GroupedSidebarNodeEntry nodeId={childId} groupPath={folderPath} />
             </div>
           ))}
-          {intoState && childIds.length === 0 ? (
-            <div className="mt-1">
-              <GroupedSidebarDragShadowSlot />
-            </div>
-          ) : null}
           {showCreateInline && folderEditor?.error ? <div className="text-[10px] text-[var(--red)]">{folderEditor.error}</div> : null}
         </div>
       ) : null}
       {showEditorInline && folderEditor?.error ? <div className="ml-5 text-[10px] text-[var(--red)]">{folderEditor.error}</div> : null}
-      {dragOverTreeTarget?.nodeId === node.id && dragOverTreeTarget.placement === 'after' ? (
-        <div className="mt-2">
-          <GroupedSidebarDragShadowSlot />
-        </div>
-      ) : null}
     </div>
   );
 }
@@ -1085,32 +1037,36 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
         if (!targetNode) {
           if (overData?.type === 'sidebar-tree-folder-body' && hoveredFolderNode?.kind === 'folder') {
             const targetParentId = hoveredFolderNode.id;
-            const targetFolderPath = sidebarFolderPathFromNodeId(targetParentId);
+            const targetParentNode = nodeTree.nodesById[targetParentId];
+            const targetFolderPath = targetParentNode?.kind === 'folder' ? folderGroupPath(targetParentNode) : null;
             const sourceNode = nodeTree.nodesById[sidebarDroneNodeId(active.droneId)] as SidebarTreeDroneNode | undefined;
             const sourceParentId = sourceNode?.parentId ?? targetParentId;
             const movingDroneIds =
               props.selectedDroneSet.has(active.droneId) && props.selectedDroneIds.length > 0
                 ? props.selectedDroneIds.slice()
                 : [active.droneId];
+            const previousNodeOrderByParent = sidebarNodeOrderByParent;
+            const movingNodeIds = movingDroneIds.map(sidebarDroneNodeId);
+            const sourceVisibleChildIds = nodeTree.childIdsByParent[sourceParentId] ?? [];
+            const targetVisibleChildIds = nodeTree.childIdsByParent[targetParentId] ?? [];
+            const nextSourceVisible = sourceVisibleChildIds.filter((entry) => !movingNodeIds.includes(entry));
+            const nextTargetVisible = targetVisibleChildIds.filter((entry) => !movingNodeIds.includes(entry));
+            setSidebarNodeOrderByParent(
+              moveSidebarNodeIdsBetweenParents({
+                map: removeDroneIdsFromSidebarNodeOrderByParent(sidebarNodeOrderByParent, movingDroneIds),
+                sourceParentId,
+                targetParentId,
+                sourceVisibleChildIds: nextSourceVisible,
+                targetVisibleChildIds: nextTargetVisible,
+                movingNodeIds,
+                overNodeId: null,
+                placement: 'into',
+              }),
+            );
             void onMoveDronesToGroup(targetFolderPath ?? 'Ungrouped', movingDroneIds).then((result) => {
-              if (!result.ok) return;
-              const movingNodeIds = movingDroneIds.map(sidebarDroneNodeId);
-              const sourceVisibleChildIds = nodeTree.childIdsByParent[sourceParentId] ?? [];
-              const targetVisibleChildIds = nodeTree.childIdsByParent[targetParentId] ?? [];
-              const nextSourceVisible = sourceVisibleChildIds.filter((entry) => !movingNodeIds.includes(entry));
-              const nextTargetVisible = targetVisibleChildIds.filter((entry) => !movingNodeIds.includes(entry));
-              setSidebarNodeOrderByParent((prev) =>
-                moveSidebarNodeIdsBetweenParents({
-                  map: removeDroneIdsFromSidebarNodeOrderByParent(prev, movingDroneIds),
-                  sourceParentId,
-                  targetParentId,
-                  sourceVisibleChildIds: nextSourceVisible,
-                  targetVisibleChildIds: nextTargetVisible,
-                  movingNodeIds,
-                  overNodeId: null,
-                  placement: 'into',
-                }),
-              );
+              if (!result.ok) {
+                setSidebarNodeOrderByParent(previousNodeOrderByParent);
+              }
             });
           }
           clearDragState();
@@ -1141,7 +1097,8 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
               : placement === 'into' && targetNode.kind === 'folder'
                 ? targetNode.id
                 : targetNode.parentId;
-        const targetFolderPath = targetParentId === SIDEBAR_ROOT_PARENT_ID ? null : sidebarFolderPathFromNodeId(targetParentId);
+        const targetParentNode = targetParentId === SIDEBAR_ROOT_PARENT_ID ? null : nodeTree.nodesById[targetParentId];
+        const targetFolderPath = targetParentNode?.kind === 'folder' ? folderGroupPath(targetParentNode) : null;
         const sourceNode = nodeTree.nodesById[sidebarDroneNodeId(active.droneId)] as SidebarTreeDroneNode | undefined;
         const sourceParentId = sourceNode?.parentId ?? targetParentId;
         const sourceVisibleChildIds = nodeTree.childIdsByParent[sourceParentId] ?? [];
@@ -1163,13 +1120,13 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
         }
 
         void onMoveDronesToGroup(targetFolderPath ?? 'Ungrouped', movingDroneIds).then((result) => {
-          if (!result.ok) return;
           const movingNodeIds = movingDroneIds.map(sidebarDroneNodeId);
           const nextSourceVisible = sourceVisibleChildIds.filter((entry) => !movingNodeIds.includes(entry));
           const nextTargetVisible = targetVisibleChildIds.filter((entry) => !movingNodeIds.includes(entry));
-          setSidebarNodeOrderByParent((prev) =>
+          const previousNodeOrderByParent = sidebarNodeOrderByParent;
+          setSidebarNodeOrderByParent(
             moveSidebarNodeIdsBetweenParents({
-              map: removeDroneIdsFromSidebarNodeOrderByParent(prev, movingDroneIds),
+              map: removeDroneIdsFromSidebarNodeOrderByParent(sidebarNodeOrderByParent, movingDroneIds),
               sourceParentId,
               targetParentId,
               sourceVisibleChildIds: nextSourceVisible,
@@ -1179,6 +1136,9 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
               placement,
             }),
           );
+          if (!result.ok) {
+            setSidebarNodeOrderByParent(previousNodeOrderByParent);
+          }
         });
         clearDragState();
         return;
@@ -1194,7 +1154,7 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
         )
       ) {
         const sourceFolderPath = String(activeRaw.folderPath ?? '').trim();
-        const sourceNodeId = sidebarFolderNodeId(sourceFolderPath);
+        const sourceNodeId = String(activeRaw.folderNodeId ?? '').trim() || sidebarFolderNodeId(sourceFolderPath);
         const sourceNode = nodeTree.nodesById[sourceNodeId];
         const chatTargetNodeId =
           overData?.type === 'sidebar-chat-reorder' ? sidebarDroneNodeId(String(overData.droneId ?? '').trim()) : null;
@@ -1210,16 +1170,16 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
           if (sourceNode && overData?.type === 'sidebar-tree-folder-body' && hoveredFolderNode?.kind === 'folder') {
             const sourceParentId = sourceNode.parentId;
             const targetParentId = hoveredFolderNode.id;
-            const targetParentPath = sidebarFolderPathFromNodeId(targetParentId);
-            void moveFolder(sourceFolderPath, targetParentPath).then((ok) => {
-              if (!ok) return;
-              const movedFolderPath = joinSidebarGroupPath([targetParentPath, sidebarGroupBaseName(sourceFolderPath)]);
-              if (!movedFolderPath) return;
-              const sourceVisibleChildIds = nodeTree.childIdsByParent[sourceParentId] ?? [];
-              const targetVisibleChildIds = nodeTree.childIdsByParent[targetParentId] ?? [];
-              setSidebarNodeOrderByParent((prev) =>
+            const targetParentNode = nodeTree.nodesById[targetParentId];
+            const targetParentPath = targetParentNode?.kind === 'folder' ? folderGroupPath(targetParentNode) : null;
+            const previousNodeOrderByParent = sidebarNodeOrderByParent;
+            const sourceVisibleChildIds = nodeTree.childIdsByParent[sourceParentId] ?? [];
+            const targetVisibleChildIds = nodeTree.childIdsByParent[targetParentId] ?? [];
+            const movedFolderPath = joinSidebarGroupPath([targetParentPath, sidebarGroupBaseName(sourceFolderPath)]);
+            if (movedFolderPath) {
+              setSidebarNodeOrderByParent(
                 moveSidebarNodeIdsBetweenParents({
-                  map: prev,
+                  map: sidebarNodeOrderByParent,
                   sourceParentId,
                   targetParentId,
                   sourceVisibleChildIds,
@@ -1229,6 +1189,11 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
                   placement: 'into',
                 }),
               );
+            }
+            void moveFolder(sourceFolderPath, targetParentPath).then((ok) => {
+              if (!ok) {
+                setSidebarNodeOrderByParent(previousNodeOrderByParent);
+              }
             });
           }
           clearDragState();
@@ -1270,14 +1235,14 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
           return;
         }
 
-        const targetParentPath = targetParentId === SIDEBAR_ROOT_PARENT_ID ? null : sidebarFolderPathFromNodeId(targetParentId);
-        void moveFolder(sourceFolderPath, targetParentPath).then((ok) => {
-          if (!ok) return;
-          const movedFolderPath = joinSidebarGroupPath([targetParentPath, sidebarGroupBaseName(sourceFolderPath)]);
-          if (!movedFolderPath) return;
-          setSidebarNodeOrderByParent((prev) =>
+        const targetParentNode = targetParentId === SIDEBAR_ROOT_PARENT_ID ? null : nodeTree.nodesById[targetParentId];
+        const targetParentPath = targetParentNode?.kind === 'folder' ? folderGroupPath(targetParentNode) : null;
+        const movedFolderPath = joinSidebarGroupPath([targetParentPath, sidebarGroupBaseName(sourceFolderPath)]);
+        const previousNodeOrderByParent = sidebarNodeOrderByParent;
+        if (movedFolderPath) {
+          setSidebarNodeOrderByParent(
             moveSidebarNodeIdsBetweenParents({
-              map: prev,
+              map: sidebarNodeOrderByParent,
               sourceParentId,
               targetParentId,
               sourceVisibleChildIds,
@@ -1287,6 +1252,11 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
               placement,
             }),
           );
+        }
+        void moveFolder(sourceFolderPath, targetParentPath).then((ok) => {
+          if (!ok) {
+            setSidebarNodeOrderByParent(previousNodeOrderByParent);
+          }
         });
         clearDragState();
         return;

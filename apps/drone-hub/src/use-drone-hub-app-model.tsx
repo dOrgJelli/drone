@@ -1179,6 +1179,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
       suggestAndRenameDraftDrone,
       rememberStartupSeed,
       rememberSeenModels,
+      setStartupSeedByDrone,
       isValidDroneName: isValidDroneNameDashCase,
       hasWhitespaceInNameRaw: droneNameHasWhitespace,
       setCreateError,

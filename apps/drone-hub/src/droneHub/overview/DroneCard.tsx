@@ -30,6 +30,8 @@ export function DroneCard({
   statusHint,
   unreadAgentMessage,
   active,
+  activeIndicatorStyle,
+  leadingIcon,
   selectionTone,
   showSelectionEdge,
 }: {
@@ -58,6 +60,8 @@ export function DroneCard({
   statusHint?: string;
   unreadAgentMessage?: boolean;
   active?: boolean;
+  activeIndicatorStyle?: 'dot' | 'edge';
+  leadingIcon?: React.ReactNode;
   selectionTone?: 'accent' | 'muted';
   showSelectionEdge?: boolean;
   showGroup?: boolean;
@@ -95,6 +99,7 @@ export function DroneCard({
   const showUnreadIndicator =
     Boolean(unreadAgentMessage) && !isStarting && !showRespondingAsStatus;
   const showActiveIndicator = Boolean(active) && !showUnreadIndicator;
+  const renderActiveEdge = showActiveIndicator && activeIndicatorStyle === 'edge';
   const errText = String(drone.hubMessage ?? drone.statusError ?? '').trim();
   const showInlineError = drone.hubPhase === 'error' && Boolean(errText);
   const canOpenInlineError = showInlineError && typeof onErrorClick === 'function';
@@ -129,20 +134,21 @@ export function DroneCard({
         dragging ? 'opacity-35' : ''
       } focus:outline-none focus-visible:outline-none`}
     >
-      {/* Accent edge for selected state */}
-      {selected && renderSelectionEdge && (
+      {/* Accent edge for selected state or open-chat state when requested */}
+      {(selected && renderSelectionEdge) || renderActiveEdge ? (
         <div className="absolute left-0 top-1 bottom-1 w-[2px] rounded-full bg-[var(--accent)]" />
-      )}
+      ) : null}
 
       {/* Single row: name … status/actions */}
       <div className="flex-1 min-w-0 flex items-center gap-1.5">
+        {leadingIcon ? <span className="inline-flex flex-shrink-0 items-center">{leadingIcon}</span> : null}
         {showUnreadIndicator ? (
           <span
             className="inline-flex h-1.5 w-1.5 flex-shrink-0 rounded-full bg-[var(--yellow)]"
             title="Unread agent message"
             aria-label="Unread agent message"
           />
-        ) : showActiveIndicator ? (
+        ) : showActiveIndicator && !renderActiveEdge ? (
           <span
             className="inline-flex h-1.5 w-1.5 flex-shrink-0 rounded-full bg-[var(--accent)]"
             title="Open chat"

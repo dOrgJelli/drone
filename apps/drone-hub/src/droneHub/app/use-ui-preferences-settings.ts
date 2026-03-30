@@ -21,7 +21,7 @@ type UseUiPreferencesSettingsArgs = {
 const SAVE_DEBOUNCE_MS = 400;
 
 function normalizeSidebarGroupingMode(value: unknown): SidebarGroupingMode {
-  return value === 'repos' ? 'repos' : 'groups';
+  return value === 'groups' ? 'groups' : 'repos';
 }
 
 function normalizeOrderedStringList(value: unknown): string[] {
@@ -69,7 +69,7 @@ function serializeUiPreferencesSnapshot(value: UiPreferencesSnapshot): string {
 
 function hasMeaningfulUiPreferencesSnapshot(value: UiPreferencesSnapshot): boolean {
   return (
-    value.sidebarGroupingMode === 'repos' ||
+    value.sidebarGroupingMode === 'groups' ||
     value.sidebarGroupOrder.length > 0 ||
     Object.keys(value.sidebarDroneOrderByGroup).length > 0 ||
     Object.keys(value.sidebarNodeOrderByParent).length > 0 ||
@@ -82,7 +82,7 @@ function hasMeaningfulUiPreferencesSnapshot(value: UiPreferencesSnapshot): boole
 
 function mergeUiPreferencesForRecovery(base: UiPreferencesSnapshot, rescue: UiPreferencesSnapshot): UiPreferencesSnapshot {
   return normalizeUiPreferencesSnapshot({
-    sidebarGroupingMode: base.sidebarGroupingMode === 'groups' ? rescue.sidebarGroupingMode : base.sidebarGroupingMode,
+    sidebarGroupingMode: base.sidebarGroupingMode === 'repos' ? rescue.sidebarGroupingMode : base.sidebarGroupingMode,
     sidebarGroupOrder: base.sidebarGroupOrder.length > 0 ? base.sidebarGroupOrder : rescue.sidebarGroupOrder,
     sidebarDroneOrderByGroup:
       Object.keys(base.sidebarDroneOrderByGroup).length > 0 ? base.sidebarDroneOrderByGroup : rescue.sidebarDroneOrderByGroup,

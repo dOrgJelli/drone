@@ -5,12 +5,15 @@ import { orderSidebarNodeIds, SIDEBAR_ROOT_PARENT_ID, sidebarDroneNodeId, sideba
 import { sidebarFolderDisplayLabel, type SidebarFolderNode } from './sidebar-folder-tree';
 import { buildSidebarDroneTree } from './sidebar-drone-tree';
 import type { SidebarGroup } from './use-sidebar-view-model';
+import { splitSidebarGroupPath } from './sidebar-group-paths';
 
 export type SidebarTreeFolderNode = {
   id: string;
   kind: 'folder';
   path: string;
+  groupPath: string | null;
   label: string;
+  groupKind: SidebarGroup['kind'];
   parentId: string;
   depth: number;
   totalDroneCount: number;
@@ -96,20 +99,102 @@ function collectFolderNodes(
     id,
     kind: 'folder',
     path: folder.path,
+    groupPath: folder.kind === 'group' ? folder.path : null,
     label: sidebarFolderDisplayLabel(folder),
+    groupKind: folder.kind,
     parentId,
     depth: folder.depth,
     totalDroneCount: folder.totalDroneCount,
     directDroneCount: folder.directDroneCount,
   };
   nodesById[id] = folderNode;
-  folderNodeByPath[folder.path] = folderNode;
+  if (folderNode.groupPath && !folderNodeByPath[folderNode.groupPath]) {
+    folderNodeByPath[folderNode.groupPath] = folderNode;
+  }
   childIdsByParentDraft[parentId] ??= [];
   childIdsByParentDraft[parentId].push(id);
   childIdsByParentDraft[id] ??= [];
   for (const child of folder.children) {
     collectFolderNodes(child, id, nodesById, folderNodeByPath, childIdsByParentDraft);
   }
+}
+
+function repoScopedFolderPath(repoGroupPathRaw: string, groupPathRaw: string): string {
+  const repoGroupPath = String(repoGroupPathRaw ?? '').trim();
+  const groupPath = String(groupPathRaw ?? '').trim();
+  return `repo-scope:${repoGroupPath}:${groupPath}`;
+}
+
+function ensureRepoScopedGroupFolders(args: {
+  repoGroup: SidebarGroup;
+  repoRootNode: SidebarTreeFolderNode;
+  groupedItems: Map<string, DroneSummary[]>;
+  groupOrderIndex: Map<string, number>;
+  nodesById: Record<string, SidebarTreeNode>;
+  childIdsByParentDraft: Record<string, string[]>;
+}): Map<string, SidebarTreeFolderNode> {
+  const folderNodeByGroupPath = new Map<string, SidebarTreeFolderNode>();
+  const orderedGroupPaths = Array.from(args.groupedItems.keys())
+    .filter(Boolean)
+    .sort((a, b) => {
+      const aOrder = args.groupOrderIndex.get(sidebarGroupOrderToken({ group: a, kind: 'group' })) ?? Number.POSITIVE_INFINITY;
+      const bOrder = args.groupOrderIndex.get(sidebarGroupOrderToken({ group: b, kind: 'group' })) ?? Number.POSITIVE_INFINITY;
+      if (aOrder !== bOrder) return aOrder - bOrder;
+      return a.localeCompare(b);
+    });
+
+  for (const groupPath of orderedGroupPaths) {
+    const parts = splitSidebarGroupPath(groupPath);
+    let parentId = args.repoRootNode.id;
+    let depth = args.repoRootNode.depth + 1;
+    let currentGroupPath = '';
+    for (const part of parts) {
+      currentGroupPath = currentGroupPath ? `${currentGroupPath}/${part}` : part;
+      const existing = folderNodeByGroupPath.get(currentGroupPath);
+      if (existing) {
+        parentId = existing.id;
+        depth = existing.depth + 1;
+        continue;
+      }
+      const id = sidebarFolderNodeId(repoScopedFolderPath(args.repoGroup.group, currentGroupPath));
+      const folderNode: SidebarTreeFolderNode = {
+        id,
+        kind: 'folder',
+        path: repoScopedFolderPath(args.repoGroup.group, currentGroupPath),
+        groupPath: currentGroupPath,
+        label: part,
+        groupKind: 'group',
+        parentId,
+        depth,
+        totalDroneCount: 0,
+        directDroneCount: 0,
+      };
+      args.nodesById[id] = folderNode;
+      args.childIdsByParentDraft[parentId] ??= [];
+      args.childIdsByParentDraft[parentId].push(id);
+      args.childIdsByParentDraft[id] ??= [];
+      folderNodeByGroupPath.set(currentGroupPath, folderNode);
+      parentId = id;
+      depth += 1;
+    }
+  }
+
+  for (const [groupPath, items] of args.groupedItems.entries()) {
+    if (!groupPath) continue;
+    const leafNode = folderNodeByGroupPath.get(groupPath);
+    if (!leafNode) continue;
+    leafNode.directDroneCount += items.length;
+    leafNode.totalDroneCount += items.length;
+    let currentParentPath = groupPath;
+    while (currentParentPath.includes('/')) {
+      currentParentPath = currentParentPath.slice(0, currentParentPath.lastIndexOf('/'));
+      const parentNode = folderNodeByGroupPath.get(currentParentPath);
+      if (!parentNode) continue;
+      parentNode.totalDroneCount += items.length;
+    }
+  }
+
+  return folderNodeByGroupPath;
 }
 
 export function buildSidebarNodeTree({
@@ -122,6 +207,11 @@ export function buildSidebarNodeTree({
   const nodesById: Record<string, SidebarTreeNode> = {};
   const folderNodeByPath: Record<string, SidebarTreeFolderNode> = {};
   const childIdsByParentDraft: Record<string, string[]> = {};
+  const groupOrderIndex = new Map<string, number>();
+  for (const token of sidebarGroupOrder) {
+    if (groupOrderIndex.has(token)) continue;
+    groupOrderIndex.set(token, groupOrderIndex.size);
+  }
 
   for (const folder of sidebarFolderTree) {
     collectFolderNodes(folder, SIDEBAR_ROOT_PARENT_ID, nodesById, folderNodeByPath, childIdsByParentDraft);
@@ -147,14 +237,58 @@ export function buildSidebarNodeTree({
   });
 
   for (const group of sidebarGroups) {
-    if (group.kind !== 'group') continue;
     const groupPath = String(group.group ?? '').trim();
-    if (!groupPath || isUngroupedGroupName(groupPath)) continue;
+    if (!groupPath) continue;
+    if (group.kind === 'group' && isUngroupedGroupName(groupPath)) continue;
+    if (group.kind === 'repo') {
+      const repoRootNode = nodesById[sidebarFolderNodeId(groupPath)];
+      if (!repoRootNode || repoRootNode.kind !== 'folder') continue;
+      const itemsByActualGroup = new Map<string, DroneSummary[]>();
+      for (const item of group.items) {
+        const actualGroupPath = String(item.group ?? '').trim();
+        const key = !actualGroupPath || isUngroupedGroupName(actualGroupPath) ? '' : actualGroupPath;
+        const existingItems = itemsByActualGroup.get(key);
+        if (existingItems) {
+          existingItems.push(item);
+        } else {
+          itemsByActualGroup.set(key, [item]);
+        }
+      }
+      const repoFolderNodeByGroupPath = ensureRepoScopedGroupFolders({
+        repoGroup: group,
+        repoRootNode,
+        groupedItems: itemsByActualGroup,
+        groupOrderIndex,
+        nodesById,
+        childIdsByParentDraft,
+      });
+      for (const [actualGroupPath, rawItems] of itemsByActualGroup.entries()) {
+        const orderedDroneItems = orderSidebarEntries(
+          rawItems,
+          sidebarDroneOrderByGroup[sidebarGroupOrderToken({ group: actualGroupPath || 'Ungrouped', kind: 'group' })] ?? [],
+          (item) => item.id,
+          { unorderedPlacement: 'start' },
+        );
+        const tree = buildSidebarDroneTree(orderedDroneItems);
+        const parentNode = actualGroupPath ? repoFolderNodeByGroupPath.get(actualGroupPath) : repoRootNode;
+        appendDroneTreeNodes({
+          tree,
+          rootDroneIds: tree.rootDroneIds,
+          parentId: parentNode?.id ?? repoRootNode.id,
+          groupPath: actualGroupPath || null,
+          depth: (parentNode?.depth ?? repoRootNode.depth) + 1,
+          nodesById,
+          childIdsByParentDraft,
+          sidebarNodeOrderByParent,
+        });
+      }
+      continue;
+    }
     const folderNode = folderNodeByPath[groupPath];
     if (!folderNode) continue;
     const orderedDroneItems = orderSidebarEntries(
       group.items,
-      sidebarDroneOrderByGroup[sidebarGroupOrderToken({ group: groupPath, kind: 'group' })] ?? [],
+      sidebarDroneOrderByGroup[sidebarGroupOrderToken({ group: groupPath, kind: group.kind })] ?? [],
       (item) => item.id,
       { unorderedPlacement: 'start' },
     );

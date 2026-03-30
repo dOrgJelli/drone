@@ -37,6 +37,19 @@ export function IconColumns({ className }: { className?: string }) {
   );
 }
 
+export function IconChatThread({ className }: { className?: string }) {
+  return (
+    <svg className={className} width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="3" cy="4" r="0.9" fill="currentColor" stroke="none" />
+      <circle cx="3" cy="8" r="0.9" fill="currentColor" stroke="none" />
+      <circle cx="3" cy="12" r="0.9" fill="currentColor" stroke="none" />
+      <path d="M5.5 4h6.5" />
+      <path d="M5.5 8h5" />
+      <path d="M5.5 12h7.5" />
+    </svg>
+  );
+}
+
 export function IconBoard({ className }: { className?: string }) {
   return (
     <svg className={className} width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -49,6 +62,20 @@ export function IconBoard({ className }: { className?: string }) {
       <path d="M2.7 7.7h1" />
       <path d="M7.2 7.7h1" />
       <path d="M11.7 7.7h1" />
+    </svg>
+  );
+}
+
+export function IconTreeView({ className }: { className?: string }) {
+  return (
+    <svg className={className} width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M4 2.5v11" />
+      <path d="M4 5h2.5" />
+      <path d="M6.5 5h5" />
+      <path d="M4 11h2.5" />
+      <path d="M6.5 11h5" />
+      <circle cx="10.75" cy="5" r="1.25" fill="currentColor" stroke="none" />
+      <circle cx="10.75" cy="11" r="1.25" fill="currentColor" stroke="none" />
     </svg>
   );
 }
