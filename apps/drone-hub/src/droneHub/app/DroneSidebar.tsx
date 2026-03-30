@@ -453,6 +453,7 @@ type SidebarFolderTreeNodeProps = {
   onStartRenameFolder: (group: string) => void;
   onFolderEditorValueChange: (next: string) => void;
   onSubmitFolderEditor: () => void;
+  onBlurFolderEditor: () => void;
   onCancelFolderEditor: () => void;
   toggleSidebarGroupHidden: (target: SidebarDragGroupRef) => void;
   onOpenGroupMultiChat: (group: string) => void;
@@ -485,6 +486,7 @@ function SidebarFolderTreeNode({
   onStartRenameFolder,
   onFolderEditorValueChange,
   onSubmitFolderEditor,
+  onBlurFolderEditor,
   onCancelFolderEditor,
   toggleSidebarGroupHidden,
   onOpenGroupMultiChat,
@@ -585,7 +587,7 @@ function SidebarFolderTreeNode({
                   ref={folderEditorInputRef}
                   value={folderEditor.value}
                   onChange={(event) => onFolderEditorValueChange(event.target.value)}
-                  onBlur={onSubmitFolderEditor}
+                  onBlur={onBlurFolderEditor}
                   onKeyDown={(event) => {
                     if (event.key === 'Enter') {
                       event.preventDefault();
@@ -716,6 +718,7 @@ function SidebarFolderTreeNode({
               onStartRenameFolder={onStartRenameFolder}
               onFolderEditorValueChange={onFolderEditorValueChange}
               onSubmitFolderEditor={onSubmitFolderEditor}
+              onBlurFolderEditor={onBlurFolderEditor}
               onCancelFolderEditor={onCancelFolderEditor}
               toggleSidebarGroupHidden={toggleSidebarGroupHidden}
               onOpenGroupMultiChat={onOpenGroupMultiChat}
@@ -729,7 +732,7 @@ function SidebarFolderTreeNode({
                 ref={folderEditorInputRef}
                 value={folderEditor.value}
                 onChange={(event) => onFolderEditorValueChange(event.target.value)}
-                onBlur={onSubmitFolderEditor}
+                onBlur={onBlurFolderEditor}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') {
                     event.preventDefault();
@@ -1161,6 +1164,17 @@ export function DroneSidebar({
       setFolderEditor((prev) => (prev ? { ...prev, pending: false, error: message || 'Rename folder failed.' } : prev));
     }
   }, [folderEditor, runOptimisticCreateGroup, runOptimisticRenameGroup]);
+
+  const blurFolderEditor = React.useCallback(() => {
+    const draft = folderEditor;
+    if (!draft || draft.pending) return;
+    const segment = String(draft.value ?? '').trim().replace(/^\/+|\/+$/g, '');
+    if (!segment) {
+      setFolderEditor(null);
+      return;
+    }
+    void submitFolderEditor();
+  }, [folderEditor, submitFolderEditor]);
 
   const moveFolderIntoGroup = React.useCallback(
     async (sourceGroupRaw: string, targetGroupRaw: string) => {
@@ -2049,7 +2063,7 @@ export function DroneSidebar({
                             ref={folderEditorInputRef}
                             value={folderEditor.value}
                             onChange={(event) => updateFolderEditorValue(event.target.value)}
-                            onBlur={submitFolderEditor}
+                            onBlur={blurFolderEditor}
                             onKeyDown={(event) => {
                               if (event.key === 'Enter') {
                                 event.preventDefault();
@@ -2103,6 +2117,7 @@ export function DroneSidebar({
                       onStartRenameFolder={startRenameFolder}
                       onFolderEditorValueChange={updateFolderEditorValue}
                       onSubmitFolderEditor={submitFolderEditor}
+                      onBlurFolderEditor={blurFolderEditor}
                       onCancelFolderEditor={closeFolderEditor}
                       folderEditor={folderEditor}
                       folderEditorInputRef={folderEditorInputRef}
