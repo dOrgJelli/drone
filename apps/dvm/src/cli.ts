@@ -1523,7 +1523,7 @@ repoCommand
       // Clone from bundle into dest.
       const branch = options.branch ? String(options.branch) : '';
       const branchCmd = branch
-        ? `cd ${JSON.stringify(dest)} && git checkout ${options.forceBranch ? '-B' : '-b'} ${JSON.stringify(branch)}`
+        ? `cd ${JSON.stringify(dest)} && git checkout ${options.forceBranch ? '-B' : '-b'} ${JSON.stringify(branch)} ${JSON.stringify(baseSha)}`
         : '';
       const remoteCmd = hostRemoteUrl
         ? `cd ${JSON.stringify(dest)} && git remote set-url origin ${JSON.stringify(hostRemoteUrl)}`

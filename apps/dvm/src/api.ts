@@ -607,7 +607,7 @@ export class DvmApi {
       const branch = options.branch ? String(options.branch) : '';
       const checkoutRef = String(options.baseRef || 'HEAD').trim() || 'HEAD';
       const branchCmd = branch
-        ? `cd ${JSON.stringify(dest)} && git checkout ${options.forceBranch ? '-B' : '-b'} ${JSON.stringify(branch)} ${JSON.stringify(checkoutRef)}`
+        ? `cd ${JSON.stringify(dest)} && git checkout ${options.forceBranch ? '-B' : '-b'} ${JSON.stringify(branch)} ${JSON.stringify(baseSha)}`
         : checkoutRef !== 'HEAD'
           ? `cd ${JSON.stringify(dest)} && git checkout ${JSON.stringify(checkoutRef)}`
           : '';
