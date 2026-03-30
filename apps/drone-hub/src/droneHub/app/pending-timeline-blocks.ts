@@ -1,5 +1,5 @@
 import type { PendingPrompt } from '../types';
-import type { PendingPromptLoopGroup } from './prompt-loop-groups';
+import { pendingPromptTimelineSortMs, type PendingPromptLoopGroup } from './prompt-loop-groups';
 import { parseIsoMs } from './selected-drone-workspace-utils';
 import type {
   PromptAutomationJobSnapshot,
@@ -59,7 +59,7 @@ export function buildPendingTimelineBlocks(opts: {
       kind: 'pending-prompt',
       key: `pending-prompt:${item.id}`,
       item,
-      sortMs: parseIsoMs(item.at || item.updatedAt),
+      sortMs: pendingPromptTimelineSortMs(item),
       order: order++,
       timelineRole: 'other',
     });
