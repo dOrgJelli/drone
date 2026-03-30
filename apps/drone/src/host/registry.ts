@@ -174,6 +174,7 @@ type DroneRegistryV1 = {
     };
     uiPreferences?: {
       sidebarGroupingMode?: 'groups' | 'repos';
+      sidebarDensityMode?: 'compact' | 'default' | 'comfortable';
       sidebarGroupOrder?: string[];
       sidebarDroneOrderByGroup?: Record<string, string[]>;
       sidebarNodeOrderByParent?: Record<string, string[]>;

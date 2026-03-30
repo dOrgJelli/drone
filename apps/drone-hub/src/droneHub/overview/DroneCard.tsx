@@ -3,6 +3,7 @@ import { timeAgo } from '../../domain';
 import type { DroneSummary } from '../types';
 import { IconBaseImage, IconClone, IconPlus, IconRename, IconSpinner, IconTrash, TypingDots } from './icons';
 import { StatusBadge } from './StatusBadge';
+import type { SidebarDensityMode } from '../app/settings-types';
 
 export function DroneCard({
   drone,
@@ -36,6 +37,7 @@ export function DroneCard({
   leadingIcon,
   selectionTone,
   showSelectionEdge,
+  density = 'default',
 }: {
   drone: DroneSummary;
   displayName?: string;
@@ -69,6 +71,7 @@ export function DroneCard({
   selectionTone?: 'accent' | 'muted';
   showSelectionEdge?: boolean;
   showGroup?: boolean;
+  density?: SidebarDensityMode;
 }) {
   const shownName = String(displayName ?? drone.name).trim() || drone.name;
   const canClone = typeof onClone === 'function';
@@ -114,6 +117,18 @@ export function DroneCard({
   const canOpenInlineError = showInlineError && typeof onErrorClick === 'function';
   const selectedTone = selectionTone === 'muted' ? 'muted' : 'accent';
   const renderSelectionEdge = showSelectionEdge !== false;
+  const rowDensityClass =
+    density === 'compact'
+      ? 'min-h-[25px] px-2'
+      : density === 'comfortable'
+        ? 'min-h-[31px] px-3'
+        : 'h-7 px-2.5';
+  const titleDensityClass =
+    density === 'compact'
+      ? 'text-[11px]'
+      : density === 'comfortable'
+        ? 'text-[12.5px]'
+        : 'text-[12px]';
   const stopCardSelection = (e: React.SyntheticEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -133,7 +148,7 @@ export function DroneCard({
           onClick();
         }
       }}
-      className={`w-full text-left px-2.5 h-7 flex items-center rounded-md border transition-all duration-150 group/drone relative ${
+      className={`w-full text-left ${rowDensityClass} flex items-center rounded-md border transition-all duration-150 group/drone relative ${
         selected
           ? selectedTone === 'muted'
             ? 'bg-[rgba(255,255,255,.045)] border-[rgba(255,255,255,.08)]'
@@ -165,7 +180,7 @@ export function DroneCard({
           />
         ) : null}
         <span
-          className={`flex-1 min-w-0 truncate text-[12px] ${selected ? 'font-medium text-[var(--fg)]' : 'text-[var(--fg-secondary)]'}`}
+          className={`flex-1 min-w-0 truncate ${titleDensityClass} ${selected ? 'font-medium text-[var(--fg)]' : 'text-[var(--fg-secondary)]'}`}
           title={`${shownName}${shownName !== drone.name ? ` (${drone.name})` : ''} · created ${timeAgo(drone.createdAt)}`}
         >
           {shownName}

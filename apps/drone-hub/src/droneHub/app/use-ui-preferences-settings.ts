@@ -4,6 +4,7 @@ import {
   normalizeAutomationConfigs,
 } from './automation-config';
 import type {
+  SidebarDensityMode,
   SidebarGroupingMode,
   UiPreferencesSettingsResponse,
 } from './settings-types';
@@ -22,6 +23,10 @@ const SAVE_DEBOUNCE_MS = 400;
 
 function normalizeSidebarGroupingMode(value: unknown): SidebarGroupingMode {
   return value === 'groups' ? 'groups' : 'repos';
+}
+
+function normalizeSidebarDensityMode(value: unknown): SidebarDensityMode {
+  return value === 'compact' || value === 'comfortable' ? value : 'default';
 }
 
 function normalizeOrderedStringList(value: unknown): string[] {
@@ -53,6 +58,7 @@ function normalizeOrderedStringMap(value: unknown): Record<string, string[]> {
 function normalizeUiPreferencesSnapshot(value: Partial<UiPreferencesSnapshot> | null | undefined): UiPreferencesSnapshot {
   return {
     sidebarGroupingMode: normalizeSidebarGroupingMode(value?.sidebarGroupingMode),
+    sidebarDensityMode: normalizeSidebarDensityMode(value?.sidebarDensityMode),
     sidebarGroupOrder: normalizeOrderedStringList(value?.sidebarGroupOrder),
     sidebarDroneOrderByGroup: normalizeOrderedStringMap(value?.sidebarDroneOrderByGroup),
     sidebarNodeOrderByParent: normalizeOrderedStringMap(value?.sidebarNodeOrderByParent),
@@ -70,6 +76,7 @@ function serializeUiPreferencesSnapshot(value: UiPreferencesSnapshot): string {
 function hasMeaningfulUiPreferencesSnapshot(value: UiPreferencesSnapshot): boolean {
   return (
     value.sidebarGroupingMode === 'groups' ||
+    value.sidebarDensityMode !== 'default' ||
     value.sidebarGroupOrder.length > 0 ||
     Object.keys(value.sidebarDroneOrderByGroup).length > 0 ||
     Object.keys(value.sidebarNodeOrderByParent).length > 0 ||
@@ -83,6 +90,7 @@ function hasMeaningfulUiPreferencesSnapshot(value: UiPreferencesSnapshot): boole
 function mergeUiPreferencesForRecovery(base: UiPreferencesSnapshot, rescue: UiPreferencesSnapshot): UiPreferencesSnapshot {
   return normalizeUiPreferencesSnapshot({
     sidebarGroupingMode: base.sidebarGroupingMode === 'repos' ? rescue.sidebarGroupingMode : base.sidebarGroupingMode,
+    sidebarDensityMode: base.sidebarDensityMode === 'default' ? rescue.sidebarDensityMode : base.sidebarDensityMode,
     sidebarGroupOrder: base.sidebarGroupOrder.length > 0 ? base.sidebarGroupOrder : rescue.sidebarGroupOrder,
     sidebarDroneOrderByGroup:
       Object.keys(base.sidebarDroneOrderByGroup).length > 0 ? base.sidebarDroneOrderByGroup : rescue.sidebarDroneOrderByGroup,
@@ -123,6 +131,7 @@ export function restoreUiPreferencesFromPersistedStorage(
 export function useUiPreferencesSettings({ requestJson }: UseUiPreferencesSettingsArgs): void {
   const {
     sidebarGroupingMode,
+    sidebarDensityMode,
     sidebarGroupOrder,
     sidebarDroneOrderByGroup,
     sidebarNodeOrderByParent,
@@ -131,6 +140,7 @@ export function useUiPreferencesSettings({ requestJson }: UseUiPreferencesSettin
     autoDelete,
     automations,
     setSidebarGroupingMode,
+    setSidebarDensityMode,
     setSidebarGroupOrder,
     setSidebarDroneOrderByGroup,
     setSidebarNodeOrderByParent,
@@ -141,6 +151,7 @@ export function useUiPreferencesSettings({ requestJson }: UseUiPreferencesSettin
   } = useDroneHubUiStore(
     useShallow((s) => ({
       sidebarGroupingMode: s.sidebarGroupingMode,
+      sidebarDensityMode: s.sidebarDensityMode,
       sidebarGroupOrder: s.sidebarGroupOrder,
       sidebarDroneOrderByGroup: s.sidebarDroneOrderByGroup,
       sidebarNodeOrderByParent: s.sidebarNodeOrderByParent,
@@ -149,6 +160,7 @@ export function useUiPreferencesSettings({ requestJson }: UseUiPreferencesSettin
       autoDelete: s.autoDelete,
       automations: s.automations,
       setSidebarGroupingMode: s.setSidebarGroupingMode,
+      setSidebarDensityMode: s.setSidebarDensityMode,
       setSidebarGroupOrder: s.setSidebarGroupOrder,
       setSidebarDroneOrderByGroup: s.setSidebarDroneOrderByGroup,
       setSidebarNodeOrderByParent: s.setSidebarNodeOrderByParent,
@@ -168,6 +180,7 @@ export function useUiPreferencesSettings({ requestJson }: UseUiPreferencesSettin
     (value: Partial<UiPreferencesSnapshot> | null | undefined): UiPreferencesSnapshot => {
       const normalized = normalizeUiPreferencesSnapshot(value);
       setSidebarGroupingMode(normalized.sidebarGroupingMode);
+      setSidebarDensityMode(normalized.sidebarDensityMode);
       setSidebarGroupOrder(normalized.sidebarGroupOrder);
       setSidebarDroneOrderByGroup(normalized.sidebarDroneOrderByGroup);
       setSidebarNodeOrderByParent(normalized.sidebarNodeOrderByParent);
@@ -180,6 +193,7 @@ export function useUiPreferencesSettings({ requestJson }: UseUiPreferencesSettin
     [
       setAutoDelete,
       setAutomations,
+      setSidebarDensityMode,
       setHiddenSidebarGroups,
       setSidebarChatOrderByDrone,
       setSidebarDroneOrderByGroup,
@@ -201,6 +215,7 @@ export function useUiPreferencesSettings({ requestJson }: UseUiPreferencesSettin
     () =>
       normalizeUiPreferencesSnapshot({
         sidebarGroupingMode,
+        sidebarDensityMode,
         sidebarGroupOrder,
         sidebarDroneOrderByGroup,
         sidebarNodeOrderByParent,
@@ -213,6 +228,7 @@ export function useUiPreferencesSettings({ requestJson }: UseUiPreferencesSettin
       autoDelete,
       automations,
       hiddenSidebarGroups,
+      sidebarDensityMode,
       sidebarChatOrderByDrone,
       sidebarDroneOrderByGroup,
       sidebarNodeOrderByParent,
