@@ -100,6 +100,7 @@ import {
 } from './environment-config';
 import { hasActivePriorPendingPrompt, shouldDeferQueuedTranscriptPrompt, stalePendingPromptState } from './pendingPromptEnqueue';
 import {
+  applyBranchDiffToMainWorkingTree,
   buildReviewScopeId,
   cleanupQuarantineWorktree,
   deleteHostRefBestEffort,
@@ -118,7 +119,6 @@ import {
   gitResolveRemoteBranchForCreate,
   importBundleHeadToHostRef,
   isHostRepoPullBeforeCreateError,
-  mergeBranchIntoMainWorkingTreeNoCommit,
   resolveBundleImportSourceRefFromListHeads,
   gitStashPop,
   gitStashPush,
@@ -13105,7 +13105,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               const lastPullMode = String((lastPullAny as any)?.mode ?? '').trim().toLowerCase();
               const lastExportedHeadSha = String((lastPullAny as any)?.exportedHeadSha ?? '').trim().toLowerCase();
               if (
-                lastPullMode === 'bundle-merge-no-commit' &&
+                (lastPullMode === 'bundle-merge-no-commit' || lastPullMode === 'bundle-apply-no-commit') &&
                 /^[0-9a-f]{40}$/.test(lastExportedHeadSha) &&
                 summary.baseSha === lastExportedHeadSha &&
                 /^[0-9a-f]{40}$/.test(summary.headSha)
@@ -14370,8 +14370,9 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
       }
 
       // POST /api/drones/:id/repo/pull
-      // Pull container repo changes onto the host repo as a normal git merge (no auto-commit).
-      // Exports a bundle from the container, imports it to a temporary host ref, then merges that ref.
+      // Pull container repo changes onto the host repo without creating a merge commit.
+      // Exports a bundle from the container, imports it to a temporary host ref, then
+      // applies the imported branch diff onto the host worktree/index.
       if (
         method === 'POST' &&
         parts.length === 5 &&
@@ -14562,7 +14563,10 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               } catch (e: any) {
                 prePullBaseAdvanceError = e?.message ?? String(e);
               }
-            } else if (lastMode === 'bundle-merge-no-commit' && /^[0-9a-f]{40}$/.test(lastExportedHeadSha)) {
+            } else if (
+              (lastMode === 'bundle-merge-no-commit' || lastMode === 'bundle-apply-no-commit') &&
+              /^[0-9a-f]{40}$/.test(lastExportedHeadSha)
+            ) {
               try {
                 const hostContainsLastExport = await gitIsAncestor(repoRoot, lastExportedHeadSha, 'HEAD');
                 if (!hostContainsLastExport) {
@@ -14735,10 +14739,10 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             throw e;
           }
 
-          // Merge imported drone commits into the host branch.
-          // We intentionally do not auto-commit; users review/resolve and commit as normal.
+          // Apply imported drone changes onto the host branch without leaving MERGE_HEAD.
+          // Users still review/resolve and commit as normal, but the resulting commit remains single-parent.
           hostConflictState = true;
-          await mergeBranchIntoMainWorkingTreeNoCommit({ repoRoot, branch: importRefName });
+          await applyBranchDiffToMainWorkingTree({ repoRoot, branch: importRefName });
 
           await tryAdvanceContainerExportBase();
 
@@ -14752,7 +14756,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             dd.repo.lastPullAt = nowIso();
             dd.repo.lastPullError = null;
             dd.repo.lastPull = {
-              mode: 'bundle-merge-no-commit',
+              mode: 'bundle-apply-no-commit',
               exportFormat: 'bundle',
               exportPath,
               importedRef: importRefName,
@@ -14781,7 +14785,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           json(res, 200, {
             ok: true,
             name: droneName,
-            mode: 'bundle-merge-no-commit',
+            mode: 'bundle-apply-no-commit',
             repoRoot,
             fromRef,
             exportFormat: 'bundle',
@@ -14809,8 +14813,8 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
 
           if (patchErr?.kind === 'patch_apply_conflict') {
             if (!hostConflictState) {
-              const fullMsg = `${msg}\n\nFailed importing bundle or preparing merge. Host repo was not modified.`;
-              hubLog('error', 'Repo pull failed before host merge state', {
+              const fullMsg = `${msg}\n\nFailed importing bundle or preparing host apply. Host repo was not modified.`;
+              hubLog('error', 'Repo pull failed before host apply state', {
                 droneName,
                 repoRoot,
                 fromRef,
@@ -14867,7 +14871,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             }
 
             const guidance = [
-              'Conflicts were applied to your host repo as normal Git merge conflict markers.',
+              'Conflicts were applied to your host repo as normal Git conflict markers.',
               'Conflict marker mapping: <<<<<<< ours is your current host branch; >>>>>>> theirs is the pulled drone branch.',
               'Resolve conflicts in your current branch, then stage and commit as usual.',
               stashed
@@ -14877,7 +14881,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               .filter(Boolean)
               .join(' ');
             const fullMsg = `${msg}\n\n${guidance}`;
-            hubLog('warn', 'Repo pull produced host merge conflicts', {
+            hubLog('warn', 'Repo pull produced host apply conflicts', {
               droneName,
               repoRoot,
               fromRef,
