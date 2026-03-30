@@ -83,6 +83,8 @@ import {
   getTaskBoardStateFromRegistry,
   listScopedTasksForDroneScope,
   normalizeTaskTitle,
+  removeTasksForScope,
+  renameTasksForScope,
   normalizeTaskTypeId,
   persistTaskBoardState,
   removeScopedTaskFromBoard,
@@ -956,6 +958,8 @@ async function drainPendingTaskCreatesForDrone(droneId: string, droneEntry: any)
           typeId,
           createdAt,
           updatedAt: createdAt,
+          scopeType: repoPath ? 'repo' : 'global',
+          ...(repoPath ? { scopeValue: repoPath } : {}),
           repoPath,
           droneId,
           droneName: String(latestDrone?.name ?? droneId).trim() || droneId,
@@ -7100,6 +7104,8 @@ async function removeDroneById(opts: { id: string; keepVolume: boolean; forget: 
     removedRegistry = await updateRegistry((reg: any) => {
       if (reg?.drones?.[droneId]) {
         delete reg.drones[droneId];
+        const removed = removeTasksForScope(getTaskBoardStateFromRegistry(reg), 'drone', droneId);
+        if (removed.removedCount > 0) persistTaskBoardState(reg, removed.board);
         return true;
       }
       return false;
@@ -7492,6 +7498,8 @@ async function archiveDroneById(opts: {
     regAny.archived[droneId] = archivedEntry;
     if (regAny?.drones?.[droneId]) delete regAny.drones[droneId];
     if (regAny?.pending?.[droneId]) delete regAny.pending[droneId];
+    const removed = removeTasksForScope(getTaskBoardStateFromRegistry(regAny), 'drone', droneId);
+    if (removed.removedCount > 0) persistTaskBoardState(regAny, removed.board);
 
     return {
       hadEntry: true,
@@ -16086,6 +16094,9 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             regAny.groups[newName] = { name: newName, createdAt: at, updatedAt: at };
           }
 
+          const renamed = renameTasksForScope(getTaskBoardStateFromRegistry(regAny), 'group', oldName, newName);
+          if (renamed.renamedCount > 0) persistTaskBoardState(regAny, renamed.board);
+
           return { ok: true as const, movedDrones, movedPending };
         });
 
@@ -16147,6 +16158,8 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           try {
             await updateRegistry((regLatest: any) => {
               if (regLatest?.groups?.[group]) delete regLatest.groups[group];
+              const removed = removeTasksForScope(getTaskBoardStateFromRegistry(regLatest), 'group', group);
+              if (removed.removedCount > 0) persistTaskBoardState(regLatest, removed.board);
             });
           } catch {
             // ignore
@@ -16189,6 +16202,8 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               if (regLatest?.pending?.[n] && !regLatest?.drones?.[n]) delete regLatest.pending[n];
             }
             if (!wantsUngrouped && regLatest?.groups?.[group]) delete regLatest.groups[group];
+            const removed = removeTasksForScope(getTaskBoardStateFromRegistry(regLatest), 'group', group);
+            if (removed.removedCount > 0) persistTaskBoardState(regLatest, removed.board);
           });
         } catch {
           // ignore (drones are already deleted)

@@ -17,6 +17,7 @@ import {
 import { readLocalStorageItem } from './hooks';
 import type { CustomAgentProfile } from '../types';
 import type { SettingsTabId } from './settings-tabs';
+import type { KanbanTaskScopeType } from './kanban-board-state';
 import {
   automationConfigsEqual,
   createAutomationConfig,
@@ -36,6 +37,7 @@ type SidebarGroupingMode = 'groups' | 'repos';
 type FsExplorerView = 'list' | 'thumb';
 type OutputView = 'screen' | 'log';
 type KanbanBoardViewMode = 'board' | 'table';
+type KanbanBoardScopeType = KanbanTaskScopeType;
 const CHAT_INPUT_DRAFT_MAX_CHARS = 4_000;
 const CHAT_INPUT_DRAFT_MAX_KEYS = 80;
 const CHAT_INPUT_DRAFTS_STORAGE_KEY = profileStorageKey('droneHub.chatInputDrafts');
@@ -49,6 +51,8 @@ type DroneHubUiState = {
   playbookRunsSelectedPlaybookId: string;
   playbookRunsSelectedRepoPath: string;
   kanbanBoardSelectionInitialized: boolean;
+  kanbanBoardScopeType: KanbanBoardScopeType;
+  kanbanBoardScopeValue: string;
   kanbanBoardSelectedRepoPath: string;
   kanbanBoardViewMode: KanbanBoardViewMode;
   chatHeaderRepoPath: string;
@@ -108,6 +112,8 @@ type DroneHubUiState = {
   setPlaybookRunsSelectedPlaybookId: (next: Updater<string>) => void;
   setPlaybookRunsSelectedRepoPath: (next: Updater<string>) => void;
   setKanbanBoardSelectionInitialized: (next: Updater<boolean>) => void;
+  setKanbanBoardScopeType: (next: Updater<KanbanBoardScopeType>) => void;
+  setKanbanBoardScopeValue: (next: Updater<string>) => void;
   setKanbanBoardSelectedRepoPath: (next: Updater<string>) => void;
   setKanbanBoardViewMode: (next: Updater<KanbanBoardViewMode>) => void;
   setChatHeaderRepoPath: (next: Updater<string>) => void;
@@ -180,6 +186,8 @@ type DroneHubUiPersistedState = Pick<
   | 'playbookRunsSelectedPlaybookId'
   | 'playbookRunsSelectedRepoPath'
   | 'kanbanBoardSelectionInitialized'
+  | 'kanbanBoardScopeType'
+  | 'kanbanBoardScopeValue'
   | 'kanbanBoardSelectedRepoPath'
   | 'kanbanBoardViewMode'
   | 'chatHeaderRepoPath'
@@ -283,6 +291,10 @@ function normalizeKanbanBoardViewMode(value: unknown): KanbanBoardViewMode {
   return value === 'table' ? 'table' : 'board';
 }
 
+function normalizeKanbanBoardScopeType(value: unknown): KanbanBoardScopeType {
+  return value === 'repo' || value === 'group' || value === 'drone' ? value : 'global';
+}
+
 function normalizeBoolean(value: unknown): boolean {
   return value === true;
 }
@@ -349,6 +361,8 @@ function readPersistedDroneHubUiSelections(): Pick<
   | 'playbookRunsSelectedPlaybookId'
   | 'playbookRunsSelectedRepoPath'
   | 'kanbanBoardSelectionInitialized'
+  | 'kanbanBoardScopeType'
+  | 'kanbanBoardScopeValue'
   | 'kanbanBoardSelectedRepoPath'
   | 'kanbanBoardViewMode'
 > {
@@ -359,6 +373,8 @@ function readPersistedDroneHubUiSelections(): Pick<
       playbookRunsSelectedPlaybookId: '',
       playbookRunsSelectedRepoPath: '',
       kanbanBoardSelectionInitialized: false,
+      kanbanBoardScopeType: 'global',
+      kanbanBoardScopeValue: '',
       kanbanBoardSelectedRepoPath: '',
       kanbanBoardViewMode: 'board',
     };
@@ -374,6 +390,8 @@ function readPersistedDroneHubUiSelections(): Pick<
       playbookRunsSelectedPlaybookId: normalizeTrimmedString(persistedState?.playbookRunsSelectedPlaybookId),
       playbookRunsSelectedRepoPath: normalizeTrimmedString(persistedState?.playbookRunsSelectedRepoPath),
       kanbanBoardSelectionInitialized: normalizeBoolean(persistedState?.kanbanBoardSelectionInitialized),
+      kanbanBoardScopeType: normalizeKanbanBoardScopeType(persistedState?.kanbanBoardScopeType),
+      kanbanBoardScopeValue: normalizeTrimmedString(persistedState?.kanbanBoardScopeValue),
       kanbanBoardSelectedRepoPath: normalizeTrimmedString(persistedState?.kanbanBoardSelectedRepoPath),
       kanbanBoardViewMode: normalizeKanbanBoardViewMode(persistedState?.kanbanBoardViewMode),
     };
@@ -383,6 +401,8 @@ function readPersistedDroneHubUiSelections(): Pick<
       playbookRunsSelectedPlaybookId: '',
       playbookRunsSelectedRepoPath: '',
       kanbanBoardSelectionInitialized: false,
+      kanbanBoardScopeType: 'global',
+      kanbanBoardScopeValue: '',
       kanbanBoardSelectedRepoPath: '',
       kanbanBoardViewMode: 'board',
     };
@@ -425,6 +445,8 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
       playbookRunsSelectedPlaybookId: initialPlaybookRunsSelections.playbookRunsSelectedPlaybookId,
       playbookRunsSelectedRepoPath: initialPlaybookRunsSelections.playbookRunsSelectedRepoPath,
       kanbanBoardSelectionInitialized: initialPlaybookRunsSelections.kanbanBoardSelectionInitialized,
+      kanbanBoardScopeType: initialPlaybookRunsSelections.kanbanBoardScopeType,
+      kanbanBoardScopeValue: initialPlaybookRunsSelections.kanbanBoardScopeValue,
       kanbanBoardSelectedRepoPath: initialPlaybookRunsSelections.kanbanBoardSelectedRepoPath,
       kanbanBoardViewMode: initialPlaybookRunsSelections.kanbanBoardViewMode,
       chatHeaderRepoPath: '',
@@ -489,6 +511,10 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
         set((s) => ({ playbookRunsSelectedRepoPath: normalizeTrimmedString(resolveNext(s.playbookRunsSelectedRepoPath, next)) })),
       setKanbanBoardSelectionInitialized: (next) =>
         set((s) => ({ kanbanBoardSelectionInitialized: resolveNext(s.kanbanBoardSelectionInitialized, next) })),
+      setKanbanBoardScopeType: (next) =>
+        set((s) => ({ kanbanBoardScopeType: normalizeKanbanBoardScopeType(resolveNext(s.kanbanBoardScopeType, next)) })),
+      setKanbanBoardScopeValue: (next) =>
+        set((s) => ({ kanbanBoardScopeValue: normalizeTrimmedString(resolveNext(s.kanbanBoardScopeValue, next)) })),
       setKanbanBoardSelectedRepoPath: (next) =>
         set((s) => ({ kanbanBoardSelectedRepoPath: normalizeTrimmedString(resolveNext(s.kanbanBoardSelectedRepoPath, next)) })),
       setKanbanBoardViewMode: (next) =>
@@ -659,7 +685,7 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
     }),
     {
       name: profileStorageKey('droneHub.ui'),
-      version: 10,
+      version: 11,
       storage: createJSONStorage(() => localStorage),
       migrate: (persistedState, version) => migrateDroneHubUiPersistedState(persistedState, version),
       partialize: (state): DroneHubUiPersistedState => ({
@@ -669,6 +695,8 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
         playbookRunsSelectedPlaybookId: state.playbookRunsSelectedPlaybookId,
         playbookRunsSelectedRepoPath: state.playbookRunsSelectedRepoPath,
         kanbanBoardSelectionInitialized: state.kanbanBoardSelectionInitialized,
+        kanbanBoardScopeType: state.kanbanBoardScopeType,
+        kanbanBoardScopeValue: state.kanbanBoardScopeValue,
         kanbanBoardSelectedRepoPath: state.kanbanBoardSelectedRepoPath,
         kanbanBoardViewMode: state.kanbanBoardViewMode,
         chatHeaderRepoPath: state.chatHeaderRepoPath,
@@ -730,6 +758,12 @@ export const useDroneHubUiStore = create<DroneHubUiState>()(
           ),
           kanbanBoardSelectionInitialized: normalizeBoolean(
             persisted.kanbanBoardSelectionInitialized ?? currentState.kanbanBoardSelectionInitialized,
+          ),
+          kanbanBoardScopeType: normalizeKanbanBoardScopeType(
+            persisted.kanbanBoardScopeType ?? currentState.kanbanBoardScopeType,
+          ),
+          kanbanBoardScopeValue: normalizeTrimmedString(
+            persisted.kanbanBoardScopeValue ?? currentState.kanbanBoardScopeValue,
           ),
           kanbanBoardSelectedRepoPath: normalizeTrimmedString(
             persisted.kanbanBoardSelectedRepoPath ?? currentState.kanbanBoardSelectedRepoPath,
@@ -796,6 +830,11 @@ export function useDroneHubAppModelUiState() {
       playbookRunsSelectionInitialized: s.playbookRunsSelectionInitialized,
       playbookRunsSelectedPlaybookId: s.playbookRunsSelectedPlaybookId,
       playbookRunsSelectedRepoPath: s.playbookRunsSelectedRepoPath,
+      kanbanBoardSelectionInitialized: s.kanbanBoardSelectionInitialized,
+      kanbanBoardScopeType: s.kanbanBoardScopeType,
+      kanbanBoardScopeValue: s.kanbanBoardScopeValue,
+      kanbanBoardSelectedRepoPath: s.kanbanBoardSelectedRepoPath,
+      kanbanBoardViewMode: s.kanbanBoardViewMode,
       chatHeaderRepoPath: s.chatHeaderRepoPath,
       appView: s.appView,
       viewMode: s.viewMode,
@@ -842,6 +881,11 @@ export function useDroneHubAppModelUiState() {
       setPlaybookRunsSelectionInitialized: s.setPlaybookRunsSelectionInitialized,
       setPlaybookRunsSelectedPlaybookId: s.setPlaybookRunsSelectedPlaybookId,
       setPlaybookRunsSelectedRepoPath: s.setPlaybookRunsSelectedRepoPath,
+      setKanbanBoardSelectionInitialized: s.setKanbanBoardSelectionInitialized,
+      setKanbanBoardScopeType: s.setKanbanBoardScopeType,
+      setKanbanBoardScopeValue: s.setKanbanBoardScopeValue,
+      setKanbanBoardSelectedRepoPath: s.setKanbanBoardSelectedRepoPath,
+      setKanbanBoardViewMode: s.setKanbanBoardViewMode,
       setChatHeaderRepoPath: s.setChatHeaderRepoPath,
       setAppView: s.setAppView,
       setSidebarGroupingMode: s.setSidebarGroupingMode,
