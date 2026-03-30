@@ -35,6 +35,7 @@ import type { SidebarGroup } from './use-sidebar-view-model';
 type FolderEditorState = {
   mode: 'create' | 'rename';
   parentPath: string | null;
+  anchorPath: string | null;
   targetPath: string | null;
   value: string;
   error: string | null;
@@ -70,7 +71,7 @@ type GroupedSidebarTreeProps = {
   renamingGroups: Record<string, boolean>;
   hiddenSidebarGroupTokenSet: Set<string>;
   selectedGroupMultiChat: string | null;
-  onOpenFolderCreate: (parentPath: string | null) => void;
+  onOpenFolderCreate: (parentPath: string | null, opts?: { anchorPath?: string | null }) => void;
   onStartRenameFolder: (path: string) => void;
   onFolderEditorValueChange: (next: string) => void;
   onSubmitFolderEditor: () => void;
@@ -659,7 +660,7 @@ function GroupedSidebarFolderRow({ node }: { node: SidebarTreeFolderNode }) {
   const isSelected = selectedSidebarNodeId === node.id || selectedFolderPath === folderPath;
   const isHiddenGroup = hiddenSidebarGroupTokenSet.has(groupToken);
   const showEditorInline = folderEditor?.targetPath === folderPath && folderEditor.mode === 'rename';
-  const showCreateInline = folderEditor?.parentPath === folderPath && folderEditor.mode === 'create';
+  const showCreateInline = (folderEditor?.anchorPath ?? folderEditor?.parentPath) === folderPath && folderEditor?.mode === 'create';
   const childIds = nodeTree.childIdsByParent[node.id] ?? [];
   const { attributes, listeners, isDragging, setNodeRef: setDragNodeRef } = useDraggable({
     id: `sidebar-folder:${node.id}`,
@@ -774,7 +775,9 @@ function GroupedSidebarFolderRow({ node }: { node: SidebarTreeFolderNode }) {
             <div className="absolute inset-y-0 right-0 flex items-center justify-end gap-1 opacity-0 transition-all group-hover/folder-row:opacity-100">
               <button
                 type="button"
-                onClick={() => onOpenFolderCreate(isVirtualGroup ? null : folderPath)}
+                onClick={() =>
+                  onOpenFolderCreate(isVirtualGroup ? null : folderPath, isVirtualGroup ? { anchorPath: folderPath } : undefined)
+                }
                 className={`inline-flex ${densityClasses.folderActionButton} items-center justify-center rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)] transition-all hover:border-[var(--accent-muted)] hover:bg-[var(--accent-subtle)] hover:text-[var(--accent)]`}
                 title={isVirtualGroup ? `New top-level folder from "${node.label}"` : `New subfolder in "${node.label}"`}
               >
@@ -861,7 +864,7 @@ function GroupedSidebarFolderRow({ node }: { node: SidebarTreeFolderNode }) {
                   }
                 }}
                 maxLength={64}
-                placeholder="Subfolder name"
+                placeholder={folderEditor?.parentPath ? 'Subfolder name' : 'Folder name'}
                 className={`min-w-0 flex-1 rounded-md border border-[var(--accent-muted)] bg-[rgba(15,18,28,.88)] text-[var(--fg)] shadow-[0_0_0_1px_rgba(167,139,250,.16)] focus:border-[var(--accent)] focus:outline-none focus:ring-2 focus:ring-[rgba(167,139,250,.18)] ${densityClasses.folderInput}`}
               />
             </div>
@@ -875,7 +878,9 @@ function GroupedSidebarFolderRow({ node }: { node: SidebarTreeFolderNode }) {
             ) : (
               <button
                 type="button"
-                onClick={() => onOpenFolderCreate(isVirtualGroup ? null : folderPath)}
+                onClick={() =>
+                  onOpenFolderCreate(isVirtualGroup ? null : folderPath, isVirtualGroup ? { anchorPath: folderPath } : undefined)
+                }
                 className={densityClasses.emptyHint}
                 title={isVirtualGroup ? `Create a top-level folder from "${node.label}"` : `Create a subfolder in "${node.label}"`}
               >

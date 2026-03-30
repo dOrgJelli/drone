@@ -424,6 +424,7 @@ function SidebarGroupSection({
 type FolderEditorState = {
   mode: 'create' | 'rename';
   parentPath: string | null;
+  anchorPath: string | null;
   targetPath: string | null;
   value: string;
   error: string | null;
@@ -448,7 +449,7 @@ type SidebarFolderTreeNodeProps = {
   sharedDroneTreeListProps: Omit<React.ComponentProps<typeof SidebarDroneTreeList>, 'tree'>;
   onSelectFolder: (path: string) => void;
   onToggleGroupCollapsed: (group: string) => void;
-  onOpenFolderCreate: (parentPath: string | null) => void;
+  onOpenFolderCreate: (parentPath: string | null, opts?: { anchorPath?: string | null }) => void;
   onStartRenameFolder: (group: string) => void;
   onFolderEditorValueChange: (next: string) => void;
   onSubmitFolderEditor: () => void;
@@ -502,7 +503,7 @@ function SidebarFolderTreeNode({
   const canRenameGroup = !isUngroupedGroupName(node.path);
   const canDeleteGroup = !isUngroupedGroupName(node.path);
   const showEditorInline = folderEditor?.targetPath === node.path && folderEditor.mode === 'rename';
-  const showCreateInline = folderEditor?.parentPath === node.path && folderEditor.mode === 'create';
+  const showCreateInline = (folderEditor?.anchorPath ?? folderEditor?.parentPath) === node.path && folderEditor?.mode === 'create';
   const dragData = React.useMemo<SidebarGroupDragData>(
     () => ({
       type: 'sidebar-group',
@@ -739,7 +740,7 @@ function SidebarFolderTreeNode({
                   }
                 }}
                 maxLength={64}
-                placeholder="Subfolder name"
+                placeholder={folderEditor.parentPath ? 'Subfolder name' : 'Folder name'}
                 className="min-w-0 flex-1 rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.2)] px-2 py-1 text-[11px] text-[var(--fg)] focus:border-[var(--accent-muted)] focus:outline-none"
               />
             </div>
@@ -1017,7 +1018,7 @@ export function DroneSidebar({
   const folderEditorFocusKey = React.useMemo(
     () =>
       folderEditor
-        ? `${folderEditor.mode}:${folderEditor.parentPath ?? ''}:${folderEditor.targetPath ?? ''}`
+        ? `${folderEditor.mode}:${folderEditor.parentPath ?? ''}:${folderEditor.anchorPath ?? ''}:${folderEditor.targetPath ?? ''}`
         : null,
     [folderEditor],
   );
@@ -1047,13 +1048,15 @@ export function DroneSidebar({
   }, []);
 
   const openFolderCreate = React.useCallback(
-    (parentPathRaw: string | null) => {
+    (parentPathRaw: string | null, opts?: { anchorPath?: string | null }) => {
       const parentPath = String(parentPathRaw ?? '').trim() || null;
+      const anchorPath = String(opts?.anchorPath ?? '').trim() || parentPath;
       if (parentPath && collapsedGroups[parentPath]) onToggleGroupCollapsed(parentPath);
-      setSelectedFolderPath(parentPath);
+      setSelectedFolderPath(anchorPath);
       setFolderEditor({
         mode: 'create',
         parentPath,
+        anchorPath,
         targetPath: null,
         value: '',
         error: null,
@@ -1070,6 +1073,7 @@ export function DroneSidebar({
     setFolderEditor({
       mode: 'rename',
       parentPath: sidebarGroupParentPath(group),
+      anchorPath: group,
       targetPath: group,
       value: sidebarGroupBaseName(group),
       error: null,
@@ -1629,7 +1633,11 @@ export function DroneSidebar({
     if (visibleSidebarFolderPathSet.has(selectedFolderPath)) return;
     setSelectedFolderPath(null);
     setSelectedSidebarNodeId((prev) => (prev === sidebarFolderNodeId(selectedFolderPath) ? null : prev));
-    setFolderEditor((prev) => (prev?.targetPath === selectedFolderPath || prev?.parentPath === selectedFolderPath ? null : prev));
+    setFolderEditor((prev) =>
+      prev?.targetPath === selectedFolderPath || prev?.parentPath === selectedFolderPath || prev?.anchorPath === selectedFolderPath
+        ? null
+        : prev,
+    );
   }, [selectedFolderPath, visibleSidebarFolderPathSet]);
 
   React.useEffect(() => {
@@ -2034,7 +2042,7 @@ export function DroneSidebar({
                           </span>
                         ) : null}
                       </div>
-                      {folderEditor?.mode === 'create' && folderEditor.parentPath === null ? (
+                      {folderEditor?.mode === 'create' && folderEditor.parentPath === null && folderEditor.anchorPath === null ? (
                         <div className="mb-1 flex items-center gap-2 rounded-md border border-dashed border-[var(--accent-muted)] bg-[var(--accent-subtle)] px-2 py-1.5">
                           <IconFolder className="h-3.5 w-3.5 flex-shrink-0 text-[var(--accent)] opacity-80" />
                           <input
@@ -2057,7 +2065,7 @@ export function DroneSidebar({
                           />
                         </div>
                       ) : null}
-                      {folderEditor?.mode === 'create' && folderEditor.parentPath === null && folderEditor.error ? (
+                      {folderEditor?.mode === 'create' && folderEditor.parentPath === null && folderEditor.anchorPath === null && folderEditor.error ? (
                         <div className="mb-1 px-1 text-[10px] text-[var(--red)]">{folderEditor.error}</div>
                       ) : null}
                       </>
