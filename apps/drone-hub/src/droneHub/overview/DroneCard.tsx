@@ -81,25 +81,25 @@ export function DroneCard({
   const pinActionsVisible = Boolean(renameBusy) || Boolean(setBaseImageBusy) || Boolean(deleteBusy);
   const actionReserveWidthClass =
     actionCount >= 5
-      ? 'min-w-[108px]'
+      ? 'min-w-[116px]'
       : actionCount === 4
-        ? 'min-w-[86px]'
+        ? 'min-w-[92px]'
       : actionCount === 3
-        ? 'min-w-[64px]'
+        ? 'min-w-[68px]'
         : actionCount === 2
-          ? 'min-w-[42px]'
+          ? 'min-w-[44px]'
           : actionCount === 1
             ? 'min-w-[20px]'
             : '';
   const actionReserveHoverWidthClass =
     actionCount >= 5
-      ? 'group-hover/drone:min-w-[108px]'
+      ? 'group-hover/drone:min-w-[116px]'
       : actionCount === 4
-        ? 'group-hover/drone:min-w-[86px]'
+        ? 'group-hover/drone:min-w-[92px]'
       : actionCount === 3
-        ? 'group-hover/drone:min-w-[64px]'
+        ? 'group-hover/drone:min-w-[68px]'
         : actionCount === 2
-          ? 'group-hover/drone:min-w-[42px]'
+          ? 'group-hover/drone:min-w-[44px]'
           : actionCount === 1
             ? 'group-hover/drone:min-w-[20px]'
             : '';
