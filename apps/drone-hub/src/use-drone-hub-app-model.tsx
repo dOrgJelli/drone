@@ -2069,6 +2069,37 @@ export function useDroneHubAppModel(): DroneHubAppModel {
       sidebarSelectableDroneIdSet,
     ],
   );
+  const createDroneChat = React.useCallback(
+    async (drone: DroneSummary): Promise<void> => {
+      const droneId = String(drone?.id ?? '').trim();
+      if (!droneId) return;
+      const availableChats = Array.isArray(drone?.chats) && drone.chats.length > 0 ? drone.chats : ['default'];
+      const seed = `chat-${Math.max(1, availableChats.length + 1)}`;
+      const raw = window.prompt('New chat name', seed);
+      if (raw == null) return;
+      const chatName = String(raw ?? '').trim();
+      if (!chatName) {
+        window.alert('Chat name is required.');
+        return;
+      }
+      const copyFromChat =
+        selectedDrone === droneId
+          ? (String(selectedChat ?? '').trim() || 'default')
+          : (availableChats.includes('default') ? 'default' : availableChats[0] ?? 'default');
+      try {
+        await requestJson<{ ok: true }>(`/api/drones/${encodeURIComponent(droneId)}/chats`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name: chatName, ...(availableChats.length > 0 ? { copyFromChat } : {}) }),
+        });
+        setSelectedDrone(droneId);
+        setSelectedChat(chatName);
+      } catch (err: any) {
+        window.alert(err?.message ?? String(err));
+      }
+    },
+    [requestJson, selectedChat, selectedDrone, setSelectedChat, setSelectedDrone],
+  );
   const deleteCanvasChat = React.useCallback(
     async (
       droneIdRaw: string,
@@ -2473,6 +2504,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     openPlaybookRuns,
     selectDroneCard,
     selectDroneChat,
+    createDroneChat,
     deleteCanvasChat,
     openCloneModal,
     renameDrone,

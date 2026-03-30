@@ -2,6 +2,14 @@ import React from 'react';
 
 export { IconChat, IconChevron, IconDrone, IconFolder, IconSpinner, IconTrash } from '../icons';
 
+export function IconPlus({ className }: { className?: string }) {
+  return (
+    <svg className={className} width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+      <path d="M8 1.75a.75.75 0 01.75.75v4.75h4.75a.75.75 0 010 1.5H8.75v4.75a.75.75 0 01-1.5 0V8.75H2.5a.75.75 0 010-1.5h4.75V2.5A.75.75 0 018 1.75z" />
+    </svg>
+  );
+}
+
 export function IconClone({ className }: { className?: string }) {
   return (
     <svg className={className} width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">

@@ -796,6 +796,7 @@ export type DroneSidebarProps = {
     chatName: string,
   ) => Promise<{ ok: boolean; deletedDrone?: boolean; error?: string | null }>;
   onOpenCloneModal: (drone: DroneSummary) => void;
+  onCreateDroneChat: (drone: DroneSummary) => void;
   onRenameDrone: (droneId: string) => void;
   onSetDroneBaseImage: (droneId: string) => void;
   onDeleteDrone: (droneId: string) => void;
@@ -855,6 +856,7 @@ export function DroneSidebar({
   onSelectDroneChat,
   onDeleteDroneChat,
   onOpenCloneModal,
+  onCreateDroneChat,
   onRenameDrone,
   onSetDroneBaseImage,
   onDeleteDrone,
@@ -1676,6 +1678,7 @@ export function DroneSidebar({
     onSelectDroneChat,
     onDeleteDroneChat,
     onOpenCloneModal,
+    onCreateDroneChat,
     onRenameDrone,
     onSetDroneBaseImage,
     onDeleteDrone,
@@ -2052,6 +2055,7 @@ export function DroneSidebar({
                       uiDroneName={uiDroneName}
                       onDeleteDroneChat={onDeleteDroneChat}
                       onOpenCloneModal={onOpenCloneModal}
+                      onCreateDroneChat={onCreateDroneChat}
                       onRenameDrone={onRenameDrone}
                       onSetDroneBaseImage={onSetDroneBaseImage}
                       onDeleteDrone={onDeleteDrone}
@@ -2267,9 +2271,9 @@ export function DroneSidebar({
           <div className="flex items-center gap-1">
             <SidebarIconButton
               onClick={() => setSidebarGroupingMode((prev) => (prev === 'groups' ? 'repos' : 'groups'))}
-              aria-pressed={isRepoGroupingMode}
+              aria-pressed={!isRepoGroupingMode}
               className={`border ${
-                isRepoGroupingMode
+                !isRepoGroupingMode
                   ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
                   : 'border-[var(--border-subtle)] text-[var(--muted-dim)] hover:text-[var(--muted)] hover:border-[var(--border)] hover:bg-[var(--hover)]'
               }`}
@@ -2280,9 +2284,9 @@ export function DroneSidebar({
             </SidebarIconButton>
             <SidebarIconButton
               onClick={() => setViewMode((prev) => (prev === 'grouped' ? 'flat' : 'grouped'))}
-              aria-pressed={viewMode === 'grouped'}
+              aria-pressed={viewMode === 'flat'}
               className={`border ${
-                viewMode === 'grouped'
+                viewMode === 'flat'
                   ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
                   : 'border-[var(--border-subtle)] text-[var(--muted-dim)] hover:text-[var(--muted)] hover:border-[var(--border)] hover:bg-[var(--hover)]'
               }`}

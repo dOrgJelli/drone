@@ -95,6 +95,7 @@ type GroupedSidebarTreeProps = {
     chatName: string,
   ) => Promise<{ ok: boolean; deletedDrone?: boolean; error?: string | null }>;
   onOpenCloneModal: (drone: DroneSummary) => void;
+  onCreateDroneChat: (drone: DroneSummary) => void;
   onRenameDrone: (droneId: string) => void;
   onSetDroneBaseImage: (droneId: string) => void;
   onDeleteDrone: (droneId: string) => void;
@@ -217,6 +218,12 @@ function chatReorderDropId(droneIdRaw: string, chatNameRaw: string): string {
 function folderGroupPath(node: SidebarTreeFolderNode | null | undefined): string | null {
   if (!node) return null;
   return String(node.groupPath ?? node.path ?? '').trim() || null;
+}
+
+function folderTargetGroupPath(node: SidebarTreeFolderNode | null | undefined): string | null {
+  if (!node) return null;
+  if (node.groupKind === 'repo' && !node.groupPath) return null;
+  return folderGroupPath(node);
 }
 
 function GroupedSidebarChatRow({ drone, chatName, isOptimistic }: { drone: DroneSummary; chatName: string; isOptimistic: boolean }) {
@@ -351,6 +358,7 @@ function GroupedSidebarDroneRow({ node, groupPath, nested = false }: { node: Sid
     selectedDrone,
     activeChatName,
     onOpenCloneModal,
+    onCreateDroneChat,
     onRenameDrone,
     onSetDroneBaseImage,
     onDeleteDrone,
@@ -446,6 +454,7 @@ function GroupedSidebarDroneRow({ node, groupPath, nested = false }: { node: Sid
           dragAttributes={attributes as unknown as Record<string, unknown>}
           dragListeners={listeners as unknown as Record<string, unknown>}
           onClone={() => onOpenCloneModal(drone)}
+          onCreateChat={() => onCreateDroneChat(drone)}
           onRename={() => onRenameDrone(drone.id)}
           onSetBaseImage={() => onSetDroneBaseImage(drone.id)}
           onDelete={() => onDeleteDrone(drone.id)}
@@ -456,6 +465,13 @@ function GroupedSidebarDroneRow({ node, groupPath, nested = false }: { node: Sid
             Boolean(renamingDrones[drone.id]) ||
             Boolean(settingBaseImages[drone.id]) ||
             String(drone.runtime ?? 'container').trim().toLowerCase() === 'host'
+          }
+          createChatDisabled={
+            isOptimistic ||
+            Boolean(deletingDrones[drone.id]) ||
+            Boolean(renamingDrones[drone.id]) ||
+            Boolean(settingBaseImages[drone.id]) ||
+            isDroneStartingOrSeeding(drone.hubPhase)
           }
           renameDisabled={
             isOptimistic ||
@@ -653,16 +669,14 @@ function GroupedSidebarFolderRow({ node }: { node: SidebarTreeFolderNode }) {
               {node.totalDroneCount}
             </div>
             <div className="absolute inset-y-0 right-0 flex items-center justify-end gap-1 opacity-0 transition-all group-hover/folder-row:opacity-100">
-              {!isVirtualGroup ? (
-                <button
-                  type="button"
-                  onClick={() => onOpenFolderCreate(folderPath)}
-                  className="inline-flex h-6 w-6 items-center justify-center rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)] transition-all hover:border-[var(--accent-muted)] hover:bg-[var(--accent-subtle)] hover:text-[var(--accent)]"
-                  title={`New subfolder in "${node.label}"`}
-                >
-                  <IconPlus className="opacity-90" />
-                </button>
-              ) : null}
+              <button
+                type="button"
+                onClick={() => onOpenFolderCreate(isVirtualGroup ? null : folderPath)}
+                className="inline-flex h-6 w-6 items-center justify-center rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)] transition-all hover:border-[var(--accent-muted)] hover:bg-[var(--accent-subtle)] hover:text-[var(--accent)]"
+                title={isVirtualGroup ? `New top-level folder from "${node.label}"` : `New subfolder in "${node.label}"`}
+              >
+                <IconPlus className="opacity-90" />
+              </button>
               {!isVirtualGroup ? (
                 <button
                   type="button"
@@ -1038,7 +1052,7 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
           if (overData?.type === 'sidebar-tree-folder-body' && hoveredFolderNode?.kind === 'folder') {
             const targetParentId = hoveredFolderNode.id;
             const targetParentNode = nodeTree.nodesById[targetParentId];
-            const targetFolderPath = targetParentNode?.kind === 'folder' ? folderGroupPath(targetParentNode) : null;
+            const targetFolderPath = targetParentNode?.kind === 'folder' ? folderTargetGroupPath(targetParentNode) : null;
             const sourceNode = nodeTree.nodesById[sidebarDroneNodeId(active.droneId)] as SidebarTreeDroneNode | undefined;
             const sourceParentId = sourceNode?.parentId ?? targetParentId;
             const movingDroneIds =
@@ -1098,7 +1112,7 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
                 ? targetNode.id
                 : targetNode.parentId;
         const targetParentNode = targetParentId === SIDEBAR_ROOT_PARENT_ID ? null : nodeTree.nodesById[targetParentId];
-        const targetFolderPath = targetParentNode?.kind === 'folder' ? folderGroupPath(targetParentNode) : null;
+        const targetFolderPath = targetParentNode?.kind === 'folder' ? folderTargetGroupPath(targetParentNode) : null;
         const sourceNode = nodeTree.nodesById[sidebarDroneNodeId(active.droneId)] as SidebarTreeDroneNode | undefined;
         const sourceParentId = sourceNode?.parentId ?? targetParentId;
         const sourceVisibleChildIds = nodeTree.childIdsByParent[sourceParentId] ?? [];
@@ -1119,23 +1133,23 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
           return;
         }
 
+        const movingNodeIds = movingDroneIds.map(sidebarDroneNodeId);
+        const nextSourceVisible = sourceVisibleChildIds.filter((entry) => !movingNodeIds.includes(entry));
+        const nextTargetVisible = targetVisibleChildIds.filter((entry) => !movingNodeIds.includes(entry));
+        const previousNodeOrderByParent = sidebarNodeOrderByParent;
+        setSidebarNodeOrderByParent(
+          moveSidebarNodeIdsBetweenParents({
+            map: removeDroneIdsFromSidebarNodeOrderByParent(sidebarNodeOrderByParent, movingDroneIds),
+            sourceParentId,
+            targetParentId,
+            sourceVisibleChildIds: nextSourceVisible,
+            targetVisibleChildIds: nextTargetVisible,
+            movingNodeIds,
+            overNodeId: placement === 'into' ? null : targetNode.id,
+            placement,
+          }),
+        );
         void onMoveDronesToGroup(targetFolderPath ?? 'Ungrouped', movingDroneIds).then((result) => {
-          const movingNodeIds = movingDroneIds.map(sidebarDroneNodeId);
-          const nextSourceVisible = sourceVisibleChildIds.filter((entry) => !movingNodeIds.includes(entry));
-          const nextTargetVisible = targetVisibleChildIds.filter((entry) => !movingNodeIds.includes(entry));
-          const previousNodeOrderByParent = sidebarNodeOrderByParent;
-          setSidebarNodeOrderByParent(
-            moveSidebarNodeIdsBetweenParents({
-              map: removeDroneIdsFromSidebarNodeOrderByParent(sidebarNodeOrderByParent, movingDroneIds),
-              sourceParentId,
-              targetParentId,
-              sourceVisibleChildIds: nextSourceVisible,
-              targetVisibleChildIds: nextTargetVisible,
-              movingNodeIds,
-              overNodeId: placement === 'into' ? null : targetNode.id,
-              placement,
-            }),
-          );
           if (!result.ok) {
             setSidebarNodeOrderByParent(previousNodeOrderByParent);
           }
@@ -1171,7 +1185,7 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
             const sourceParentId = sourceNode.parentId;
             const targetParentId = hoveredFolderNode.id;
             const targetParentNode = nodeTree.nodesById[targetParentId];
-            const targetParentPath = targetParentNode?.kind === 'folder' ? folderGroupPath(targetParentNode) : null;
+            const targetParentPath = targetParentNode?.kind === 'folder' ? folderTargetGroupPath(targetParentNode) : null;
             const previousNodeOrderByParent = sidebarNodeOrderByParent;
             const sourceVisibleChildIds = nodeTree.childIdsByParent[sourceParentId] ?? [];
             const targetVisibleChildIds = nodeTree.childIdsByParent[targetParentId] ?? [];
@@ -1236,7 +1250,7 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
         }
 
         const targetParentNode = targetParentId === SIDEBAR_ROOT_PARENT_ID ? null : nodeTree.nodesById[targetParentId];
-        const targetParentPath = targetParentNode?.kind === 'folder' ? folderGroupPath(targetParentNode) : null;
+        const targetParentPath = targetParentNode?.kind === 'folder' ? folderTargetGroupPath(targetParentNode) : null;
         const movedFolderPath = joinSidebarGroupPath([targetParentPath, sidebarGroupBaseName(sourceFolderPath)]);
         const previousNodeOrderByParent = sidebarNodeOrderByParent;
         if (movedFolderPath) {

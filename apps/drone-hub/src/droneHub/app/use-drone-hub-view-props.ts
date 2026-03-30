@@ -37,6 +37,7 @@ export function useDroneHubSidebarProps(args: any): DroneSidebarProps {
     openPlaybookRuns,
     selectDroneCard,
     selectDroneChat,
+    createDroneChat,
     deleteCanvasChat,
     openCloneModal,
     renameDrone,
@@ -90,6 +91,9 @@ export function useDroneHubSidebarProps(args: any): DroneSidebarProps {
     onSelectDroneCard: selectDroneCard,
     onSelectDroneChat: (droneId, chatName) => {
       selectDroneChat(droneId, chatName);
+    },
+    onCreateDroneChat: (drone) => {
+      void createDroneChat(drone);
     },
     onDeleteDroneChat: async (droneId, chatName) => await deleteCanvasChat(droneId, chatName),
     onOpenCloneModal: openCloneModal,

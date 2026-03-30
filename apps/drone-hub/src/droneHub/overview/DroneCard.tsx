@@ -1,7 +1,7 @@
 import React from 'react';
 import { timeAgo } from '../../domain';
 import type { DroneSummary } from '../types';
-import { IconBaseImage, IconClone, IconRename, IconSpinner, IconTrash, TypingDots } from './icons';
+import { IconBaseImage, IconClone, IconPlus, IconRename, IconSpinner, IconTrash, TypingDots } from './icons';
 import { StatusBadge } from './StatusBadge';
 
 export function DroneCard({
@@ -16,11 +16,13 @@ export function DroneCard({
   draggable,
   dragging,
   onClone,
+  onCreateChat,
   onRename,
   onSetBaseImage,
   onDelete,
   onErrorClick,
   cloneDisabled,
+  createChatDisabled,
   renameDisabled,
   renameBusy,
   setBaseImageDisabled,
@@ -46,11 +48,13 @@ export function DroneCard({
   draggable?: boolean;
   dragging?: boolean;
   onClone?: () => void;
+  onCreateChat?: () => void;
   onRename?: () => void;
   onSetBaseImage?: () => void;
   onDelete?: () => void;
   onErrorClick?: (drone: DroneSummary, message: string) => void;
   cloneDisabled?: boolean;
+  createChatDisabled?: boolean;
   renameDisabled?: boolean;
   renameBusy?: boolean;
   setBaseImageDisabled?: boolean;
@@ -68,11 +72,12 @@ export function DroneCard({
 }) {
   const shownName = String(displayName ?? drone.name).trim() || drone.name;
   const canClone = typeof onClone === 'function';
+  const canCreateChat = typeof onCreateChat === 'function';
   const canRename = typeof onRename === 'function';
   const canSetBaseImage = typeof onSetBaseImage === 'function';
   const canDelete = typeof onDelete === 'function';
-  const actionCount = Number(canClone) + Number(canRename) + Number(canSetBaseImage) + Number(canDelete);
-  const hasActions = canClone || canRename || canSetBaseImage || canDelete;
+  const actionCount = Number(canClone) + Number(canCreateChat) + Number(canRename) + Number(canSetBaseImage) + Number(canDelete);
+  const hasActions = canClone || canCreateChat || canRename || canSetBaseImage || canDelete;
   const pinActionsVisible = Boolean(renameBusy) || Boolean(setBaseImageBusy) || Boolean(deleteBusy);
   const actionReserveWidthClass =
     actionCount >= 4
@@ -238,6 +243,24 @@ export function DroneCard({
                   aria-label={`Clone "${shownName}"`}
                 >
                   <IconClone className="opacity-90" />
+                </button>
+              )}
+              {canCreateChat && (
+                <button
+                  type="button"
+                  onClick={(e) => { stopCardSelection(e); onCreateChat?.(); }}
+                  onMouseDown={stopCardSelection}
+                  onPointerDown={stopCardSelection}
+                  disabled={Boolean(createChatDisabled)}
+                  className={`inline-flex items-center justify-center w-6 h-6 rounded border transition-all ${
+                    createChatDisabled
+                      ? 'opacity-50 cursor-not-allowed bg-[var(--panel-raised)] border-[var(--border-subtle)] text-[var(--muted)]'
+                      : 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:text-[var(--accent)] hover:border-[var(--accent-muted)] hover:bg-[var(--accent-subtle)]'
+                  }`}
+                  title={`Create chat on "${shownName}"`}
+                  aria-label={`Create chat on "${shownName}"`}
+                >
+                  <IconPlus className="opacity-90" />
                 </button>
               )}
               {canRename && (
