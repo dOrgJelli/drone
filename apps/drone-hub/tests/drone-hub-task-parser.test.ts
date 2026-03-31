@@ -77,4 +77,41 @@ describe('drone hub task parser', () => {
       tasks: [],
     });
   });
+
+  test('ignores task-looking literals inside general fenced examples', () => {
+    const message = [
+      'Use this skill template.',
+      '',
+      '```md',
+      'When the user asks for tasks, show this example:',
+      '{',
+      "  type: 'drone-hub-task',",
+      "  name: 'Docs',",
+      "  description: 'Update the README.'",
+      '}',
+      '```',
+    ].join('\n');
+
+    expect(extractDroneHubTasksFromAgentMessage(message)).toEqual({
+      cleanedText: message,
+      tasks: [],
+    });
+  });
+
+  test('rejects placeholder task fields', () => {
+    const message = [
+      '```js',
+      '{',
+      "  type: 'drone-hub-task',",
+      "  name: '...',",
+      "  description: '...'",
+      '}',
+      '```',
+    ].join('\n');
+
+    expect(extractDroneHubTasksFromAgentMessage(message)).toEqual({
+      cleanedText: message,
+      tasks: [],
+    });
+  });
 });
