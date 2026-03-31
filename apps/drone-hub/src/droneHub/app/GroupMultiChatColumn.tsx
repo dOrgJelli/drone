@@ -3,6 +3,7 @@ import {
   ChatInput,
   type ChatSendPayload,
   type DroneHubTask,
+  type DroneHubTaskSpawnMode,
   EmptyState,
   PendingTranscriptTurn,
   TranscriptSkeleton,
@@ -44,6 +45,7 @@ export type GroupMultiChatColumnProps = {
     sourceDroneId: string;
     sourceChatName: string;
     task: DroneHubTask;
+    mode: DroneHubTaskSpawnMode;
   }) => Promise<{ ok: boolean; error?: string | null }>;
   columnWidthPx: number;
   onRuntimeStateChange?: (next: GroupMultiChatColumnRuntimeState) => void;
@@ -610,11 +612,12 @@ export function GroupMultiChatColumn({
                   nowMs={nowMs}
                   parsingJobs={false}
                   onCreateJobs={onCreateJobs}
-                  onSpawnDroneHubTask={(task) =>
+                  onSpawnDroneHubTask={(mode, task) =>
                     onSpawnDroneHubTask({
                       sourceDroneId: drone.id,
                       sourceChatName: chatName,
                       task,
+                      mode,
                     })
                   }
                   messageId={messageId}

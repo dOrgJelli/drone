@@ -8,6 +8,7 @@ import { DroneHubTaskList } from './DroneHubTaskList';
 import { ImageAttachmentChips, isAttachmentOnlyPrompt, normalizeImageAttachmentRefs } from './ImageAttachmentChips';
 import type { MarkdownFileReference } from './MarkdownMessage';
 import type { DroneHubTask } from './drone-hub-task-parser';
+import type { DroneHubTaskSpawnMode } from './drone-hub-task-spawn';
 import { extractDroneHubTasksFromAgentMessage } from './drone-hub-task-parser';
 import { IconBot, IconCopy, IconImage, IconJobs, IconSpinner, IconTldr, IconUser } from './icons';
 
@@ -266,7 +267,7 @@ export const TranscriptTurn = React.memo(
     nowMs: number;
     parsingJobs: boolean;
     onCreateJobs: (opts: { turn: number; message: string }) => void;
-    onSpawnDroneHubTask: (task: DroneHubTask) => Promise<{ ok: boolean; error?: string | null }>;
+    onSpawnDroneHubTask: (mode: DroneHubTaskSpawnMode, task: DroneHubTask) => Promise<{ ok: boolean; error?: string | null }>;
     messageId: string;
     tldr: TldrState | null;
     showTldr: boolean;

@@ -15,6 +15,11 @@ type TaskRange = {
   tasks: DroneHubTask[];
 };
 
+type TextRange = {
+  start: number;
+  end: number;
+};
+
 class TaskLiteralParser {
   private readonly text: string;
   private index: number;
@@ -221,6 +226,7 @@ function normalizeDroneHubTask(raw: unknown): DroneHubTask | null {
   const name = String((raw as Record<string, unknown>).name ?? '').trim();
   const description = String((raw as Record<string, unknown>).description ?? '').trim();
   if (!name || !description) return null;
+  if (isPlaceholderTaskField(name) || isPlaceholderTaskField(description)) return null;
   return {
     type: 'drone-hub-task',
     name,
@@ -270,10 +276,20 @@ function hasOverlap(ranges: TaskRange[], start: number, end: number): boolean {
   return ranges.some((range) => start < range.end && end > range.start);
 }
 
+function hasTextRangeOverlap(ranges: TextRange[], start: number, end: number): boolean {
+  return ranges.some((range) => start < range.end && end > range.start);
+}
+
 function isBoundaryChar(ch: string, side: 'left' | 'right'): boolean {
   if (!ch) return true;
   if (/\s/.test(ch)) return true;
   return side === 'left' ? /[([{:>,;"'`-]/.test(ch) : /[\])}:<,.;!?"'`-]/.test(ch);
+}
+
+function isPlaceholderTaskField(valueRaw: string): boolean {
+  const value = String(valueRaw ?? '').trim();
+  if (!value) return true;
+  return /^(?:\.\.\.|…+)$/.test(value);
 }
 
 function cleanupMessageAfterTaskRemoval(text: string): string {
@@ -291,16 +307,19 @@ export function extractDroneHubTasksFromAgentMessage(textRaw: string): {
   if (!text.trim()) return { cleanedText: '', tasks: [] };
 
   const ranges: TaskRange[] = [];
+  const fenceRanges: TextRange[] = [];
   const fencePattern = /```[^\n`]*\n([\s\S]*?)```/g;
   for (const match of text.matchAll(fencePattern)) {
     const full = String(match[0] ?? '');
     const body = String(match[1] ?? '').trim();
     if (!full || !body) continue;
-    const tasks = tryParseDroneHubTaskLiteral(body);
-    if (!tasks || tasks.length === 0) continue;
     const start = match.index ?? -1;
     const end = start + full.length;
-    if (start < 0 || hasOverlap(ranges, start, end)) continue;
+    if (start < 0) continue;
+    fenceRanges.push({ start, end });
+    const tasks = tryParseDroneHubTaskLiteral(body);
+    if (!tasks || tasks.length === 0) continue;
+    if (hasOverlap(ranges, start, end)) continue;
     ranges.push({ start, end, tasks });
   }
 
@@ -309,16 +328,18 @@ export function extractDroneHubTasksFromAgentMessage(textRaw: string): {
     const full = String(match[0] ?? '');
     const body = String(match[1] ?? '').trim();
     if (!full || !body) continue;
-    const tasks = tryParseDroneHubTaskLiteral(body);
-    if (!tasks || tasks.length === 0) continue;
     const start = match.index ?? -1;
     const end = start + full.length;
-    if (start < 0 || hasOverlap(ranges, start, end)) continue;
+    if (start < 0 || hasTextRangeOverlap(fenceRanges, start, end)) continue;
+    const tasks = tryParseDroneHubTaskLiteral(body);
+    if (!tasks || tasks.length === 0) continue;
+    if (hasOverlap(ranges, start, end)) continue;
     ranges.push({ start, end, tasks });
   }
 
   for (let index = 0; index < text.length; index += 1) {
     if (hasOverlap(ranges, index, index + 1)) continue;
+    if (hasTextRangeOverlap(fenceRanges, index, index + 1)) continue;
     const ch = text[index] ?? '';
     if (ch !== '{' && ch !== '[') continue;
     const parsed = tryParseDroneHubTaskLiteralAt(text, index);
