@@ -10996,15 +10996,6 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
       // GET /api/drones
       if (method === 'GET' && parts.length === 2 && parts[0] === 'api' && parts[1] === 'drones') {
         triggerArchiveCleanup('api:drones');
-        const prunedMissingDrones = await pruneMissingRegistryDrones();
-        for (const removed of prunedMissingDrones) {
-          hubLog('info', 'pruned stale registry drone', {
-            id: removed.id,
-            name: removed.name,
-            containerName: removed.containerName,
-            reason: 'missing-container',
-          });
-        }
         const regAny: any = await loadRegistry();
 
         // Best-effort: if the Hub restarted while drones were pending, resume provisioning.

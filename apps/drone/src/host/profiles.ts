@@ -29,6 +29,14 @@ export function profileManifestPath(): string {
   return path.join(profilesRootDir(), 'manifest.json');
 }
 
+export function legacyDefaultDroneRootDir(): string {
+  return path.join(repoDataRootDir(), 'drone');
+}
+
+export function legacyDefaultDvmRootDir(): string {
+  return path.join(repoDataRootDir(), 'dvm');
+}
+
 export function normalizeProfileName(raw: unknown): string | null {
   const value = String(raw ?? '')
     .trim()

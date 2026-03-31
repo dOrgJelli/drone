@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { DEFAULT_PROFILE_NAME, readActiveProfileNameSync, resolveDvmRootFromActiveProfile } from './profiles';
+import { DEFAULT_PROFILE_NAME, legacyDefaultDvmRootDir, readActiveProfileNameSync, resolveDvmRootFromActiveProfile } from './profiles';
 
 const DVM_STATE_ENTRY_NAMES = [
   'base.json',
@@ -132,7 +132,7 @@ function mergePathIntoTarget(sourcePath: string, targetPath: string): void {
 
 export function legacyDvmRootDirs(): string[] {
   const current = path.resolve(configuredDvmRootDir());
-  const candidates = [xdgDvmRootDir(), legacyHomeDvmRootDir()]
+  const candidates = [legacyDefaultDvmRootDir(), xdgDvmRootDir(), legacyHomeDvmRootDir()]
     .map((dir) => path.resolve(dir))
     .filter((dir) => dir !== current);
   return Array.from(new Set(candidates));

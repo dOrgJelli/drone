@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_PROFILE_NAME, readActiveProfileNameSync, resolveDroneRootFromActiveProfile } from './profiles';
+import { DEFAULT_PROFILE_NAME, legacyDefaultDroneRootDir, readActiveProfileNameSync, resolveDroneRootFromActiveProfile } from './profiles';
 
 const DRONE_STATE_ENTRY_NAMES = [
   'hub.json',
@@ -126,7 +126,7 @@ function mergePathIntoTarget(sourcePath: string, targetPath: string): void {
 
 export function legacyDroneRootDirs(): string[] {
   const current = path.resolve(configuredDroneRootDir());
-  const candidates = [xdgDroneRootDir(), legacyHomeDroneRootDir()]
+  const candidates = [legacyDefaultDroneRootDir(), xdgDroneRootDir(), legacyHomeDroneRootDir()]
     .map((dir) => path.resolve(dir))
     .filter((dir) => dir !== current);
   return Array.from(new Set(candidates));

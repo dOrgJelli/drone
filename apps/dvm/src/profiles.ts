@@ -15,6 +15,8 @@ function repoRootDir(): string {
 }
 
 function repoDataRootDir(): string {
+  const explicit = process.env.DRONE_REPO_DATA_DIR?.trim();
+  if (explicit) return path.resolve(explicit);
   return path.join(repoRootDir(), 'data');
 }
 
@@ -24,6 +26,10 @@ export function profilesRootDir(): string {
 
 export function profileManifestPath(): string {
   return path.join(profilesRootDir(), 'manifest.json');
+}
+
+export function legacyDefaultDvmRootDir(): string {
+  return path.join(repoDataRootDir(), 'dvm');
 }
 
 function normalizeProfileName(raw: unknown): string | null {

@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { constants as fsConstants } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -11,6 +12,8 @@ type DroneRegistryBuiltinAgentId = 'cursor' | 'codex' | 'claude' | 'opencode' | 
 type DroneRegistryChatAgentConfig =
   | { kind: 'builtin'; id: DroneRegistryBuiltinAgentId }
   | { kind: 'custom'; id: string; label: string; command: string };
+
+const REGISTRY_HOURLY_SNAPSHOT_INTERVAL_MS = 60 * 60 * 1000;
 
 type DroneRegistryPlaybookMeta = {
   id: string;
@@ -913,8 +916,37 @@ async function readRegistryFromPath(p: string): Promise<DroneRegistry | null> {
   }
 }
 
+async function pathExists(p: string): Promise<boolean> {
+  try {
+    await fs.access(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function registryHourlySnapshotPath(p: string, at = new Date()): string {
+  const bucketStartMs = Math.floor(at.getTime() / REGISTRY_HOURLY_SNAPSHOT_INTERVAL_MS) * REGISTRY_HOURLY_SNAPSHOT_INTERVAL_MS;
+  const stamp = new Date(bucketStartMs).toISOString().replace(/[:.]/g, '-');
+  const parsed = path.parse(p);
+  return path.join(parsed.dir, `${parsed.name}.snapshot-${stamp}${parsed.ext || '.json'}`);
+}
+
+async function saveRegistryHourlySnapshotBestEffort(p: string): Promise<void> {
+  if (!(await pathExists(p))) return;
+  const snapshotPath = registryHourlySnapshotPath(p);
+  try {
+    await fs.copyFile(p, snapshotPath, fsConstants.COPYFILE_EXCL);
+    await setPrivateFileModeBestEffort(snapshotPath);
+  } catch (error: any) {
+    const code = String(error?.code ?? '');
+    if (code === 'EEXIST' || code === 'ENOENT') return;
+  }
+}
+
 async function saveRegistryAtPath(p: string, reg: DroneRegistry): Promise<void> {
   await fs.mkdir(path.dirname(p), { recursive: true });
+  await saveRegistryHourlySnapshotBestEffort(p);
   const tmpPath = path.join(path.dirname(p), `.registry.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`);
   try {
     await fs.writeFile(tmpPath, JSON.stringify(reg, null, 2), 'utf8');
