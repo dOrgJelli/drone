@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { buildSidebarFolderTree } from '../src/droneHub/app/sidebar-folder-tree';
-import { sidebarFolderNodeId } from '../src/droneHub/app/sidebar-node-order';
+import { SIDEBAR_ROOT_PARENT_ID, sidebarDroneNodeId, sidebarFolderNodeId } from '../src/droneHub/app/sidebar-node-order';
 import { buildSidebarNodeTree, type SidebarTreeFolderNode } from '../src/droneHub/app/sidebar-node-tree';
 import type { SidebarGroup } from '../src/droneHub/app/use-sidebar-view-model';
 import type { DroneSummary } from '../src/droneHub/types';
@@ -31,6 +31,37 @@ function folderNode(node: unknown): SidebarTreeFolderNode {
 }
 
 describe('buildSidebarNodeTree', () => {
+  test('keeps newly inserted drones ahead of persisted sibling node order', () => {
+    const sidebarGroups: SidebarGroup[] = [
+      {
+        group: 'Ungrouped',
+        label: 'Ungrouped',
+        kind: 'group',
+        items: [
+          drone({ id: 'new-drone', name: 'new-drone', createdAt: '2026-03-31T12:00:00.000Z' }),
+          drone({ id: 'older-a', name: 'older-a', createdAt: '2026-03-30T12:00:00.000Z' }),
+          drone({ id: 'older-b', name: 'older-b', createdAt: '2026-03-29T12:00:00.000Z' }),
+        ],
+      },
+    ];
+
+    const tree = buildSidebarNodeTree({
+      sidebarFolderTree: [],
+      sidebarGroups,
+      sidebarGroupOrder: [],
+      sidebarDroneOrderByGroup: {},
+      sidebarNodeOrderByParent: {
+        [SIDEBAR_ROOT_PARENT_ID]: [sidebarDroneNodeId('older-b'), sidebarDroneNodeId('older-a')],
+      },
+    });
+
+    expect(tree.rootChildIds).toEqual([
+      sidebarDroneNodeId('new-drone'),
+      sidebarDroneNodeId('older-b'),
+      sidebarDroneNodeId('older-a'),
+    ]);
+  });
+
   test('renders repo-scoped empty folders under the owning repo root', () => {
     const repoPath = '/work/repo-a';
     const sidebarGroups: SidebarGroup[] = [

@@ -40,7 +40,35 @@ function normalizeNodeOrderMap(value: Record<string, string[]>): Record<string, 
 }
 
 export function orderSidebarNodeIds(childIds: string[], order: string[]): string[] {
-  return orderSidebarEntries(childIds, order, (childId) => childId, { unorderedPlacement: 'end' });
+  const visibleChildIds = normalizeSidebarGroupOrder(childIds);
+  if (visibleChildIds.length < 2) return visibleChildIds;
+  const normalizedOrder = normalizeSidebarGroupOrder(order);
+  const orderedChildIdSet = new Set(normalizedOrder);
+
+  const orderedVisibleChildIds = orderSidebarEntries(visibleChildIds, normalizedOrder, (childId) => childId, {
+    unorderedPlacement: 'end',
+  }).filter((childId) => orderedChildIdSet.has(childId));
+
+  if (orderedVisibleChildIds.length === 0) return visibleChildIds;
+  if (orderedVisibleChildIds.length === visibleChildIds.length) return orderedVisibleChildIds;
+
+  const visibleOrderedChildIdSet = new Set(orderedVisibleChildIds);
+  const unorderedBuckets = Array.from({ length: orderedVisibleChildIds.length + 1 }, () => [] as string[]);
+  let orderedSeen = 0;
+  for (const childId of visibleChildIds) {
+    if (visibleOrderedChildIdSet.has(childId)) {
+      orderedSeen += 1;
+      continue;
+    }
+    unorderedBuckets[Math.min(orderedSeen, unorderedBuckets.length - 1)].push(childId);
+  }
+
+  const out: string[] = [];
+  for (let index = 0; index < orderedVisibleChildIds.length; index += 1) {
+    out.push(...unorderedBuckets[index], orderedVisibleChildIds[index]);
+  }
+  out.push(...unorderedBuckets[orderedVisibleChildIds.length]);
+  return out;
 }
 
 export function reorderSidebarNodeParentOrder(
