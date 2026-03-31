@@ -1,6 +1,6 @@
 import React from 'react';
 import { useShallow } from 'zustand/react/shallow';
-import { ChatInput, type ChatSendPayload, type DroneHubTask, EmptyState } from '../chat';
+import { ChatInput, type ChatSendPayload, type DroneHubTask, type DroneHubTaskSpawnMode, EmptyState } from '../chat';
 import { GroupMultiChatColumn } from './GroupMultiChatColumn';
 import {
   GROUP_MULTI_CHAT_COLUMN_WIDTH_DEFAULT_PX,
@@ -34,6 +34,7 @@ type GroupMultiChatWorkspaceProps = {
     sourceDroneId: string;
     sourceChatName: string;
     task: DroneHubTask;
+    mode: DroneHubTaskSpawnMode;
   }) => Promise<{ ok: boolean; error?: string | null }>;
 };
 

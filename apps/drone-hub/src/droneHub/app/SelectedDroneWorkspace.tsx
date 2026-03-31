@@ -4,6 +4,7 @@ import {
   AutomationLaneStatusCard,
   ChatInput,
   type DroneHubTask,
+  type DroneHubTaskSpawnMode,
   type ChatSendPayload,
   CollapsibleOutput,
   EmptyState,
@@ -140,6 +141,7 @@ type SelectedDroneWorkspaceProps = {
     sourceDroneId: string;
     sourceChatName: string;
     task: DroneHubTask;
+    mode: DroneHubTaskSpawnMode;
   }) => Promise<{ ok: boolean; error?: string | null }>;
   tldrByMessageId: Record<string, TldrState | null>;
   showTldrByMessageId: Record<string, boolean>;
@@ -1349,11 +1351,12 @@ export function SelectedDroneWorkspace({
                           nowMs={nowMs}
                           parsingJobs={Boolean(parsingJobsByTurn[block.item.turn])}
                           onCreateJobs={parseJobsFromAgentMessage}
-                          onSpawnDroneHubTask={(task) =>
+                          onSpawnDroneHubTask={(mode, task) =>
                             spawnDroneHubTaskFromAgentMessage({
                               sourceDroneId: currentDrone.id,
                               sourceChatName: resolveChatNameForDrone(currentDrone, selectedChat || 'default'),
                               task,
+                              mode,
                             })
                           }
                           messageId={messageId}

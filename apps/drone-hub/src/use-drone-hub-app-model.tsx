@@ -57,7 +57,7 @@ import { useRightPanelLayout } from './droneHub/app/use-right-panel-layout';
 import { useDroneSelectionState } from './droneHub/app/use-drone-selection-state';
 import { SIDEBAR_VISIBLE_MULTI_CHAT_GROUP, useSidebarViewModel } from './droneHub/app/use-sidebar-view-model';
 import { useChatConfigState } from './droneHub/app/use-chat-config-state';
-import { useDroneHubAppModelUiState } from './droneHub/app/use-drone-hub-ui-store';
+import { resolveSpawnContextPreferencesForRepo, useDroneHubAppModelUiState } from './droneHub/app/use-drone-hub-ui-store';
 import { useDroneHubRuntimeState } from './droneHub/app/use-drone-hub-runtime-store';
 import { useDroneHubLifecycleEffects } from './droneHub/app/use-drone-hub-lifecycle-effects';
 import { useDroneHubRegistryData } from './droneHub/app/use-drone-hub-registry-data';
@@ -81,6 +81,7 @@ import {
   useDroneHubWorkspaceContentProps,
 } from './droneHub/app/use-drone-hub-view-props';
 import type { MarkdownFileReference } from './droneHub/chat/MarkdownMessage';
+import { buildDroneHubTaskQueueSpec, type DroneHubTaskSpawnMode } from './droneHub/chat/drone-hub-task-spawn';
 import {
   droneHomePath,
   isDroneStartingOrSeeding,
@@ -172,6 +173,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     outputView,
     fsExplorerView,
     spawnContextRepoPath,
+    spawnContextByRepoKey,
     spawnAgentKey,
     spawnModel,
     repoBranchSource,
@@ -1613,7 +1615,9 @@ export function useDroneHubAppModel(): DroneHubAppModel {
       sourceDroneId: string;
       sourceChatName: string;
       task: { name: string; description: string };
+      mode: DroneHubTaskSpawnMode;
     }): Promise<{ ok: boolean; error?: string | null }> => {
+      const mode: DroneHubTaskSpawnMode = opts?.mode === 'clone' ? 'clone' : 'spawn';
       const sourceDroneId = String(opts?.sourceDroneId ?? '').trim();
       const sourceChatName = String(opts?.sourceChatName ?? 'default').trim() || 'default';
       const taskNameRaw = String(opts?.task?.name ?? '').replace(/[\r\n]+/g, ' ').trim();
@@ -1623,15 +1627,16 @@ export function useDroneHubAppModel(): DroneHubAppModel {
 
       const sourceDrone = drones.find((drone) => drone.id === sourceDroneId) ?? null;
       if (!sourceDrone) return { ok: false, error: 'Source drone is unavailable.' };
-      if (String(sourceDrone.runtime ?? 'container').trim().toLowerCase() === 'host') {
+      if (mode === 'clone' && String(sourceDrone.runtime ?? 'container').trim().toLowerCase() === 'host') {
         return { ok: false, error: 'Host runtime drones cannot be cloned.' };
       }
 
       const sourceContext = resolveNewDroneContextFromCurrentSelection(sourceDrone);
       const baseName = taskNameRaw.length > 80 ? taskNameRaw.slice(0, 80).trim() : taskNameRaw;
+      const repoSpawnDefaults = resolveSpawnContextPreferencesForRepo(spawnContextByRepoKey, sourceContext.repoPath);
       const siblingNames = new Set(drones.map((drone) => String(drone?.name ?? '').trim()).filter(Boolean));
       const requestedName = (() => {
-        const clean = baseName || 'Task clone';
+        const clean = baseName || (mode === 'clone' ? 'Task clone' : 'Task');
         if (!siblingNames.has(clean)) return clean;
         for (let i = 2; i < 1000; i += 1) {
           const suffix = ` (${i})`;
@@ -1662,19 +1667,18 @@ export function useDroneHubAppModel(): DroneHubAppModel {
       }
 
       try {
+        const queueSpec = buildDroneHubTaskQueueSpec({
+          mode,
+          requestedName,
+          taskDescription,
+          sourceDroneId,
+          sourceContext,
+          seedAgent,
+          seedModel,
+          repoDefaults: repoSpawnDefaults,
+        });
         const response = await queueDrones([
-          {
-            name: requestedName,
-            runtime: 'container',
-            ...(sourceContext.group ? { group: sourceContext.group } : {}),
-            ...(sourceContext.repoPath ? { repoPath: sourceContext.repoPath } : {}),
-            cloneFrom: sourceDroneId,
-            cloneChats: false,
-            ...(seedAgent ? { seedAgent } : {}),
-            ...(seedModel ? { seedModel } : {}),
-            seedChat: 'default',
-            seedPrompt: taskDescription,
-          },
+          queueSpec,
         ]);
         const accepted = Array.isArray(response?.accepted) ? response.accepted[0] : null;
         if (!accepted?.id) {
@@ -1706,7 +1710,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
         };
       }
     },
-    [drones, effectiveChatInfo, queueDrones, rememberSeenModels, rememberStartupSeed, requestJson, selectedDrone],
+    [drones, effectiveChatInfo, queueDrones, rememberSeenModels, rememberStartupSeed, requestJson, selectedDrone, spawnContextByRepoKey],
   );
   useDroneHubLifecycleEffects({
     normalizeCreateRepoPath,
