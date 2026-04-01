@@ -310,6 +310,9 @@ async function startPromptJob(job: PromptJob): Promise<void> {
   // Run inside tmux so work continues even if this daemon process restarts.
   const quotedCmd = bashQuote(job.cmd);
   const quotedArgs = (job.args ?? []).map((a) => bashQuote(a)).join(' ');
+  const quotedStdoutPath = bashQuote(job.stdoutPath);
+  const quotedStderrPath = bashQuote(job.stderrPath);
+  const quotedExitPath = bashQuote(job.exitPath);
   const cd = job.cwd ? `cd ${bashQuote(job.cwd)}\n` : '';
   const envLines =
     job.env && Object.keys(job.env).length > 0
@@ -322,9 +325,12 @@ async function startPromptJob(job: PromptJob): Promise<void> {
     cd.trimEnd(),
     envLines.trimEnd(),
     // Run and capture exit code.
-    `${quotedCmd} ${quotedArgs} > ${bashQuote(job.stdoutPath)} 2> ${bashQuote(job.stderrPath)}`,
+    `${quotedCmd} ${quotedArgs} > ${quotedStdoutPath} 2> ${quotedStderrPath}`,
     'code=$?',
-    `printf %s \"$code\" > ${bashQuote(job.exitPath)}`,
+    `if [ "$code" -ne 0 ] && [ ! -s ${quotedStdoutPath} ] && [ ! -s ${quotedStderrPath} ]; then`,
+    `  printf '%s\n' "prompt wrapper: command exited with code $code without writing stdout/stderr" >> ${quotedStderrPath}`,
+    'fi',
+    `printf %s \"$code\" > ${quotedExitPath}`,
     'exit 0',
   ]
     .filter(Boolean)

@@ -202,3 +202,39 @@ export function formatCodexJobFailure(stdoutRaw: string, stderrRaw: string, fall
   if (lifecycleOnly) return 'Codex turn started but exited before producing a response.';
   return fallback;
 }
+
+export function formatTranscriptJobFailure(opts: {
+  agentId: BuiltinTranscriptAgentId;
+  stdoutRaw: string;
+  stderrRaw: string;
+  fallbackRaw: string;
+  exitCode?: number | null;
+}): string {
+  const stdout = String(opts.stdoutRaw ?? '').trim();
+  const stderr = String(opts.stderrRaw ?? '').trim();
+  const fallback = String(opts.fallbackRaw ?? '').trim();
+  const exitCode =
+    typeof opts.exitCode === 'number' && Number.isFinite(opts.exitCode)
+      ? Math.floor(opts.exitCode)
+      : null;
+
+  let detail = fallback || stderr || stdout || '';
+  if (opts.agentId === 'codex') {
+    detail = formatCodexJobFailure(stdout, stderr, detail);
+  }
+  detail = String(detail ?? '').trim();
+
+  if (!detail || detail === 'failed') {
+    if (!stdout && !stderr) {
+      return exitCode != null
+        ? `prompt command failed without any captured stdout/stderr output (exit ${exitCode})`
+        : 'prompt command failed before any stdout/stderr output or exit code was captured';
+    }
+    return exitCode != null ? `prompt command failed (exit ${exitCode})` : 'prompt command failed';
+  }
+
+  if (exitCode != null && detail.length < 220 && !/\bexit\s*\d+\b/i.test(detail)) {
+    return `${detail} (exit ${exitCode})`;
+  }
+  return detail;
+}
