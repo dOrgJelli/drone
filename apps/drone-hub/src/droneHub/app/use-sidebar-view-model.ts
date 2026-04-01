@@ -6,6 +6,7 @@ import { isStartupSeedFresh } from './app-config';
 import type { StartupSeedState } from './app-types';
 import { orderSidebarEntries, orderSidebarGroups, sidebarGroupOrderToken } from './sidebar-group-order';
 import { isSameOrDescendantSidebarGroupPath } from './sidebar-group-paths';
+import { buildRepoSidebarGroups } from './sidebar-repo-groups';
 
 export type SidebarGroup = {
   group: string;
@@ -30,14 +31,8 @@ type UseSidebarViewModelArgs = {
   optimisticallyDeletedDrones: Record<string, boolean>;
   activeRepoPath: string;
   registryGroupNames: string[];
+  registeredRepoPaths: string[];
 };
-
-function repoPathToLabel(repoPathRaw: string): string {
-  const repoPath = String(repoPathRaw ?? '').trim();
-  if (!repoPath) return 'Ungrouped';
-  const parts = repoPath.split(/[\\/]/).filter(Boolean);
-  return parts[parts.length - 1] || repoPath;
-}
 
 export function useSidebarViewModel({
   selectedDroneIds,
@@ -53,6 +48,7 @@ export function useSidebarViewModel({
   optimisticallyDeletedDrones,
   activeRepoPath,
   registryGroupNames,
+  registeredRepoPaths,
 }: UseSidebarViewModelArgs) {
   const selectedDroneSet = React.useMemo(() => new Set(selectedDroneIds), [selectedDroneIds]);
 
@@ -130,36 +126,13 @@ export function useSidebarViewModel({
 
   const allSidebarGroups = React.useMemo(() => {
     if (sidebarGroupingMode === 'repos') {
-      const byRepo = new Map<string, { group: string; label: string; kind: 'repo'; items: DroneSummary[] }>();
-      for (const d of sidebarDronesFilteredByRepoBase) {
-        const repoPath = String(d?.repoPath ?? '').trim();
-        const hasRepo = repoPath.length > 0;
-        const key = hasRepo ? `repo:${repoPath}` : 'repo:ungrouped';
-        const label = hasRepo ? repoPathToLabel(repoPath) : 'Ungrouped';
-        const existing = byRepo.get(key);
-        if (existing) {
-          existing.items.push(d);
-          continue;
-        }
-        byRepo.set(key, { group: key, label, kind: 'repo', items: [d] });
-      }
-
-      const out = Array.from(byRepo.values());
-      for (const g of out) {
-        g.items.sort(compareDronesByNewestFirst);
-        g.items = orderSidebarEntries(
-          g.items,
-          sidebarDroneOrderByGroup[sidebarGroupOrderToken({ group: g.group, kind: g.kind })] ?? [],
-          (item) => item.id,
-          { unorderedPlacement: 'start' },
-        );
-      }
-      out.sort((a, b) => {
-        if (isUngroupedGroupName(a.label) && !isUngroupedGroupName(b.label)) return -1;
-        if (!isUngroupedGroupName(a.label) && isUngroupedGroupName(b.label)) return 1;
-        return a.label.localeCompare(b.label);
+      return buildRepoSidebarGroups({
+        drones: sidebarDronesFilteredByRepoBase,
+        activeRepoPath,
+        registeredRepoPaths,
+        sidebarDroneOrderByGroup,
+        sidebarGroupOrder,
       });
-      return orderSidebarGroups(out, sidebarGroupOrder);
     }
 
     const m = new Map<string, DroneSummary[]>();
@@ -198,6 +171,7 @@ export function useSidebarViewModel({
     return orderSidebarGroups(out, sidebarGroupOrder);
   }, [
     activeRepoPath,
+    registeredRepoPaths,
     registryGroupNames,
     sidebarDroneOrderByGroup,
     sidebarDronesFilteredByRepoBase,
