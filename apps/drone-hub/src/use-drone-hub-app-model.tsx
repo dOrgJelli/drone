@@ -339,6 +339,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     optimisticallyDeletedDrones,
     activeRepoPath,
     registryGroupNames,
+    registeredRepoPaths,
   });
   const draftSidebarPlaceholder = React.useMemo(() => {
     if (!draftChat) return null;

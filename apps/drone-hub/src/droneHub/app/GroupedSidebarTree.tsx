@@ -23,6 +23,7 @@ import {
 import {
   orderSidebarEntries,
   reorderSidebarEntryOrder,
+  reorderSidebarGroupOrder,
   sidebarGroupOrderToken,
   type SidebarGroupDropPlacement,
 } from './sidebar-group-order';
@@ -59,6 +60,7 @@ type GroupedSidebarTreeProps = {
   repoScopedGroupPathsByRepoGroup: Record<string, string[]>;
   sidebarDroneOrderByGroup: Record<string, string[]>;
   sidebarNodeOrderByParent: Record<string, string[]>;
+  setSidebarGroupOrder: React.Dispatch<React.SetStateAction<string[]>>;
   setSidebarNodeOrderByParent: React.Dispatch<React.SetStateAction<Record<string, string[]>>>;
   sidebarChatOrderByDrone: Record<string, string[]>;
   setSidebarChatOrderByDrone: React.Dispatch<React.SetStateAction<Record<string, string[]>>>;
@@ -238,19 +240,27 @@ function useGroupedSidebarTreeContext(): GroupedSidebarTreeContextValue {
   return value;
 }
 
-function groupedFolderDragData(args: { nodeId: string; folderPath: string; label: string }): {
+function groupedFolderDragData(args: {
+  nodeId: string;
+  folderPath: string;
+  groupKind: 'group' | 'repo';
+  label: string;
+}): {
   type: 'sidebar-folder';
   folderNodeId: string;
   folderPath: string;
+  groupKind: 'group' | 'repo';
   label: string;
 } {
   const folderNodeId = String(args.nodeId ?? '').trim();
   const folderPath = String(args.folderPath ?? '').trim();
   const label = String(args.label ?? '').trim();
+  const groupKind = args.groupKind === 'repo' ? 'repo' : 'group';
   return {
     type: 'sidebar-folder',
     folderNodeId,
     folderPath,
+    groupKind,
     label: label || sidebarGroupBaseName(folderPath) || folderPath,
   };
 }
@@ -338,6 +348,10 @@ function folderTargetGroupPath(node: SidebarTreeFolderNode | null | undefined): 
   if (!node) return null;
   if (node.groupKind === 'repo' && !node.groupPath) return null;
   return folderGroupPath(node);
+}
+
+function isVirtualRepoRootNode(node: SidebarTreeNode | null | undefined): node is SidebarTreeFolderNode {
+  return Boolean(node && node.kind === 'folder' && node.groupKind === 'repo' && !node.groupPath);
 }
 
 function TreeDropGuide({ placement }: { placement: SidebarGroupDropPlacement }) {
@@ -774,6 +788,8 @@ function GroupedSidebarFolderRow({ node }: { node: SidebarTreeFolderNode }) {
   const densityClasses = groupedSidebarDensityClasses(sidebarDensityMode);
   const folderPath = folderGroupPath(node) ?? node.path;
   const isVirtualGroup = node.groupKind === 'repo' && !node.groupPath;
+  const allowVirtualRepoReorderDrop =
+    isVirtualGroup && activeDrag?.type === 'sidebar-folder' && activeDrag.groupKind === 'repo';
   const groupRef = React.useMemo(
     () => ({ group: folderPath, kind: node.groupKind }),
     [folderPath, node.groupKind],
@@ -787,8 +803,7 @@ function GroupedSidebarFolderRow({ node }: { node: SidebarTreeFolderNode }) {
   const childIds = nodeTree.childIdsByParent[node.id] ?? [];
   const { attributes, listeners, isDragging, setNodeRef: setDragNodeRef } = useDraggable({
     id: `sidebar-folder:${node.id}`,
-    data: groupedFolderDragData({ nodeId: node.id, folderPath, label: node.label }),
-    disabled: isVirtualGroup,
+    data: groupedFolderDragData({ nodeId: node.id, folderPath, groupKind: node.groupKind, label: node.label }),
   });
   const { setNodeRef: setDropNodeRef } = useDroppable({
     id: `sidebar-tree-node:${node.id}`,
@@ -798,7 +813,7 @@ function GroupedSidebarFolderRow({ node }: { node: SidebarTreeFolderNode }) {
       kind: 'folder',
       parentId: node.parentId,
     },
-    disabled: isVirtualGroup,
+    disabled: isVirtualGroup ? !allowVirtualRepoReorderDrop : false,
   });
   const { setNodeRef: setBodyDropNodeRef } = useDroppable({
     id: `sidebar-tree-folder-body:${node.id}`,
@@ -1163,6 +1178,32 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
       const active = parseDroneHubDragData(event.active.data.current);
       const activeRaw = event.active.data.current as Record<string, unknown> | undefined;
       const overData = event.over?.data.current as Record<string, unknown> | undefined;
+      const activeFolderNode =
+        activeRaw?.type === 'sidebar-folder'
+          ? nodeTree.nodesById[
+              String(activeRaw.folderNodeId ?? '').trim() || sidebarFolderNodeId(String(activeRaw.folderPath ?? '').trim())
+            ]
+          : null;
+      const draggingVirtualRepoRoot = isVirtualRepoRootNode(activeFolderNode);
+
+      if (draggingVirtualRepoRoot && overData?.type === 'sidebar-tree-node' && typeof overData.nodeId === 'string') {
+        const targetNodeId = String(overData.nodeId ?? '').trim();
+        const targetNode = nodeTree.nodesById[targetNodeId];
+        if (isVirtualRepoRootNode(targetNode) && targetNode.id !== activeFolderNode.id) {
+          setDragOverChat(null);
+          setDragOverFolderBodyId(null);
+          setDragOverTreeTarget({
+            nodeId: targetNodeId,
+            placement: placementFromEvent(event, false),
+          });
+          return;
+        }
+      }
+
+      if (draggingVirtualRepoRoot) {
+        clearDragState();
+        return;
+      }
 
       if (active?.type === 'sidebar-chat' && overData?.type === 'sidebar-chat-reorder') {
         const overDroneId = String(overData.droneId ?? '').trim();
@@ -1245,7 +1286,7 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
 
       clearDragState();
     },
-    [clearDragState],
+    [clearDragState, nodeTree],
   );
 
   useDndMonitor({
@@ -1264,6 +1305,38 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
       const active = parseDroneHubDragData(event.active.data.current);
       const activeRaw = event.active.data.current as Record<string, unknown> | undefined;
       const overData = event.over?.data.current as Record<string, unknown> | undefined;
+      const activeFolderNode =
+        activeRaw?.type === 'sidebar-folder'
+          ? nodeTree.nodesById[
+              String(activeRaw.folderNodeId ?? '').trim() || sidebarFolderNodeId(String(activeRaw.folderPath ?? '').trim())
+            ]
+          : null;
+
+      if (isVirtualRepoRootNode(activeFolderNode)) {
+        if (overData?.type === 'sidebar-tree-node' && typeof overData.nodeId === 'string') {
+          const targetNodeId = String(overData.nodeId ?? '').trim();
+          const targetNode = nodeTree.nodesById[targetNodeId];
+          if (isVirtualRepoRootNode(targetNode) && targetNode.id !== activeFolderNode.id) {
+            const placement =
+              dragOverTreeTarget?.nodeId === targetNodeId
+                ? dragOverTreeTarget.placement
+                : placementFromEvent(event, false);
+            if (placement === 'before' || placement === 'after') {
+              props.setSidebarGroupOrder((prev) =>
+                reorderSidebarGroupOrder(
+                  prev,
+                  props.sidebarGroups,
+                  { group: activeFolderNode.path, kind: 'repo' },
+                  { group: targetNode.path, kind: 'repo' },
+                  placement,
+                ),
+              );
+            }
+          }
+        }
+        clearDragState();
+        return;
+      }
 
       if (active?.type === 'sidebar-chat' && overData?.type === 'sidebar-chat-reorder') {
         const overDroneId = String(overData.droneId ?? '').trim();
