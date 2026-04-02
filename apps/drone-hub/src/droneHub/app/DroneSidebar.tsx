@@ -2395,6 +2395,7 @@ export function DroneSidebar({
                   onDeleteDrone={onDeleteDrone}
                   onOpenDroneErrorModal={onOpenDroneErrorModal}
                   onPrepareDroneDragStart={onPrepareDroneDragStart}
+                  onReparentDronesToParent={onReparentDronesToParent}
                 />
                   </>
                 {!isRepoGroupingMode && !sidebarHasUngroupedGroup && showExternalMoveTargets && (
