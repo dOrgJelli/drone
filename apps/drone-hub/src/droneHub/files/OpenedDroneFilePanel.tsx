@@ -318,6 +318,9 @@ export function OpenedDroneFilePanel({
                 scrollBeyondLastLine: false,
                 automaticLayout: true,
                 padding: { top: 12, bottom: 12 },
+                'semanticHighlighting.enabled': true,
+                bracketPairColorization: { enabled: true },
+                guides: { bracketPairs: true },
               }}
             />
           )}
