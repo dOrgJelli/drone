@@ -416,6 +416,117 @@ describeSocketSuite('fleet api', () => {
     }
   });
 
+  test('reparents a drone and syncs affected fleet parent policies', async () => {
+    const oldParentDaemon = await startStubDaemon('old-parent-token');
+    const newParentDaemon = await startStubDaemon('new-parent-token');
+    try {
+      const now = new Date().toISOString();
+      await updateRegistry((reg: any) => {
+        reg.drones = {
+          'old-parent': {
+            id: 'old-parent',
+            name: 'old-parent',
+            hostPort: oldParentDaemon.port,
+            token: 'old-parent-token',
+            containerPort: 7777,
+            repoPath: '',
+            createdAt: now,
+            chats: { default: { createdAt: now, agent: { kind: 'builtin', id: 'cursor' }, turns: [], pendingPrompts: [] } },
+          },
+          'new-parent': {
+            id: 'new-parent',
+            name: 'new-parent',
+            hostPort: newParentDaemon.port,
+            token: 'new-parent-token',
+            containerPort: 7777,
+            repoPath: '',
+            createdAt: now,
+            chats: { default: { createdAt: now, agent: { kind: 'builtin', id: 'cursor' }, turns: [], pendingPrompts: [] } },
+          },
+          child: {
+            id: 'child',
+            name: 'child',
+            hostPort: null,
+            token: '',
+            runtime: 'host',
+            containerPort: 7777,
+            repoPath: '',
+            createdAt: now,
+            fleet: {
+              createdBy: 'old-parent',
+              assigned: [],
+            },
+            chats: { default: { createdAt: now, agent: { kind: 'builtin', id: 'cursor' }, turns: [], pendingPrompts: [] } },
+          },
+        };
+      });
+
+      const reparented = await apiFetch('/api/fleet/actors/child/parent', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ parent: 'new-parent' }),
+      });
+      expect(reparented.r.status).toBe(200);
+      expect(reparented.data?.parentId).toBe('new-parent');
+
+      const reg = await loadRegistry();
+      expect(reg?.drones?.child?.fleet?.createdBy).toBe('new-parent');
+
+      await Bun.sleep(250);
+      expect(oldParentDaemon.policy?.relationships?.children ?? []).toEqual([]);
+      expect(newParentDaemon.policy?.relationships?.children ?? []).toEqual([{ id: 'child', name: 'child' }]);
+    } finally {
+      await oldParentDaemon.close();
+      await newParentDaemon.close();
+    }
+  });
+
+  test('rejects reparenting a drone beneath its descendant', async () => {
+    const now = new Date().toISOString();
+    await updateRegistry((reg: any) => {
+      reg.drones = {
+        parent: {
+          id: 'parent',
+          name: 'parent',
+          hostPort: null,
+          token: '',
+          runtime: 'host',
+          containerPort: 7777,
+          repoPath: '',
+          createdAt: now,
+          chats: { default: { createdAt: now, turns: [], pendingPrompts: [] } },
+        },
+        child: {
+          id: 'child',
+          name: 'child',
+          hostPort: null,
+          token: '',
+          runtime: 'host',
+          containerPort: 7777,
+          repoPath: '',
+          createdAt: now,
+          fleet: {
+            createdBy: 'parent',
+            assigned: [],
+          },
+          chats: { default: { createdAt: now, turns: [], pendingPrompts: [] } },
+        },
+      };
+    });
+
+    const rejected = await apiFetch('/api/fleet/actors/parent/parent', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ parent: 'child' }),
+    });
+    expect(rejected.r.status).toBe(400);
+    expect(String(rejected.data?.error ?? '')).toMatch(/descendants/i);
+
+    const reg = await loadRegistry();
+    expect(reg?.drones?.parent?.fleet?.createdBy ?? null).toBeNull();
+    expect(reg?.drones?.child?.fleet?.createdBy).toBe('parent');
+  });
+
   test('reconciles send and read fleet requests for a child drone', async () => {
     const parentDaemon = await startStubDaemon('parent-send-token');
     const childDaemon = await startStubDaemon('child-send-token');

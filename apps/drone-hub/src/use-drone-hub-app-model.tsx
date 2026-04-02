@@ -836,6 +836,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     deleteDrone: deleteDroneBase,
     renameDrone,
     setDroneBaseImage,
+    reparentDronesToParent,
     renameDroneTo,
     suggestAndRenameDraftDrone,
   } = useDroneMutationActions({
@@ -2799,6 +2800,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     renameDrone,
     setDroneBaseImage,
     deleteDrone,
+    reparentDronesToParent,
     openDroneErrorModal,
     moveDronesToGroup,
     createGroup: createSidebarGroup,

@@ -21,6 +21,10 @@ import {
   sidebarDropPlacementFromRects,
   SidebarReorderDropIndicator,
 } from './sidebar-reorder-ui';
+import {
+  canReparentSidebarDroneSelection,
+  sidebarDroneDropIntentFromRects,
+} from './sidebar-drone-drop';
 import { useDroneSidebarUiState } from './use-drone-hub-ui-store';
 import type { SidebarDroneTree } from './sidebar-drone-tree';
 import type { SidebarDensityMode } from './settings-types';
@@ -72,6 +76,10 @@ export type SidebarDroneTreeListProps = {
   onDeleteDrone: (droneId: string) => void;
   onOpenDroneErrorModal: (drone: DroneSummary, message: string) => void;
   onPrepareDroneDragStart: (droneId: string) => void;
+  onReparentDronesToParent: (
+    parentDroneId: string,
+    droneIds: string[],
+  ) => Promise<{ ok: boolean; error?: string | null; reparentedIds?: string[] }>;
   groupOrderKey?: string | null;
   groupName?: string | null;
   showGroup?: boolean;
@@ -102,6 +110,7 @@ type SidebarDroneRowProps = {
   groupOrderKey?: string | null;
   groupName?: string | null;
   dragOverPlacement: SidebarGroupDropPlacement | null;
+  dragOverParenting: boolean;
   uiDroneName: (nameRaw: string) => string;
   onSelectDroneCard: (droneId: string, opts?: { toggle?: boolean; range?: boolean }) => void;
   onOpenCloneModal: (drone: DroneSummary) => void;
@@ -145,6 +154,7 @@ type SidebarDroneNodeProps = SidebarDroneTreeListProps & {
   sidebarChatOrderByDrone: Record<string, string[]>;
   dragOverDrone: { droneId: string; placement: SidebarGroupDropPlacement } | null;
   dragOverChat: { key: string; placement: SidebarGroupDropPlacement } | null;
+  dragOverParentDroneId: string | null;
   deletingChats: Record<string, boolean>;
   onDeleteChatClick: (droneId: string, chatName: string) => void;
   chatEditor: ChatEditorState | null;
@@ -225,6 +235,11 @@ function createChatReorderDropId(droneIdRaw: string, chatNameRaw: string): strin
   return `sidebar-chat-reorder:${droneId}:${chatName}`;
 }
 
+function createDroneChildrenDropId(droneIdRaw: string): string {
+  const droneId = String(droneIdRaw ?? '').trim();
+  return `sidebar-drone-children:${droneId}`;
+}
+
 function currentPlacementFromEvent(
   event: DragMoveEvent | DragOverEvent | DragEndEvent,
 ): SidebarGroupDropPlacement {
@@ -250,6 +265,7 @@ function SidebarDroneRow({
   groupOrderKey,
   groupName,
   dragOverPlacement,
+  dragOverParenting,
   uiDroneName,
   onSelectDroneCard,
   onOpenCloneModal,
@@ -293,7 +309,12 @@ function SidebarDroneRow({
   });
 
   return (
-    <div className="relative flex items-stretch gap-1" ref={setNodeRef}>
+    <div
+      className={`relative flex items-stretch gap-1 rounded-md transition-colors ${
+        dragOverParenting ? 'bg-[rgba(80,130,255,.10)] ring-1 ring-[rgba(90,140,255,.34)]' : ''
+      }`}
+      ref={setNodeRef}
+    >
       {dragOverPlacement ? <SidebarReorderDropIndicator placement={dragOverPlacement} /> : null}
       <div className="min-w-0 flex-1">
         <DroneCard
@@ -516,6 +537,45 @@ function SidebarChatRow({
   );
 }
 
+function SidebarDroneChildrenSection({
+  droneId,
+  highlighted,
+  movingDroneGroups,
+  isOptimistic,
+  groupOrderKey,
+  className,
+  children,
+}: {
+  droneId: string;
+  highlighted: boolean;
+  movingDroneGroups: boolean;
+  isOptimistic: boolean;
+  groupOrderKey?: string | null;
+  className: string;
+  children: React.ReactNode;
+}) {
+  const { setNodeRef } = useDroppable({
+    id: createDroneChildrenDropId(droneId),
+    data: {
+      type: 'sidebar-drone-parenting',
+      droneId,
+      groupOrderKey: groupOrderKey ?? null,
+    },
+    disabled: movingDroneGroups || isOptimistic,
+  });
+
+  return (
+    <div
+      ref={setNodeRef}
+      className={`${className} rounded-md transition-colors ${
+        highlighted ? 'bg-[rgba(80,130,255,.08)] ring-1 ring-[rgba(90,140,255,.24)]' : ''
+      }`}
+    >
+      {children}
+    </div>
+  );
+}
+
 function SidebarDroneNode({
   droneById,
   tree,
@@ -554,6 +614,7 @@ function SidebarDroneNode({
   sidebarChatOrderByDrone,
   dragOverDrone,
   dragOverChat,
+  dragOverParentDroneId,
   deletingChats,
   onDeleteChatClick,
   chatEditor,
@@ -633,6 +694,7 @@ function SidebarDroneNode({
         groupOrderKey={groupOrderKey}
         groupName={groupName}
         dragOverPlacement={dragOverDrone?.droneId === drone.id ? dragOverDrone.placement : null}
+        dragOverParenting={dragOverParentDroneId === drone.id}
         uiDroneName={uiDroneName}
         onSelectDroneCard={onSelectDroneCard}
         onOpenCloneModal={onOpenCloneModal}
@@ -708,7 +770,14 @@ function SidebarDroneNode({
         </div>
       ) : null}
       {hasChildrenSection ? (
-        <div className={`${densityClasses.childIndent} mr-1 flex flex-col gap-0.5`}>
+        <SidebarDroneChildrenSection
+          droneId={drone.id}
+          highlighted={dragOverParentDroneId === drone.id}
+          movingDroneGroups={movingDroneGroups}
+          isOptimistic={isOptimistic}
+          groupOrderKey={groupOrderKey}
+          className={`${densityClasses.childIndent} mr-1 flex flex-col gap-0.5`}
+        >
           {childDroneIds.map((childDroneId) => (
             <SidebarDroneNode
               key={childDroneId}
@@ -749,6 +818,7 @@ function SidebarDroneNode({
               sidebarChatOrderByDrone={sidebarChatOrderByDrone}
               dragOverDrone={dragOverDrone}
               dragOverChat={dragOverChat}
+              dragOverParentDroneId={dragOverParentDroneId}
               deletingChats={deletingChats}
               onDeleteChatClick={onDeleteChatClick}
               chatEditor={chatEditor}
@@ -761,7 +831,7 @@ function SidebarDroneNode({
               onCancelChatEditor={onCancelChatEditor}
             />
           ))}
-        </div>
+        </SidebarDroneChildrenSection>
       ) : null}
     </div>
   );
@@ -797,6 +867,7 @@ export function SidebarDroneTreeList({
   onDeleteDrone,
   onOpenDroneErrorModal,
   onPrepareDroneDragStart,
+  onReparentDronesToParent,
   groupOrderKey,
   groupName,
   showGroup,
@@ -814,6 +885,7 @@ export function SidebarDroneTreeList({
     key: string;
     placement: SidebarGroupDropPlacement;
   } | null>(null);
+  const [dragOverParentDroneId, setDragOverParentDroneId] = React.useState<string | null>(null);
   const [deletingChats, setDeletingChats] = React.useState<Record<string, boolean>>({});
   const [chatEditor, setChatEditor] = React.useState<ChatEditorState | null>(null);
   const chatEditorInputRef = React.useRef<HTMLInputElement>(null);
@@ -909,7 +981,37 @@ export function SidebarDroneTreeList({
   const clearDragOverState = React.useCallback(() => {
     setDragOverDrone(null);
     setDragOverChat(null);
+    setDragOverParentDroneId(null);
   }, []);
+
+  const handleDroneParentingDrop = React.useCallback(
+    async (parentDroneIdRaw: string, sourceDroneIdsRaw: string[]) => {
+      const parentDroneId = String(parentDroneIdRaw ?? '').trim();
+      if (!canReparentSidebarDroneSelection(droneById, sourceDroneIdsRaw, parentDroneId)) return;
+      const result = await onReparentDronesToParent(parentDroneId, sourceDroneIdsRaw);
+      const reparentedIds = Array.isArray(result.reparentedIds)
+        ? result.reparentedIds.map((item) => String(item ?? '').trim()).filter(Boolean)
+        : [];
+      if (
+        reparentedIds.length > 0 &&
+        collapsedDroneSections[sidebarInlineSectionKey(parentDroneId, 'children')]
+      ) {
+        onToggleSection(parentDroneId, 'children');
+      }
+      if (!result.ok && result.error) {
+        const targetDrone = droneById[parentDroneId] ?? null;
+        if (targetDrone) onOpenDroneErrorModal(targetDrone, result.error);
+        else window.alert(result.error);
+      }
+    },
+    [
+      collapsedDroneSections,
+      droneById,
+      onOpenDroneErrorModal,
+      onReparentDronesToParent,
+      onToggleSection,
+    ],
+  );
 
   const onDeleteChatClick = React.useCallback(
     async (droneIdRaw: string, chatNameRaw: string) => {
@@ -938,21 +1040,50 @@ export function SidebarDroneTreeList({
     (event: DragMoveEvent | DragOverEvent) => {
       const active = parseDroneHubDragData(event.active.data.current);
       const overData = event.over?.data.current;
-      if (
-        active?.type === 'sidebar-drone' &&
-        groupOrderKey &&
-        active.groupOrderKey === groupOrderKey &&
-        overData?.type === 'sidebar-drone-reorder'
-      ) {
-        const overDroneId = String((overData as { droneId?: unknown }).droneId ?? '').trim();
-        const overGroupOrderKey = String((overData as { groupOrderKey?: unknown }).groupOrderKey ?? '').trim();
-        if (overDroneId && overGroupOrderKey === groupOrderKey && active.droneId !== overDroneId) {
-          setDragOverChat(null);
-          setDragOverDrone({
-            droneId: overDroneId,
-            placement: currentPlacementFromEvent(event),
-          });
-          return;
+      if (active?.type === 'sidebar-drone') {
+        if (overData?.type === 'sidebar-drone-parenting') {
+          const overDroneId = String((overData as { droneId?: unknown }).droneId ?? '').trim();
+          if (canReparentSidebarDroneSelection(droneById, active.droneIds, overDroneId)) {
+            setDragOverDrone(null);
+            setDragOverChat(null);
+            setDragOverParentDroneId(overDroneId);
+            return;
+          }
+        }
+
+        if (overData?.type === 'sidebar-drone-reorder') {
+          const overDroneId = String((overData as { droneId?: unknown }).droneId ?? '').trim();
+          const overGroupOrderKey = String((overData as { groupOrderKey?: unknown }).groupOrderKey ?? '').trim();
+          if (overDroneId) {
+            const dropIntent = sidebarDroneDropIntentFromRects(
+              event.active.rect.current.translated ?? event.active.rect.current.initial,
+              event.over?.rect ?? null,
+            );
+            if (
+              dropIntent === 'inside' &&
+              canReparentSidebarDroneSelection(droneById, active.droneIds, overDroneId)
+            ) {
+              setDragOverDrone(null);
+              setDragOverChat(null);
+              setDragOverParentDroneId(overDroneId);
+              return;
+            }
+            if (
+              dropIntent !== 'inside' &&
+              groupOrderKey &&
+              active.groupOrderKey === groupOrderKey &&
+              overGroupOrderKey === groupOrderKey &&
+              active.droneId !== overDroneId
+            ) {
+              setDragOverParentDroneId(null);
+              setDragOverChat(null);
+              setDragOverDrone({
+                droneId: overDroneId,
+                placement: currentPlacementFromEvent(event),
+              });
+              return;
+            }
+          }
         }
       }
 
@@ -966,6 +1097,7 @@ export function SidebarDroneTreeList({
           overChatName !== active.chatName
         ) {
           setDragOverDrone(null);
+          setDragOverParentDroneId(null);
           setDragOverChat({
             key: `${overDroneId}:${overChatName}`,
             placement: currentPlacementFromEvent(event),
@@ -976,7 +1108,7 @@ export function SidebarDroneTreeList({
 
       clearDragOverState();
     },
-    [clearDragOverState, groupOrderKey],
+    [clearDragOverState, droneById, groupOrderKey],
   );
 
   useDndMonitor({
@@ -993,27 +1125,55 @@ export function SidebarDroneTreeList({
       const active = parseDroneHubDragData(event.active.data.current);
       const overData = event.over?.data.current;
 
-      if (
-        active?.type === 'sidebar-drone' &&
-        groupOrderKey &&
-        active.groupOrderKey === groupOrderKey &&
-        overData?.type === 'sidebar-drone-reorder'
-      ) {
-        const overDroneId = String((overData as { droneId?: unknown }).droneId ?? '').trim();
-        const overGroupOrderKey = String((overData as { groupOrderKey?: unknown }).groupOrderKey ?? '').trim();
-        if (overDroneId && overGroupOrderKey === groupOrderKey && active.droneId !== overDroneId) {
-          const placement =
-            dragOverDrone?.droneId === overDroneId ? dragOverDrone.placement : currentPlacementFromEvent(event);
-          setSidebarDroneOrderByGroup((prev) => ({
-            ...prev,
-            [groupOrderKey]: reorderSidebarEntryOrder(
-              prev[groupOrderKey] ?? [],
-              visibleDroneOrder,
-              active.droneId,
-              overDroneId,
-              placement,
-            ),
-          }));
+      if (active?.type === 'sidebar-drone') {
+        if (overData?.type === 'sidebar-drone-parenting') {
+          const overDroneId = String((overData as { droneId?: unknown }).droneId ?? '').trim();
+          clearDragOverState();
+          if (canReparentSidebarDroneSelection(droneById, active.droneIds, overDroneId)) {
+            void handleDroneParentingDrop(overDroneId, active.droneIds);
+          }
+          return;
+        }
+
+        if (overData?.type === 'sidebar-drone-reorder') {
+          const overDroneId = String((overData as { droneId?: unknown }).droneId ?? '').trim();
+          const overGroupOrderKey = String((overData as { groupOrderKey?: unknown }).groupOrderKey ?? '').trim();
+          const dropIntent =
+            dragOverParentDroneId === overDroneId
+              ? 'inside'
+              : sidebarDroneDropIntentFromRects(
+                  event.active.rect.current.translated ?? event.active.rect.current.initial,
+                  event.over?.rect ?? null,
+                );
+          if (
+            dropIntent === 'inside' &&
+            canReparentSidebarDroneSelection(droneById, active.droneIds, overDroneId)
+          ) {
+            clearDragOverState();
+            void handleDroneParentingDrop(overDroneId, active.droneIds);
+            return;
+          }
+          if (
+            dropIntent !== 'inside' &&
+            groupOrderKey &&
+            active.groupOrderKey === groupOrderKey &&
+            overDroneId &&
+            overGroupOrderKey === groupOrderKey &&
+            active.droneId !== overDroneId
+          ) {
+            const placement =
+              dragOverDrone?.droneId === overDroneId ? dragOverDrone.placement : currentPlacementFromEvent(event);
+            setSidebarDroneOrderByGroup((prev) => ({
+              ...prev,
+              [groupOrderKey]: reorderSidebarEntryOrder(
+                prev[groupOrderKey] ?? [],
+                visibleDroneOrder,
+                active.droneId,
+                overDroneId,
+                placement,
+              ),
+            }));
+          }
         }
       }
 
@@ -1088,6 +1248,7 @@ export function SidebarDroneTreeList({
           sidebarChatOrderByDrone={sidebarChatOrderByDrone}
           dragOverDrone={dragOverDrone}
           dragOverChat={dragOverChat}
+          dragOverParentDroneId={dragOverParentDroneId}
           deletingChats={deletingChats}
           onDeleteChatClick={(droneIdValue, chatNameValue) => {
             void onDeleteChatClick(droneIdValue, chatNameValue);

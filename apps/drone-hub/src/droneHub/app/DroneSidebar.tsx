@@ -842,6 +842,10 @@ export type DroneSidebarProps = {
   onSetDroneBaseImage: (droneId: string) => void;
   onDeleteDrone: (droneId: string) => void;
   onOpenDroneErrorModal: (drone: DroneSummary, message: string) => void;
+  onReparentDronesToParent: (
+    parentDroneId: string,
+    droneIds: string[],
+  ) => Promise<{ ok: boolean; error?: string | null; reparentedIds?: string[] }>;
   onMoveDronesToGroup: (group: string, droneIds: string[]) => Promise<MoveDronesToGroupResult>;
   onCreateGroup: (group: string) => Promise<{ ok: boolean; error: string | null }> | { ok: boolean; error: string | null };
   onCreateGroupAndMove: (
@@ -903,6 +907,7 @@ export function DroneSidebar({
   onSetDroneBaseImage,
   onDeleteDrone,
   onOpenDroneErrorModal,
+  onReparentDronesToParent,
   onMoveDronesToGroup,
   onCreateGroup,
   onCreateGroupAndMove,
@@ -1967,6 +1972,7 @@ export function DroneSidebar({
     onDeleteDrone,
     onOpenDroneErrorModal,
     onPrepareDroneDragStart,
+    onReparentDronesToParent,
   } satisfies Omit<React.ComponentProps<typeof SidebarDroneTreeList>, 'tree'>;
 
   const onSidebarWheel = React.useCallback(
