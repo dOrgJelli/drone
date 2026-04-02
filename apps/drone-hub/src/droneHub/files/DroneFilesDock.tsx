@@ -1,25 +1,17 @@
 import React from 'react';
-import { IconPencil, IconTreeView } from '../app/icons';
+import { IconPencil } from '../app/icons';
 import { formatBytes } from '../app/selected-drone-workspace-utils';
 import { requestJson } from '../http';
 import { IconChevron, IconFolder, iconForFilePath } from '../icons';
 import type { DroneFsEntry, DroneFsListPayload, DroneFsUploadPayload } from '../types';
 import { OpenedDroneFilePanel } from './OpenedDroneFilePanel';
 import type { DroneOpenedFileState } from './opened-file-types';
-import { buildFileExplorerTree, summarizeRootEntries, type FileExplorerNode } from './tree';
+import { buildFileExplorerTree, type FileExplorerNode } from './tree';
 
 function normalizeContainerPathInput(raw: string): string {
   const trimmed = String(raw ?? '').trim();
   if (!trimmed) return '/';
   return trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
-}
-
-function parentContainerPath(rawPath: string): string {
-  const p = normalizeContainerPathInput(rawPath).replace(/\/+$/g, '') || '/';
-  if (p === '/') return '/';
-  const i = p.lastIndexOf('/');
-  if (i <= 0) return '/';
-  return p.slice(0, i) || '/';
 }
 
 function formatLocalDateTime(ms: number | null | undefined): string {
@@ -82,7 +74,7 @@ export function DroneFilesDock({
   droneName,
   droneLabel,
   path,
-  homePath,
+  homePath: _homePath,
   entries,
   loading,
   error,
@@ -120,9 +112,9 @@ export function DroneFilesDock({
 }) {
   const shownName = String(droneLabel ?? droneName).trim() || droneName;
   const normalizedPath = normalizeContainerPathInput(path);
-  const normalizedHomePath = normalizeContainerPathInput(homePath);
   const activeOpenedFilePath = String(openedFile.path ?? '').trim();
   const [pathInput, setPathInput] = React.useState(normalizedPath);
+  const [pathEntryOpen, setPathEntryOpen] = React.useState(false);
   const [expandedDirs, setExpandedDirs] = React.useState<Record<string, boolean>>({});
   const [childEntriesByPath, setChildEntriesByPath] = React.useState<Record<string, DroneFsEntry[]>>({});
   const [childLoadingByPath, setChildLoadingByPath] = React.useState<Record<string, boolean>>({});
@@ -162,7 +154,6 @@ export function DroneFilesDock({
     [],
   );
 
-  const rootSummary = React.useMemo(() => summarizeRootEntries(entries), [entries]);
   const explorerTree = React.useMemo(
     () =>
       buildFileExplorerTree({
@@ -184,11 +175,8 @@ export function DroneFilesDock({
     return out;
   }, [normalizedPath]);
 
-  const goUp = React.useCallback(() => {
-    onOpenPath(parentContainerPath(normalizedPath));
-  }, [normalizedPath, onOpenPath]);
-
   const submitPath = React.useCallback(() => {
+    setPathEntryOpen(false);
     onOpenPath(normalizeContainerPathInput(pathInput));
   }, [onOpenPath, pathInput]);
 
@@ -562,11 +550,6 @@ export function DroneFilesDock({
   const startupText = startup?.timedOut
     ? 'Still waiting for the filesystem to come online. If this keeps happening, the drone may be stuck provisioning.'
     : 'Waiting for filesystem…';
-  const expandedCount = React.useMemo(
-    () => Object.values(expandedDirs).filter((value) => value === true).length,
-    [expandedDirs],
-  );
-
   return (
     <div
       className={`w-full h-full min-h-0 bg-[var(--panel-alt)] overflow-hidden flex flex-col relative ${
@@ -577,92 +560,78 @@ export function DroneFilesDock({
       onDragLeave={onPanelDragLeave}
       onDrop={onPanelDrop}
     >
-      <div className="px-2.5 py-2 border-b border-[var(--border-subtle)] flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2 min-w-0">
-          <div className="text-[11px] font-semibold text-[var(--muted-dim)] tracking-[0.12em] uppercase" style={{ fontFamily: 'var(--display)' }}>
-            Files
-          </div>
-          <span className="inline-flex items-center gap-1 rounded-full border border-[var(--accent-muted)] bg-[var(--accent-subtle)] px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[var(--accent)]">
-            <IconTreeView className="opacity-80" />
-            Explorer
-          </span>
-        </div>
-        <div className="text-[10px] text-[var(--muted-dim)] tabular-nums whitespace-nowrap">
-          {rootSummary.directories} dirs • {rootSummary.files} files
-        </div>
-      </div>
-
-      <div className="px-2.5 py-2 border-b border-[var(--border-subtle)] flex flex-col gap-1.5">
-        <div className="min-w-0 overflow-x-auto whitespace-nowrap text-[10px] text-[var(--muted)]">
-          {crumbs.map((c, idx) => (
-            <React.Fragment key={c.path}>
-              {idx > 0 && <span className="mx-1 text-[var(--muted-dim)]">/</span>}
+      <div className="px-2.5 py-2 border-b border-[var(--border-subtle)] flex items-center gap-2">
+        <div className="min-w-0 flex-1">
+          {pathEntryOpen ? (
+            <div className="flex items-center gap-1">
+              <input
+                type="text"
+                value={pathInput}
+                onChange={(e) => setPathInput(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    submitPath();
+                  } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    setPathInput(normalizedPath);
+                    setPathEntryOpen(false);
+                  }
+                }}
+                autoFocus
+                className="flex-1 min-w-0 h-7 rounded-md border border-[var(--border-subtle)] bg-[var(--panel)] px-2 text-[11px] text-[var(--fg-secondary)] focus:outline-none"
+                title={`Container path for ${shownName}`}
+              />
               <button
                 type="button"
-                onClick={() => onOpenPath(c.path)}
-                className={`hover:text-[var(--fg-secondary)] ${idx === crumbs.length - 1 ? 'text-[var(--fg-secondary)] font-semibold' : ''}`}
-                title={c.path}
+                onClick={submitPath}
+                className="h-7 px-2.5 rounded-md border border-[var(--border-subtle)] bg-[var(--panel)] text-[10px] font-semibold text-[var(--muted)] hover:text-[var(--fg-secondary)] hover:bg-[var(--hover)]"
+                title="Go to path"
               >
-                {c.label}
+                Go
               </button>
-            </React.Fragment>
-          ))}
+            </div>
+          ) : (
+            <div className="overflow-x-auto whitespace-nowrap text-[11px] text-[var(--muted)]">
+              {crumbs.map((c, idx) => (
+                <React.Fragment key={c.path}>
+                  {idx > 0 && <span className="mx-1 text-[var(--muted-dim)]">/</span>}
+                  <button
+                    type="button"
+                    onClick={() => onOpenPath(c.path)}
+                    className={`hover:text-[var(--fg-secondary)] ${idx === crumbs.length - 1 ? 'text-[var(--fg-secondary)]' : ''}`}
+                    title={c.path}
+                  >
+                    {c.label}
+                  </button>
+                </React.Fragment>
+              ))}
+            </div>
+          )}
         </div>
-        <div className="flex items-center gap-1">
-          <input
-            type="text"
-            value={pathInput}
-            onChange={(e) => setPathInput(e.currentTarget.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                submitPath();
-              }
+        <div className="flex items-center gap-1 shrink-0">
+          <button
+            type="button"
+            onClick={() => {
+              setPathInput(normalizedPath);
+              setPathEntryOpen((prev) => !prev);
             }}
-            className="flex-1 min-w-0 h-7 rounded-md border border-[var(--border-subtle)] bg-[var(--panel-alt)] px-2 text-[11px] text-[var(--fg-secondary)] focus:outline-none"
-            title={`Container path for ${shownName}`}
-          />
-          <button
-            type="button"
-            onClick={submitPath}
-            className="h-7 px-2.5 rounded-md border border-[var(--border-subtle)] bg-[var(--panel-alt)] text-[10px] font-semibold text-[var(--muted)] hover:text-[var(--fg-secondary)] hover:bg-[var(--hover)]"
-            title="Go to path"
-          >
-            Go
-          </button>
-          <button
-            type="button"
-            onClick={() => onOpenPath(normalizedHomePath)}
-            disabled={normalizedPath === normalizedHomePath}
             className={`h-7 px-2.5 rounded-md border text-[10px] font-semibold transition-colors ${
-              normalizedPath === normalizedHomePath
-                ? 'border-[var(--border-subtle)] bg-[var(--panel-alt)] text-[var(--muted-dim)] opacity-60 cursor-not-allowed'
-                : 'border-[var(--border-subtle)] bg-[var(--panel-alt)] text-[var(--muted)] hover:text-[var(--fg-secondary)] hover:bg-[var(--hover)]'
+              pathEntryOpen
+                ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
+                : 'border-[var(--border-subtle)] bg-[var(--panel)] text-[var(--muted)] hover:text-[var(--fg-secondary)] hover:bg-[var(--hover)]'
             }`}
-            title={`Go to home: ${normalizedHomePath}`}
+            title="Jump to path"
           >
-            Home
-          </button>
-          <button
-            type="button"
-            onClick={goUp}
-            disabled={normalizedPath === '/'}
-            className={`h-7 px-2.5 rounded-md border text-[10px] font-semibold transition-colors ${
-              normalizedPath === '/'
-                ? 'border-[var(--border-subtle)] bg-[var(--panel-alt)] text-[var(--muted-dim)] opacity-60 cursor-not-allowed'
-                : 'border-[var(--border-subtle)] bg-[var(--panel-alt)] text-[var(--muted)] hover:text-[var(--fg-secondary)] hover:bg-[var(--hover)]'
-            }`}
-            title="Up one directory"
-          >
-            Up
+            Path
           </button>
           <button
             type="button"
             onClick={refreshExplorer}
-            className="h-7 px-2.5 rounded-md border border-[var(--border-subtle)] bg-[var(--panel-alt)] text-[10px] font-semibold text-[var(--muted)] hover:text-[var(--fg-secondary)] hover:bg-[var(--hover)]"
+            className="h-7 px-2.5 rounded-md border border-[var(--border-subtle)] bg-[var(--panel)] text-[10px] font-semibold text-[var(--muted)] hover:text-[var(--fg-secondary)] hover:bg-[var(--hover)]"
             title="Refresh explorer"
           >
-            Refresh
+            {loading ? 'Refreshing' : 'Refresh'}
           </button>
         </div>
       </div>
@@ -696,32 +665,16 @@ export function DroneFilesDock({
             />
           ) : (
             <div className="h-full min-h-0 rounded-md border border-[var(--border-subtle)] bg-[var(--panel)] flex items-center justify-center p-6">
-              <div className="max-w-md text-center">
+              <div className="max-w-sm text-center">
                 <div className="text-[15px] font-medium text-[var(--fg-secondary)]">No file selected</div>
                 <div className="mt-2 text-[12px] text-[var(--muted)]">Select a file from the explorer to view or edit it.</div>
-                <div className="mt-4 rounded-md border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 py-2 text-left text-[11px] text-[var(--muted)]">
-                  <div className="text-[10px] uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
-                    Current Folder
-                  </div>
-                  <div className="mt-1 font-mono text-[var(--fg-secondary)] break-all">{normalizedPath}</div>
-                  <div className="mt-2 text-[var(--muted-dim)]">
-                    {entries.length} item{entries.length === 1 ? '' : 's'} • {rootSummary.directories} dirs • {rootSummary.files} files
-                  </div>
-                </div>
+                <div className="mt-3 font-mono text-[10px] text-[var(--muted-dim)] break-all">{normalizedPath}</div>
               </div>
             </div>
           )}
         </div>
 
-        <div className="w-[320px] shrink-0 border-l border-[var(--border-subtle)] bg-[var(--panel)] flex flex-col">
-          <div className="px-2 py-1.5 border-b border-[var(--border-subtle)] bg-[var(--panel-raised)]/80">
-            <div className="text-[9px] font-semibold tracking-wide uppercase text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
-              Explorer
-            </div>
-            <div className="mt-0.5 text-[11px] text-[var(--fg-secondary)] font-mono truncate" title={normalizedPath}>
-              {normalizedPath}
-            </div>
-          </div>
+        <div className="w-[300px] shrink-0 border-l border-[var(--border-subtle)] bg-[var(--panel)] flex flex-col">
           <div className="flex-1 min-h-0 overflow-auto px-1.5 py-1">
             {showStartupPlaceholder ? (
               <div className="rounded-md border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 py-3 text-[12px] text-[var(--muted)]">
@@ -756,13 +709,6 @@ export function DroneFilesDock({
           </div>
         </div>
       ) : null}
-
-      <div className="px-2.5 py-1.5 border-t border-[var(--border-subtle)] text-[10px] text-[var(--muted-dim)] tabular-nums">
-        {entries.length} item{entries.length !== 1 ? 's' : ''} at root
-        {expandedCount > 0 ? ` • ${expandedCount} folder${expandedCount === 1 ? '' : 's'} expanded` : ''}
-        {loading ? ' • refreshing…' : ''}
-        {uploading ? ' • uploading…' : ''}
-      </div>
     </div>
   );
 }
