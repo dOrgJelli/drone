@@ -227,6 +227,11 @@ export function diffKey(path: string, kind: DiffKind): string {
   return `${kind}\u0000${path}`;
 }
 
+export function scopedChangesStateKey(scopeIdRaw: string, key: string): string {
+  const scopeId = String(scopeIdRaw ?? '').trim();
+  return scopeId ? `${scopeId}\u0000${key}` : key;
+}
+
 function compareRepoChangeEntries(a: RepoChangeEntry, b: RepoChangeEntry): number {
   const pathCmp = String(a.path ?? '').localeCompare(String(b.path ?? ''));
   if (pathCmp !== 0) return pathCmp;
