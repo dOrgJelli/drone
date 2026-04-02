@@ -1,7 +1,13 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_PROFILE_NAME, legacyDefaultDroneRootDir, readActiveProfileNameSync, resolveDroneRootFromActiveProfile } from './profiles';
+import {
+  DEFAULT_PROFILE_NAME,
+  defaultProfileDroneRootDir,
+  legacyDefaultDroneRootDir,
+  profileDroneRootDir,
+  readActiveProfileNameSync,
+} from './profiles';
 
 const DRONE_STATE_ENTRY_NAMES = [
   'hub.json',
@@ -11,16 +17,29 @@ const DRONE_STATE_ENTRY_NAMES = [
   'tmp',
 ];
 
-let cachedDroneRootDir: string | null = null;
+let cachedDroneRootDir: { key: string; value: string } | null = null;
 
 function repoRootDir(): string {
   return path.resolve(__dirname, '..', '..', '..', '..');
 }
 
-function configuredDroneRootDir(): string {
+function configuredDroneRootDirState(): { key: string; rootDir: string; activeProfile: string | null } {
   const explicit = process.env.DRONE_DATA_DIR?.trim();
-  if (explicit) return path.resolve(explicit);
-  return resolveDroneRootFromActiveProfile();
+  const activeProfile = readActiveProfileNameSync();
+  if (explicit) {
+    const rootDir = path.resolve(explicit);
+    return {
+      key: `explicit:${rootDir}:${activeProfile ?? ''}`,
+      rootDir,
+      activeProfile,
+    };
+  }
+  const rootDir = activeProfile ? profileDroneRootDir(activeProfile) : defaultProfileDroneRootDir();
+  return {
+    key: `profile:${rootDir}:${activeProfile ?? ''}`,
+    rootDir,
+    activeProfile,
+  };
 }
 
 function xdgDroneRootDir(): string {
@@ -125,7 +144,7 @@ function mergePathIntoTarget(sourcePath: string, targetPath: string): void {
 }
 
 export function legacyDroneRootDirs(): string[] {
-  const current = path.resolve(configuredDroneRootDir());
+  const current = path.resolve(configuredDroneRootDirState().rootDir);
   const candidates = [legacyDefaultDroneRootDir(), xdgDroneRootDir(), legacyHomeDroneRootDir()]
     .map((dir) => path.resolve(dir))
     .filter((dir) => dir !== current);
@@ -144,16 +163,15 @@ function migrateLegacyDroneRootIfNeeded(targetDir: string): void {
 }
 
 export function droneRootDir(): string {
-  if (cachedDroneRootDir) return cachedDroneRootDir;
-  const rootDir = configuredDroneRootDir();
-  const activeProfile = readActiveProfileNameSync();
+  const { key, rootDir, activeProfile } = configuredDroneRootDirState();
+  if (cachedDroneRootDir?.key === key) return cachedDroneRootDir.value;
   if (!activeProfile || activeProfile === DEFAULT_PROFILE_NAME) {
     migrateLegacyDroneRootIfNeeded(rootDir);
   } else {
     fs.mkdirSync(rootDir, { recursive: true });
   }
-  cachedDroneRootDir = rootDir;
-  return cachedDroneRootDir;
+  cachedDroneRootDir = { key, value: rootDir };
+  return rootDir;
 }
 
 export function droneRootPath(...parts: string[]): string {

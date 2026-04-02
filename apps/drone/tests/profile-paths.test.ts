@@ -35,6 +35,23 @@ describe('profile-backed drone paths', () => {
     });
   });
 
+  test('recomputes droneRootDir when the active profile changes without resetting the cache', async () => {
+    await withTempRepoDataRoot('drone-profile-paths-', async () => {
+      const testProfileRoot = path.join(profilesRootDir(), TEST_PROFILE_NAME);
+      const testManifestPath = profileManifestPath();
+      fs.rmSync(testProfileRoot, { recursive: true, force: true });
+      fs.rmSync(testManifestPath, { force: true });
+      resetDroneRootDirForTests();
+      await ensureProfileDirs(TEST_PROFILE_NAME);
+
+      const defaultRoot = droneRootDir();
+      await writeActiveProfileName(TEST_PROFILE_NAME);
+
+      expect(defaultRoot).toBe(profileDroneRootDir('default'));
+      expect(droneRootDir()).toBe(profileDroneRootDir(TEST_PROFILE_NAME));
+    });
+  });
+
   test('clearing the active profile removes the manifest', async () => {
     await withTempRepoDataRoot('drone-profile-paths-', async () => {
       const testProfileRoot = path.join(profilesRootDir(), TEST_PROFILE_NAME);
