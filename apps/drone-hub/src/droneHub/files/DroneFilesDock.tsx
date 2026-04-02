@@ -60,13 +60,6 @@ function sameFsEntries(a: DroneFsEntry[] | undefined, b: DroneFsEntry[] | undefi
   return true;
 }
 
-function detailHintLabel(entry: DroneFsEntry): string {
-  if (entry.kind === 'directory') return 'folder';
-  if (entry.isImage) return 'image';
-  if (entry.isVideo) return 'video';
-  return entry.ext ? entry.ext : 'file';
-}
-
 function InlineSpinner() {
   return (
     <span
@@ -466,19 +459,7 @@ export function DroneFilesDock({
                       Loading
                     </span>
                   ) : null}
-                  {node.count != null ? (
-                    <span className="text-[10px] text-[var(--muted-dim)] tabular-nums">{node.count}</span>
-                  ) : (
-                    <span className="text-[10px] text-[var(--muted-dim)]">dir</span>
-                  )}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onOpenPath(node.path)}
-                  className={`${actionButtonClassName} opacity-0 group-hover/dir:opacity-100 focus:opacity-100 transition-opacity`}
-                  title={`Browse ${node.path}`}
-                >
-                  <IconFolder className="w-3 h-3" />
+                  {node.count != null ? <span className="text-[10px] text-[var(--muted-dim)] tabular-nums">{node.count}</span> : null}
                 </button>
                 {renderDownloadButton(
                   node.entry,
@@ -536,7 +517,6 @@ export function DroneFilesDock({
                   <FileIcon size={12} />
                 </span>
                 <span className="truncate flex-1 text-[var(--fg-secondary)] text-[11px]">{node.name}</span>
-                <span className="text-[10px] text-[var(--muted)]">{detailHintLabel(entry)}</span>
                 <span className="text-[10px] text-[var(--muted-dim)] tabular-nums">
                   {entry.kind === 'file' ? formatBytes(entry.size) : '-'}
                 </span>
@@ -553,7 +533,6 @@ export function DroneFilesDock({
                   <FileIcon size={12} />
                 </span>
                 <span className="truncate flex-1 text-[var(--fg-secondary)] text-[11px]">{node.name}</span>
-                <span className="text-[10px] text-[var(--muted)]">other</span>
                 <span className="text-[10px] text-[var(--muted-dim)] tabular-nums">-</span>
               </div>
             )}
@@ -705,7 +684,36 @@ export function DroneFilesDock({
       ) : null}
 
       <div className="flex-1 min-h-0 flex overflow-hidden">
-        <div className="w-[320px] shrink-0 border-r border-[var(--border-subtle)] bg-[var(--panel)] flex flex-col">
+        <div className="flex-1 min-w-0 min-h-0 p-2.5 overflow-hidden">
+          {activeOpenedFilePath ? (
+            <OpenedDroneFilePanel
+              droneId={droneId}
+              file={openedFile}
+              onFileContentChange={onOpenedFileContentChange}
+              onSaveFile={onSaveOpenedFile}
+              onCloseFile={onCloseOpenedFile}
+              onOpenResolvedFile={openResolvedFile}
+            />
+          ) : (
+            <div className="h-full min-h-0 rounded-md border border-[var(--border-subtle)] bg-[var(--panel)] flex items-center justify-center p-6">
+              <div className="max-w-md text-center">
+                <div className="text-[15px] font-medium text-[var(--fg-secondary)]">No file selected</div>
+                <div className="mt-2 text-[12px] text-[var(--muted)]">Select a file from the explorer to view or edit it.</div>
+                <div className="mt-4 rounded-md border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 py-2 text-left text-[11px] text-[var(--muted)]">
+                  <div className="text-[10px] uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+                    Current Folder
+                  </div>
+                  <div className="mt-1 font-mono text-[var(--fg-secondary)] break-all">{normalizedPath}</div>
+                  <div className="mt-2 text-[var(--muted-dim)]">
+                    {entries.length} item{entries.length === 1 ? '' : 's'} • {rootSummary.directories} dirs • {rootSummary.files} files
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="w-[320px] shrink-0 border-l border-[var(--border-subtle)] bg-[var(--panel)] flex flex-col">
           <div className="px-2 py-1.5 border-b border-[var(--border-subtle)] bg-[var(--panel-raised)]/80">
             <div className="text-[9px] font-semibold tracking-wide uppercase text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
               Explorer
@@ -735,43 +743,6 @@ export function DroneFilesDock({
               renderExplorer(explorerTree, 0)
             )}
           </div>
-        </div>
-
-        <div className="flex-1 min-w-0 min-h-0 p-2.5 overflow-hidden">
-          {activeOpenedFilePath ? (
-            <OpenedDroneFilePanel
-              droneId={droneId}
-              file={openedFile}
-              onFileContentChange={onOpenedFileContentChange}
-              onSaveFile={onSaveOpenedFile}
-              onCloseFile={onCloseOpenedFile}
-              onOpenResolvedFile={openResolvedFile}
-            />
-          ) : (
-            <div className="h-full min-h-0 rounded-md border border-[var(--border-subtle)] bg-[var(--panel)] flex items-center justify-center p-6">
-              <div className="max-w-md text-center">
-                <div className="inline-flex items-center gap-2 rounded-full border border-[var(--accent-muted)] bg-[var(--accent-subtle)] px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--accent)]">
-                  <IconTreeView className="opacity-80" />
-                  Tree Explorer Ready
-                </div>
-                <div className="mt-4 text-[14px] text-[var(--fg-secondary)]">
-                  Browse <span className="font-mono">{shownName}</span> from the left explorer.
-                </div>
-                <div className="mt-2 text-[12px] text-[var(--muted)]">
-                  Click a file to open it here. Expand folders inline, or use the folder action to make any directory the new explorer root.
-                </div>
-                <div className="mt-4 rounded-md border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 py-2 text-left text-[11px] text-[var(--muted)]">
-                  <div className="text-[10px] uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
-                    Current Root
-                  </div>
-                  <div className="mt-1 font-mono text-[var(--fg-secondary)] break-all">{normalizedPath}</div>
-                  <div className="mt-2 text-[var(--muted-dim)]">
-                    {entries.length} item{entries.length === 1 ? '' : 's'} • {rootSummary.directories} dirs • {rootSummary.files} files
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
         </div>
       </div>
 
