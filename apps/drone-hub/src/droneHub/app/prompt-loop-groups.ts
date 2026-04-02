@@ -75,14 +75,6 @@ export function buildTranscriptRenderBlocks(items: TranscriptItem[]): Transcript
   return blocks;
 }
 
-function transcriptBlockSortMs(block: TranscriptRenderBlock): number {
-  if (block.kind === 'turn') {
-    return parseIsoMs(block.item.promptAt ?? block.item.at);
-  }
-  const first = block.runs[0];
-  return parseIsoMs(first?.promptAt ?? first?.at);
-}
-
 export function pendingPromptTimelineSortMs(item: PendingPrompt): number {
   const queuedMs = parseIsoMs(item.at);
   const activeMs = parseIsoMs(item.updatedAt ?? item.at);
@@ -90,6 +82,15 @@ export function pendingPromptTimelineSortMs(item: PendingPrompt): number {
     return activeMs || queuedMs;
   }
   return queuedMs || activeMs;
+}
+
+export function transcriptTimelineSortMs(block: TranscriptTimelineBlock): number {
+  if (block.kind === 'pending-prompt') return pendingPromptTimelineSortMs(block.item);
+  if (block.kind === 'turn') {
+    return parseIsoMs(block.item.promptAt ?? block.item.at);
+  }
+  const first = block.runs[0];
+  return parseIsoMs(first?.promptAt ?? first?.at);
 }
 
 export function buildTranscriptTimelineBlocks(opts: {
@@ -102,7 +103,7 @@ export function buildTranscriptTimelineBlocks(opts: {
   for (const block of opts.transcriptRenderBlocks) {
     items.push({
       ...block,
-      sortMs: transcriptBlockSortMs(block),
+      sortMs: transcriptTimelineSortMs(block),
       order: order++,
     });
   }
@@ -112,7 +113,7 @@ export function buildTranscriptTimelineBlocks(opts: {
       kind: 'pending-prompt',
       key: `pending-prompt:${item.id}`,
       item,
-      sortMs: pendingPromptTimelineSortMs(item),
+      sortMs: transcriptTimelineSortMs({ kind: 'pending-prompt', key: `pending-prompt:${item.id}`, item }),
       order: order++,
     });
   }
