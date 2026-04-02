@@ -71,6 +71,7 @@ import {
   sameRepoPullRequestCommitListPayload,
   sameRepoPullRequestChangesPayload,
   sortRepoChangeEntries,
+  scopedChangesStateKey,
   shortRefName,
   shortSha,
   statusBadgeTitle,
@@ -503,6 +504,13 @@ export function DroneChangesDock({
     if (pullRequestNumber && pullRequestNumber > 0) return;
     setContextModeState('branch');
   }, [contextMode, fixedContextMode, pullRequestNumber]);
+
+  React.useEffect(() => {
+    setSelectedPath(null);
+    setSelectedCommitSha(null);
+    setCommitFileSelectedPath(null);
+    setHoveredFilePath(null);
+  }, [droneId]);
 
   React.useEffect(() => {
     setPullRequestActionError(null);
@@ -1281,20 +1289,27 @@ export function DroneChangesDock({
     };
   }, [restoreCommitListResizeBodyStyles]);
 
-  const workingDiffStateKey = React.useCallback((path: string, kind: DiffKind) => `wt\u0000${diffKey(path, kind)}`, []);
+  const workingDiffStateKey = React.useCallback(
+    (path: string, kind: DiffKind) => scopedChangesStateKey(droneId, `wt\u0000${diffKey(path, kind)}`),
+    [droneId],
+  );
   const pullPreviewDiffStateKey = React.useCallback(
     (path: string, baseSha: string | null | undefined, headSha: string | null | undefined) =>
-      `pull\u0000${String(baseSha ?? '').trim().toLowerCase()}\u0000${String(headSha ?? '').trim().toLowerCase()}\u0000${path}`,
-    [],
+      scopedChangesStateKey(
+        droneId,
+        `pull\u0000${String(baseSha ?? '').trim().toLowerCase()}\u0000${String(headSha ?? '').trim().toLowerCase()}\u0000${path}`,
+      ),
+    [droneId],
   );
   const pullRequestDiffStateKey = React.useCallback(
-    (path: string, prNumber: number | null | undefined) => `pr\u0000${Math.max(1, Math.floor(Number(prNumber ?? 0)))}\u0000${path}`,
-    [],
+    (path: string, prNumber: number | null | undefined) =>
+      scopedChangesStateKey(droneId, `pr\u0000${Math.max(1, Math.floor(Number(prNumber ?? 0)))}\u0000${path}`),
+    [droneId],
   );
   const commitDiffStateKey = React.useCallback(
     (path: string, sha: string | null | undefined, mode: ChangesContextMode) =>
-      `commit\u0000${mode}\u0000${String(sha ?? '').trim().toLowerCase()}\u0000${path}`,
-    [],
+      scopedChangesStateKey(droneId, `commit\u0000${mode}\u0000${String(sha ?? '').trim().toLowerCase()}\u0000${path}`),
+    [droneId],
   );
   const validDiffStateKeys = React.useMemo(() => {
     const keys = new Set<string>();
@@ -1641,7 +1656,7 @@ export function DroneChangesDock({
     if (!Number.isFinite(prNumber) || prNumber <= 0) return;
     const list = pullRequestChanges?.entries ?? [];
     for (const entry of list) {
-      const key = `pr\u0000${Math.floor(prNumber)}\u0000${entry.path}`;
+      const key = pullRequestDiffStateKey(entry.path, prNumber);
       clearDiffExpansionSource(key);
       clearExpandedRangesForDiff(key);
     }
@@ -1649,7 +1664,7 @@ export function DroneChangesDock({
       const next = { ...prev };
       let changed = false;
       for (const entry of list) {
-        const key = `pr\u0000${Math.floor(prNumber)}\u0000${entry.path}`;
+        const key = pullRequestDiffStateKey(entry.path, prNumber);
         const text = typeof entry.patch === 'string' ? entry.patch : '';
         const value: DiffState = {
           status: 'loaded',
@@ -1676,7 +1691,14 @@ export function DroneChangesDock({
       }
       return changed ? next : prev;
     });
-  }, [clearDiffExpansionSource, clearExpandedRangesForDiff, dataMode, pullRequestChanges?.entries, pullRequestChanges?.pullRequest.number]);
+  }, [
+    clearDiffExpansionSource,
+    clearExpandedRangesForDiff,
+    dataMode,
+    pullRequestChanges?.entries,
+    pullRequestChanges?.pullRequest.number,
+    pullRequestDiffStateKey,
+  ]);
 
   const splitShownKind = effectiveKindForEntry(selectedEntry, splitKind);
 

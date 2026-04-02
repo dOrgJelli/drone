@@ -6,6 +6,7 @@ import {
   estimateExplorerSidebarWidth,
   flattenVisibleExplorerRows,
   resolveExplorerSidebarWidthBounds,
+  scopedChangesStateKey,
   sameRepoChangesPayload,
   sameRepoPullChangesPayload,
   sameRepoPullRequestChangesPayload,
@@ -124,6 +125,14 @@ describe('changes explorer tree', () => {
 });
 
 describe('changes file actions', () => {
+  test('scopes cached state keys by drone identity', () => {
+    expect(scopedChangesStateKey('drone-a', 'wt\u0000unstaged\u0000src/app.ts')).toBe('drone-a\u0000wt\u0000unstaged\u0000src/app.ts');
+    expect(scopedChangesStateKey('drone-b', 'wt\u0000unstaged\u0000src/app.ts')).toBe('drone-b\u0000wt\u0000unstaged\u0000src/app.ts');
+    expect(scopedChangesStateKey('drone-a', 'wt\u0000unstaged\u0000src/app.ts')).not.toBe(
+      scopedChangesStateKey('drone-b', 'wt\u0000unstaged\u0000src/app.ts'),
+    );
+  });
+
   test('merges overlapping and adjacent expansion ranges', () => {
     expect(
       appendDiffExpansionRange(

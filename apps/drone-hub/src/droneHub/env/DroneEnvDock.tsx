@@ -93,6 +93,18 @@ export function DroneEnvDock({
   });
   const provisioningText = String(hubMessage ?? '').trim() || provisioningLabel(hubPhase);
 
+  React.useEffect(() => {
+    setData(null);
+    setLoading(true);
+    setError(null);
+    setSaving(false);
+    setSaveNotice(null);
+    setUseRepoVars(false);
+    setDisabledRepoKeys([]);
+    setCustomEntries([]);
+    setImportText('');
+  }, [droneId, setImportText]);
+
   const load = React.useCallback(async (opts?: { silent?: boolean }) => {
     if (!opts?.silent) setLoading(true);
     try {
