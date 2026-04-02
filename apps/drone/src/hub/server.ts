@@ -223,6 +223,7 @@ import {
   fleetAuditList,
   fleetAuditUsageCount,
   fleetChildrenForActor,
+  fleetDescendantIdsForActor,
   fleetTargetAllowedForRead,
   fleetTargetAllowedForSend,
   sanitizeFleetCapabilities,
@@ -10003,6 +10004,82 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           const actor = regAny?.drones?.[resolved.id] ?? null;
           if (actor) await syncFleetPolicySnapshotToDrone(resolved.id, actor);
           json(res, 200, fleetActorPayload(regAny, resolved.id));
+        } catch (error: any) {
+          json(res, Number((error as any)?.status ?? 500), { ok: false, error: error?.message ?? String(error) });
+        }
+        return;
+      }
+
+      // POST /api/fleet/actors/:drone/parent
+      if (
+        method === 'POST' &&
+        parts.length === 5 &&
+        parts[0] === 'api' &&
+        parts[1] === 'fleet' &&
+        parts[2] === 'actors' &&
+        parts[4] === 'parent'
+      ) {
+        const droneRef = decodeURIComponent(parts[3]);
+        const resolved = await resolveDroneOrRespond(res, droneRef);
+        if (!resolved) return;
+        let body: any = null;
+        try {
+          body = await readJsonBody(req);
+        } catch (error: any) {
+          json(res, 400, { ok: false, error: error?.message ?? String(error) });
+          return;
+        }
+        const parentRef =
+          body?.parent == null
+            ? ''
+            : typeof body?.parent === 'string'
+              ? body.parent.trim()
+              : String(body.parent ?? '').trim();
+        try {
+          let previousParentId: string | null = null;
+          let nextParentId: string | null = null;
+          await updateRegistry((regAny: any) => {
+            const actor = regAny?.drones?.[resolved.id];
+            if (!actor) throw fleetError(`unknown drone: ${resolved.id}`, 404);
+            const current = fleetActorConfig(actor);
+            previousParentId = typeof current.createdBy === 'string' && current.createdBy.trim() ? current.createdBy.trim() : null;
+            if (!parentRef) {
+              nextParentId = null;
+            } else {
+              const parentFound = findDroneIdByRef(regAny, parentRef);
+              if (!parentFound) throw fleetError(`unknown drone: ${parentRef}`, 404);
+              nextParentId = resolveStableDroneOrPendingIdFromRef(regAny, parentRef);
+              if (!nextParentId) throw fleetError(`unknown drone: ${parentRef}`, 404);
+              if (nextParentId === resolved.id) throw fleetError('cannot make a drone its own parent', 400);
+              if (fleetDescendantIdsForActor(regAny, resolved.id).includes(nextParentId)) {
+                throw fleetError('cannot reparent a drone beneath one of its descendants', 400);
+              }
+            }
+            setFleetActorConfig(actor, {
+              enabled: current.enabled,
+              capabilities: current.capabilities,
+              readScopes: current.readScopes,
+              assigned: current.assigned,
+              quotas: current.quotas,
+              createdBy: nextParentId,
+              createdAt: current.createdAt,
+            });
+            regAny.drones[resolved.id] = actor;
+          });
+          const regAny: any = await loadRegistry();
+          const idsToSync = Array.from(
+            new Set(
+              [resolved.id, previousParentId, nextParentId]
+                .map((item) => String(item ?? '').trim())
+                .filter(Boolean),
+            ),
+          );
+          for (const actorId of idsToSync) {
+            const actor = regAny?.drones?.[actorId] ?? null;
+            if (!actor) continue;
+            await syncFleetPolicySnapshotToDrone(actorId, actor);
+          }
+          json(res, 200, { ok: true, id: resolved.id, parentId: nextParentId });
         } catch (error: any) {
           json(res, Number((error as any)?.status ?? 500), { ok: false, error: error?.message ?? String(error) });
         }

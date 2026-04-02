@@ -130,6 +130,26 @@ export function fleetChildrenForActor(
   return out;
 }
 
+export function fleetDescendantIdsForActor(regAny: any, actorIdRaw: unknown): string[] {
+  const actorId = String(actorIdRaw ?? '').trim();
+  if (!actorId) return [];
+  const descendants = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (parentIdRaw: unknown) => {
+    const parentId = String(parentIdRaw ?? '').trim();
+    if (!parentId || visited.has(parentId)) return;
+    visited.add(parentId);
+    for (const child of fleetChildrenForActor(regAny, parentId)) {
+      const childId = String(child?.id ?? '').trim();
+      if (!childId || childId === actorId || descendants.has(childId)) continue;
+      descendants.add(childId);
+      visit(childId);
+    }
+  };
+  visit(actorId);
+  return Array.from(descendants);
+}
+
 export function fleetAuditUsageCount(
   regAny: any,
   opts: { actorId: string; action: 'create_child' | 'send_message'; status?: 'accepted' | 'rejected'; sinceMs: number },
