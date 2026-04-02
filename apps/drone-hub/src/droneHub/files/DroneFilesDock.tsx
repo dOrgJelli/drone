@@ -1,10 +1,12 @@
 import React from 'react';
+import { IconPencil, IconTreeView } from '../app/icons';
 import { formatBytes } from '../app/selected-drone-workspace-utils';
 import { requestJson } from '../http';
-import { IconFolder, IconList, iconForFilePath } from '../icons';
-import type { DroneFsEntry, DroneFsUploadPayload } from '../types';
+import { IconChevron, IconFolder, iconForFilePath } from '../icons';
+import type { DroneFsEntry, DroneFsListPayload, DroneFsUploadPayload } from '../types';
 import { OpenedDroneFilePanel } from './OpenedDroneFilePanel';
 import type { DroneOpenedFileState } from './opened-file-types';
+import { buildFileExplorerTree, summarizeRootEntries, type FileExplorerNode } from './tree';
 
 function normalizeContainerPathInput(raw: string): string {
   const trimmed = String(raw ?? '').trim();
@@ -30,25 +32,47 @@ function formatLocalDateTime(ms: number | null | undefined): string {
   }
 }
 
-function formatLocalDateShort(ms: number | null | undefined): string {
-  const n = Number(ms);
-  if (!Number.isFinite(n) || n <= 0) return '-';
-  try {
-    return new Date(n).toLocaleDateString();
-  } catch {
-    return '-';
-  }
-}
-
 function hasFileDragPayload(event: React.DragEvent<HTMLElement>): boolean {
   return Array.from(event.dataTransfer?.types ?? []).includes('Files');
 }
 
-function IconGrid({ className }: { className?: string }) {
+function sameFsEntries(a: DroneFsEntry[] | undefined, b: DroneFsEntry[] | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const left = a[i];
+    const right = b[i];
+    if (!right) return false;
+    if (
+      left.name !== right.name ||
+      left.path !== right.path ||
+      left.kind !== right.kind ||
+      left.size !== right.size ||
+      left.mtimeMs !== right.mtimeMs ||
+      left.ext !== right.ext ||
+      left.isImage !== right.isImage ||
+      left.isVideo !== right.isVideo
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function detailHintLabel(entry: DroneFsEntry): string {
+  if (entry.kind === 'directory') return 'folder';
+  if (entry.isImage) return 'image';
+  if (entry.isVideo) return 'video';
+  return entry.ext ? entry.ext : 'file';
+}
+
+function InlineSpinner() {
   return (
-    <svg className={className} width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-      <path d="M1 1.75C1 .784 1.784 0 2.75 0h2.5C6.216 0 7 .784 7 1.75v2.5C7 5.216 6.216 6 5.25 6h-2.5A1.75 1.75 0 011 4.25v-2.5zM2.75 1A.75.75 0 002 1.75v2.5c0 .414.336.75.75.75h2.5A.75.75 0 006 4.25v-2.5A.75.75 0 005.25 1h-2.5zM9 1.75C9 .784 9.784 0 10.75 0h2.5C14.216 0 15 .784 15 1.75v2.5c0 .966-.784 1.75-1.75 1.75h-2.5A1.75 1.75 0 019 4.25v-2.5zM10.75 1a.75.75 0 00-.75.75v2.5c0 .414.336.75.75.75h2.5a.75.75 0 00.75-.75v-2.5a.75.75 0 00-.75-.75h-2.5zM1 10.75C1 9.784 1.784 9 2.75 9h2.5C6.216 9 7 9.784 7 10.75v2.5C7 14.216 6.216 15 5.25 15h-2.5A1.75 1.75 0 011 13.25v-2.5zM2.75 10a.75.75 0 00-.75.75v2.5c0 .414.336.75.75.75h2.5a.75.75 0 00.75-.75v-2.5a.75.75 0 00-.75-.75h-2.5zM9 10.75C9 9.784 9.784 9 10.75 9h2.5c.966 0 1.75.784 1.75 1.75v2.5c0 .966-.784 1.75-1.75 1.75h-2.5A1.75 1.75 0 019 13.25v-2.5zM10.75 10a.75.75 0 00-.75.75v2.5c0 .414.336.75.75.75h2.5a.75.75 0 00.75-.75v-2.5a.75.75 0 00-.75-.75h-2.5z" />
-    </svg>
+    <span
+      aria-hidden="true"
+      className="inline-block h-3 w-3 rounded-full border border-[var(--accent-muted)] border-t-[var(--accent)] animate-spin"
+    />
   );
 }
 
@@ -70,8 +94,8 @@ export function DroneFilesDock({
   loading,
   error,
   startup,
-  viewMode,
-  onSetViewMode,
+  viewMode: _viewMode,
+  onSetViewMode: _onSetViewMode,
   onOpenPath,
   onOpenFile,
   onOpenFileTarget,
@@ -106,15 +130,13 @@ export function DroneFilesDock({
   const normalizedHomePath = normalizeContainerPathInput(homePath);
   const activeOpenedFilePath = String(openedFile.path ?? '').trim();
   const [pathInput, setPathInput] = React.useState(normalizedPath);
-  const [thumbFailedByPath, setThumbFailedByPath] = React.useState<Record<string, boolean>>({});
-  const [openedImage, setOpenedImage] = React.useState<DroneFsEntry | null>(null);
-  const [openedImageFailed, setOpenedImageFailed] = React.useState(false);
-  const [openedImageZoom, setOpenedImageZoom] = React.useState(1);
-  const [openedImagePan, setOpenedImagePan] = React.useState<{ x: number; y: number }>({ x: 0, y: 0 });
-  const [openedImagePanning, setOpenedImagePanning] = React.useState(false);
-  const openedImagePanDragRef = React.useRef<{ startX: number; startY: number; baseX: number; baseY: number } | null>(null);
+  const [expandedDirs, setExpandedDirs] = React.useState<Record<string, boolean>>({});
+  const [childEntriesByPath, setChildEntriesByPath] = React.useState<Record<string, DroneFsEntry[]>>({});
+  const [childLoadingByPath, setChildLoadingByPath] = React.useState<Record<string, boolean>>({});
+  const [childErrorByPath, setChildErrorByPath] = React.useState<Record<string, string | null>>({});
   const dragDepthRef = React.useRef(0);
   const uploadRunRef = React.useRef(0);
+  const childRequestSeqRef = React.useRef<Record<string, number>>({});
   const [dragActive, setDragActive] = React.useState(false);
   const [uploading, setUploading] = React.useState(false);
   const [uploadStatus, setUploadStatus] = React.useState<string | null>(null);
@@ -125,16 +147,10 @@ export function DroneFilesDock({
   }, [normalizedPath]);
 
   React.useEffect(() => {
-    setThumbFailedByPath({});
-  }, [droneId, normalizedPath]);
-
-  React.useEffect(() => {
-    setOpenedImage(null);
-    setOpenedImageFailed(false);
-    setOpenedImageZoom(1);
-    setOpenedImagePan({ x: 0, y: 0 });
-    setOpenedImagePanning(false);
-    openedImagePanDragRef.current = null;
+    setExpandedDirs({});
+    setChildEntriesByPath({});
+    setChildLoadingByPath({});
+    setChildErrorByPath({});
   }, [droneId, normalizedPath]);
 
   React.useEffect(() => {
@@ -146,16 +162,6 @@ export function DroneFilesDock({
     setUploadStatus(null);
   }, [droneId, normalizedPath]);
 
-  React.useEffect(() => {
-    if (!activeOpenedFilePath) return;
-    setOpenedImage(null);
-    setOpenedImageFailed(false);
-    setOpenedImageZoom(1);
-    setOpenedImagePan({ x: 0, y: 0 });
-    setOpenedImagePanning(false);
-    openedImagePanDragRef.current = null;
-  }, [activeOpenedFilePath]);
-
   React.useEffect(
     () => () => {
       uploadRunRef.current += 1;
@@ -163,40 +169,15 @@ export function DroneFilesDock({
     [],
   );
 
-  React.useEffect(() => {
-    if (!openedImagePanning) return;
-    const onMouseMove = (event: MouseEvent) => {
-      const drag = openedImagePanDragRef.current;
-      if (!drag) return;
-      setOpenedImagePan({
-        x: drag.baseX + (event.clientX - drag.startX),
-        y: drag.baseY + (event.clientY - drag.startY),
-      });
-    };
-    const onMouseUp = () => {
-      setOpenedImagePanning(false);
-      openedImagePanDragRef.current = null;
-    };
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-    return () => {
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    };
-  }, [openedImagePanning]);
-
-  React.useEffect(() => {
-    if (!openedImage) return;
-    const next = entries.find((entry) => entry.path === openedImage.path && entry.kind === 'file' && entry.isImage);
-    if (!next) {
-      setOpenedImage(null);
-      setOpenedImageFailed(false);
-      return;
-    }
-    if (next.name !== openedImage.name || next.size !== openedImage.size || next.mtimeMs !== openedImage.mtimeMs) {
-      setOpenedImage(next);
-    }
-  }, [entries, openedImage]);
+  const rootSummary = React.useMemo(() => summarizeRootEntries(entries), [entries]);
+  const explorerTree = React.useMemo(
+    () =>
+      buildFileExplorerTree({
+        rootEntries: entries,
+        childEntriesByPath,
+      }),
+    [childEntriesByPath, entries],
+  );
 
   const crumbs = React.useMemo(() => {
     if (normalizedPath === '/') return [{ label: '/', path: '/' }];
@@ -218,15 +199,69 @@ export function DroneFilesDock({
     onOpenPath(normalizeContainerPathInput(pathInput));
   }, [onOpenPath, pathInput]);
 
-  const openImagePreview = React.useCallback((entry: DroneFsEntry) => {
-    if (entry.kind !== 'file' || !entry.isImage) return;
-    setOpenedImage(entry);
-    setOpenedImageFailed(false);
-    setOpenedImageZoom(1);
-    setOpenedImagePan({ x: 0, y: 0 });
-    setOpenedImagePanning(false);
-    openedImagePanDragRef.current = null;
-  }, []);
+  const loadDirectory = React.useCallback(
+    async (dirPathRaw: string, opts?: { force?: boolean }) => {
+      const dirPath = normalizeContainerPathInput(dirPathRaw);
+      if (!dirPath || dirPath === normalizedPath) return;
+      if (childLoadingByPath[dirPath]) return;
+      if (!opts?.force && Object.prototype.hasOwnProperty.call(childEntriesByPath, dirPath)) return;
+
+      const seq = (childRequestSeqRef.current[dirPath] ?? 0) + 1;
+      childRequestSeqRef.current[dirPath] = seq;
+      setChildLoadingByPath((prev) => ({ ...prev, [dirPath]: true }));
+      setChildErrorByPath((prev) => ({ ...prev, [dirPath]: null }));
+
+      try {
+        const data = await requestJson<DroneFsListPayload>(
+          `/api/drones/${encodeURIComponent(droneId)}/fs/list?path=${encodeURIComponent(dirPath)}`,
+        );
+        if ((data as any)?.ok !== true) {
+          throw new Error(String((data as any)?.error ?? 'filesystem request failed'));
+        }
+        if (childRequestSeqRef.current[dirPath] !== seq) return;
+        const nextEntries = Array.isArray((data as any).entries) ? (((data as any).entries as DroneFsEntry[]) ?? []) : [];
+        setChildEntriesByPath((prev) => {
+          if (sameFsEntries(prev[dirPath], nextEntries)) return prev;
+          return { ...prev, [dirPath]: nextEntries };
+        });
+        setChildErrorByPath((prev) => {
+          if (prev[dirPath] == null) return prev;
+          return { ...prev, [dirPath]: null };
+        });
+      } catch (e: any) {
+        if (childRequestSeqRef.current[dirPath] !== seq) return;
+        const msg = String(e?.message ?? e ?? 'failed to load directory').trim() || 'failed to load directory';
+        setChildErrorByPath((prev) => ({ ...prev, [dirPath]: msg }));
+      } finally {
+        if (childRequestSeqRef.current[dirPath] !== seq) return;
+        setChildLoadingByPath((prev) => {
+          if (prev[dirPath] === false) return prev;
+          return { ...prev, [dirPath]: false };
+        });
+      }
+    },
+    [childEntriesByPath, childLoadingByPath, droneId, normalizedPath],
+  );
+
+  const toggleDirectory = React.useCallback(
+    (dirPath: string) => {
+      const open = expandedDirs[dirPath] === true;
+      const nextOpen = !open;
+      setExpandedDirs((prev) => ({ ...prev, [dirPath]: nextOpen }));
+      if (nextOpen) void loadDirectory(dirPath);
+    },
+    [expandedDirs, loadDirectory],
+  );
+
+  const refreshExplorer = React.useCallback(() => {
+    onRefresh();
+    const visibleExpandedDirs = Object.entries(expandedDirs)
+      .filter(([, open]) => open)
+      .map(([dirPath]) => dirPath);
+    for (const dirPath of visibleExpandedDirs) {
+      void loadDirectory(dirPath, { force: true });
+    }
+  }, [expandedDirs, loadDirectory, onRefresh]);
 
   const uploadFilesToCurrentPath = React.useCallback(
     async (dropped: FileList | File[] | null | undefined) => {
@@ -266,7 +301,7 @@ export function DroneFilesDock({
 
       if (uploadRunRef.current !== runId) return;
       setUploading(false);
-      if (uploaded > 0) onRefresh();
+      if (uploaded > 0) refreshExplorer();
       if (failures.length === 0) {
         setUploadError(null);
         setUploadStatus(`Uploaded ${uploaded} file${uploaded === 1 ? '' : 's'} to ${normalizedPath}.`);
@@ -280,7 +315,7 @@ export function DroneFilesDock({
       setUploadError(failureText);
       setUploadStatus(uploaded > 0 ? `Uploaded ${uploaded}/${files.length}.` : null);
     },
-    [droneId, normalizedPath, onRefresh],
+    [droneId, normalizedPath, refreshExplorer],
   );
 
   const onPanelDragEnter = React.useCallback(
@@ -299,12 +334,15 @@ export function DroneFilesDock({
     if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
   }, []);
 
-  const onPanelDragLeave = React.useCallback((event: React.DragEvent<HTMLDivElement>) => {
-    if (!dragActive) return;
-    event.preventDefault();
-    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
-    if (dragDepthRef.current === 0) setDragActive(false);
-  }, [dragActive]);
+  const onPanelDragLeave = React.useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      if (!dragActive) return;
+      event.preventDefault();
+      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+      if (dragDepthRef.current === 0) setDragActive(false);
+    },
+    [dragActive],
+  );
 
   const onPanelDrop = React.useCallback(
     (event: React.DragEvent<HTMLDivElement>) => {
@@ -332,28 +370,7 @@ export function DroneFilesDock({
     },
     [droneId],
   );
-  const canOpenEntry = React.useCallback((entry: DroneFsEntry): boolean => entry.kind === 'directory' || entry.kind === 'file', []);
-  const openEntry = React.useCallback(
-    (entry: DroneFsEntry) => {
-      if (entry.kind === 'directory') {
-        onOpenPath(entry.path);
-        return;
-      }
-      if (entry.kind !== 'file') return;
-      if (entry.isImage) {
-        openImagePreview(entry);
-        return;
-      }
-      onOpenFile(entry);
-    },
-    [onOpenFile, onOpenPath, openImagePreview],
-  );
-  const entryOpenTitle = React.useCallback((entry: DroneFsEntry): string => {
-    if (entry.kind === 'directory') return `Double-click to open: ${entry.path}`;
-    if (entry.kind === 'file' && entry.isImage) return `Double-click to preview: ${entry.path}`;
-    if (entry.kind === 'file') return `Double-click to open: ${entry.path}`;
-    return entry.path;
-  }, []);
+
   const openResolvedFile = React.useCallback(
     (next: { path: string; name: string; line?: number | null; column?: number | null }) => {
       if (onOpenFileTarget) {
@@ -373,16 +390,7 @@ export function DroneFilesDock({
     },
     [onOpenFile, onOpenFileTarget],
   );
-  const onEntryKeyDown = React.useCallback(
-    (event: React.KeyboardEvent<HTMLElement>, entry: DroneFsEntry) => {
-      if (!canOpenEntry(entry)) return;
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault();
-        openEntry(entry);
-      }
-    },
-    [canOpenEntry, openEntry],
-  );
+
   const renderDownloadButton = React.useCallback(
     (entry: DroneFsEntry, className: string) => {
       if (entry.kind !== 'directory' && entry.kind !== 'file') return null;
@@ -404,12 +412,181 @@ export function DroneFilesDock({
     [downloadEntry],
   );
 
-  const showStartupPlaceholder = Boolean(startup?.waiting) && !openedImage && !error && entries.length === 0;
+  const actionButtonClassName =
+    'w-6 h-6 rounded border border-[var(--border-subtle)] bg-[var(--panel)] text-[var(--muted)] hover:text-[var(--fg-secondary)] hover:bg-[var(--hover)] flex items-center justify-center';
+
+  function renderExplorer(nodes: FileExplorerNode[], depth: number): React.ReactNode {
+    return nodes.map((node) => {
+      const indentPx = 8 + depth * 12;
+      if (node.kind === 'directory') {
+        const open = expandedDirs[node.path] === true;
+        const childLoading = childLoadingByPath[node.path] === true;
+        const childError = childErrorByPath[node.path];
+        const childLoaded = Object.prototype.hasOwnProperty.call(childEntriesByPath, node.path);
+        const title = `${node.path}${childLoaded && node.count != null ? ` • ${node.count} item${node.count === 1 ? '' : 's'}` : ''}`;
+
+        return (
+          <React.Fragment key={`dir:${node.path}`}>
+            <div className="w-full group/dir" style={{ paddingLeft: `${indentPx}px` }}>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => toggleDirectory(node.path)}
+                  className={`flex-1 min-w-0 text-left px-1 rounded border transition-all flex items-center gap-0.5 ${
+                    open
+                      ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)]'
+                      : 'border-transparent hover:bg-[var(--hover)]'
+                  }`}
+                  style={{
+                    minHeight: '28px',
+                  }}
+                  title={`${title} • Click to ${open ? 'collapse' : 'expand'}`}
+                >
+                  <span className="inline-flex items-center justify-center w-4 h-4 flex-shrink-0 text-[var(--muted-dim)]">
+                    <IconChevron down={open} size={12} />
+                  </span>
+                  <span className="inline-flex items-center justify-center w-4 h-4 flex-shrink-0 text-[var(--muted)]">
+                    <IconFolder size={12} />
+                  </span>
+                  <span className="truncate flex-1 text-[var(--fg-secondary)] text-[11px]">{node.name}</span>
+                  {childError ? (
+                    <span
+                      className="inline-flex items-center justify-center rounded border px-1 text-[8px] uppercase tracking-wide text-[var(--red)] border-[rgba(248,81,73,.22)] bg-[var(--red-subtle)]"
+                      title={childError}
+                    >
+                      Error
+                    </span>
+                  ) : null}
+                  {childLoading ? (
+                    <span
+                      className="inline-flex items-center gap-1 rounded border px-1 text-[8px] uppercase tracking-wide text-[var(--accent)] border-[var(--accent-muted)] bg-[var(--accent-subtle)]"
+                      title={`Loading ${node.path}`}
+                    >
+                      <InlineSpinner />
+                      Loading
+                    </span>
+                  ) : null}
+                  {node.count != null ? (
+                    <span className="text-[10px] text-[var(--muted-dim)] tabular-nums">{node.count}</span>
+                  ) : (
+                    <span className="text-[10px] text-[var(--muted-dim)]">dir</span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onOpenPath(node.path)}
+                  className={`${actionButtonClassName} opacity-0 group-hover/dir:opacity-100 focus:opacity-100 transition-opacity`}
+                  title={`Browse ${node.path}`}
+                >
+                  <IconFolder className="w-3 h-3" />
+                </button>
+                {renderDownloadButton(
+                  node.entry,
+                  `${actionButtonClassName} opacity-0 group-hover/dir:opacity-100 focus:opacity-100 transition-opacity`,
+                )}
+              </div>
+            </div>
+            {open ? (
+              <>
+                {childError ? (
+                  <div className="ml-7 mt-1 mb-1 rounded border border-[rgba(248,81,73,.18)] bg-[var(--red-subtle)] px-2 py-1 text-[10px] text-[var(--red)]">
+                    {childError}
+                  </div>
+                ) : null}
+                {childLoading && !childLoaded ? (
+                  <div className="ml-7 mt-1 mb-1 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-2 py-1 text-[10px] text-[var(--muted)]">
+                    Loading directory...
+                  </div>
+                ) : null}
+                {childLoaded && node.children && node.children.length > 0 ? renderExplorer(node.children, depth + 1) : null}
+                {childLoaded && (!node.children || node.children.length === 0) ? (
+                  <div className="ml-7 mt-1 mb-1 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-2 py-1 text-[10px] text-[var(--muted)]">
+                    Directory is empty.
+                  </div>
+                ) : null}
+              </>
+            ) : null}
+          </React.Fragment>
+        );
+      }
+
+      const entry = node.entry;
+      const active = activeOpenedFilePath === entry.path;
+      const FileIcon = iconForFilePath(entry.path);
+      const modified = formatLocalDateTime(entry.mtimeMs);
+      const openable = entry.kind === 'file';
+      return (
+        <div key={`file:${entry.path}`} className="w-full group/file" style={{ paddingLeft: `${indentPx}px` }}>
+          <div className="flex items-center gap-1">
+            {openable ? (
+              <button
+                type="button"
+                onClick={() => onOpenFile(entry)}
+                className={`flex-1 min-w-0 text-left px-1 rounded border transition-all flex items-center gap-0.5 ${
+                  active
+                    ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)]'
+                    : 'border-transparent hover:bg-[var(--hover)]'
+                }`}
+                style={{
+                  minHeight: '28px',
+                }}
+                title={`${entry.path} • ${modified}`}
+              >
+                <span className="inline-flex items-center justify-center w-4 h-4 flex-shrink-0 text-[var(--muted-dim)]">
+                  <FileIcon size={12} />
+                </span>
+                <span className="truncate flex-1 text-[var(--fg-secondary)] text-[11px]">{node.name}</span>
+                <span className="text-[10px] text-[var(--muted)]">{detailHintLabel(entry)}</span>
+                <span className="text-[10px] text-[var(--muted-dim)] tabular-nums">
+                  {entry.kind === 'file' ? formatBytes(entry.size) : '-'}
+                </span>
+              </button>
+            ) : (
+              <div
+                className="flex-1 min-w-0 text-left px-1 rounded border border-transparent flex items-center gap-0.5 opacity-70"
+                style={{
+                  minHeight: '28px',
+                }}
+                title={`${entry.path} • ${modified}`}
+              >
+                <span className="inline-flex items-center justify-center w-4 h-4 flex-shrink-0 text-[var(--muted-dim)]">
+                  <FileIcon size={12} />
+                </span>
+                <span className="truncate flex-1 text-[var(--fg-secondary)] text-[11px]">{node.name}</span>
+                <span className="text-[10px] text-[var(--muted)]">other</span>
+                <span className="text-[10px] text-[var(--muted-dim)] tabular-nums">-</span>
+              </div>
+            )}
+            {openable ? (
+              <button
+                type="button"
+                onClick={() => onOpenFile(entry)}
+                className={`${actionButtonClassName} opacity-0 group-hover/file:opacity-100 focus:opacity-100 transition-opacity`}
+                title={`Open ${entry.path}`}
+              >
+                <IconPencil className="w-3 h-3" />
+              </button>
+            ) : null}
+            {renderDownloadButton(
+              entry,
+              `${actionButtonClassName} opacity-0 group-hover/file:opacity-100 focus:opacity-100 transition-opacity`,
+            )}
+          </div>
+        </div>
+      );
+    });
+  }
+
+  const showStartupPlaceholder = Boolean(startup?.waiting) && !error && entries.length === 0;
   const startupLabel = startup?.hubPhase === 'seeding' ? 'Seeding' : 'Starting';
   const startupDetail = String(startup?.hubMessage ?? '').trim();
   const startupText = startup?.timedOut
     ? 'Still waiting for the filesystem to come online. If this keeps happening, the drone may be stuck provisioning.'
     : 'Waiting for filesystem…';
+  const expandedCount = React.useMemo(
+    () => Object.values(expandedDirs).filter((value) => value === true).length,
+    [expandedDirs],
+  );
 
   return (
     <div
@@ -422,36 +599,17 @@ export function DroneFilesDock({
       onDrop={onPanelDrop}
     >
       <div className="px-2.5 py-2 border-b border-[var(--border-subtle)] flex items-center justify-between gap-2">
-        <div className="text-[11px] font-semibold text-[var(--muted-dim)] tracking-[0.12em] uppercase" style={{ fontFamily: 'var(--display)' }}>Files</div>
-        <div className="inline-flex items-center gap-0.5">
-          <button
-            type="button"
-            onClick={() => onSetViewMode('list')}
-            className={`inline-flex items-center gap-1 px-2 py-1 rounded border text-[11px] font-semibold tracking-wide uppercase transition-all ${
-              viewMode === 'list'
-                ? 'bg-[var(--accent-subtle)] text-[var(--accent)] border-[var(--accent-muted)]'
-                : 'bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)] border-[var(--border-subtle)] hover:text-[var(--muted)]'
-            }`}
-            style={{ fontFamily: 'var(--display)' }}
-            title="List view"
-          >
-            <IconList className="opacity-70" />
-            List
-          </button>
-          <button
-            type="button"
-            onClick={() => onSetViewMode('thumb')}
-            className={`inline-flex items-center gap-1 px-2 py-1 rounded border text-[11px] font-semibold tracking-wide uppercase transition-all ${
-              viewMode === 'thumb'
-                ? 'bg-[var(--accent-subtle)] text-[var(--accent)] border-[var(--accent-muted)]'
-                : 'bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)] border-[var(--border-subtle)] hover:text-[var(--muted)]'
-            }`}
-            style={{ fontFamily: 'var(--display)' }}
-            title="Thumbnail view"
-          >
-            <IconGrid className="opacity-70" />
-            Thumb
-          </button>
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="text-[11px] font-semibold text-[var(--muted-dim)] tracking-[0.12em] uppercase" style={{ fontFamily: 'var(--display)' }}>
+            Files
+          </div>
+          <span className="inline-flex items-center gap-1 rounded-full border border-[var(--accent-muted)] bg-[var(--accent-subtle)] px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[var(--accent)]">
+            <IconTreeView className="opacity-80" />
+            Explorer
+          </span>
+        </div>
+        <div className="text-[10px] text-[var(--muted-dim)] tabular-nums whitespace-nowrap">
+          {rootSummary.directories} dirs • {rootSummary.files} files
         </div>
       </div>
 
@@ -521,264 +679,103 @@ export function DroneFilesDock({
           </button>
           <button
             type="button"
-            onClick={onRefresh}
+            onClick={refreshExplorer}
             className="h-7 px-2.5 rounded-md border border-[var(--border-subtle)] bg-[var(--panel-alt)] text-[10px] font-semibold text-[var(--muted)] hover:text-[var(--fg-secondary)] hover:bg-[var(--hover)]"
-            title="Refresh listing"
+            title="Refresh explorer"
           >
             Refresh
           </button>
         </div>
       </div>
 
-      <div className={`flex-1 min-h-0 px-2.5 py-2 ${activeOpenedFilePath ? 'overflow-hidden' : 'overflow-auto'}`}>
-        {activeOpenedFilePath ? (
-          <OpenedDroneFilePanel
-            droneId={droneId}
-            file={openedFile}
-            onFileContentChange={onOpenedFileContentChange}
-            onSaveFile={onSaveOpenedFile}
-            onCloseFile={onCloseOpenedFile}
-            onOpenResolvedFile={openResolvedFile}
-          />
-        ) : (
-          <>
-        {uploadStatus && (
-          <div className="mb-2 p-2 rounded-md bg-[rgba(66,153,225,.12)] border border-[rgba(66,153,225,.28)] text-[12px] text-[var(--fg-secondary)]">
-            {uploadStatus}
-          </div>
-        )}
-        {uploadError && (
-          <div className="mb-2 p-2 rounded-md bg-[var(--red-subtle)] border border-[rgba(248,81,73,.2)] text-[12px] text-[var(--red)]">
-            {uploadError}
-          </div>
-        )}
-        {error && (
-          <div className="mb-2 p-2 rounded-md bg-[var(--red-subtle)] border border-[rgba(248,81,73,.2)] text-[12px] text-[var(--red)]">
-            {error}
-          </div>
-        )}
-        {showStartupPlaceholder ? (
-          <div className="px-3 py-3 rounded-md border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[12px] text-[var(--muted)]">
-            <div className="text-[11px] font-semibold tracking-wide uppercase text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
-              {startupLabel}
-            </div>
-            <div className="mt-1">{startupText}</div>
-            {startupDetail ? <div className="mt-1 text-[11px] text-[var(--muted-dim)]">{startupDetail}</div> : null}
-          </div>
-        ) : (
-          <>
-            {!error && !openedImage && loading && entries.length === 0 && (
-              <div className="text-[12px] text-[var(--muted)]">Loading files...</div>
-            )}
-            {!error && !openedImage && !loading && entries.length === 0 && (
-              <div className="text-[12px] text-[var(--muted)]">Directory is empty.</div>
-            )}
-          </>
-        )}
+      {uploadStatus ? (
+        <div className="mx-2.5 mt-2 p-2 rounded-md bg-[rgba(66,153,225,.12)] border border-[rgba(66,153,225,.28)] text-[12px] text-[var(--fg-secondary)]">
+          {uploadStatus}
+        </div>
+      ) : null}
+      {uploadError ? (
+        <div className="mx-2.5 mt-2 p-2 rounded-md bg-[var(--red-subtle)] border border-[rgba(248,81,73,.2)] text-[12px] text-[var(--red)]">
+          {uploadError}
+        </div>
+      ) : null}
+      {error ? (
+        <div className="mx-2.5 mt-2 p-2 rounded-md bg-[var(--red-subtle)] border border-[rgba(248,81,73,.2)] text-[12px] text-[var(--red)]">
+          {error}
+        </div>
+      ) : null}
 
-        {!error && openedImage && (
-          <div className="h-full min-h-0 flex flex-col gap-2">
-            <div className="flex items-start justify-between gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setOpenedImage(null);
-                  setOpenedImageFailed(false);
-                }}
-                className="h-7 px-2.5 rounded-md border border-[var(--border-subtle)] bg-[var(--panel-alt)] text-[10px] font-semibold text-[var(--muted)] hover:text-[var(--fg-secondary)] hover:bg-[var(--hover)] whitespace-nowrap"
-                title="Back to file list"
-              >
-                Back to files
-              </button>
-              <div className="min-w-0 text-right">
-                <div className="text-[12px] text-[var(--fg-secondary)] truncate" title={openedImage.path}>
-                  {openedImage.name}
+      <div className="flex-1 min-h-0 flex overflow-hidden">
+        <div className="w-[320px] shrink-0 border-r border-[var(--border-subtle)] bg-[var(--panel)] flex flex-col">
+          <div className="px-2 py-1.5 border-b border-[var(--border-subtle)] bg-[var(--panel-raised)]/80">
+            <div className="text-[9px] font-semibold tracking-wide uppercase text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+              Explorer
+            </div>
+            <div className="mt-0.5 text-[11px] text-[var(--fg-secondary)] font-mono truncate" title={normalizedPath}>
+              {normalizedPath}
+            </div>
+          </div>
+          <div className="flex-1 min-h-0 overflow-auto px-1.5 py-1">
+            {showStartupPlaceholder ? (
+              <div className="rounded-md border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 py-3 text-[12px] text-[var(--muted)]">
+                <div className="text-[11px] font-semibold tracking-wide uppercase text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+                  {startupLabel}
                 </div>
-                <div className="text-[11px] text-[var(--muted-dim)]">
-                  {formatBytes(openedImage.size)} • {formatLocalDateTime(openedImage.mtimeMs)}
+                <div className="mt-1">{startupText}</div>
+                {startupDetail ? <div className="mt-1 text-[11px] text-[var(--muted-dim)]">{startupDetail}</div> : null}
+              </div>
+            ) : !error && loading && entries.length === 0 ? (
+              <div className="rounded-md border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 py-3 text-[12px] text-[var(--muted)]">
+                Loading files...
+              </div>
+            ) : !error && !loading && entries.length === 0 ? (
+              <div className="rounded-md border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 py-3 text-[12px] text-[var(--muted)]">
+                Directory is empty.
+              </div>
+            ) : (
+              renderExplorer(explorerTree, 0)
+            )}
+          </div>
+        </div>
+
+        <div className="flex-1 min-w-0 min-h-0 p-2.5 overflow-hidden">
+          {activeOpenedFilePath ? (
+            <OpenedDroneFilePanel
+              droneId={droneId}
+              file={openedFile}
+              onFileContentChange={onOpenedFileContentChange}
+              onSaveFile={onSaveOpenedFile}
+              onCloseFile={onCloseOpenedFile}
+              onOpenResolvedFile={openResolvedFile}
+            />
+          ) : (
+            <div className="h-full min-h-0 rounded-md border border-[var(--border-subtle)] bg-[var(--panel)] flex items-center justify-center p-6">
+              <div className="max-w-md text-center">
+                <div className="inline-flex items-center gap-2 rounded-full border border-[var(--accent-muted)] bg-[var(--accent-subtle)] px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--accent)]">
+                  <IconTreeView className="opacity-80" />
+                  Tree Explorer Ready
+                </div>
+                <div className="mt-4 text-[14px] text-[var(--fg-secondary)]">
+                  Browse <span className="font-mono">{shownName}</span> from the left explorer.
+                </div>
+                <div className="mt-2 text-[12px] text-[var(--muted)]">
+                  Click a file to open it here. Expand folders inline, or use the folder action to make any directory the new explorer root.
+                </div>
+                <div className="mt-4 rounded-md border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 py-2 text-left text-[11px] text-[var(--muted)]">
+                  <div className="text-[10px] uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+                    Current Root
+                  </div>
+                  <div className="mt-1 font-mono text-[var(--fg-secondary)] break-all">{normalizedPath}</div>
+                  <div className="mt-2 text-[var(--muted-dim)]">
+                    {entries.length} item{entries.length === 1 ? '' : 's'} • {rootSummary.directories} dirs • {rootSummary.files} files
+                  </div>
                 </div>
               </div>
             </div>
-            <div className="flex-1 min-h-0 rounded-md border border-[var(--border-subtle)] bg-[var(--panel)] overflow-hidden flex items-center justify-center">
-              {openedImageFailed ? (
-                <div className="px-3 text-[12px] text-[var(--muted)] text-center">
-                  Unable to load this image preview. Try refreshing the directory and opening it again.
-                </div>
-              ) : (
-                <div
-                  className="w-full h-full flex items-center justify-center bg-[var(--panel-alt)] select-none"
-                  style={{ cursor: openedImageZoom > 1 ? (openedImagePanning ? 'grabbing' : 'grab') : 'default' }}
-                  onWheel={(event) => {
-                    event.preventDefault();
-                    const factor = event.deltaY < 0 ? 1.15 : 1 / 1.15;
-                    setOpenedImageZoom((prev) => {
-                      const next = Math.max(1, Math.min(8, prev * factor));
-                      if (next === 1 && prev !== 1) {
-                        setOpenedImagePan({ x: 0, y: 0 });
-                        setOpenedImagePanning(false);
-                        openedImagePanDragRef.current = null;
-                      }
-                      return next;
-                    });
-                  }}
-                  onMouseDown={(event) => {
-                    if (event.button !== 2) return;
-                    if (openedImageZoom <= 1) return;
-                    event.preventDefault();
-                    openedImagePanDragRef.current = {
-                      startX: event.clientX,
-                      startY: event.clientY,
-                      baseX: openedImagePan.x,
-                      baseY: openedImagePan.y,
-                    };
-                    setOpenedImagePanning(true);
-                  }}
-                  onContextMenu={(event) => {
-                    if (openedImageZoom > 1 || openedImagePanning) event.preventDefault();
-                  }}
-                >
-                  <img
-                    src={`/api/drones/${encodeURIComponent(droneId)}/fs/media?path=${encodeURIComponent(openedImage.path)}`}
-                    alt={openedImage.name}
-                    draggable={false}
-                    onDragStart={(event) => event.preventDefault()}
-                    className="w-full h-full object-contain bg-[var(--panel-alt)]"
-                    style={{
-                      transform: `translate(${openedImagePan.x}px, ${openedImagePan.y}px) scale(${openedImageZoom})`,
-                      transformOrigin: 'center center',
-                    }}
-                    onLoad={() => setOpenedImageFailed(false)}
-                    onError={() => setOpenedImageFailed(true)}
-                  />
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {!error && !openedImage && entries.length > 0 && viewMode === 'list' && (
-          <div className="flex flex-col">
-            <div className="grid grid-cols-[1fr_70px_100px_34px] gap-2 px-2 py-1.5 text-[10px] uppercase tracking-wide text-[var(--muted-dim)] border-b border-[var(--border-subtle)]">
-              <span>Name</span>
-              <span className="text-right">Size</span>
-              <span className="text-right">Modified</span>
-              <span />
-            </div>
-            <div className="divide-y divide-[var(--border-subtle)]">
-              {entries.map((entry) => {
-                const isDir = entry.kind === 'directory';
-                const modifiedText = formatLocalDateShort(entry.mtimeMs);
-                const modifiedTitle = formatLocalDateTime(entry.mtimeMs);
-                const typeText = isDir ? 'dir' : entry.isImage ? 'image' : entry.isVideo ? 'video' : entry.ext ? entry.ext : 'file';
-                const openable = canOpenEntry(entry);
-                const FileIcon = iconForFilePath(entry.path);
-                return (
-                  <div
-                    key={entry.path}
-                    className={`group grid grid-cols-[1fr_70px_100px_34px] gap-2 px-2 py-1.5 text-[11px] leading-5 select-none ${
-                      openable ? 'hover:bg-[var(--hover)] cursor-pointer' : ''
-                    }`}
-                    onDoubleClick={() => openEntry(entry)}
-                    role={openable ? 'button' : undefined}
-                    tabIndex={openable ? 0 : -1}
-                    onKeyDown={(e) => onEntryKeyDown(e, entry)}
-                    title={entryOpenTitle(entry)}
-                  >
-                    <span className="min-w-0 flex items-center gap-1.5">
-                      {isDir ? (
-                        <IconFolder className="flex-shrink-0 text-[var(--muted)] opacity-80" />
-                      ) : (
-                        <FileIcon className="flex-shrink-0 text-[var(--muted)] opacity-80" />
-                      )}
-                      <span className="truncate text-[var(--fg-secondary)]">{entry.name}</span>
-                      <span className="text-[11px] text-[var(--muted-dim)]">{typeText}</span>
-                    </span>
-                    <span className="text-right tabular-nums text-[var(--muted-dim)]">{isDir ? '-' : formatBytes(entry.size)}</span>
-                    <span className="text-right tabular-nums text-[var(--muted-dim)] whitespace-nowrap overflow-hidden text-ellipsis" title={modifiedTitle}>
-                      {modifiedText}
-                    </span>
-                    <span className="flex items-center justify-end">
-                      {renderDownloadButton(
-                        entry,
-                        'w-6 h-6 rounded border border-[var(--border-subtle)] bg-[var(--panel)] text-[var(--muted)] hover:text-[var(--fg-secondary)] hover:bg-[var(--hover)] opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity flex items-center justify-center',
-                      )}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {!error && !openedImage && entries.length > 0 && viewMode === 'thumb' && (
-          <div className="grid grid-cols-2 xl:grid-cols-3 gap-2">
-            {entries.map((entry) => {
-              const isDir = entry.kind === 'directory';
-              const isRegularFile = entry.kind === 'file';
-              const isImageFile = isRegularFile && entry.isImage;
-              const canThumb = isImageFile && !thumbFailedByPath[entry.path];
-              const FileIcon = iconForFilePath(entry.path);
-              const openable = canOpenEntry(entry);
-              const content = (
-                <>
-                  <div className="w-full h-20 rounded-md border border-[var(--border-subtle)] bg-[var(--panel-alt)] overflow-hidden flex items-center justify-center">
-                    {isDir ? (
-                      <IconFolder className="w-6 h-6 text-[var(--muted)] opacity-80" />
-                    ) : canThumb ? (
-                      <img
-                        src={`/api/drones/${encodeURIComponent(droneId)}/fs/thumb?path=${encodeURIComponent(entry.path)}`}
-                        alt={entry.name}
-                        loading="lazy"
-                        className="w-full h-full object-cover"
-                        onError={() =>
-                          setThumbFailedByPath((prev) => ({
-                            ...prev,
-                            [entry.path]: true,
-                          }))
-                        }
-                      />
-                    ) : (
-                      <FileIcon className="w-6 h-6 text-[var(--muted)] opacity-80" />
-                    )}
-                  </div>
-                  <div className="min-w-0 mt-1">
-                    <div className="text-[12px] text-[var(--fg-secondary)] truncate" title={entry.name}>
-                      {entry.name}
-                    </div>
-                    <div className="text-[11px] text-[var(--muted-dim)] truncate">{isDir ? 'directory' : formatBytes(entry.size)}</div>
-                  </div>
-                </>
-              );
-              return (
-                <div key={entry.path} className="relative group">
-                  {openable ? (
-                    <button
-                      type="button"
-                      onDoubleClick={() => openEntry(entry)}
-                      onKeyDown={(e) => onEntryKeyDown(e, entry)}
-                      className="w-full text-left p-2 pr-8 rounded-md border border-[var(--border-subtle)] bg-[var(--panel)] hover:bg-[var(--hover)] select-none"
-                      title={entryOpenTitle(entry)}
-                    >
-                      {content}
-                    </button>
-                  ) : (
-                    <div className="p-2 rounded-md border border-[var(--border-subtle)] bg-[var(--panel)] select-none" title={entry.path}>
-                      {content}
-                    </div>
-                  )}
-                  {renderDownloadButton(
-                    entry,
-                    'absolute top-2 right-2 w-6 h-6 rounded border border-[var(--border-subtle)] bg-[var(--panel)] text-[var(--muted)] hover:text-[var(--fg-secondary)] hover:bg-[var(--hover)] opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity flex items-center justify-center',
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
-          </>
-        )}
+          )}
+        </div>
       </div>
-      {dragActive && (
+
+      {dragActive ? (
         <div className="pointer-events-none absolute inset-0 z-30 px-3 py-3">
           <div className="w-full h-full rounded-md border-2 border-dashed border-[var(--accent-muted)] bg-[rgba(18,23,34,.55)] flex items-center justify-center text-center px-4">
             <div className="text-[12px] text-[var(--fg-secondary)]">
@@ -787,9 +784,11 @@ export function DroneFilesDock({
             </div>
           </div>
         </div>
-      )}
+      ) : null}
+
       <div className="px-2.5 py-1.5 border-t border-[var(--border-subtle)] text-[10px] text-[var(--muted-dim)] tabular-nums">
-        {entries.length} item{entries.length !== 1 ? 's' : ''}
+        {entries.length} item{entries.length !== 1 ? 's' : ''} at root
+        {expandedCount > 0 ? ` • ${expandedCount} folder${expandedCount === 1 ? '' : 's'} expanded` : ''}
         {loading ? ' • refreshing…' : ''}
         {uploading ? ' • uploading…' : ''}
       </div>
