@@ -157,9 +157,9 @@ export function OpenedDroneFilePanel({
           type="button"
           onClick={onCloseFile}
           className="h-7 px-2.5 rounded-md border border-[var(--border-subtle)] bg-[var(--panel-alt)] text-[10px] font-semibold text-[var(--muted)] hover:text-[var(--fg-secondary)] hover:bg-[var(--hover)] whitespace-nowrap"
-          title="Back to file list"
+          title="Close file"
         >
-          Back to files
+          Close file
         </button>
         <div className="flex items-center gap-1.5">
           {openedFileIsMarkdown ? (
