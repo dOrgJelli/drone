@@ -364,7 +364,7 @@ export function RightPanelTabContent({
     case 'changes':
       return (
         <DroneChangesDock
-          key={`${paneKey}-changes`}
+          key={`${paneKey}-${drone.id}-changes`}
           droneId={drone.id}
           repoAttached={repoFeaturesEnabled}
           repoPath={drone.repoPath}
@@ -381,7 +381,7 @@ export function RightPanelTabContent({
     case 'prs':
       return (
         <DronePullRequestsDock
-          key={`${paneKey}-prs`}
+          key={`${paneKey}-${drone.id}-prs`}
           droneId={drone.id}
           droneName={drone.name}
           repoAttached={repoFeaturesEnabled}
