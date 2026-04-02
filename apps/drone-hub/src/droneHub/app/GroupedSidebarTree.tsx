@@ -8,6 +8,7 @@ import { normalizedDroneChats } from './chat-node-helpers';
 import { createSidebarChatDragData, parseDroneHubDragData, useDroneHubActiveDrag, type SidebarDroneDragData } from './drone-hub-dnd';
 import { isDroneStartingOrSeeding } from './helpers';
 import { IconChatThread, IconColumns, IconDrone, IconEye, IconEyeOff, IconFolder, IconPencil, IconPlus, IconSpinner, IconTrash } from './icons';
+import { canReparentSidebarDroneSelection } from './sidebar-drone-drop';
 import { buildSidebarDroneTree, type SidebarDroneTree } from './sidebar-drone-tree';
 import { buildSidebarNodeTree, type SidebarNodeTreeModel, type SidebarTreeDroneNode, type SidebarTreeFolderNode, type SidebarTreeNode } from './sidebar-node-tree';
 import {
@@ -136,6 +137,10 @@ type GroupedSidebarTreeProps = {
   onDeleteDrone: (droneId: string) => void;
   onOpenDroneErrorModal: (drone: DroneSummary, message: string) => void;
   onPrepareDroneDragStart: (droneId: string) => void;
+  onReparentDronesToParent: (
+    parentDroneId: string,
+    droneIds: string[],
+  ) => Promise<{ ok: boolean; error?: string | null; reparentedIds?: string[] }>;
 };
 
 type TreeDropPlacement = SidebarGroupDropPlacement | 'into';
@@ -628,6 +633,8 @@ function GroupedSidebarDroneRow({ node, groupPath, nested = false }: { node: Sid
     isChatTailOver && (activeDrag?.type === 'sidebar-drone' || activeDrag?.type === 'sidebar-folder');
   const showAfterPreview =
     (dragOverTreeTarget?.nodeId === node.id && dragOverTreeTarget.placement === 'after') || showChatTailPreview;
+  const showIntoPreview =
+    dragOverTreeTarget?.nodeId === node.id && dragOverTreeTarget.placement === 'into';
 
   return (
     <div className={`flex flex-col gap-0.5 transition-[margin] duration-150 ${nested ? densityClasses.nestedDroneIndent : ''} ${reorderPreviewClass}`}>
@@ -636,72 +643,80 @@ function GroupedSidebarDroneRow({ node, groupPath, nested = false }: { node: Sid
         (dragOverTreeTarget.placement === 'before' || dragOverTreeTarget.placement === 'after') ? (
           <TreeDropGuide placement={dragOverTreeTarget.placement} />
         ) : null}
-        <DroneCard
-          drone={drone}
-          density={sidebarDensityMode}
-          displayName={uiDroneName(drone.name)}
-          selected={selected}
-          active={showOpenDefaultChatIndicator}
-          activeIndicatorStyle="edge"
-          leadingIcon={<IconDrone className={densityClasses.icon} />}
-          selectionTone="muted"
-          showSelectionEdge={false}
-          busy={showBusy}
-          unreadAgentMessage={showUnread}
-          onClick={(rowOpts) => {
-            if (shouldSuppressClick()) return;
-            setSelectedSidebarNodeId(node.id);
-            onSelectDroneCard(drone.id, rowOpts);
-          }}
-          dragNodeRef={setDragNodeRef}
-          draggable={!dragDisabled}
-          dragging={isDragging}
-          dragAttributes={attributes as unknown as Record<string, unknown>}
-          dragListeners={listeners as unknown as Record<string, unknown>}
-          onCreateChat={() => onOpenCreateDroneChat(drone)}
-          onClone={() => onOpenCloneModal(drone)}
-          onRename={() => onRenameDrone(drone.id)}
-          onSetBaseImage={() => onSetDroneBaseImage(drone.id)}
-          onDelete={() => onDeleteDrone(drone.id)}
-          onErrorClick={onOpenDroneErrorModal}
-          cloneDisabled={
-            isOptimistic ||
-            Boolean(deletingDrones[drone.id]) ||
-            Boolean(renamingDrones[drone.id]) ||
-            Boolean(settingBaseImages[drone.id]) ||
-            String(drone.runtime ?? 'container').trim().toLowerCase() === 'host'
+        <div
+          className={
+            showIntoPreview
+              ? 'rounded-[12px] bg-[var(--accent-subtle)] ring-1 ring-inset ring-[var(--accent-muted)]'
+              : ''
           }
-          createChatDisabled={
-            isOptimistic ||
-            Boolean(deletingDrones[drone.id]) ||
-            Boolean(renamingDrones[drone.id]) ||
-            Boolean(settingBaseImages[drone.id]) ||
-            isDroneStartingOrSeeding(drone.hubPhase)
-          }
-          renameDisabled={
-            isOptimistic ||
-            Boolean(deletingDrones[drone.id]) ||
-            Boolean(renamingDrones[drone.id]) ||
-            Boolean(settingBaseImages[drone.id]) ||
-            isDroneStartingOrSeeding(drone.hubPhase)
-          }
-          renameBusy={Boolean(renamingDrones[drone.id])}
-          setBaseImageDisabled={
-            isOptimistic ||
-            Boolean(deletingDrones[drone.id]) ||
-            Boolean(renamingDrones[drone.id]) ||
-            Boolean(settingBaseImages[drone.id]) ||
-            isDroneStartingOrSeeding(drone.hubPhase)
-          }
-          setBaseImageBusy={Boolean(settingBaseImages[drone.id])}
-          deleteDisabled={
-            isOptimistic ||
-            Boolean(deletingDrones[drone.id]) ||
-            Boolean(renamingDrones[drone.id]) ||
-            Boolean(settingBaseImages[drone.id])
-          }
-          deleteBusy={Boolean(deletingDrones[drone.id])}
-        />
+        >
+          <DroneCard
+            drone={drone}
+            density={sidebarDensityMode}
+            displayName={uiDroneName(drone.name)}
+            selected={selected}
+            active={showOpenDefaultChatIndicator}
+            activeIndicatorStyle="edge"
+            leadingIcon={<IconDrone className={densityClasses.icon} />}
+            selectionTone="muted"
+            showSelectionEdge={false}
+            busy={showBusy}
+            unreadAgentMessage={showUnread}
+            onClick={(rowOpts) => {
+              if (shouldSuppressClick()) return;
+              setSelectedSidebarNodeId(node.id);
+              onSelectDroneCard(drone.id, rowOpts);
+            }}
+            dragNodeRef={setDragNodeRef}
+            draggable={!dragDisabled}
+            dragging={isDragging}
+            dragAttributes={attributes as unknown as Record<string, unknown>}
+            dragListeners={listeners as unknown as Record<string, unknown>}
+            onCreateChat={() => onOpenCreateDroneChat(drone)}
+            onClone={() => onOpenCloneModal(drone)}
+            onRename={() => onRenameDrone(drone.id)}
+            onSetBaseImage={() => onSetDroneBaseImage(drone.id)}
+            onDelete={() => onDeleteDrone(drone.id)}
+            onErrorClick={onOpenDroneErrorModal}
+            cloneDisabled={
+              isOptimistic ||
+              Boolean(deletingDrones[drone.id]) ||
+              Boolean(renamingDrones[drone.id]) ||
+              Boolean(settingBaseImages[drone.id]) ||
+              String(drone.runtime ?? 'container').trim().toLowerCase() === 'host'
+            }
+            createChatDisabled={
+              isOptimistic ||
+              Boolean(deletingDrones[drone.id]) ||
+              Boolean(renamingDrones[drone.id]) ||
+              Boolean(settingBaseImages[drone.id]) ||
+              isDroneStartingOrSeeding(drone.hubPhase)
+            }
+            renameDisabled={
+              isOptimistic ||
+              Boolean(deletingDrones[drone.id]) ||
+              Boolean(renamingDrones[drone.id]) ||
+              Boolean(settingBaseImages[drone.id]) ||
+              isDroneStartingOrSeeding(drone.hubPhase)
+            }
+            renameBusy={Boolean(renamingDrones[drone.id])}
+            setBaseImageDisabled={
+              isOptimistic ||
+              Boolean(deletingDrones[drone.id]) ||
+              Boolean(renamingDrones[drone.id]) ||
+              Boolean(settingBaseImages[drone.id]) ||
+              isDroneStartingOrSeeding(drone.hubPhase)
+            }
+            setBaseImageBusy={Boolean(settingBaseImages[drone.id])}
+            deleteDisabled={
+              isOptimistic ||
+              Boolean(deletingDrones[drone.id]) ||
+              Boolean(renamingDrones[drone.id]) ||
+              Boolean(settingBaseImages[drone.id])
+            }
+            deleteBusy={Boolean(deletingDrones[drone.id])}
+          />
+        </div>
       </div>
       {chats.length > 1 || showCreateChatEditor ? (
         <div ref={setChatTailDropNodeRef} className={`${densityClasses.chatBlockIndent} flex flex-col gap-0.5`}>
@@ -1262,11 +1277,17 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
         typeof overData.nodeId === 'string'
       ) {
         const targetNodeId = String(overData.nodeId ?? '').trim();
+        const targetNode = nodeTree.nodesById[targetNodeId];
+        const allowInto =
+          (active?.type === 'sidebar-drone' &&
+            targetNode?.kind === 'drone' &&
+            canReparentSidebarDroneSelection(droneById, active.droneIds, targetNode.droneId)) ||
+          (targetNode?.kind === 'folder' && !isVirtualRepoRootNode(targetNode));
         setDragOverChat(null);
         setDragOverFolderBodyId(null);
         setDragOverTreeTarget({
           nodeId: targetNodeId,
-          placement: placementFromEvent(event, false),
+          placement: placementFromEvent(event, allowInto),
         });
         return;
       }
@@ -1286,7 +1307,7 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
 
       clearDragState();
     },
-    [clearDragState, nodeTree],
+    [clearDragState, droneById, nodeTree],
   );
 
   useDndMonitor({
@@ -1431,6 +1452,10 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
           props.selectedDroneSet.has(active.droneId) && props.selectedDroneIds.length > 0
             ? props.selectedDroneIds.slice()
             : [active.droneId];
+        const allowIntoTarget =
+          (targetNode.kind === 'drone' &&
+            canReparentSidebarDroneSelection(droneById, movingDroneIds, targetNode.droneId)) ||
+          (targetNode.kind === 'folder' && !isVirtualRepoRootNode(targetNode));
         const placement =
           overData.type === 'sidebar-chat-reorder' || overData.type === 'sidebar-tree-drone-tail'
             ? 'after'
@@ -1438,7 +1463,18 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
               ? (folderBodyInsertionTarget?.placement ?? 'into')
               : dragOverTreeTarget?.nodeId === targetNodeId
                 ? dragOverTreeTarget.placement
-                : placementFromEvent(event, false);
+                : placementFromEvent(event, allowIntoTarget);
+        if (placement === 'into' && targetNode.kind === 'drone') {
+          clearDragState();
+          void props.onReparentDronesToParent(targetNode.droneId, movingDroneIds).then((result) => {
+            if (!result.ok && result.error) {
+              const targetDrone = droneById[targetNode.droneId] ?? null;
+              if (targetDrone) props.onOpenDroneErrorModal(targetDrone, result.error);
+              else window.alert(result.error);
+            }
+          });
+          return;
+        }
         const targetParentId =
           overData.type === 'sidebar-chat-reorder' || overData.type === 'sidebar-tree-drone-tail'
             ? targetNode.parentId
@@ -1561,7 +1597,10 @@ export function GroupedSidebarTree(props: GroupedSidebarTreeProps) {
               ? (folderBodyInsertionTarget?.placement ?? 'into')
               : dragOverTreeTarget?.nodeId === targetNodeId
                 ? dragOverTreeTarget.placement
-                : placementFromEvent(event, false);
+                : placementFromEvent(
+                    event,
+                    targetNode.kind === 'folder' && !isVirtualRepoRootNode(targetNode),
+                  );
         const sourceParentId = sourceNode.parentId;
         const targetParentId =
           overData.type === 'sidebar-chat-reorder' || overData.type === 'sidebar-tree-drone-tail'
