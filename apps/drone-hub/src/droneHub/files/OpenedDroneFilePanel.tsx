@@ -1,6 +1,5 @@
 import React from 'react';
 import Editor from '@monaco-editor/react';
-import { SegmentedToolbarToggle } from '../app/SegmentedToolbarToggle';
 import { MarkdownMessage } from '../chat/MarkdownMessage';
 import { defaultTextFileViewModeForFile, editorLanguageForPath, isMarkdownFile, type TextFileViewMode } from '../code-languages';
 import { formatBytes, formatEditorMtime } from '../app/selected-drone-workspace-utils';
@@ -98,6 +97,16 @@ export function OpenedDroneFilePanel({
 
   const openedFileShowsMarkdownPreview = openedFileIsMarkdown && openedTextMode === 'preview';
   const openedFileEditorVisible = openedEditorIsText && !openedFileShowsMarkdownPreview;
+  const headerStatusText = React.useMemo(() => {
+    if (openedEditorIsText) {
+      if (fileSaving) return 'Saving...';
+      if (fileDirty) return 'Unsaved changes';
+      const savedText = formatEditorMtime(fileMtimeMs ?? null);
+      return savedText === '-' ? 'Saved' : `Saved ${savedText}`;
+    }
+    const details = [fileMime || null, (fileSize ?? 0) > 0 ? formatBytes(fileSize) : null].filter(Boolean);
+    return details.length > 0 ? details.join(' • ') : 'Preview';
+  }, [fileDirty, fileMime, fileMtimeMs, fileSaving, fileSize, openedEditorIsText]);
   const openedFileMediaSrc = React.useMemo(() => {
     if (!activeFilePath) return '';
     if (fileKind !== 'image' && fileKind !== 'video') return '';
@@ -149,71 +158,74 @@ export function OpenedDroneFilePanel({
     },
     [activeFilePath, onOpenResolvedFile],
   );
+  const modeButtonClassName = (active: boolean, disabled: boolean) =>
+    `h-7 px-2 rounded-md border text-[10px] font-semibold transition-colors ${
+      active
+        ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
+        : 'border-[var(--border-subtle)] bg-[var(--panel)] text-[var(--muted)] hover:text-[var(--fg-secondary)] hover:bg-[var(--hover)]'
+    } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`;
 
   return (
-    <div className="h-full min-h-0 overflow-hidden flex flex-col gap-2">
-      <div className="flex items-start justify-between gap-2">
-        <button
-          type="button"
-          onClick={onCloseFile}
-          className="h-7 px-2.5 rounded-md border border-[var(--border-subtle)] bg-[var(--panel-alt)] text-[10px] font-semibold text-[var(--muted)] hover:text-[var(--fg-secondary)] hover:bg-[var(--hover)] whitespace-nowrap"
-          title="Close file"
-        >
-          Close file
-        </button>
-        <div className="flex items-center gap-1.5">
-          {openedFileIsMarkdown ? (
-            <SegmentedToolbarToggle
-              label="Mode"
-              value={openedTextMode}
-              options={[
-                { value: 'preview', label: 'Preview', title: 'Render markdown preview' },
-                { value: 'edit', label: 'Edit', title: 'Edit markdown source' },
-              ]}
-              onChange={setOpenedTextMode}
-              disabled={Boolean(fileLoading)}
-            />
-          ) : null}
-          {openedEditorIsText ? (
+    <div className="h-full min-h-0 overflow-hidden">
+      <div className="min-w-0 h-full min-h-0 rounded-md border border-[var(--border-subtle)] bg-[var(--panel)] flex flex-col">
+        <div className="px-3 py-2 border-b border-[var(--border-subtle)] flex items-center justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 min-w-0">
+              <div className="truncate text-[13px] font-medium text-[var(--fg-secondary)]">{fileName || activeFilePath || 'File'}</div>
+              <div className="shrink-0 text-[10px] text-[var(--muted)]">{headerStatusText}</div>
+            </div>
+            <div className="mt-0.5 text-[10px] text-[var(--muted-dim)] font-mono truncate" title={activeFilePath || undefined}>
+              {activeFilePath}
+            </div>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {openedFileIsMarkdown ? (
+              <div className="inline-flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setOpenedTextMode('preview')}
+                  disabled={Boolean(fileLoading)}
+                  className={modeButtonClassName(openedTextMode === 'preview', Boolean(fileLoading))}
+                  title="Render markdown preview"
+                >
+                  Preview
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setOpenedTextMode('edit')}
+                  disabled={Boolean(fileLoading)}
+                  className={modeButtonClassName(openedTextMode === 'edit', Boolean(fileLoading))}
+                  title="Edit markdown source"
+                >
+                  Edit
+                </button>
+              </div>
+            ) : null}
+            {openedEditorIsText ? (
+              <button
+                type="button"
+                onClick={() => {
+                  void onSaveFile?.();
+                }}
+                disabled={Boolean(fileLoading) || Boolean(fileSaving) || !fileDirty || !onSaveFile}
+                className={`h-7 px-2.5 rounded-md border text-[10px] font-semibold transition-colors ${
+                  fileLoading || fileSaving || !fileDirty || !onSaveFile
+                    ? 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)] opacity-50 cursor-not-allowed'
+                    : 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)] hover:shadow-[var(--glow-accent)]'
+                }`}
+                title="Save file (Ctrl/Cmd+S)"
+              >
+                Save
+              </button>
+            ) : null}
             <button
               type="button"
-              onClick={() => {
-                void onSaveFile?.();
-              }}
-              disabled={Boolean(fileLoading) || Boolean(fileSaving) || !fileDirty || !onSaveFile}
-              className={`h-7 px-2.5 rounded-md border text-[10px] font-semibold tracking-wide uppercase transition-colors ${
-                fileLoading || fileSaving || !fileDirty || !onSaveFile
-                  ? 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)] opacity-50 cursor-not-allowed'
-                  : 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)] hover:shadow-[var(--glow-accent)]'
-              }`}
-              style={{ fontFamily: 'var(--display)' }}
-              title="Save file (Ctrl/Cmd+S)"
+              onClick={onCloseFile}
+              className="h-7 px-2.5 rounded-md border border-[var(--border-subtle)] bg-[var(--panel)] text-[10px] font-semibold text-[var(--muted)] hover:text-[var(--fg-secondary)] hover:bg-[var(--hover)] whitespace-nowrap"
+              title="Close file"
             >
-              Save
+              Done
             </button>
-          ) : null}
-        </div>
-      </div>
-      <div className="min-w-0 flex-1 min-h-0 rounded-md border border-[var(--border-subtle)] bg-[var(--panel)] flex flex-col">
-        <div className="px-3 py-2 border-b border-[var(--border-subtle)]">
-          <div className="text-[10px] text-[var(--muted-dim)] uppercase tracking-wide" style={{ fontFamily: 'var(--display)' }}>
-            {fileName
-              ? `${openedFileShowsMarkdownPreview ? 'Previewing' : 'Editing'} ${fileName}`
-              : openedFileShowsMarkdownPreview
-                ? 'Previewing file'
-                : 'Editing file'}
-          </div>
-          <div className="mt-0.5 text-[12px] text-[var(--fg-secondary)] font-mono truncate" title={activeFilePath || undefined}>
-            {activeFilePath}
-          </div>
-          <div className="mt-1 text-[10px] text-[var(--muted)]">
-            {openedEditorIsText
-              ? fileSaving
-                ? 'Saving...'
-                : fileDirty
-                  ? `${openedFileShowsMarkdownPreview ? 'Preview mode' : 'Edit mode'} • Unsaved changes`
-                  : `${openedFileShowsMarkdownPreview ? 'Preview mode' : 'Edit mode'} • Saved • ${formatEditorMtime(fileMtimeMs ?? null)}`
-              : `Preview${fileMime ? ` • ${fileMime}` : ''}${(fileSize ?? 0) > 0 ? ` • ${formatBytes(fileSize)}` : ''}`}
           </div>
         </div>
         {fileError ? (
