@@ -37,6 +37,7 @@ import { cn } from '../../ui/cn';
 import { dropdownMenuItemBaseClass, dropdownPanelBaseClass, useDropdownDismiss } from '../../ui/dropdown';
 import { UiMenuSelect, type UiMenuSelectEntry } from '../../ui/menuSelect';
 import { createDraftChatAutomationLaunch } from './chat-draft-automation';
+import { currentPromptAutomationDisplayStatus } from './prompt-automation-display-status';
 import { repoPathLabel } from './repo-path-label';
 import { useDroneHubUiStore, useSelectedDroneWorkspaceUiState } from './use-drone-hub-ui-store';
 import { usePromptAutomationState } from './use-prompt-automation-state';
@@ -456,6 +457,10 @@ export function SelectedDroneWorkspace({
     const total = Math.max(0, Number(promptAutomationJob.runsTotal ?? 0) || 0);
     return `Running ${completed}/${total}`;
   }, [promptAutomationJob]);
+  const currentAutomationCardStatus = React.useMemo(
+    () => currentPromptAutomationDisplayStatus(promptAutomationJob),
+    [promptAutomationJob],
+  );
   const runningAutomationHasRenderedGroup = Boolean(promptAutomationJob?.running && runningAutomationIdentity);
   const pendingTimelineBlocks = React.useMemo(() => {
     return buildPendingTimelineBlocks({
@@ -1452,7 +1457,7 @@ export function SelectedDroneWorkspace({
                         <AutomationLaneStatusCard
                           key={item.key}
                           nowMs={nowMs}
-                          status="running"
+                          status={currentAutomationCardStatus}
                           automationLabel={String(promptAutomationJob.automationLabel ?? '').trim() || 'Automation'}
                           runsTotal={Number(promptAutomationJob.runsTotal ?? 0) || 0}
                           runsCompleted={Number(promptAutomationJob.runsCompleted ?? 0) || 0}

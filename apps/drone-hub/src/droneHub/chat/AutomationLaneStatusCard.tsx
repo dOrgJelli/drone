@@ -40,7 +40,7 @@ export const AutomationLaneStatusCard = React.memo(function AutomationLaneStatus
   const label = String(automationLabel ?? '').trim() || 'Automation';
   const ts = String(atIso ?? '').trim();
   const canCancel = status === 'queued' && !!queueId && !!onCancelQueued;
-  const canStop = status === 'running' && (Boolean(onStopAll) || Boolean(onStopRunsOnly));
+  const canStop = Boolean(onStopAll) || Boolean(onStopRunsOnly);
 
   return (
     <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--panel-alt)] px-4 py-3">
