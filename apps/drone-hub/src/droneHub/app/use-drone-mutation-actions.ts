@@ -276,25 +276,27 @@ export function useDroneMutationActions({
 
   const reparentDronesToParent = React.useCallback(
     async (
-      parentDroneIdRaw: string,
+      parentDroneIdRaw: string | null,
       droneIdsRaw: string[],
     ): Promise<{ ok: boolean; error?: string | null; reparentedIds?: string[] }> => {
-      const parentDroneId = String(parentDroneIdRaw ?? '').trim();
+      const parentDroneId = String(parentDroneIdRaw ?? '').trim() || null;
       const dedupedDroneIds = Array.from(
         new Set(droneIdsRaw.map((item) => String(item ?? '').trim()).filter(Boolean)),
-      ).filter((droneId) => droneId !== parentDroneId);
-      if (!parentDroneId || dedupedDroneIds.length === 0) {
+      ).filter((droneId) => !parentDroneId || droneId !== parentDroneId);
+      if (dedupedDroneIds.length === 0) {
         return { ok: false, error: 'No drones selected to reparent.', reparentedIds: [] };
       }
 
       const currentDrones = dronesRef.current;
-      const parentDrone = currentDrones.find((drone) => drone.id === parentDroneId) ?? null;
-      if (!parentDrone) {
+      const parentDrone = parentDroneId
+        ? currentDrones.find((drone) => drone.id === parentDroneId) ?? null
+        : null;
+      if (parentDroneId && !parentDrone) {
         return { ok: false, error: `unknown drone: ${parentDroneId}`, reparentedIds: [] };
       }
       const requestedDroneIds = dedupedDroneIds.filter((droneId) => {
         const drone = currentDrones.find((item) => item.id === droneId) ?? null;
-        return String(drone?.fleetParentId ?? '').trim() !== parentDroneId;
+        return (String(drone?.fleetParentId ?? '').trim() || null) !== parentDroneId;
       });
       if (requestedDroneIds.length === 0) {
         return { ok: true, error: null, reparentedIds: [] };
@@ -323,12 +325,14 @@ export function useDroneMutationActions({
         }
       }
 
-      const targetGroupRaw = String(parentDrone.group ?? '').trim();
+      const targetGroupRaw = String(parentDrone?.group ?? '').trim();
       const targetGroup = targetGroupRaw || null;
-      const droneIdsNeedingGroupMove = reparentedIds.filter((droneId) => {
-        const drone = currentDrones.find((item) => item.id === droneId) ?? null;
-        return String(drone?.group ?? '').trim() !== String(targetGroup ?? '').trim();
-      });
+      const droneIdsNeedingGroupMove = parentDrone
+        ? reparentedIds.filter((droneId) => {
+            const drone = currentDrones.find((item) => item.id === droneId) ?? null;
+            return String(drone?.group ?? '').trim() !== String(targetGroup ?? '').trim();
+          })
+        : [];
       if (droneIdsNeedingGroupMove.length > 0) {
         try {
           const response = await requestJson<{

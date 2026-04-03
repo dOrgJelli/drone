@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  canSetSidebarDroneSelectionParent,
   canReparentSidebarDroneSelection,
   sidebarDroneDropIntentFromRects,
 } from '../src/droneHub/app/sidebar-drone-drop';
@@ -46,5 +47,18 @@ describe('sidebar drone drop helpers', () => {
     expect(canReparentSidebarDroneSelection(droneById, ['parent'], 'child')).toBe(false);
     expect(canReparentSidebarDroneSelection(droneById, ['child'], 'child')).toBe(false);
     expect(canReparentSidebarDroneSelection(droneById, ['child'], 'sibling')).toBe(true);
+  });
+
+  test('allows clearing a parent while still rejecting invalid descendant parenting', () => {
+    const droneById = Object.fromEntries(
+      [
+        drone({ id: 'parent', name: 'parent' }),
+        drone({ id: 'child', name: 'child', fleetParentId: 'parent' }),
+        drone({ id: 'grandchild', name: 'grandchild', fleetParentId: 'child' }),
+      ].map((item) => [item.id, item]),
+    );
+
+    expect(canSetSidebarDroneSelectionParent(droneById, ['child'], null)).toBe(true);
+    expect(canSetSidebarDroneSelectionParent(droneById, ['parent'], 'grandchild')).toBe(false);
   });
 });

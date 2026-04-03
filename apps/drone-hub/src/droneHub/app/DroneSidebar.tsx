@@ -8,6 +8,7 @@ import { IconAutoMinimize, IconBoard, IconChevron, IconColumns, IconEye, IconEye
 import { SidebarDroneTreeList, sidebarInlineSectionKey, type SidebarInlineSectionKind } from './SidebarDroneTreeList';
 import { GroupedSidebarTree } from './GroupedSidebarTree';
 import {
+  normalizeSidebarReorderTarget,
   sidebarDropPlacementFromRects,
   SidebarReorderDropIndicator,
 } from './sidebar-reorder-ui';
@@ -843,7 +844,7 @@ export type DroneSidebarProps = {
   onDeleteDrone: (droneId: string) => void;
   onOpenDroneErrorModal: (drone: DroneSummary, message: string) => void;
   onReparentDronesToParent: (
-    parentDroneId: string,
+    parentDroneId: string | null,
     droneIds: string[],
   ) => Promise<{ ok: boolean; error?: string | null; reparentedIds?: string[] }>;
   onMoveDronesToGroup: (group: string, droneIds: string[]) => Promise<MoveDronesToGroupResult>;
@@ -1509,6 +1510,25 @@ export function DroneSidebar({
     [],
   );
 
+  const currentSidebarGroupTargetFromEvent = React.useCallback(
+    (
+      event: DragMoveEvent | DragOverEvent | DragEndEvent,
+      activeGroupRef: SidebarDragGroupRef,
+      overGroupRef: SidebarDragGroupRef,
+    ) => {
+      const visibleTokens = orderSidebarGroups(sidebarGroups, sidebarGroupOrder)
+        .filter((group) => {
+          if (group.kind !== activeGroupRef.kind) return false;
+          if (group.kind !== 'group') return true;
+          return sidebarGroupParentPath(group.group) === sidebarGroupParentPath(overGroupRef.group);
+        })
+        .map((group) => sidebarGroupOrderToken(group));
+      const overTokenRaw = sidebarGroupOrderToken(overGroupRef);
+      return normalizeSidebarReorderTarget(visibleTokens, overTokenRaw, currentPlacementFromEvent(event));
+    },
+    [currentPlacementFromEvent, sidebarGroupOrder, sidebarGroups],
+  );
+
   const resolveMoveTargetGroupFromOverData = React.useCallback((overData: Record<string, unknown> | undefined): string | null => {
     if (!overData) return null;
     if (overData.type === 'sidebar-group-move') {
@@ -1539,12 +1559,13 @@ export function DroneSidebar({
           target.kind !== 'group' ||
           sidebarGroupParentPath(activeData.groupRef.group) === sidebarGroupParentPath(target.group);
         if (sameFolderParent && draggedToken && targetToken && draggedToken !== targetToken) {
+          const dropTarget = currentSidebarGroupTargetFromEvent(event, activeData.groupRef, target);
           setDragOverGroup(null);
           setDragOverUngrouped(false);
           setDragOverCreateGroup(false);
           setDragOverSidebarGroup({
-            token: targetToken,
-            placement: currentPlacementFromEvent(event),
+            token: dropTarget.overId,
+            placement: dropTarget.placement,
           });
           return;
         }
@@ -1628,7 +1649,7 @@ export function DroneSidebar({
 
       clearSidebarDragState();
     },
-    [clearSidebarDragState, currentPlacementFromEvent, isRepoGroupingMode, resolveMoveTargetGroupFromOverData, sidebarHasUngroupedGroup],
+    [clearSidebarDragState, currentPlacementFromEvent, currentSidebarGroupTargetFromEvent, isRepoGroupingMode, resolveMoveTargetGroupFromOverData, sidebarHasUngroupedGroup],
   );
 
   useDndMonitor({
@@ -1653,12 +1674,17 @@ export function DroneSidebar({
           target.kind !== 'group' ||
           sidebarGroupParentPath(activeData.groupRef.group) === sidebarGroupParentPath(target.group);
         if (sameFolderParent && targetToken && targetToken !== sidebarGroupOrderToken(activeData.groupRef)) {
-          const placement =
-            dragOverSidebarGroup?.token === targetToken
-              ? dragOverSidebarGroup.placement
-              : currentPlacementFromEvent(event);
+          const fallbackTarget = currentSidebarGroupTargetFromEvent(event, activeData.groupRef, target);
+          const dropTarget = dragOverSidebarGroup ?? {
+            token: fallbackTarget.overId,
+            placement: fallbackTarget.placement,
+          };
+          const resolvedTarget =
+            orderSidebarGroups(sidebarGroups, sidebarGroupOrder).find(
+              (group) => sidebarGroupOrderToken(group) === dropTarget.token,
+            ) ?? target;
           setSidebarGroupOrder((prev) =>
-            reorderSidebarGroupOrder(prev, sidebarGroups, activeData.groupRef, target, placement),
+            reorderSidebarGroupOrder(prev, sidebarGroups, activeData.groupRef, resolvedTarget, dropTarget.placement),
           );
           clearSidebarDragState();
           return;
