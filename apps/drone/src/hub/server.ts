@@ -7161,6 +7161,84 @@ async function removeDroneById(opts: { id: string; keepVolume: boolean; forget: 
   return { hadEntry, removedRegistry, removeErr };
 }
 
+async function removeDroneLifecycleEntryById(opts: {
+  id: string;
+  keepVolume: boolean;
+  forget: boolean;
+}): Promise<{ kind: 'real' | 'pending' | 'none'; removedRegistry: boolean; removeErr: string | null }> {
+  const droneId = normalizeDroneIdentity(opts.id);
+  if (!droneId) {
+    return { kind: 'none', removedRegistry: false, removeErr: `invalid drone id: ${String(opts.id ?? '')}` };
+  }
+
+  const regSnapshot: any = await loadRegistry();
+  if (regSnapshot?.drones?.[droneId]) {
+    const result = await removeDroneById(opts);
+    return { kind: result.hadEntry ? 'real' : 'none', removedRegistry: result.removedRegistry, removeErr: result.removeErr };
+  }
+  if (regSnapshot?.pending?.[droneId]) {
+    await updateRegistry((regAny: any) => {
+      if (regAny?.pending?.[droneId] && !regAny?.drones?.[droneId]) delete regAny.pending[droneId];
+    });
+    dequeueProvisioning(droneId);
+    return { kind: 'pending', removedRegistry: false, removeErr: null };
+  }
+  return { kind: 'none', removedRegistry: false, removeErr: null };
+}
+
+async function removeDroneTreeById(opts: {
+  id: string;
+  keepVolume: boolean;
+  forget: boolean;
+}): Promise<{
+  kind: 'real' | 'pending' | 'none';
+  removedRegistry: boolean;
+  removedPending: boolean;
+  removedDescendants: string[];
+  removeErr: string | null;
+}> {
+  const droneId = normalizeDroneIdentity(opts.id);
+  if (!droneId) {
+    return {
+      kind: 'none',
+      removedRegistry: false,
+      removedPending: false,
+      removedDescendants: [],
+      removeErr: `invalid drone id: ${String(opts.id ?? '')}`,
+    };
+  }
+
+  const regSnapshot: any = await loadRegistry();
+  const descendantIds = fleetDescendantIdsForActor(regSnapshot, droneId).reverse();
+  const removedDescendants: string[] = [];
+  for (const descendantId of descendantIds) {
+    const result = await removeDroneLifecycleEntryById({
+      id: descendantId,
+      keepVolume: opts.keepVolume,
+      forget: opts.forget,
+    });
+    if (result.removeErr) {
+      return {
+        kind: 'none',
+        removedRegistry: false,
+        removedPending: false,
+        removedDescendants,
+        removeErr: `failed to delete descendant drone "${descendantId}": ${result.removeErr}`,
+      };
+    }
+    if (result.kind !== 'none') removedDescendants.push(descendantId);
+  }
+
+  const rootResult = await removeDroneLifecycleEntryById(opts);
+  return {
+    kind: rootResult.kind,
+    removedRegistry: rootResult.removedRegistry,
+    removedPending: rootResult.kind === 'pending',
+    removedDescendants,
+    removeErr: rootResult.removeErr,
+  };
+}
+
 const DEFAULT_ARCHIVE_RETENTION: ArchiveRetentionId = '1d';
 const DEFAULT_ARCHIVE_RUNTIME_POLICY: ArchiveRuntimePolicy = 'keep-running';
 
@@ -15999,25 +16077,11 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         const keepVolume = parseBoolParam(u.searchParams.get('keepVolume'), false);
         const forget = parseBoolParam(u.searchParams.get('forget'), true);
 
-        const pendingResult = await updateRegistry((regAny: any) => {
-          if (regAny?.drones?.[droneId]) return { kind: 'real' as const };
-          if (regAny?.pending?.[droneId]) {
-            delete regAny.pending[droneId];
-            return { kind: 'pending' as const };
-          }
-          return { kind: 'none' as const };
-        });
-        if (pendingResult.kind === 'pending') {
-          dequeueProvisioning(droneId);
-          json(res, 200, { ok: true, id: droneId, name: droneName, removedRegistry: false, removedPending: true });
-          return;
-        }
-        if (pendingResult.kind === 'none') {
+        const r = await removeDroneTreeById({ id: droneId, keepVolume, forget });
+        if (r.kind === 'none' && !r.removeErr) {
           json(res, 404, { ok: false, error: `unknown drone: ${droneRef}` });
           return;
         }
-
-        const r = await removeDroneById({ id: droneId, keepVolume, forget });
         if (r.removeErr) {
           json(res, 500, {
             ok: false,
@@ -16025,11 +16089,20 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             name: droneName,
             error: r.removeErr,
             removedRegistry: r.removedRegistry,
+            removedPending: r.removedPending,
+            removedDescendants: r.removedDescendants,
           });
           return;
         }
 
-        json(res, 200, { ok: true, id: droneId, name: droneName, removedRegistry: r.removedRegistry });
+        json(res, 200, {
+          ok: true,
+          id: droneId,
+          name: droneName,
+          removedRegistry: r.removedRegistry,
+          removedPending: r.removedPending,
+          removedDescendants: r.removedDescendants,
+        });
         return;
       }
 
