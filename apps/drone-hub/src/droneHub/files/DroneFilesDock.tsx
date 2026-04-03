@@ -2,7 +2,7 @@ import React from 'react';
 import { IconPencil } from '../app/icons';
 import { formatBytes } from '../app/selected-drone-workspace-utils';
 import { requestJson } from '../http';
-import { IconChevron, IconFolder, iconForFilePath } from '../icons';
+import { IconChevron, iconForFilePath } from '../icons';
 import type { DroneFsEntry, DroneFsListPayload, DroneFsUploadPayload } from '../types';
 import { OpenedDroneFilePanel } from './OpenedDroneFilePanel';
 import type { DroneOpenedFileState } from './opened-file-types';
@@ -415,7 +415,7 @@ export function DroneFilesDock({
                   onClick={() => toggleDirectory(node.path)}
                   className={`flex-1 min-w-0 text-left px-1 rounded border transition-all flex items-center gap-0.5 ${
                     open
-                      ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)]'
+                      ? 'border-transparent bg-[rgba(255,255,255,.04)]'
                       : 'border-transparent hover:bg-[var(--hover)]'
                   }`}
                   style={{
@@ -425,9 +425,6 @@ export function DroneFilesDock({
                 >
                   <span className="inline-flex items-center justify-center w-4 h-4 flex-shrink-0 text-[var(--muted-dim)]">
                     <IconChevron down={open} size={12} />
-                  </span>
-                  <span className="inline-flex items-center justify-center w-4 h-4 flex-shrink-0 text-[var(--muted)]">
-                    <IconFolder size={12} />
                   </span>
                   <span className="truncate flex-1 text-[var(--fg-secondary)] text-[11px]">{node.name}</span>
                   {childError ? (
@@ -493,7 +490,7 @@ export function DroneFilesDock({
                 onClick={() => onOpenFile(entry)}
                 className={`flex-1 min-w-0 text-left px-1 rounded border transition-all flex items-center gap-0.5 ${
                   active
-                    ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)]'
+                    ? 'border-transparent bg-[rgba(255,255,255,.04)]'
                     : 'border-transparent hover:bg-[var(--hover)]'
                 }`}
                 style={{
