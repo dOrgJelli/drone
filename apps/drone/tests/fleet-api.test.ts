@@ -527,6 +527,92 @@ describeSocketSuite('fleet api', () => {
     expect(reg?.drones?.child?.fleet?.createdBy).toBe('parent');
   });
 
+  test('deleting a parent drone cascades to descendant drones', async () => {
+    const now = new Date().toISOString();
+    await updateRegistry((reg: any) => {
+      reg.drones = {
+        parent: {
+          id: 'parent',
+          name: 'parent',
+          hostPort: null,
+          token: '',
+          runtime: 'host',
+          containerPort: 7777,
+          repoPath: '',
+          createdAt: now,
+          chats: { default: { createdAt: now, turns: [], pendingPrompts: [] } },
+        },
+        child: {
+          id: 'child',
+          name: 'child',
+          hostPort: null,
+          token: '',
+          runtime: 'host',
+          containerPort: 7777,
+          repoPath: '',
+          createdAt: now,
+          fleet: {
+            createdBy: 'parent',
+            assigned: [],
+          },
+          chats: { default: { createdAt: now, turns: [], pendingPrompts: [] } },
+        },
+        grandchild: {
+          id: 'grandchild',
+          name: 'grandchild',
+          hostPort: null,
+          token: '',
+          runtime: 'host',
+          containerPort: 7777,
+          repoPath: '',
+          createdAt: now,
+          fleet: {
+            createdBy: 'child',
+            assigned: [],
+          },
+          chats: { default: { createdAt: now, turns: [], pendingPrompts: [] } },
+        },
+        sibling: {
+          id: 'sibling',
+          name: 'sibling',
+          hostPort: null,
+          token: '',
+          runtime: 'host',
+          containerPort: 7777,
+          repoPath: '',
+          createdAt: now,
+          chats: { default: { createdAt: now, turns: [], pendingPrompts: [] } },
+        },
+      };
+      reg.pending = {
+        pendingChild: {
+          id: 'pendingChild',
+          name: 'pendingChild',
+          runtime: 'host',
+          createdAt: now,
+          phase: 'starting',
+          fleet: {
+            createdBy: 'parent',
+            assigned: [],
+          },
+        },
+      };
+    });
+
+    const deleted = await apiFetch('/api/drones/parent?keepVolume=1', {
+      method: 'DELETE',
+    });
+    expect(deleted.r.status).toBe(200);
+    expect(deleted.data?.removedDescendants).toEqual(['pendingChild', 'grandchild', 'child']);
+
+    const reg = await loadRegistry();
+    expect(reg?.drones?.parent).toBeUndefined();
+    expect(reg?.drones?.child).toBeUndefined();
+    expect(reg?.drones?.grandchild).toBeUndefined();
+    expect(reg?.pending?.pendingChild).toBeUndefined();
+    expect(reg?.drones?.sibling).toBeTruthy();
+  });
+
   test('reconciles send and read fleet requests for a child drone', async () => {
     const parentDaemon = await startStubDaemon('parent-send-token');
     const childDaemon = await startStubDaemon('child-send-token');
