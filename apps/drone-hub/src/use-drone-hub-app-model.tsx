@@ -53,6 +53,7 @@ import { useProfileSettings } from './droneHub/app/use-profile-settings';
 import { useSetupStatus } from './droneHub/app/use-setup-status';
 import { useSkillLibrary } from './droneHub/app/use-skill-library';
 import type { ProfileSettingsResponse } from './droneHub/app/settings-types';
+import { shellTerminalPrewarmKey, shouldPrewarmShellTerminal } from './droneHub/app/terminal-prewarm';
 import { useQueuedPromptsState } from './droneHub/app/use-queued-prompts-state';
 import { useRightPanelLayout } from './droneHub/app/use-right-panel-layout';
 import { useDroneSelectionState } from './droneHub/app/use-drone-selection-state';
@@ -531,6 +532,8 @@ export function useDroneHubAppModel(): DroneHubAppModel {
   const headerOverflowRef = React.useRef<HTMLDivElement | null>(null);
   const preferredSelectedDroneRef = React.useRef<string | null>(null);
   const preferredSelectedDroneHoldUntilRef = React.useRef<number>(0);
+  const shellTerminalPrewarmReadyRef = React.useRef<Set<string>>(new Set());
+  const shellTerminalPrewarmInFlightRef = React.useRef<Set<string>>(new Set());
   const lastSyncedCanvasRepoContextRef = React.useRef<string>('');
   const lastSyncedCanvasAgentModelContextRef = React.useRef<string>('');
   const previousBusyChatNodeIdSetRef = React.useRef<Set<string>>(new Set());
@@ -1554,6 +1557,62 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setSelectedPreviewUrlOverride,
     portRows,
   } = useFilesAndPortsPaneState({ currentDrone, requestJson });
+  React.useEffect(() => {
+    if (
+      !shouldPrewarmShellTerminal({
+        drone: currentDrone,
+        cwd: defaultFsPathForCurrentDrone,
+        rightPanelOpen,
+        rightPanelTab,
+        rightPanelSplit,
+        rightPanelBottomTab,
+      })
+    ) {
+      return;
+    }
+
+    const droneId = String(currentDrone?.id ?? '').trim();
+    const cwd = String(defaultFsPathForCurrentDrone ?? '').trim();
+    const key = shellTerminalPrewarmKey({ droneId, cwd });
+    if (!key) return;
+    if (shellTerminalPrewarmReadyRef.current.has(key) || shellTerminalPrewarmInFlightRef.current.has(key)) return;
+
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      if (cancelled) return;
+      shellTerminalPrewarmInFlightRef.current.add(key);
+      const qs = new URLSearchParams();
+      qs.set('mode', 'shell');
+      qs.set('chat', String(selectedChat ?? '').trim() || 'default');
+      qs.set('cwd', cwd);
+      void requestJson(`/api/drones/${encodeURIComponent(droneId)}/terminal/open?${qs.toString()}`, {
+        method: 'POST',
+      })
+        .then(() => {
+          if (!cancelled) shellTerminalPrewarmReadyRef.current.add(key);
+        })
+        .catch(() => {
+          // Best-effort prewarm only.
+        })
+        .finally(() => {
+          shellTerminalPrewarmInFlightRef.current.delete(key);
+        });
+    }, 150);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    currentDrone,
+    defaultFsPathForCurrentDrone,
+    requestJson,
+    rightPanelBottomTab,
+    rightPanelOpen,
+    rightPanelSplit,
+    rightPanelTab,
+    selectedChat,
+  ]);
   const [lockedPreviewByDrone, setLockedPreviewByDrone] = React.useState<Record<string, PreviewPaneSnapshot>>({});
   const setPreviewLockedForDrone = React.useCallback(
     (droneIdRaw: string, nextLocked: boolean, snapshot?: PreviewPaneSnapshot) => {

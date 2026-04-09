@@ -1,7 +1,11 @@
 import React from 'react';
 import type { DroneSummary, RepoSummary } from '../types';
 import type { RepoOpErrorMeta } from './helpers';
-import { dirtyDroneApplyRequestBody, type DirtyDroneApplyModalState } from './dirty-drone-apply';
+import {
+  dirtyDroneApplyRequestBody,
+  reconcileDirtyDroneApplyModal,
+  type DirtyDroneApplyModalState,
+} from './dirty-drone-apply';
 import { compareDronesByNewestFirst, droneHomePath, isHostRuntimeDrone } from './helpers';
 import { normalizeRepoTransferProbeStatus, type RepoTransferProbeStatus } from './repo-transfer-probe-status';
 
@@ -454,10 +458,7 @@ export function useWorkspaceActions({
   );
 
   React.useEffect(() => {
-    setDirtyDroneApplyModal((current) => {
-      if (!currentDrone) return null;
-      return current.droneId === String(currentDrone.id ?? '').trim() ? current : null;
-    });
+    setDirtyDroneApplyModal((current) => reconcileDirtyDroneApplyModal(current, currentDrone?.id));
   }, [currentDrone]);
 
   const pushRepoChanges = React.useCallback(async () => {

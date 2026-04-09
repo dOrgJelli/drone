@@ -19,3 +19,13 @@ export function dirtyDroneApplyRequestBody(choice: 'commit' | 'keep', autoCommit
   }
   return { allowDirty: true };
 }
+
+export function reconcileDirtyDroneApplyModal(
+  current: DirtyDroneApplyModalState | null,
+  activeDroneIdRaw: unknown,
+): DirtyDroneApplyModalState | null {
+  if (!current) return null;
+  const activeDroneId = String(activeDroneIdRaw ?? '').trim();
+  if (!activeDroneId) return null;
+  return current.droneId === activeDroneId ? current : null;
+}

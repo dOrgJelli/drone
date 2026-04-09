@@ -29,7 +29,11 @@ import {
   reconcileOptimisticPendingPrompt,
 } from './optimistic-pending-prompts';
 import { DirtyDroneApplyModal } from './DirtyDroneApplyModal';
-import { dirtyDroneApplyRequestBody, type DirtyDroneApplyModalState } from './dirty-drone-apply';
+import {
+  dirtyDroneApplyRequestBody,
+  reconcileDirtyDroneApplyModal,
+  type DirtyDroneApplyModalState,
+} from './dirty-drone-apply';
 import { parseIsoDateMs, type GroupMultiChatColumnRuntimeState } from './group-multi-chat-sort';
 import { openDroneTabFromLastPreview, resolveDroneOpenTabUrl } from './quick-actions';
 import { useDroneHubUiStore } from './use-drone-hub-ui-store';
@@ -435,10 +439,7 @@ export function GroupMultiChatColumn({
   );
 
   React.useEffect(() => {
-    setDirtyDroneApplyModal((current) => {
-      if (!current) return null;
-      return current.droneId === String(drone.id ?? '').trim() ? current : null;
-    });
+    setDirtyDroneApplyModal((current) => reconcileDirtyDroneApplyModal(current, drone.id));
   }, [drone.id]);
 
   const pushRepoChanges = React.useCallback(async () => {
