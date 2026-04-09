@@ -1591,6 +1591,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     openEditorFile,
     closeEditorFile,
     setOpenedFileContent,
+    refreshOpenedFile,
     saveOpenedFile,
   } = useFileEditorState({
     currentDrone,
@@ -2600,6 +2601,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
           }}
           agentLabel={agentLabel}
           portRows={previewPortRows}
+          onRefreshOpenedEditorFile={refreshOpenedFile}
           onOpenFileInEditor={(entry) => {
             if (entry.kind !== 'file') return;
             openFileInFilesPane({ path: entry.path, name: entry.name });
@@ -2709,6 +2711,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
       openedEditorFileSaving,
       openedEditorFileSize,
       setOpenedFileContent,
+      refreshOpenedFile,
       saveOpenedFile,
       closeEditorFile,
     ],

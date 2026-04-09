@@ -110,6 +110,7 @@ type RightPanelTabContentProps = {
   setFsExplorerView: React.Dispatch<React.SetStateAction<'list' | 'thumb'>>;
   setCurrentFsPath: (nextPath: string) => void;
   refreshFsList: () => void;
+  onRefreshOpenedEditorFile: () => void;
   selectedPreviewPort: DronePortMapping | null;
   currentPortReachability: PortReachabilityByHostPort;
   portsLoading: boolean;
@@ -182,6 +183,7 @@ export function RightPanelTabContent({
   setFsExplorerView,
   setCurrentFsPath,
   refreshFsList,
+  onRefreshOpenedEditorFile,
   selectedPreviewPort,
   currentPortReachability,
   portsLoading,
@@ -310,6 +312,7 @@ export function RightPanelTabContent({
           onSetViewMode={setFsExplorerView}
           onOpenPath={setCurrentFsPath}
           onRefresh={refreshFsList}
+          onRefreshOpenedFile={onRefreshOpenedEditorFile}
           onOpenFile={onOpenFileInEditor}
           onOpenFileTarget={onOpenFileTargetInEditor}
           openedFile={openedFile}

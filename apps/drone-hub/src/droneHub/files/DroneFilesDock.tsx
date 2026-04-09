@@ -85,6 +85,7 @@ export function DroneFilesDock({
   onOpenFile,
   onOpenFileTarget,
   onRefresh,
+  onRefreshOpenedFile,
   openedFile,
   onOpenedFileContentChange,
   onSaveOpenedFile,
@@ -105,6 +106,7 @@ export function DroneFilesDock({
   onOpenFile: (entry: DroneFsEntry) => void;
   onOpenFileTarget?: (next: { path: string; name: string; line?: number | null; column?: number | null }) => void;
   onRefresh: () => void;
+  onRefreshOpenedFile?: () => void;
   openedFile: DroneOpenedFileState;
   onOpenedFileContentChange?: (next: string) => void;
   onSaveOpenedFile?: (contentOverride?: string) => Promise<boolean>;
@@ -236,13 +238,14 @@ export function DroneFilesDock({
 
   const refreshExplorer = React.useCallback(() => {
     onRefresh();
+    onRefreshOpenedFile?.();
     const visibleExpandedDirs = Object.entries(expandedDirs)
       .filter(([, open]) => open)
       .map(([dirPath]) => dirPath);
     for (const dirPath of visibleExpandedDirs) {
       void loadDirectory(dirPath, { force: true });
     }
-  }, [expandedDirs, loadDirectory, onRefresh]);
+  }, [expandedDirs, loadDirectory, onRefresh, onRefreshOpenedFile]);
 
   const uploadFilesToCurrentPath = React.useCallback(
     async (dropped: FileList | File[] | null | undefined) => {
