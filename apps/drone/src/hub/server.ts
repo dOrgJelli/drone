@@ -14658,6 +14658,13 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           String(commitDirtyRaw ?? '')
             .trim()
             .toLowerCase() === 'true';
+        const allowDirtyRaw = (body as any)?.allowDirty;
+        const allowDirty =
+          allowDirtyRaw === true ||
+          allowDirtyRaw === 1 ||
+          String(allowDirtyRaw ?? '')
+            .trim()
+            .toLowerCase() === 'true';
         const defaultAutoCommitMessage = 'chore(drone): snapshot working tree before apply changes';
         const requestedAutoCommitMessage = String((body as any)?.commitMessage ?? '').trim();
         const autoCommitMessage = requestedAutoCommitMessage || defaultAutoCommitMessage;
@@ -14751,7 +14758,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             return { dirtyFileCount, autoCommitSha: /^[0-9a-f]{40}$/.test(autoCommitSha) ? autoCommitSha : null };
           });
           droneDirtyFileCount = Math.max(0, Number(dronePrepare.dirtyFileCount) || 0);
-          if (droneDirtyFileCount > 0 && !commitDirty) {
+          if (droneDirtyFileCount > 0 && !commitDirty && !allowDirty) {
             hubLog('warn', 'Repo pull blocked by uncommitted drone changes', {
               droneName,
               repoPathInContainer,
@@ -14775,6 +14782,13 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               repoPathInContainer,
               dirtyFileCount: droneDirtyFileCount,
               autoCommitSha: droneAutoCommitSha,
+            });
+          }
+          if (droneDirtyFileCount > 0 && allowDirty && !commitDirty) {
+            hubLog('info', 'Repo pull proceeding with dirty drone working tree kept intact', {
+              droneName,
+              repoPathInContainer,
+              dirtyFileCount: droneDirtyFileCount,
             });
           }
           if (clean) {
