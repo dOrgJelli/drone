@@ -227,6 +227,9 @@ export function useDroneHubOverlaysProps(args: any): DroneHubOverlaysProps {
     setActiveRepoPath,
     deleteRepo,
     githubUrlForRepo,
+    dirtyDroneApplyModal,
+    closeDirtyDroneApplyModal,
+    continueDirtyDroneApply,
     droneErrorModal,
     clearingDroneError,
     closeDroneErrorModal,
@@ -375,6 +378,18 @@ export function useDroneHubOverlaysProps(args: any): DroneHubOverlaysProps {
             void deleteRepo(path);
           },
           getGithubUrlForRepo: githubUrlForRepo,
+        }
+      : null,
+    dirtyDroneApplyModalProps: dirtyDroneApplyModal
+      ? {
+          dirtyDroneApplyModal,
+          onCancel: closeDirtyDroneApplyModal,
+          onKeepDirtyAndApply: () => {
+            void continueDirtyDroneApply('keep');
+          },
+          onCommitAndApply: () => {
+            void continueDirtyDroneApply('commit');
+          },
         }
       : null,
     droneErrorModalProps: droneErrorModal
