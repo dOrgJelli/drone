@@ -14,4 +14,5 @@ export type { DroneHubTaskSpawnMode } from './drone-hub-task-spawn';
 export { PromptLoopTranscriptGroup } from './PromptLoopTranscriptGroup';
 export { AutomationLaneStatusCard } from './AutomationLaneStatusCard';
 export { PendingTranscriptTurn } from './PendingTranscriptTurn';
+export { RelativeTimeText } from './RelativeTimeText';
 export { TranscriptSkeleton } from './TranscriptSkeleton';

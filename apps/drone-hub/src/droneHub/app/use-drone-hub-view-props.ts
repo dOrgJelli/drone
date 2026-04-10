@@ -454,7 +454,6 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
     boardUpdatedAt,
     reloadBoard,
     suggestKanbanCardTitleFromPaste,
-    nowMs,
     createRuntime,
     pullHostBranchBeforeCreate,
     repoBranchSource,
@@ -672,7 +671,6 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
     draftChatWorkspaceProps: draftChat
       ? {
           draftChat,
-          nowMs,
           createRuntime,
           onCreateRuntimeChange: setCreateRuntime,
           draftCreateMode,
@@ -785,7 +783,6 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
           groupBroadcastPromptError,
           groupBroadcastSending,
           onSendGroupBroadcastPrompt: sendGroupBroadcastPrompt,
-          nowMs,
           uiDroneName,
           onSelectDroneCard: selectDroneCard,
           onDeleteDrone: deleteDrone,
@@ -880,7 +877,6 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
           transcripts,
           visiblePendingPromptsWithStartup,
           transcriptMessageId,
-          nowMs,
           parsingJobsByTurn,
           parseJobsFromAgentMessage,
           spawnDroneHubTaskFromAgentMessage,

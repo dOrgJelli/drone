@@ -1,5 +1,5 @@
 import React from 'react';
-import { stripAnsi, timeAgo } from '../../domain';
+import { stripAnsi } from '../../domain';
 import type { TranscriptItem } from '../types';
 import { useDroneHubUiStore } from '../app/use-drone-hub-ui-store';
 import { copyText } from '../app/clipboard';
@@ -7,6 +7,7 @@ import { CollapsibleMarkdown } from './CollapsibleMarkdown';
 import { DroneHubTaskList } from './DroneHubTaskList';
 import { ImageAttachmentChips, isAttachmentOnlyPrompt, normalizeImageAttachmentRefs } from './ImageAttachmentChips';
 import type { MarkdownFileReference } from './MarkdownMessage';
+import { RelativeTimeText } from './RelativeTimeText';
 import type { DroneHubTask } from './drone-hub-task-parser';
 import type { DroneHubTaskSpawnMode } from './drone-hub-task-spawn';
 import { extractDroneHubTasksFromAgentMessage } from './drone-hub-task-parser';
@@ -248,7 +249,6 @@ function sameAttachments(aRaw: unknown, bRaw: unknown): boolean {
 export const TranscriptTurn = React.memo(
   function TranscriptTurn({
     item,
-    nowMs,
     parsingJobs,
     onCreateJobs,
     onSpawnDroneHubTask,
@@ -264,7 +264,6 @@ export const TranscriptTurn = React.memo(
     showRoleIcons = true,
   }: {
     item: TranscriptItem;
-    nowMs: number;
     parsingJobs: boolean;
     onCreateJobs: (opts: { turn: number; message: string }) => void;
     onSpawnDroneHubTask: (mode: DroneHubTaskSpawnMode, task: DroneHubTask) => Promise<{ ok: boolean; error?: string | null }>;
@@ -364,11 +363,11 @@ export const TranscriptTurn = React.memo(
         <div className="flex justify-end mb-3">
           <div className={`${showRoleIcons ? 'max-w-[85%]' : 'max-w-full'} min-w-[120px]`}>
             <div className="flex items-center justify-end gap-2 mb-1.5">
-              <span className="text-[9px] leading-none text-[var(--muted-dim)] font-mono"
+              <RelativeTimeText
+                at={promptIso}
+                className="text-[9px] leading-none text-[var(--muted-dim)] font-mono"
                 title={new Date(promptIso).toLocaleString()}
-              >
-                {timeAgo(promptIso, nowMs)}
-              </span>
+              />
               <span
                 className="text-[10px] font-semibold text-[var(--user-muted)] tracking-wide uppercase"
                 style={{ fontFamily: 'var(--display)' }}
@@ -439,11 +438,11 @@ export const TranscriptTurn = React.memo(
               >
                 Agent
               </span>
-              <span className="text-[9px] leading-none text-[var(--muted-dim)] font-mono"
+              <RelativeTimeText
+                at={agentIso}
+                className="text-[9px] leading-none text-[var(--muted-dim)] font-mono"
                 title={new Date(agentIso).toLocaleString()}
-              >
-                {timeAgo(agentIso, nowMs)}
-              </span>
+              />
             </div>
             <div
               className={`border rounded-lg rounded-tl-sm px-4 py-3 relative group ${

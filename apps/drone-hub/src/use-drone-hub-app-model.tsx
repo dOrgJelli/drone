@@ -1343,7 +1343,6 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     cancellingPendingPromptById,
     canStopResponse,
     chatUiMode,
-    nowMs,
     promptError,
     requestCancelPendingPrompt,
     requestStopResponse,
@@ -1540,6 +1539,20 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     return markChatsUnread(targetChatNodeIds) > 0;
   }, [markChatsUnread, selectedChat, selectedDrone, selectedDroneIds]);
   const currentGroup = currentDrone?.group ? groups.find((g) => g.group === currentDrone.group) ?? null : null;
+  const filesPaneActive = Boolean(
+    currentDrone &&
+      rightPanelOpen &&
+      (rightPanelTab === 'files' || (rightPanelSplit && rightPanelBottomTab === 'files')),
+  );
+  const portsPaneActive = Boolean(
+    currentDrone &&
+      rightPanelOpen &&
+      (
+        rightPanelTab === 'preview' ||
+        rightPanelTab === 'links' ||
+        (rightPanelSplit && (rightPanelBottomTab === 'preview' || rightPanelBottomTab === 'links'))
+      ),
+  );
   const {
     defaultFsPathForCurrentDrone,
     currentFsPath,
@@ -1560,7 +1573,12 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     selectedPreviewUrlOverride,
     setSelectedPreviewUrlOverride,
     portRows,
-  } = useFilesAndPortsPaneState({ currentDrone, requestJson });
+  } = useFilesAndPortsPaneState({
+    currentDrone,
+    requestJson,
+    filesEnabled: filesPaneActive,
+    portsEnabled: portsPaneActive,
+  });
   React.useEffect(() => {
     if (
       !shouldPrewarmShellTerminal({
@@ -3062,7 +3080,6 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     boardUpdatedAt,
     reloadBoard,
     suggestKanbanCardTitleFromPaste,
-    nowMs,
     createRuntime,
     pullHostBranchBeforeCreate,
     repoBranchSource,

@@ -41,9 +41,16 @@ import {
 type UseFilesAndPortsPaneStateArgs = {
   currentDrone: DroneSummary | null;
   requestJson: <T>(url: string, init?: RequestInit) => Promise<T>;
+  filesEnabled: boolean;
+  portsEnabled: boolean;
 };
 
-export function useFilesAndPortsPaneState({ currentDrone, requestJson }: UseFilesAndPortsPaneStateArgs) {
+export function useFilesAndPortsPaneState({
+  currentDrone,
+  requestJson,
+  filesEnabled,
+  portsEnabled,
+}: UseFilesAndPortsPaneStateArgs) {
   const [fsPathByDrone, setFsPathByDrone] = React.useState<Record<string, string>>({});
   const [fsRefreshNonce, setFsRefreshNonce] = React.useState(0);
 
@@ -94,6 +101,7 @@ export function useFilesAndPortsPaneState({ currentDrone, requestJson }: UseFile
         : Promise.resolve({ ok: true, id: '', name: '', path: '/', entries: [] }),
     fsPollIntervalMs,
     [currentDrone?.id, currentDrone?.name, currentDrone?.hubPhase, currentFsPath, fsRefreshNonce],
+    { enabled: filesEnabled },
   );
   const fsPayloadError =
     fsResp && (fsResp as any).ok === false ? String((fsResp as any)?.error ?? 'filesystem request failed') : null;
@@ -128,6 +136,7 @@ export function useFilesAndPortsPaneState({ currentDrone, requestJson }: UseFile
         : Promise.resolve({ ok: true, id: '', name: '', ports: [] }),
     portsPollIntervalMs,
     [currentDrone?.id, currentDrone?.hubPhase],
+    { enabled: portsEnabled },
   );
   const ports =
     portsResp && (portsResp as any).ok === true ? ((portsResp as any).ports as DronePortMapping[]) : null;

@@ -1,10 +1,11 @@
 import React from 'react';
-import { stripAnsi, timeAgo } from '../../domain';
+import { stripAnsi } from '../../domain';
 import type { PendingPrompt } from '../types';
 import { copyText } from '../app/clipboard';
 import { CollapsibleMarkdown } from './CollapsibleMarkdown';
 import { ImageAttachmentChips, isAttachmentOnlyPrompt, normalizeImageAttachmentRefs } from './ImageAttachmentChips';
 import type { MarkdownFileReference } from './MarkdownMessage';
+import { RelativeTimeText } from './RelativeTimeText';
 import { IconBot, IconCopy, IconUser, TypingDots } from './icons';
 
 const MANUAL_UNSTICK_STALE_MS = 2 * 60_000;
@@ -16,7 +17,6 @@ function parseTimeMs(raw: string | undefined): number | null {
 
 export const PendingTranscriptTurn = React.memo(function PendingTranscriptTurn({
   item,
-  nowMs,
   showRoleIcons = true,
   onRequestUnstick,
   onCancelQueued,
@@ -30,7 +30,6 @@ export const PendingTranscriptTurn = React.memo(function PendingTranscriptTurn({
   unstickError = null,
 }: {
   item: PendingPrompt;
-  nowMs: number;
   showRoleIcons?: boolean;
   onRequestUnstick?: (promptId: string) => Promise<void> | void;
   onCancelQueued?: (promptId: string) => Promise<void> | void;
@@ -52,6 +51,14 @@ export const PendingTranscriptTurn = React.memo(function PendingTranscriptTurn({
     isFailed && /stopped by user|stopped before submission|stopped because the drone was archived|stopped because the drone was deleted/i.test(String(item.error ?? ''));
   const badgeLabel = isStopped ? 'Stopped' : isFailed ? 'Failed' : item.state === 'queued' ? 'Queued' : 'Pending';
   const activeAtMs = parseTimeMs(item.updatedAt ?? item.at);
+  const [nowMs, setNowMs] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    if (!onRequestUnstick || isFailed || (item.state !== 'sending' && item.state !== 'sent')) return;
+    const timer = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [isFailed, item.state, onRequestUnstick]);
   const ageMs = activeAtMs == null ? 0 : Math.max(0, nowMs - activeAtMs);
   const canRequestUnstick =
     !isFailed &&
@@ -108,9 +115,11 @@ export const PendingTranscriptTurn = React.memo(function PendingTranscriptTurn({
                 {item.state === 'queued' && !isFailed ? <TypingDots color="var(--muted-dim)" /> : null}
               </span>
             </span>
-            <span className="text-[9px] leading-none text-[var(--muted-dim)] font-mono" title={new Date(item.at).toLocaleString()}>
-              {timeAgo(item.at, nowMs)}
-            </span>
+            <RelativeTimeText
+              at={item.at}
+              className="text-[9px] leading-none text-[var(--muted-dim)] font-mono"
+              title={new Date(item.at).toLocaleString()}
+            />
             {canCancelQueued ? (
               <button
                 type="button"
@@ -199,9 +208,11 @@ export const PendingTranscriptTurn = React.memo(function PendingTranscriptTurn({
               >
                 Agent
               </span>
-              <span className="text-[9px] leading-none text-[var(--muted-dim)] font-mono" title={new Date(item.at).toLocaleString()}>
-                {timeAgo(item.at, nowMs)}
-              </span>
+              <RelativeTimeText
+                at={item.at}
+                className="text-[9px] leading-none text-[var(--muted-dim)] font-mono"
+                title={new Date(item.at).toLocaleString()}
+              />
             </div>
             <div
               className={`border rounded-lg rounded-tl-sm px-4 py-3 relative group ${

@@ -1,8 +1,9 @@
 import React from 'react';
-import { stripAnsi, timeAgo } from '../../domain';
+import { stripAnsi } from '../../domain';
 import type { PendingPrompt, TranscriptItem } from '../types';
 import { CollapsibleMarkdown } from './CollapsibleMarkdown';
 import type { MarkdownFileReference } from './MarkdownMessage';
+import { RelativeTimeText } from './RelativeTimeText';
 import { fillMissingPromptLoopRunRows, type PromptLoopRunRow } from './prompt-loop-run-rows';
 
 const PROMPT_PREVIEW_MAX_CHARS = 220;
@@ -114,7 +115,6 @@ function pendingRunOutput(item: PendingPrompt): string {
 export const PromptLoopTranscriptGroup = React.memo(function PromptLoopTranscriptGroup({
   runs,
   pendingRuns = [],
-  nowMs,
   onOpenFileReference,
   onOpenLink,
   headerBadgeLabel,
@@ -124,7 +124,6 @@ export const PromptLoopTranscriptGroup = React.memo(function PromptLoopTranscrip
 }: {
   runs: TranscriptItem[];
   pendingRuns?: PendingPrompt[];
-  nowMs: number;
   onOpenFileReference?: (ref: MarkdownFileReference) => void;
   onOpenLink?: (href: string) => boolean;
   headerBadgeLabel?: string;
@@ -324,7 +323,11 @@ export const PromptLoopTranscriptGroup = React.memo(function PromptLoopTranscrip
                         className="px-3 py-2 text-[11px] text-[var(--muted-dim)]"
                         title={row.atIso ? new Date(row.atIso).toLocaleString() : undefined}
                       >
-                        {row.atIso ? timeAgo(row.atIso, nowMs) : 'Not recorded'}
+                        <RelativeTimeText
+                          at={row.atIso}
+                          fallback="Not recorded"
+                          title={row.atIso ? new Date(row.atIso).toLocaleString() : undefined}
+                        />
                       </td>
                       <td className="px-3 py-2">
                         <button
@@ -374,9 +377,11 @@ export const PromptLoopTranscriptGroup = React.memo(function PromptLoopTranscrip
               >
                 {latestSummary.statusLabel}
               </span>
-              <span className="text-[10px] text-[var(--muted-dim)]" title={new Date(latestSummary.atIso).toLocaleString()}>
-                {timeAgo(latestSummary.atIso, nowMs)}
-              </span>
+              <RelativeTimeText
+                at={latestSummary.atIso}
+                className="text-[10px] text-[var(--muted-dim)]"
+                title={new Date(latestSummary.atIso).toLocaleString()}
+              />
             </div>
           </div>
           <div className="mt-2">

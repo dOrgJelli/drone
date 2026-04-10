@@ -1,7 +1,7 @@
 import React from 'react';
-import { timeAgo } from '../../domain';
-import type { PendingPrompt } from '../types';
+import { RelativeTimeText } from '../chat';
 import { TypingDots } from '../overview/icons';
+import type { PendingPrompt } from '../types';
 
 function pendingStatusLabel(state: PendingPrompt['state']): string {
   return state === 'queued' ? 'Queued' : state === 'sending' ? 'Sending' : state === 'failed' ? 'Failed' : 'Waiting';
@@ -9,10 +9,8 @@ function pendingStatusLabel(state: PendingPrompt['state']): string {
 
 export const CliPendingPromptStrip = React.memo(function CliPendingPromptStrip({
   items,
-  nowMs,
 }: {
   items: PendingPrompt[];
-  nowMs: number;
 }) {
   if (!Array.isArray(items) || items.length === 0) return null;
   return (
@@ -36,12 +34,11 @@ export const CliPendingPromptStrip = React.memo(function CliPendingPromptStrip({
                   {String(item.prompt ?? '').trim() || '[pending prompt]'}
                 </span>
               </div>
-              <span
+              <RelativeTimeText
+                at={item.at}
                 className="flex-shrink-0 text-[9px] leading-none text-[var(--muted-dim)] font-mono"
                 title={new Date(item.at).toLocaleString()}
-              >
-                {timeAgo(item.at, nowMs)}
-              </span>
+              />
             </div>
           </div>
         ))}

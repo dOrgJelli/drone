@@ -137,7 +137,6 @@ type SelectedDroneWorkspaceProps = {
   transcripts: TranscriptItem[] | null;
   visiblePendingPromptsWithStartup: PendingPrompt[];
   transcriptMessageId: (item: TranscriptItem) => string;
-  nowMs: number;
   parsingJobsByTurn: Record<number, unknown>;
   parseJobsFromAgentMessage: (opts: { turn: number; message: string }) => void;
   spawnDroneHubTaskFromAgentMessage: (opts: {
@@ -257,7 +256,6 @@ export function SelectedDroneWorkspace({
   transcripts,
   visiblePendingPromptsWithStartup,
   transcriptMessageId,
-  nowMs,
   parsingJobsByTurn,
   parseJobsFromAgentMessage,
   spawnDroneHubTaskFromAgentMessage,
@@ -317,6 +315,17 @@ export function SelectedDroneWorkspace({
   const activeChatName = React.useMemo(
     () => resolveChatNameForDrone(currentDrone, selectedChat),
     [currentDrone, selectedChat],
+  );
+  const currentDroneHomePath = React.useMemo(() => droneHomePath(currentDrone), [currentDrone]);
+  const spawnCurrentDroneHubTask = React.useCallback(
+    (mode: DroneHubTaskSpawnMode, task: DroneHubTask) =>
+      spawnDroneHubTaskFromAgentMessage({
+        sourceDroneId: currentDrone.id,
+        sourceChatName: activeChatName,
+        task,
+        mode,
+      }),
+    [activeChatName, currentDrone.id, spawnDroneHubTaskFromAgentMessage],
   );
   const hasChats = React.useMemo(
     () => Array.isArray(currentDrone.chats) && currentDrone.chats.some((chat) => String(chat ?? '').trim().length > 0),
@@ -1330,14 +1339,13 @@ export function SelectedDroneWorkspace({
                             <PendingTranscriptTurn
                               key={block.key}
                               item={p}
-                              nowMs={nowMs}
                               showRoleIcons={false}
                               onCancelQueued={requestCancelPendingPrompt}
                               onRequestUnstick={requestUnstickPendingPrompt}
                               onOpenFileReference={onOpenMarkdownFileReference}
                               onOpenLink={tryOpenMarkdownPullRequest}
                               droneId={currentDrone.id}
-                              droneHomePath={droneHomePath(currentDrone)}
+                              droneHomePath={currentDroneHomePath}
                               cancelBusy={Boolean(cancellingPendingPromptById[p.id])}
                               cancelError={cancelPendingPromptErrorById[p.id] ?? null}
                               unstickBusy={Boolean(unstickingPendingPromptById[p.id])}
@@ -1357,7 +1365,6 @@ export function SelectedDroneWorkspace({
                               headerBadgeTone={runningGroup ? 'running' : undefined}
                               headerActions={runningGroup ? runningPromptLoopHeaderActions : undefined}
                               headerError={runningGroup ? stopPromptAutomationError : null}
-                              nowMs={nowMs}
                               onOpenFileReference={onOpenMarkdownFileReference}
                               onOpenLink={tryOpenMarkdownPullRequest}
                             />
@@ -1368,17 +1375,9 @@ export function SelectedDroneWorkspace({
                           <TranscriptTurn
                             key={block.key}
                             item={block.item}
-                            nowMs={nowMs}
                             parsingJobs={Boolean(parsingJobsByTurn[block.item.turn])}
                             onCreateJobs={parseJobsFromAgentMessage}
-                            onSpawnDroneHubTask={(mode, task) =>
-                              spawnDroneHubTaskFromAgentMessage({
-                                sourceDroneId: currentDrone.id,
-                                sourceChatName: resolveChatNameForDrone(currentDrone, selectedChat || 'default'),
-                                task,
-                                mode,
-                              })
-                            }
+                            onSpawnDroneHubTask={spawnCurrentDroneHubTask}
                             messageId={messageId}
                             tldr={tldrByMessageId[messageId] ?? null}
                             showTldr={Boolean(showTldrByMessageId[messageId])}
@@ -1387,7 +1386,7 @@ export function SelectedDroneWorkspace({
                             onOpenFileReference={onOpenMarkdownFileReference}
                             onOpenLink={tryOpenMarkdownPullRequest}
                             droneId={currentDrone.id}
-                            droneHomePath={droneHomePath(currentDrone)}
+                            droneHomePath={currentDroneHomePath}
                             showRoleIcons={false}
                           />
                         );
@@ -1400,14 +1399,13 @@ export function SelectedDroneWorkspace({
                           <PendingTranscriptTurn
                             key={item.key}
                             item={p}
-                            nowMs={nowMs}
                             showRoleIcons={false}
                             onCancelQueued={requestCancelPendingPrompt}
                             onRequestUnstick={requestUnstickPendingPrompt}
                             onOpenFileReference={onOpenMarkdownFileReference}
                             onOpenLink={tryOpenMarkdownPullRequest}
                             droneId={currentDrone.id}
-                            droneHomePath={droneHomePath(currentDrone)}
+                            droneHomePath={currentDroneHomePath}
                             cancelBusy={Boolean(cancellingPendingPromptById[p.id])}
                             cancelError={cancelPendingPromptErrorById[p.id] ?? null}
                             unstickBusy={Boolean(unstickingPendingPromptById[p.id])}
@@ -1427,7 +1425,6 @@ export function SelectedDroneWorkspace({
                             headerBadgeTone={runningGroup ? 'running' : undefined}
                             headerActions={runningGroup ? runningPromptLoopHeaderActions : undefined}
                             headerError={runningGroup ? stopPromptAutomationError : null}
-                            nowMs={nowMs}
                             onOpenFileReference={onOpenMarkdownFileReference}
                             onOpenLink={tryOpenMarkdownPullRequest}
                           />
@@ -1440,7 +1437,6 @@ export function SelectedDroneWorkspace({
                         return (
                           <AutomationLaneStatusCard
                             key={item.key}
-                            nowMs={nowMs}
                             status="queued"
                             automationLabel={String(queued.automationLabel ?? '').trim() || String(queued.automationId ?? '').trim() || 'Automation'}
                             runsTotal={Number(queued.runsTotal ?? 0) || 0}
@@ -1456,7 +1452,6 @@ export function SelectedDroneWorkspace({
                       return (
                         <AutomationLaneStatusCard
                           key={item.key}
-                          nowMs={nowMs}
                           status={currentAutomationCardStatus}
                           automationLabel={String(promptAutomationJob.automationLabel ?? '').trim() || 'Automation'}
                           runsTotal={Number(promptAutomationJob.runsTotal ?? 0) || 0}
@@ -1543,7 +1538,7 @@ export function SelectedDroneWorkspace({
             )}
           </div>
 
-          {chatUiMode === 'cli' ? <CliPendingPromptStrip items={visibleCliPendingPrompts} nowMs={nowMs} /> : null}
+          {chatUiMode === 'cli' ? <CliPendingPromptStrip items={visibleCliPendingPrompts} /> : null}
 
           <ChatInput
             resetKey={`${selectedDroneIdentity}:${selectedChat ?? ''}`}

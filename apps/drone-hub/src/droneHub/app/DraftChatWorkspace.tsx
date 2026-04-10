@@ -29,7 +29,6 @@ import { RepoBranchSourceControls } from './RepoBranchSourceControls';
 
 type DraftChatWorkspaceProps = {
   draftChat: DraftChatState;
-  nowMs: number;
   createRuntime: CreateRuntime;
   onCreateRuntimeChange: (value: CreateRuntime) => void;
   draftCreateMode: 'with-chat' | 'without-chat';
@@ -70,7 +69,6 @@ type DraftChatWorkspaceProps = {
 
 export function DraftChatWorkspace({
   draftChat,
-  nowMs,
   createRuntime,
   onCreateRuntimeChange,
   draftCreateMode,
@@ -414,9 +412,9 @@ export function DraftChatWorkspace({
         {draftChat.prompt ? (
           <div className="px-5 py-5">
             <div className="mx-auto max-w-[1275px] space-y-5">
-              <PendingTranscriptTurn item={draftChat.prompt} nowMs={nowMs} />
+              <PendingTranscriptTurn item={draftChat.prompt} />
               {visibleQueuedDraftPrompts.map((p) => (
-                <PendingTranscriptTurn key={`draft-queued-${p.id}`} item={p} nowMs={nowMs} />
+                <PendingTranscriptTurn key={`draft-queued-${p.id}`} item={p} />
               ))}
             </div>
           </div>

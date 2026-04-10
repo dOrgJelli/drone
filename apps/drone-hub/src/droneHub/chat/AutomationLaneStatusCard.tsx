@@ -1,9 +1,8 @@
 import React from 'react';
-import { timeAgo } from '../../domain';
 import { IconSpinner } from './icons';
+import { RelativeTimeText } from './RelativeTimeText';
 
 type AutomationLaneStatusCardProps = {
-  nowMs: number;
   status: 'queued' | 'running';
   automationLabel: string;
   runsTotal?: number;
@@ -21,7 +20,6 @@ type AutomationLaneStatusCardProps = {
 };
 
 export const AutomationLaneStatusCard = React.memo(function AutomationLaneStatusCard({
-  nowMs,
   status,
   automationLabel,
   runsTotal = 0,
@@ -63,9 +61,11 @@ export const AutomationLaneStatusCard = React.memo(function AutomationLaneStatus
             {status === 'running' ? 'Running' : 'Queued'}
           </span>
           {ts ? (
-            <span className="text-[10px] text-[var(--muted-dim)]" title={new Date(ts).toLocaleString()}>
-              {timeAgo(ts, nowMs)}
-            </span>
+            <RelativeTimeText
+              at={ts}
+              className="text-[10px] text-[var(--muted-dim)]"
+              title={new Date(ts).toLocaleString()}
+            />
           ) : null}
         </div>
       </div>

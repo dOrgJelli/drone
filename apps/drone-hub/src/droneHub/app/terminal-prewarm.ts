@@ -19,11 +19,11 @@ export function shouldPrewarmShellTerminal(opts: {
 }): boolean {
   const drone = opts.drone;
   if (!drone) return false;
+  if (!opts.rightPanelOpen) return false;
   if (String(drone.runtime ?? '').trim().toLowerCase() !== 'container') return false;
   if (!drone.statusOk) return false;
   if (isDroneStartingOrSeeding(drone.hubPhase)) return false;
   if (!String(opts.cwd ?? '').trim()) return false;
-  if (!opts.rightPanelOpen) return true;
   if (opts.rightPanelTab === 'terminal') return false;
   if (opts.rightPanelSplit && opts.rightPanelBottomTab === 'terminal') return false;
   return true;

@@ -24,7 +24,6 @@ type GroupMultiChatWorkspaceProps = {
   groupBroadcastPromptError: string | null;
   groupBroadcastSending: boolean;
   onSendGroupBroadcastPrompt: (payload: ChatSendPayload) => Promise<boolean>;
-  nowMs: number;
   uiDroneName: (nameRaw: string) => string;
   onSelectDroneCard: (droneId: string) => void;
   onDeleteDrone: (droneId: string) => void;
@@ -43,7 +42,6 @@ export function GroupMultiChatWorkspace({
   groupBroadcastPromptError,
   groupBroadcastSending,
   onSendGroupBroadcastPrompt,
-  nowMs,
   uiDroneName,
   onSelectDroneCard,
   onDeleteDrone,
@@ -255,7 +253,6 @@ export function GroupMultiChatWorkspace({
                   drone={d}
                   droneLabel={uiDroneName(d.name)}
                   preferredChat={selectedChat || 'default'}
-                  nowMs={nowMs}
                   onOpenDrone={() => onSelectDroneCard(d.id)}
                   onDeleteDrone={() => onDeleteDrone(d.id)}
                   deleteBusy={Boolean(deletingDrones[d.id])}

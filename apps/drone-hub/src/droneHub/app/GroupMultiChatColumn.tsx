@@ -14,7 +14,7 @@ import { StatusBadge } from '../overview';
 import { IconSpinner, IconTrash, TypingDots } from '../overview/icons';
 import type { DroneSummary, PendingPrompt, TranscriptItem } from '../types';
 import { IconChat } from './icons';
-import { fetchJson, isNotFoundError, usePoll } from './hooks';
+import { fetchJson, isNotFoundError, resolvePollIntervalMs, usePoll } from './hooks';
 import {
   chatInputDraftKeyForDroneChat,
   droneHomePath,
@@ -42,7 +42,6 @@ export type GroupMultiChatColumnProps = {
   drone: DroneSummary;
   droneLabel?: string;
   preferredChat: string;
-  nowMs: number;
   onOpenDrone: () => void;
   onDeleteDrone: () => void;
   deleteBusy?: boolean;
@@ -61,7 +60,6 @@ export function GroupMultiChatColumn({
   drone,
   droneLabel,
   preferredChat,
-  nowMs,
   onOpenDrone,
   onDeleteDrone,
   deleteBusy = false,
@@ -72,6 +70,7 @@ export function GroupMultiChatColumn({
 }: GroupMultiChatColumnProps) {
   const shownName = String(droneLabel ?? drone.name).trim() || drone.name;
   const chatName = React.useMemo(() => resolveChatNameForDrone(drone, preferredChat), [drone, preferredChat]);
+  const droneHome = React.useMemo(() => droneHomePath(drone), [drone]);
   const [transcripts, setTranscripts] = React.useState<TranscriptItem[] | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
@@ -104,6 +103,11 @@ export function GroupMultiChatColumn({
     let mounted = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let busy = false;
+    const clearTimer = () => {
+      if (timer == null) return;
+      clearTimeout(timer);
+      timer = null;
+    };
 
     setTranscripts(null);
     setError(null);
@@ -145,15 +149,25 @@ export function GroupMultiChatColumn({
     const loop = async () => {
       await load();
       if (!mounted) return;
+      clearTimer();
       timer = setTimeout(() => {
         void loop();
-      }, 4000);
+      }, resolvePollIntervalMs(4000, 15_000));
+    };
+
+    const onVisibilityChange = () => {
+      if (!mounted || typeof document === 'undefined') return;
+      if (document.visibilityState !== 'visible') return;
+      clearTimer();
+      void loop();
     };
 
     void loop();
+    document.addEventListener('visibilitychange', onVisibilityChange);
     return () => {
       mounted = false;
-      if (timer) clearTimeout(timer);
+      clearTimer();
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, [chatName, drone.hubPhase, drone.id]);
 
@@ -312,6 +326,16 @@ export function GroupMultiChatColumn({
       }
     },
     [chatName, drone.hubPhase, drone.id, scrollColumnToBottom, shownName],
+  );
+  const spawnDroneHubTaskForColumn = React.useCallback(
+    (mode: DroneHubTaskSpawnMode, task: DroneHubTask) =>
+      onSpawnDroneHubTask({
+        sourceDroneId: drone.id,
+        sourceChatName: chatName,
+        task,
+        mode,
+      }),
+    [chatName, drone.id, onSpawnDroneHubTask],
   );
 
   const stopResponse = React.useCallback(async (): Promise<void> => {
@@ -630,24 +654,16 @@ export function GroupMultiChatColumn({
                 <TranscriptTurn
                   key={messageId}
                   item={item}
-                  nowMs={nowMs}
                   parsingJobs={false}
                   onCreateJobs={onCreateJobs}
-                  onSpawnDroneHubTask={(mode, task) =>
-                    onSpawnDroneHubTask({
-                      sourceDroneId: drone.id,
-                      sourceChatName: chatName,
-                      task,
-                      mode,
-                    })
-                  }
+                  onSpawnDroneHubTask={spawnDroneHubTaskForColumn}
                   messageId={messageId}
                   tldr={null}
                   showTldr={false}
                   onToggleTldr={noopToggleTldr}
                   onHoverAgentMessage={noopHoverAgentMessage}
                   droneId={drone.id}
-                  droneHomePath={droneHomePath(drone)}
+                  droneHomePath={droneHome}
                   showRoleIcons={false}
                 />
               );
@@ -656,9 +672,8 @@ export function GroupMultiChatColumn({
               <PendingTranscriptTurn
                 key={`${drone.id}:pending:${item.id}`}
                 item={item}
-                nowMs={nowMs}
                 droneId={drone.id}
-                droneHomePath={droneHomePath(drone)}
+                droneHomePath={droneHome}
                 showRoleIcons={false}
               />
             ))}

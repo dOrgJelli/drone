@@ -8,20 +8,49 @@ function buildUnexpectedHtmlError(url: string): string {
   return `Expected JSON from ${path || 'request'}, but received HTML.`;
 }
 
-export function usePoll<T>(fn: () => Promise<T>, intervalMs: number, deps: any[] = []) {
+export function usePoll<T>(
+  fn: () => Promise<T>,
+  intervalMs: number,
+  deps: any[] = [],
+  opts?: { enabled?: boolean },
+) {
   const [value, setValue] = React.useState<T | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(true);
+  const enabled = opts?.enabled ?? true;
 
   React.useEffect(() => {
+    if (!enabled) {
+      setLoading(false);
+      return;
+    }
     let mounted = true;
-    let timer: any = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let busy = false;
 
     setValue(null);
     setError(null);
     setLoading(true);
 
+    const clearTimer = () => {
+      if (timer == null) return;
+      clearTimeout(timer);
+      timer = null;
+    };
+
+    const scheduleNext = (delayMs?: number) => {
+      clearTimer();
+      timer = setTimeout(() => {
+        void tick();
+      }, Math.max(0, delayMs ?? resolvePollIntervalMs(intervalMs)));
+    };
+
     const tick = async () => {
+      if (busy) {
+        scheduleNext();
+        return;
+      }
+      busy = true;
       try {
         const v = await fn();
         if (!mounted) return;
@@ -32,20 +61,26 @@ export function usePoll<T>(fn: () => Promise<T>, intervalMs: number, deps: any[]
         setError(e?.message ?? String(e));
       } finally {
         if (mounted) setLoading(false);
+        busy = false;
+        if (mounted) scheduleNext();
       }
     };
 
+    const onVisibilityChange = () => {
+      if (!mounted || typeof document === 'undefined') return;
+      if (document.visibilityState === 'visible') scheduleNext(0);
+    };
+
     void tick();
-    timer = setInterval(() => {
-      void tick();
-    }, intervalMs);
+    document.addEventListener('visibilitychange', onVisibilityChange);
 
     return () => {
       mounted = false;
-      if (timer) clearInterval(timer);
+      clearTimer();
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps);
+  }, [enabled, ...deps]);
 
   return { value, error, loading };
 }
@@ -61,6 +96,12 @@ export function useNowMs(intervalMs: number, enabled: boolean): number {
   }, [enabled, intervalMs]);
 
   return now;
+}
+
+export function resolvePollIntervalMs(intervalMs: number, hiddenMinMs: number = Math.max(intervalMs * 4, 15_000)): number {
+  const baseMs = Math.max(250, Math.floor(intervalMs || 1000));
+  if (typeof document === 'undefined' || document.visibilityState !== 'hidden') return baseMs;
+  return Math.max(baseMs, hiddenMinMs);
 }
 
 export async function fetchJson<T>(url: string): Promise<T> {

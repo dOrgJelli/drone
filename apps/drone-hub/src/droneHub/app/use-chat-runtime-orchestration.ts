@@ -12,7 +12,7 @@ import {
   reconcileOptimisticPendingPrompt,
 } from './optimistic-pending-prompts';
 import { droneChatQueueKey, isDroneStartingOrSeeding, parseDroneChatQueueKey } from './helpers';
-import { fetchJson, isNotFoundError, useNowMs, usePoll } from './hooks';
+import { fetchJson, isNotFoundError, resolvePollIntervalMs, usePoll } from './hooks';
 import { beginRecordBusyKey, removeRecordKey } from './keyed-record-state';
 import type { QueuedPrompt } from './use-queued-prompts-state';
 
@@ -208,7 +208,6 @@ export function useChatRuntimeOrchestration({
       ? startupSeedForSelectedDrone.agent
       : null;
   const chatUiMode = chatUiModeForAgent(chatInfo?.agent ?? startupAgentForSelectedDrone ?? null);
-  const nowMs = useNowMs(1000, chatUiMode === 'transcript');
   const sendingPrompt = sendingPromptCount > 0;
 
   const resetSessionOutputState = React.useCallback(() => {
@@ -631,8 +630,13 @@ export function useChatRuntimeOrchestration({
     if (chatUiMode !== 'transcript') return;
     if (!hasSelectedDroneSummary) return;
     let mounted = true;
-    let timer: any = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     let busy = false;
+    const clearTimer = () => {
+      if (timer == null) return;
+      clearTimeout(timer);
+      timer = null;
+    };
     const load = async () => {
       if (!selectedDrone || !selectedChat || busy) return;
       if (isDroneStartingOrSeeding(selectedDroneHubPhase)) return;
@@ -663,13 +667,26 @@ export function useChatRuntimeOrchestration({
       } finally {
         if (mounted && !keepLoading) setLoadingTranscript(false);
         busy = false;
+        if (mounted) {
+          clearTimer();
+          timer = setTimeout(() => {
+            void load();
+          }, resolvePollIntervalMs(2000, 10_000));
+        }
       }
     };
+    const onVisibilityChange = () => {
+      if (!mounted || typeof document === 'undefined') return;
+      if (document.visibilityState !== 'visible') return;
+      clearTimer();
+      void load();
+    };
     load();
-    timer = setInterval(load, 2000);
+    document.addEventListener('visibilitychange', onVisibilityChange);
     return () => {
       mounted = false;
-      if (timer) clearInterval(timer);
+      clearTimer();
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, [
     chatUiMode,
@@ -685,8 +702,13 @@ export function useChatRuntimeOrchestration({
   React.useEffect(() => {
     if (chatUiMode !== 'cli') return;
     let mounted = true;
-    let timer: any = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     let busy = false;
+    const clearTimer = () => {
+      if (timer == null) return;
+      clearTimeout(timer);
+      timer = null;
+    };
     const load = async () => {
       if (!selectedDrone || !selectedChat || busy) return;
       busy = true;
@@ -765,13 +787,26 @@ export function useChatRuntimeOrchestration({
       } finally {
         if (mounted && !keepLoading) setLoadingSession(false);
         busy = false;
+        if (mounted) {
+          clearTimer();
+          timer = setTimeout(() => {
+            void load();
+          }, resolvePollIntervalMs(1000, 5_000));
+        }
       }
     };
+    const onVisibilityChange = () => {
+      if (!mounted || typeof document === 'undefined') return;
+      if (document.visibilityState !== 'visible') return;
+      clearTimer();
+      void load();
+    };
     load();
-    timer = setInterval(load, 1000);
+    document.addEventListener('visibilitychange', onVisibilityChange);
     return () => {
       mounted = false;
-      if (timer) clearInterval(timer);
+      clearTimer();
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, [chatUiMode, drones, outputView, resetSessionOutputState, selectedChat, selectedDrone, setLoadingSession, setSessionError, setSessionText, bumpCliTyping]);
 
@@ -780,7 +815,6 @@ export function useChatRuntimeOrchestration({
     cancellingPendingPromptById,
     canStopResponse,
     chatUiMode,
-    nowMs,
     promptError,
     requestCancelPendingPrompt,
     requestStopResponse,
