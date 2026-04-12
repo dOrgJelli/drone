@@ -88,6 +88,35 @@ describe('draft drone create runtime support', () => {
     });
   });
 
+  test('includes parent repo seed source when requested', () => {
+    const payload = buildDraftDroneCreatePayload({
+      name: 'child-drone',
+      group: 'ops',
+      repoPath: '/work/repo',
+      fleetParentId: 'parent-1',
+      repoSeedFromDroneId: 'parent-1',
+      runtime: 'container',
+      repoBranchSelection: {
+        repoBranchSource: 'host',
+        pullHostBranchBeforeCreate: true,
+      },
+      seedAgent: null,
+      seedModel: null,
+      prompt: '',
+    });
+
+    expect(payload).toEqual({
+      name: 'child-drone',
+      group: 'ops',
+      repoPath: '/work/repo',
+      fleetParentId: 'parent-1',
+      repoSeedFromDroneId: 'parent-1',
+      runtime: 'container',
+      pullHostBranchBeforeCreate: true,
+      repoBranchSource: 'host',
+    });
+  });
+
   test('filters custom agents out of host runtime menus', () => {
     const entries: UiMenuSelectEntry[] = [
       { kind: 'item', value: 'builtin:cursor', label: 'Cursor' },

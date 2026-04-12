@@ -314,9 +314,10 @@ export function SelectedDroneWorkspace({
     setSelectedChat,
     setTerminalEmulator,
   } = useSelectedDroneWorkspaceUiState();
+  const explicitSelectedChat = String(selectedChat ?? '').trim();
   const activeChatName = React.useMemo(
-    () => resolveChatNameForDrone(currentDrone, selectedChat),
-    [currentDrone, selectedChat],
+    () => explicitSelectedChat || resolveChatNameForDrone(currentDrone, selectedChat),
+    [currentDrone, explicitSelectedChat, selectedChat],
   );
   const hasChats = React.useMemo(
     () => Array.isArray(currentDrone.chats) && currentDrone.chats.some((chat) => String(chat ?? '').trim().length > 0),

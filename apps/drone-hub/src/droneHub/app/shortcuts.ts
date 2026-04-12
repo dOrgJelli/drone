@@ -1,6 +1,7 @@
 export type ShortcutActionId =
   | 'openFleetDashboard'
   | 'createDraftDrone'
+  | 'createChildDraftDrone'
   | 'createDroneChat'
   | 'openKanbanBoard'
   | 'focusPrimaryChatInput'
@@ -44,6 +45,11 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     id: 'createDraftDrone',
     label: 'Create new drone',
     description: 'Opens the quick single-drone composer.',
+  },
+  {
+    id: 'createChildDraftDrone',
+    label: 'Create child drone',
+    description: 'Opens the quick single-drone composer as a child of the selected drone.',
   },
   {
     id: 'createDroneChat',
@@ -125,7 +131,8 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
 const DEFAULT_SHORTCUT_BINDINGS: ShortcutBindingMap = {
   openFleetDashboard: { key: 'v', mod: false, ctrl: false, meta: false, alt: false, shift: false },
   createDraftDrone: { key: 'tab', mod: false, ctrl: false, meta: false, alt: false, shift: false },
-  createDroneChat: { key: 'q', mod: false, ctrl: false, meta: false, alt: false, shift: false },
+  createChildDraftDrone: { key: 'q', mod: false, ctrl: false, meta: false, alt: false, shift: false },
+  createDroneChat: { key: 'w', mod: false, ctrl: false, meta: false, alt: false, shift: false },
   openKanbanBoard: { key: 'y', mod: false, ctrl: false, meta: false, alt: false, shift: false },
   focusPrimaryChatInput: { key: 'enter', mod: false, ctrl: false, meta: false, alt: false, shift: false },
   markSelectedDronesUnread: { key: 'z', mod: false, ctrl: false, meta: false, alt: false, shift: false },
@@ -195,6 +202,7 @@ export function cloneDefaultShortcutBindings(): ShortcutBindingMap {
   return {
     openFleetDashboard: cloneShortcutBinding(DEFAULT_SHORTCUT_BINDINGS.openFleetDashboard),
     createDraftDrone: cloneShortcutBinding(DEFAULT_SHORTCUT_BINDINGS.createDraftDrone),
+    createChildDraftDrone: cloneShortcutBinding(DEFAULT_SHORTCUT_BINDINGS.createChildDraftDrone),
     createDroneChat: cloneShortcutBinding(DEFAULT_SHORTCUT_BINDINGS.createDroneChat),
     openKanbanBoard: cloneShortcutBinding(DEFAULT_SHORTCUT_BINDINGS.openKanbanBoard),
     focusPrimaryChatInput: cloneShortcutBinding(DEFAULT_SHORTCUT_BINDINGS.focusPrimaryChatInput),

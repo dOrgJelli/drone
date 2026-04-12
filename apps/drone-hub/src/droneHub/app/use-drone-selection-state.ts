@@ -2,22 +2,10 @@ import React from 'react';
 import type { StartupSeedState } from './app-types';
 import { isStartupSeedFresh } from './app-config';
 import { normalizedDroneChats } from './chat-node-helpers';
+import { resolveSelectedChatForDrone, shouldKeepPendingSelectedChat } from './drone-selection-helpers';
 import type { DroneSummary } from '../types';
 
-export function resolveSelectedChatForDrone(args: {
-  droneId: string;
-  drones: DroneSummary[];
-  lastSelectedChatByDrone: Record<string, string>;
-}): string {
-  const droneId = String(args.droneId ?? '').trim();
-  if (!droneId) return 'default';
-  const drone = args.drones.find((item) => item.id === droneId) ?? null;
-  const chats = normalizedDroneChats(drone);
-  const remembered = String(args.lastSelectedChatByDrone[droneId] ?? '').trim();
-  if (remembered && chats.includes(remembered)) return remembered;
-  if (chats.includes('default')) return 'default';
-  return chats[0] ?? 'default';
-}
+const PENDING_SELECTED_CHAT_GRACE_MS = 5_000;
 
 type UseDroneSelectionStateArgs = {
   orderedDroneIds: string[];
@@ -83,6 +71,21 @@ export function useDroneSelectionState({
   setSelectedChat,
 }: UseDroneSelectionStateArgs) {
   const lastSelectedChatByDroneRef = React.useRef<Record<string, string>>({});
+  const pendingSelectedChatUntilByDroneRef = React.useRef<Record<string, number>>({});
+  const clearSelectedDroneState = React.useCallback(() => {
+    if (selectedDrone) setSelectedDrone(null);
+    setSelectedDroneIds((prev) => (prev.length === 0 ? prev : []));
+    selectionAnchorRef.current = null;
+    preferredSelectedDroneRef.current = null;
+    preferredSelectedDroneHoldUntilRef.current = 0;
+  }, [
+    preferredSelectedDroneHoldUntilRef,
+    preferredSelectedDroneRef,
+    selectedDrone,
+    selectionAnchorRef,
+    setSelectedDrone,
+    setSelectedDroneIds,
+  ]);
   const resolveChatForDrone = React.useCallback(
     (droneIdRaw: string) =>
       resolveSelectedChatForDrone({
@@ -99,6 +102,19 @@ export function useDroneSelectionState({
     if (!droneId) return;
     lastSelectedChatByDroneRef.current[droneId] = chatName;
   }, [selectedChat, selectedDrone]);
+
+  React.useEffect(() => {
+    const droneId = String(selectedDrone ?? '').trim();
+    const chatName = String(selectedChat ?? '').trim() || 'default';
+    if (!droneId) return;
+    const drone = drones.find((item) => item.id === droneId) ?? null;
+    const chats = normalizedDroneChats(drone, { includeDefaultWhenEmpty: true });
+    if (chatName !== 'default' && !chats.includes(chatName)) {
+      pendingSelectedChatUntilByDroneRef.current[droneId] = Date.now() + PENDING_SELECTED_CHAT_GRACE_MS;
+      return;
+    }
+    delete pendingSelectedChatUntilByDroneRef.current[droneId];
+  }, [drones, selectedChat, selectedDrone]);
 
   const selectDroneCard = React.useCallback(
     (droneIdRaw: string, opts?: { toggle?: boolean; range?: boolean }) => {
@@ -197,49 +213,29 @@ export function useDroneSelectionState({
   // Auto-select first drone (and recover from deletions).
   React.useEffect(() => {
     if (fleetDashboardOpen) {
-      if (selectedDrone) setSelectedDrone(null);
-      setSelectedDroneIds((prev) => (prev.length === 0 ? prev : []));
-      selectionAnchorRef.current = null;
-      preferredSelectedDroneRef.current = null;
-      preferredSelectedDroneHoldUntilRef.current = 0;
+      clearSelectedDroneState();
       return;
     }
     if (kanbanBoardOpen) {
-      if (selectedDrone) setSelectedDrone(null);
-      setSelectedDroneIds((prev) => (prev.length === 0 ? prev : []));
-      selectionAnchorRef.current = null;
-      preferredSelectedDroneRef.current = null;
-      preferredSelectedDroneHoldUntilRef.current = 0;
+      clearSelectedDroneState();
       return;
     }
     if (playbookRunsOpen) {
-      if (selectedDrone) setSelectedDrone(null);
-      setSelectedDroneIds((prev) => (prev.length === 0 ? prev : []));
-      selectionAnchorRef.current = null;
-      preferredSelectedDroneRef.current = null;
-      preferredSelectedDroneHoldUntilRef.current = 0;
+      clearSelectedDroneState();
       return;
     }
     if (draftChat) {
       if (!draftChat.prompt) {
-        if (selectedDrone) setSelectedDrone(null);
-        setSelectedDroneIds((prev) => (prev.length === 0 ? prev : []));
-        selectionAnchorRef.current = null;
-        preferredSelectedDroneRef.current = null;
-        preferredSelectedDroneHoldUntilRef.current = 0;
+        clearSelectedDroneState();
       }
       return;
     }
     const selectedExistsInRepo = Boolean(selectedDrone && dronesFilteredByRepo.some((d) => d.id === selectedDrone));
     if (visibleDronesFilteredByRepo.length === 0) {
       if (selectedExistsInRepo) return;
-      if (selectedDrone) setSelectedDrone(null);
-      setSelectedDroneIds((prev) => (prev.length === 0 ? prev : []));
+      clearSelectedDroneState();
       resetGroupDndState();
       setGroupMoveError(null);
-      selectionAnchorRef.current = null;
-      preferredSelectedDroneRef.current = null;
-      preferredSelectedDroneHoldUntilRef.current = 0;
       return;
     }
     const preferred = preferredSelectedDroneRef.current;
@@ -273,6 +269,7 @@ export function useDroneSelectionState({
       setSelectedChat(resolveChatForDrone(first));
     }
   }, [
+    clearSelectedDroneState,
     draftChat,
     fleetDashboardOpen,
     dronesFilteredByRepo,
@@ -283,11 +280,7 @@ export function useDroneSelectionState({
     preferredSelectedDroneRef,
     resolveChatForDrone,
     resetGroupDndState,
-    selectedDrone,
-    selectionAnchorRef,
     setGroupMoveError,
-    setSelectedDrone,
-    setSelectedDroneIds,
     startupSeedByDrone,
   ]);
 
@@ -298,6 +291,15 @@ export function useDroneSelectionState({
     const chats = d?.chats ?? [];
     if (chats.length === 0) return;
     if (selectedChat && chats.includes(selectedChat)) return;
+    if (
+      shouldKeepPendingSelectedChat({
+        selectedChat,
+        availableChats: chats,
+        pendingUntilMs: pendingSelectedChatUntilByDroneRef.current[selectedDrone] ?? 0,
+      })
+    ) {
+      return;
+    }
     setSelectedChat(chats.includes('default') ? 'default' : chats[0]);
   }, [drones, selectedDrone, selectedChat, setSelectedChat]);
 

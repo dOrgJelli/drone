@@ -158,4 +158,24 @@ describe('drone hub ui store migration', () => {
       sleepUnit: 'hours',
     });
   });
+
+  test('migrates the former create-chat default onto child-drone and moves create-chat to W', () => {
+    const migrated = migrateDroneHubUiPersistedState(
+      {
+        shortcutBindings: {
+          createDraftDrone: { key: 'tab', mod: false, ctrl: false, meta: false, alt: false, shift: false },
+          createDroneChat: { key: 'q', mod: false, ctrl: false, meta: false, alt: false, shift: false },
+          markSelectedDronesUnread: { key: 'z', mod: false, ctrl: false, meta: false, alt: false, shift: false },
+          toggleTldr: null,
+        },
+      },
+      12,
+    );
+
+    expect(migrated.shortcutBindings).toMatchObject({
+      createChildDraftDrone: { key: 'q', mod: false, ctrl: false, meta: false, alt: false, shift: false },
+      createDroneChat: { key: 'w', mod: false, ctrl: false, meta: false, alt: false, shift: false },
+      markSelectedDronesUnread: { key: 'z', mod: false, ctrl: false, meta: false, alt: false, shift: false },
+    });
+  });
 });

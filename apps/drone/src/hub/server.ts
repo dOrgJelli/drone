@@ -11097,6 +11097,13 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           json(res, 404, { ok: false, error: `unknown fleet parent drone: ${fleetParentRaw}` });
           return;
         }
+        const repoSeedFromDroneRaw = typeof body?.repoSeedFromDroneId === 'string' ? body.repoSeedFromDroneId.trim() : '';
+        const repoSeedFromDroneFound = repoSeedFromDroneRaw ? findDroneIdByRef(preRegAny, repoSeedFromDroneRaw) : null;
+        const repoSeedFromDroneId = repoSeedFromDroneFound?.kind === 'real' ? repoSeedFromDroneFound.id : null;
+        if (repoSeedFromDroneRaw && !repoSeedFromDroneId) {
+          json(res, 404, { ok: false, error: `unknown repo seed source drone: ${repoSeedFromDroneRaw}` });
+          return;
+        }
         const cloneFromEntry = cloneFromId ? findDroneEntryByIdentity(preRegAny, cloneFromId)?.entry : null;
         const cloneFromRuntime = normalizeDroneRuntime((cloneFromEntry as any)?.runtime);
         if (cloneFrom && runtime === 'container' && cloneFromRuntime !== 'container') {
@@ -11183,6 +11190,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             environment: createdEnvironment,
             ...(repoPath && !cloneFrom ? { repoSeedSource: repoBranchSource } : {}),
             ...(repoPath && repoBranchSource === 'remote' && remoteBranch && !cloneFrom ? { repoSeedRemoteBranch: remoteBranch } : {}),
+            ...(repoPath && repoSeedFromDroneId && !cloneFrom ? { repoSeedFromDroneId } : {}),
             ...(cloneFromId ? { cloneFrom: cloneFromId, cloneChats: Boolean(cloneChats) } : {}),
             ...(fleetParentId
               ? {
@@ -11478,6 +11486,13 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
                 rejected.push({ name, error: `unknown fleet parent drone: ${fleetParentRaw}`, status: 404 });
                 continue;
               }
+              const repoSeedFromDroneRaw = typeof raw?.repoSeedFromDroneId === 'string' ? raw.repoSeedFromDroneId.trim() : '';
+              const repoSeedFromDroneFound = repoSeedFromDroneRaw ? findDroneIdByRef(regAny, repoSeedFromDroneRaw) : null;
+              const repoSeedFromDroneId = repoSeedFromDroneFound?.kind === 'real' ? repoSeedFromDroneFound.id : null;
+              if (repoSeedFromDroneRaw && !repoSeedFromDroneId) {
+                rejected.push({ name, error: `unknown repo seed source drone: ${repoSeedFromDroneRaw}`, status: 404 });
+                continue;
+              }
               const cloneFromEntry = cloneFromId ? findDroneEntryByIdentity(regAny, cloneFromId)?.entry : null;
               const cloneFromRuntime = normalizeDroneRuntime((cloneFromEntry as any)?.runtime);
               if (cloneFrom && runtime === 'container' && cloneFromRuntime !== 'container') {
@@ -11517,6 +11532,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
                 ...(repoPath && repoBranchSource === 'remote' && remoteBranch && !cloneFromId
                   ? { repoSeedRemoteBranch: remoteBranch }
                   : {}),
+                ...(repoPath && repoSeedFromDroneId && !cloneFromId ? { repoSeedFromDroneId } : {}),
                 ...(cloneFromId ? { cloneFrom: cloneFromId, cloneChats: Boolean(cloneChats) } : {}),
                 ...(fleetParentId
                   ? {

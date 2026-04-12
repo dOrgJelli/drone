@@ -22,6 +22,7 @@ type UseWorkspaceNavigationActionsArgs = {
   setDraftCreateMode: React.Dispatch<React.SetStateAction<'with-chat' | 'without-chat'>>;
   setDraftCreateName: React.Dispatch<React.SetStateAction<string>>;
   setDraftCreateGroup: React.Dispatch<React.SetStateAction<string>>;
+  setDraftCreateParentDroneId: React.Dispatch<React.SetStateAction<string | null>>;
   setDraftCreateError: React.Dispatch<React.SetStateAction<string | null>>;
   setDraftCreating: React.Dispatch<React.SetStateAction<boolean>>;
   setDraftAutoRenaming: React.Dispatch<React.SetStateAction<boolean>>;
@@ -49,6 +50,7 @@ type UseWorkspaceNavigationActionsArgs = {
 type OpenDraftChatComposerOptions = {
   repoPath?: string | null;
   group?: string | null;
+  parentDroneId?: string | null;
 };
 
 export function useWorkspaceNavigationActions({
@@ -70,6 +72,7 @@ export function useWorkspaceNavigationActions({
   setDraftCreateMode,
   setDraftCreateName,
   setDraftCreateGroup,
+  setDraftCreateParentDroneId,
   setDraftCreateError,
   setDraftCreating,
   setDraftAutoRenaming,
@@ -93,14 +96,39 @@ export function useWorkspaceNavigationActions({
   setSelectedChat,
   resetDraftNameSuggestSeq,
 }: UseWorkspaceNavigationActionsArgs) {
+  const clearSidebarSelection = React.useCallback(() => {
+    setSelectedDrone(null);
+    setSelectedDroneIds([]);
+    selectionAnchorRef.current = null;
+    preferredSelectedDroneRef.current = null;
+    preferredSelectedDroneHoldUntilRef.current = 0;
+    setSelectedChat('default');
+  }, [
+    preferredSelectedDroneHoldUntilRef,
+    preferredSelectedDroneRef,
+    selectionAnchorRef,
+    setSelectedChat,
+    setSelectedDrone,
+    setSelectedDroneIds,
+  ]);
+
+  const resetDraftCreateState = React.useCallback(() => {
+    setDraftCreateOpen(false);
+    setDraftCreateParentDroneId(null);
+    setDraftCreateError(null);
+  }, [
+    setDraftCreateError,
+    setDraftCreateOpen,
+    setDraftCreateParentDroneId,
+  ]);
+
   const openCreateModal = React.useCallback(() => {
     if (creating) return;
     setAppView('workspace');
     setKanbanBoardOpen(false);
     setPlaybookRunsOpen(false);
     setDraftChat(null);
-    setDraftCreateOpen(false);
-    setDraftCreateError(null);
+    resetDraftCreateState();
     setCreateError(null);
     if (createMode === 'clone') {
       setCreateName('');
@@ -122,6 +150,7 @@ export function useWorkspaceNavigationActions({
     createMode,
     creating,
     normalizeCreateRepoPath,
+    resetDraftCreateState,
     setAppView,
     setKanbanBoardOpen,
     setPlaybookRunsOpen,
@@ -137,8 +166,6 @@ export function useWorkspaceNavigationActions({
     setCreateOpen,
     setCreateRepoPath,
     setDraftChat,
-    setDraftCreateError,
-    setDraftCreateOpen,
   ]);
 
   const openDraftChatComposer = React.useCallback((opts?: OpenDraftChatComposerOptions) => {
@@ -159,11 +186,11 @@ export function useWorkspaceNavigationActions({
     setFleetDashboardOpen(false);
     setCreateOpen(false);
     setCreateError(null);
-    setDraftCreateOpen(false);
+    resetDraftCreateState();
     setDraftCreateMode('with-chat');
     setDraftCreateName('');
     setDraftCreateGroup(nextGroup);
-    setDraftCreateError(null);
+    setDraftCreateParentDroneId(String(opts?.parentDroneId ?? '').trim() || null);
     setDraftCreating(false);
     setDraftAutoRenaming(false);
     setDraftNameSuggestionError(null);
@@ -171,19 +198,13 @@ export function useWorkspaceNavigationActions({
     setCreateRuntime('container');
     resetDraftNameSuggestSeq();
     setDraftChat({ droneId: '', droneName: '', prompt: null, queuedPrompts: [], focusKey: newDraftChatFocusKey() });
-    setSelectedDrone(null);
-    setSelectedDroneIds([]);
-    selectionAnchorRef.current = null;
-    preferredSelectedDroneRef.current = null;
-    preferredSelectedDroneHoldUntilRef.current = 0;
-    setSelectedChat('default');
+    clearSidebarSelection();
   }, [
     activeRepoPath,
+    clearSidebarSelection,
     normalizeCreateRepoPath,
-    preferredSelectedDroneHoldUntilRef,
-    preferredSelectedDroneRef,
     resetDraftNameSuggestSeq,
-    selectionAnchorRef,
+    resetDraftCreateState,
     setAppView,
     setChatHeaderRepoPath,
     setKanbanBoardOpen,
@@ -194,17 +215,14 @@ export function useWorkspaceNavigationActions({
     setCreateRuntime,
     setDraftAutoRenaming,
     setDraftChat,
-    setDraftCreateError,
     setDraftCreateGroup,
+    setDraftCreateParentDroneId,
     setDraftCreateName,
     setDraftCreating,
     setDraftCreateOpen,
     setDraftCreateMode,
     setDraftNameSuggestionError,
     setDraftNameSuggesting,
-    setSelectedChat,
-    setSelectedDrone,
-    setSelectedDroneIds,
   ]);
 
   const openCloneModal = React.useCallback(
@@ -217,8 +235,7 @@ export function useWorkspaceNavigationActions({
       setPlaybookRunsOpen(false);
       setDraftChat(null);
       setFleetDashboardOpen(false);
-      setDraftCreateOpen(false);
-      setDraftCreateError(null);
+      resetDraftCreateState();
       setCreateError(null);
       setCreateMode('clone');
       setCreateRuntime('container');
@@ -242,6 +259,7 @@ export function useWorkspaceNavigationActions({
       deletingDrones,
       normalizeCreateRepoPath,
       renamingDrones,
+      resetDraftCreateState,
       setAppView,
       setKanbanBoardOpen,
       setPlaybookRunsOpen,
@@ -258,8 +276,6 @@ export function useWorkspaceNavigationActions({
       setCreateOpen,
       setCreateRepoPath,
       setDraftChat,
-      setDraftCreateError,
-      setDraftCreateOpen,
       setFleetDashboardOpen,
       suggestCloneName,
     ],
@@ -274,17 +290,11 @@ export function useWorkspaceNavigationActions({
       setDraftChat(null);
       setCreateOpen(false);
       setCreateError(null);
-      setDraftCreateOpen(false);
-      setDraftCreateError(null);
+      resetDraftCreateState();
       setKanbanBoardOpen(false);
       setFleetDashboardOpen(false);
       setPlaybookRunsOpen(true);
-      setSelectedDrone(null);
-      setSelectedDroneIds([]);
-      selectionAnchorRef.current = null;
-      preferredSelectedDroneRef.current = null;
-      preferredSelectedDroneHoldUntilRef.current = 0;
-      setSelectedChat('default');
+      clearSidebarSelection();
     },
   };
 }
