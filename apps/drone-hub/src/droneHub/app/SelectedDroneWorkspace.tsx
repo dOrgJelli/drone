@@ -30,6 +30,7 @@ import type { RepoOpErrorMeta } from './helpers';
 import type { RightPanelWidthMode } from './right-panel-width';
 import type { DroneDeleteMode } from './settings-types';
 import { requestChangesPullRequest } from '../changes/navigation';
+import { copyText, downloadTextFile } from './clipboard';
 import { chatInputDraftKeyForDroneChat, droneHomePath, isDroneStartingOrSeeding, resolveChatNameForDrone } from './helpers';
 import { resolvePreviewHostPane } from './locked-preview-host-pane';
 import { openDroneTabFromLastPreview, resolveDroneOpenTabUrl } from './quick-actions';
@@ -58,6 +59,11 @@ import {
   parseGithubPullRequestHref,
 } from './selected-drone-workspace-utils';
 import { useFleetAssignmentDropState } from './use-fleet-assignment-drop-state';
+import {
+  buildTranscriptExportFilename,
+  formatTranscriptJson,
+  formatTranscriptMarkdown,
+} from '../chat/transcript-export';
 
 type LaunchHint =
   | {
@@ -576,7 +582,68 @@ export function SelectedDroneWorkspace({
     rightPanelBottomTab,
   });
   const [fileOpenToast, setFileOpenToast] = React.useState<{ id: number; message: string } | null>(null);
+  const [transcriptExportToast, setTranscriptExportToast] = React.useState<string | null>(null);
+  const transcriptExportToastTimerRef = React.useRef<number | null>(null);
   const repoIdentityRef = React.useRef<{ owner: string; repo: string } | null>(null);
+  const availableTranscriptItems = React.useMemo(() => (Array.isArray(transcripts) ? transcripts : []), [transcripts]);
+  const transcriptExportDisabled = chatUiMode !== 'transcript' || loadingTranscript || availableTranscriptItems.length === 0;
+
+  const showTranscriptExportToast = React.useCallback((message: string) => {
+    setTranscriptExportToast(message);
+    if (transcriptExportToastTimerRef.current != null) {
+      clearTimeout(transcriptExportToastTimerRef.current);
+    }
+    transcriptExportToastTimerRef.current = window.setTimeout(() => {
+      setTranscriptExportToast((current) => (current === message ? null : current));
+      transcriptExportToastTimerRef.current = null;
+    }, 2200);
+  }, []);
+
+  const buildTranscriptExportArgs = React.useCallback(
+    (exportedAt: string) => ({
+      droneId: currentDrone.id,
+      droneName: currentDrone.name,
+      droneLabel: currentDroneLabel,
+      chatName: activeChatName,
+      exportedAt,
+      transcripts: availableTranscriptItems,
+    }),
+    [activeChatName, availableTranscriptItems, currentDrone.id, currentDrone.name, currentDroneLabel],
+  );
+
+  const copyTranscriptMarkdown = React.useCallback(() => {
+    if (transcriptExportDisabled) return;
+    const exportedAt = new Date().toISOString();
+    const markdown = formatTranscriptMarkdown(buildTranscriptExportArgs(exportedAt));
+    void copyText(markdown).then(() => {
+      showTranscriptExportToast('Transcript copied as Markdown.');
+    });
+  }, [buildTranscriptExportArgs, showTranscriptExportToast, transcriptExportDisabled]);
+
+  const downloadTranscriptJson = React.useCallback(() => {
+    if (transcriptExportDisabled) return;
+    const exportedAt = new Date().toISOString();
+    const json = formatTranscriptJson(buildTranscriptExportArgs(exportedAt));
+    downloadTextFile({
+      filename: buildTranscriptExportFilename({
+        droneLabel: currentDroneLabel,
+        droneName: currentDrone.name,
+        chatName: activeChatName,
+        exportedAt,
+        extension: 'json',
+      }),
+      text: json,
+      mimeType: 'application/json;charset=utf-8',
+    });
+    showTranscriptExportToast('Transcript downloaded as JSON.');
+  }, [
+    activeChatName,
+    buildTranscriptExportArgs,
+    currentDrone.name,
+    currentDroneLabel,
+    showTranscriptExportToast,
+    transcriptExportDisabled,
+  ]);
 
   React.useEffect(() => {
     if (!openedEditorFileOpenFailureMessage || !openedEditorFileOpenFailureAt) return;
@@ -610,6 +677,16 @@ export function SelectedDroneWorkspace({
       cancelled = true;
     };
   }, [currentDrone.hubPhase, currentDrone.id, currentDroneRepoAttached]);
+
+  React.useEffect(
+    () => () => {
+      if (transcriptExportToastTimerRef.current != null) {
+        clearTimeout(transcriptExportToastTimerRef.current);
+        transcriptExportToastTimerRef.current = null;
+      }
+    },
+    [],
+  );
 
   const tryOpenMarkdownPullRequest = React.useCallback(
     (href: string): boolean => {
@@ -766,6 +843,14 @@ export function SelectedDroneWorkspace({
                   Repo error
                 </button>
               )}
+              {transcriptExportToast ? (
+                <span
+                  className="hidden md:inline-flex items-center gap-1.5 px-2 py-1 rounded text-[10px] border border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]"
+                  style={{ fontFamily: 'var(--display)' }}
+                >
+                  {transcriptExportToast}
+                </span>
+              ) : null}
               {launchHint?.kind === 'copied' && (
                 <span
                   className="hidden md:inline-flex items-center gap-1.5 px-2 py-1 rounded text-[10px] border border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)] font-mono"
@@ -1101,6 +1186,33 @@ export function SelectedDroneWorkspace({
             {headerOverflowOpen && (
               <div className={cn('absolute right-0 mt-2 w-[220px] z-50', dropdownPanelBaseClass)} role="menu">
                 <div className="py-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setHeaderOverflowOpen(false);
+                      copyTranscriptMarkdown();
+                    }}
+                    disabled={transcriptExportDisabled}
+                    className={cn(dropdownMenuItemBaseClass, 'text-[var(--fg-secondary)] hover:bg-[var(--hover)] disabled:opacity-40 disabled:cursor-not-allowed')}
+                    role="menuitem"
+                    title={transcriptExportDisabled ? 'No completed transcript turns are available yet.' : 'Copy the current chat transcript as Markdown'}
+                  >
+                    Copy transcript
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setHeaderOverflowOpen(false);
+                      downloadTranscriptJson();
+                    }}
+                    disabled={transcriptExportDisabled}
+                    className={cn(dropdownMenuItemBaseClass, 'text-[var(--fg-secondary)] hover:bg-[var(--hover)] disabled:opacity-40 disabled:cursor-not-allowed')}
+                    role="menuitem"
+                    title={transcriptExportDisabled ? 'No completed transcript turns are available yet.' : 'Download the current chat transcript as JSON'}
+                  >
+                    Download transcript
+                  </button>
+                  <div className="my-1 border-t border-[var(--border-subtle)]" />
                   <button
                     type="button"
                     onClick={() => {
