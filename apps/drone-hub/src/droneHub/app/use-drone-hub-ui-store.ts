@@ -340,6 +340,10 @@ export function migrateDroneHubUiPersistedState(
 ): Partial<DroneHubUiPersistedState> {
   if (!persistedState || typeof persistedState !== 'object' || Array.isArray(persistedState)) return {};
   const migrated = { ...(persistedState as Partial<DroneHubUiPersistedState>) };
+  const migratedShortcutBindings = migrateLegacyShortcutBindings(migrated.shortcutBindings);
+  if (migratedShortcutBindings !== undefined) {
+    migrated.shortcutBindings = migratedShortcutBindings as ShortcutBindingMap;
+  }
   const normalizedContexts = normalizeSpawnContextByRepoKey((migrated as any).spawnContextByRepoKey);
   if (Object.keys(normalizedContexts).length > 0) {
     migrated.spawnContextByRepoKey = normalizedContexts;
