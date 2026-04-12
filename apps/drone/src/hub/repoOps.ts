@@ -157,6 +157,7 @@ export class RepoPatchApplyError extends Error {
   conflictFiles: string[];
   stdout: string;
   stderr: string;
+  appliedToHost: boolean;
 
   constructor(opts: {
     kind: RepoPatchApplyErrorKind;
@@ -165,6 +166,7 @@ export class RepoPatchApplyError extends Error {
     conflictFiles?: string[];
     stdout?: string;
     stderr?: string;
+    appliedToHost?: boolean;
   }) {
     super(opts.message);
     this.name = 'RepoPatchApplyError';
@@ -173,6 +175,7 @@ export class RepoPatchApplyError extends Error {
     this.conflictFiles = Array.isArray(opts.conflictFiles) ? opts.conflictFiles : [];
     this.stdout = String(opts.stdout ?? '');
     this.stderr = String(opts.stderr ?? '');
+    this.appliedToHost = opts.appliedToHost === true;
   }
 }
 
@@ -1414,31 +1417,49 @@ export async function applyExportedDiffToMainWorkingTree(opts: { repoRoot: strin
   });
 }
 
-// Apply the net branch changes from merge-base(HEAD, branch)..branch directly to the
-// host worktree and index. This preserves conflict markers/unmerged entries without
-// leaving the repo in an actual git merge state, so later commits stay single-parent.
-export async function applyBranchDiffToMainWorkingTree(opts: { repoRoot: string; branch: string }): Promise<void> {
-  const repoRoot = String(opts.repoRoot ?? '').trim();
-  const branch = String(opts.branch ?? '').trim();
-  if (!repoRoot) throw new Error('missing repoRoot');
-  if (!branch) throw new Error('missing branch');
+async function gitPath(repoRoot: string, relPath: string): Promise<string> {
+  const resolved = (await runLocalOrThrow('git', ['-C', repoRoot, 'rev-parse', '--git-path', relPath])).trim();
+  if (!resolved) return resolved;
+  return path.isAbsolute(resolved) ? resolved : path.resolve(repoRoot, resolved);
+}
 
-  const diff = await runLocal('git', [
-    '-C',
-    repoRoot,
-    'diff',
-    '--binary',
-    '--full-index',
-    '--find-renames',
-    '--no-color',
-    '--no-ext-diff',
-    `HEAD...${branch}`,
-  ]);
+async function clearGitMergeStateBestEffort(repoRoot: string): Promise<void> {
+  for (const relPath of ['MERGE_HEAD', 'MERGE_MODE', 'MERGE_MSG', 'AUTO_MERGE']) {
+    try {
+      const resolved = await gitPath(repoRoot, relPath);
+      if (!resolved) continue;
+      await fs.rm(resolved, { force: true });
+    } catch {
+      // Ignore cleanup failures; merge metadata is best-effort after a successful host apply.
+    }
+  }
+}
+
+async function restoreCleanHostRepoStateAfterFailedApply(repoRoot: string, restoreRef: string): Promise<void> {
+  try {
+    await runLocalOrThrow('git', ['-C', repoRoot, 'merge', '--abort']);
+    await clearGitMergeStateBestEffort(repoRoot);
+    return;
+  } catch {
+    // Fall back to a hard reset only when the caller guaranteed a clean repo before apply.
+  }
+  await runLocalOrThrow('git', ['-C', repoRoot, 'reset', '--hard', restoreRef]);
+  await runLocalOrThrow('git', ['-C', repoRoot, 'clean', '-fd']);
+  await clearGitMergeStateBestEffort(repoRoot);
+}
+
+async function applyWorktreeDiffToMainWorkingTree(opts: { repoRoot: string; worktreePath: string; label?: string }): Promise<void> {
+  const repoRoot = String(opts.repoRoot ?? '').trim();
+  const worktreePath = String(opts.worktreePath ?? '').trim();
+  const label = String(opts.label ?? '').trim() || path.basename(worktreePath);
+  if (!repoRoot) throw new Error('missing repoRoot');
+  if (!worktreePath) throw new Error('missing worktreePath');
+
+  const diff = await runLocal('git', ['-C', worktreePath, 'diff', '--binary', '--full-index', '--find-renames', '--no-color', '--no-ext-diff', 'HEAD']);
   if (diff.code !== 0) {
     const details = `${String(diff.stderr ?? '')}\n${String(diff.stdout ?? '')}`.trim();
-    throw new Error(`Failed generating host apply diff for ${branch}.${details ? `\n\n${details}` : ''}`);
+    throw new Error(`Failed generating merged host apply diff for ${label}.${details ? `\n\n${details}` : ''}`);
   }
-
   if (!String(diff.stdout ?? '').trim()) return;
 
   const tempRoot = droneRootPath('repo-exports');
@@ -1447,13 +1468,173 @@ export async function applyBranchDiffToMainWorkingTree(opts: { repoRoot: string;
   const diffPath = path.join(tempDir, 'import.diff');
   try {
     await fs.writeFile(diffPath, diff.stdout, 'utf8');
-    await applyExportedDiffToMainWorkingTree({ repoRoot, diffPath, label: branch });
+
+    const check = await runLocal('git', ['-C', repoRoot, 'apply', '--check', '--index', '--whitespace=nowarn', diffPath]);
+    if (check.code !== 0) {
+      const combined = `${String(check.stderr ?? '')}\n${String(check.stdout ?? '')}`.trim();
+      const conflictFiles = parsePatchConflictFiles(combined);
+      const looksLikeConflict =
+        conflictFiles.length > 0 ||
+        /patch does not apply|CONFLICT|could not apply|failed to merge|with conflicts/i.test(combined) ||
+        isThreeWayAncestorError(combined);
+      const details = (check.stderr || check.stdout || `git apply --check failed (exit ${check.code})`).trim();
+      throw new RepoPatchApplyError({
+        kind: looksLikeConflict ? 'patch_apply_conflict' : 'patch_apply_failed',
+        patchName: label,
+        conflictFiles,
+        stdout: check.stdout,
+        stderr: check.stderr,
+        appliedToHost: false,
+        message: looksLikeConflict
+          ? `Host repo would have conflicts while applying ${label}. Host repo was not modified.\n\n${details}`
+          : `Failed validating merged host apply diff for ${label}. Host repo was not modified.\n\n${details}`,
+      });
+    }
+
+    await applyExportedDiffToMainWorkingTree({ repoRoot, diffPath, label });
   } finally {
     try {
       await fs.rm(tempDir, { recursive: true, force: true });
     } catch {
       // ignore temp cleanup failures
     }
+  }
+}
+
+async function applyBranchMergeToMainWorkingTree(opts: { repoRoot: string; branch: string }): Promise<void> {
+  const repoRoot = String(opts.repoRoot ?? '').trim();
+  const branch = String(opts.branch ?? '').trim();
+  if (!repoRoot) throw new Error('missing repoRoot');
+  if (!branch) throw new Error('missing branch');
+  const restoreRef = (await runLocalOrThrow('git', ['-C', repoRoot, 'rev-parse', 'HEAD'])).trim();
+  const wasCleanBefore = await gitIsClean(repoRoot);
+  let mergeStateShouldBeCleared = false;
+  try {
+    const merge = await runLocal('git', ['-C', repoRoot, 'merge', '--no-commit', '--no-ff', branch]);
+    const combined = `${String(merge.stderr ?? '')}\n${String(merge.stdout ?? '')}`.trim();
+    const conflictFiles = Array.from(new Set([...parsePatchConflictFiles(combined), ...(await gitUnmergedFiles(repoRoot))])).sort((a, b) =>
+      a.localeCompare(b)
+    );
+    const looksLikeConflict =
+      conflictFiles.length > 0 ||
+      /CONFLICT|Automatic merge failed|fix conflicts and then commit the result/i.test(combined);
+
+    if (merge.code === 0) {
+      mergeStateShouldBeCleared = true;
+      return;
+    }
+
+    if (looksLikeConflict) {
+      mergeStateShouldBeCleared = true;
+      const details = (merge.stderr || merge.stdout || `git merge failed (exit ${merge.code})`).trim();
+      throw new RepoPatchApplyError({
+        kind: 'patch_apply_conflict',
+        patchName: branch,
+        conflictFiles,
+        stdout: merge.stdout,
+        stderr: merge.stderr,
+        appliedToHost: true,
+        message: `Host repo has conflicts while applying ${branch}.\n\n${details}`,
+      });
+    }
+
+    if (wasCleanBefore) {
+      await restoreCleanHostRepoStateAfterFailedApply(repoRoot, restoreRef);
+    }
+    const details = (merge.stderr || merge.stdout || `git merge failed (exit ${merge.code})`).trim();
+    throw new RepoPatchApplyError({
+      kind: 'patch_apply_failed',
+      patchName: branch,
+      conflictFiles,
+      stdout: merge.stdout,
+      stderr: merge.stderr,
+      appliedToHost: false,
+      message: `Failed applying imported branch ${branch} to host repo.\n\n${details}`,
+    });
+  } finally {
+    if (mergeStateShouldBeCleared) {
+      await clearGitMergeStateBestEffort(repoRoot);
+    }
+  }
+}
+
+// Preview imported branch changes in a disposable worktree first. Clean merges are applied
+// back to the real host repo as a plain diff. Conflicts only touch the host repo when the
+// caller explicitly asks to materialize them there for manual resolution.
+export async function applyBranchDiffToMainWorkingTree(opts: {
+  repoRoot: string;
+  branch: string;
+  applyConflictsToHost?: boolean;
+}): Promise<void> {
+  const repoRoot = String(opts.repoRoot ?? '').trim();
+  const branch = String(opts.branch ?? '').trim();
+  const applyConflictsToHost = opts.applyConflictsToHost === true;
+  if (!repoRoot) throw new Error('missing repoRoot');
+  if (!branch) throw new Error('missing branch');
+
+  const hostHeadRef = (await runLocalOrThrow('git', ['-C', repoRoot, 'rev-parse', 'HEAD'])).trim();
+  const runId = `${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
+  const safeBranch = safeSlug(branch);
+  const worktreePath = path.join(defaultWorktreeRootDir(), repoKeyFromGitRoot(repoRoot), `host-apply-${safeBranch}-${runId}`);
+  const tempBranch = `drone-host-apply/${safeBranch}-${runId}`;
+
+  try {
+    await ensureQuarantineWorktree({
+      repoRoot,
+      worktreePath,
+      branch: tempBranch,
+      fromRef: hostHeadRef,
+    });
+
+    const merge = await runLocal('git', ['-C', worktreePath, 'merge', '--no-commit', '--no-ff', branch]);
+    const combined = `${String(merge.stderr ?? '')}\n${String(merge.stdout ?? '')}`.trim();
+    const conflictFiles = Array.from(new Set([...parsePatchConflictFiles(combined), ...(await gitUnmergedFiles(worktreePath))])).sort((a, b) =>
+      a.localeCompare(b)
+    );
+    const looksLikeConflict =
+      conflictFiles.length > 0 ||
+      /CONFLICT|Automatic merge failed|fix conflicts and then commit the result/i.test(combined);
+
+    if (merge.code === 0) {
+      await applyWorktreeDiffToMainWorkingTree({ repoRoot, worktreePath, label: branch });
+      return;
+    }
+
+    if (looksLikeConflict) {
+      const details = (merge.stderr || merge.stdout || `git merge failed (exit ${merge.code})`).trim();
+      if (!applyConflictsToHost) {
+        throw new RepoPatchApplyError({
+          kind: 'patch_apply_conflict',
+          patchName: branch,
+          conflictFiles,
+          stdout: merge.stdout,
+          stderr: merge.stderr,
+          appliedToHost: false,
+          message: `Host repo would have conflicts while applying ${branch}. Host repo was not modified.\n\n${details}`,
+        });
+      }
+      await applyBranchMergeToMainWorkingTree({ repoRoot, branch });
+      return;
+    }
+
+    const details = (merge.stderr || merge.stdout || `git merge failed (exit ${merge.code})`).trim();
+    throw new RepoPatchApplyError({
+      kind: 'patch_apply_failed',
+      patchName: branch,
+      conflictFiles,
+      stdout: merge.stdout,
+      stderr: merge.stderr,
+      appliedToHost: false,
+      message: `Failed preparing host apply for ${branch}. Host repo was not modified.\n\n${details}`,
+    });
+  } finally {
+    await cleanupQuarantineWorktree({
+      repoRoot,
+      worktreePath,
+      branch: tempBranch,
+    }).catch(() => {
+      // ignore cleanup failures
+    });
   }
 }
 

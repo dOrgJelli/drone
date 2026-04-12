@@ -446,6 +446,31 @@ export function GroupMultiChatColumn({
         });
         return;
       }
+      const canOfferConflictApply =
+        !result.ok &&
+        initialCode === 'patch_apply_conflict' &&
+        result.data?.hostConflictState !== true &&
+        result.data?.canApplyConflictsToHost === true &&
+        (body as any)?.applyConflictsToHost !== true;
+      if (canOfferConflictApply) {
+        const conflictFiles = Array.isArray(result.data?.conflictFiles)
+          ? result.data.conflictFiles.map((f: any) => String(f ?? '').trim()).filter(Boolean)
+          : [];
+        const preview = conflictFiles.slice(0, 8);
+        const suffix = conflictFiles.length > preview.length ? `\n- and ${conflictFiles.length - preview.length} more` : '';
+        const confirmed = window.confirm(
+          [
+            'Applying these drone changes would conflict with your host repo.',
+            '',
+            preview.length > 0 ? preview.map((file) => `- ${file}`).join('\n') + suffix : 'No individual files were reported.',
+            '',
+            'Apply the conflict set onto the host repo so you can resolve it there?',
+          ].join('\n'),
+        );
+        if (confirmed) {
+          result = await postPull({ ...body, applyConflictsToHost: true });
+        }
+      }
 
       if (!result.ok) {
         setQuickActionError(String(result.data?.error ?? `${result.status} ${result.statusText}`));

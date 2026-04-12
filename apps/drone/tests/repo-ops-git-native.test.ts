@@ -59,6 +59,7 @@ function mkRepo(): { repoRoot: string; cleanup: () => void } {
 }
 
 function writeAndCommit(repoRoot: string, relPath: string, content: string, message: string): void {
+  fs.mkdirSync(path.dirname(path.join(repoRoot, relPath)), { recursive: true });
   fs.writeFileSync(path.join(repoRoot, relPath), content, 'utf8');
   runOrThrow('git', ['add', relPath], repoRoot);
   runOrThrow('git', ['commit', '-m', message], repoRoot);
@@ -260,6 +261,38 @@ describe('repoOps git-native pull helpers', () => {
       expect(patchErr.kind).toBe('patch_apply_conflict');
       expect(patchErr.patchName).toBe('feature');
       expect(patchErr.conflictFiles).toContain('conflict.txt');
+      expect(patchErr.appliedToHost).toBe(false);
+
+      const status = runOrThrow('git', ['status', '--porcelain'], repoRoot);
+      expect(status.trim()).toBe('');
+      const mergeHead = run('git', ['rev-parse', '--verify', 'MERGE_HEAD'], repoRoot);
+      expect(mergeHead.code).not.toBe(0);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test('applyBranchDiffToMainWorkingTree can project text conflicts onto host when requested', async () => {
+    const { repoRoot, cleanup } = mkRepo();
+    try {
+      writeAndCommit(repoRoot, 'conflict.txt', 'same\n', 'init');
+      runOrThrow('git', ['checkout', '-b', 'feature'], repoRoot);
+      writeAndCommit(repoRoot, 'conflict.txt', 'feature\n', 'feature change');
+      runOrThrow('git', ['checkout', 'main'], repoRoot);
+      writeAndCommit(repoRoot, 'conflict.txt', 'main\n', 'main change');
+
+      let err: unknown = null;
+      try {
+        await applyBranchDiffToMainWorkingTree({ repoRoot, branch: 'feature', applyConflictsToHost: true });
+      } catch (e) {
+        err = e;
+      }
+
+      expect(err).toBeInstanceOf(RepoPatchApplyError);
+      const patchErr = err as RepoPatchApplyError;
+      expect(patchErr.kind).toBe('patch_apply_conflict');
+      expect(patchErr.appliedToHost).toBe(true);
+      expect(patchErr.conflictFiles).toContain('conflict.txt');
 
       const unmerged = runOrThrow('git', ['diff', '--name-only', '--diff-filter=U'], repoRoot)
         .split('\n')
@@ -268,6 +301,47 @@ describe('repoOps git-native pull helpers', () => {
       expect(unmerged).toContain('conflict.txt');
       const mergeHead = run('git', ['rev-parse', '--verify', 'MERGE_HEAD'], repoRoot);
       expect(mergeHead.code).not.toBe(0);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test('applyBranchDiffToMainWorkingTree preserves modify/delete conflicts for host apply', async () => {
+    const { repoRoot, cleanup } = mkRepo();
+    try {
+      writeAndCommit(repoRoot, 'apps/web/src/components/storyboards/StoryboardPreparingState.tsx', 'one\n', 'init');
+      runOrThrow('git', ['checkout', '-b', 'feature'], repoRoot);
+      writeAndCommit(repoRoot, 'apps/web/src/components/storyboards/StoryboardPreparingState.tsx', 'two\n', 'feature change');
+      runOrThrow('git', ['checkout', 'main'], repoRoot);
+      runOrThrow('git', ['rm', 'apps/web/src/components/storyboards/StoryboardPreparingState.tsx'], repoRoot);
+      runOrThrow('git', ['commit', '-m', 'remove file on main'], repoRoot);
+
+      let err: unknown = null;
+      try {
+        await applyBranchDiffToMainWorkingTree({ repoRoot, branch: 'feature', applyConflictsToHost: true });
+      } catch (e) {
+        err = e;
+      }
+
+      expect(err).toBeInstanceOf(RepoPatchApplyError);
+      const patchErr = err as RepoPatchApplyError;
+      expect(patchErr.kind).toBe('patch_apply_conflict');
+      expect(patchErr.appliedToHost).toBe(true);
+      expect(patchErr.conflictFiles).toContain('apps/web/src/components/storyboards/StoryboardPreparingState.tsx');
+
+      const status = runOrThrow('git', ['status', '--porcelain'], repoRoot);
+      expect(status).toContain('DU apps/web/src/components/storyboards/StoryboardPreparingState.tsx');
+      const mergeHead = run('git', ['rev-parse', '--verify', 'MERGE_HEAD'], repoRoot);
+      expect(mergeHead.code).not.toBe(0);
+
+      fs.mkdirSync(path.join(repoRoot, 'apps/web/src/components/storyboards'), { recursive: true });
+      fs.writeFileSync(path.join(repoRoot, 'apps/web/src/components/storyboards/StoryboardPreparingState.tsx'), 'resolved\n', 'utf8');
+      runOrThrow('git', ['add', 'apps/web/src/components/storyboards/StoryboardPreparingState.tsx'], repoRoot);
+      runOrThrow('git', ['commit', '-m', 'resolve imported change'], repoRoot);
+      const parents = runOrThrow('git', ['rev-list', '--parents', '-n', '1', 'HEAD'], repoRoot)
+        .trim()
+        .split(/\s+/);
+      expect(parents).toHaveLength(2);
     } finally {
       cleanup();
     }

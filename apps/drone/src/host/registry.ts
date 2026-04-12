@@ -277,6 +277,7 @@ type DroneRegistryV1 = {
       repoPath: string;
       repoSeedSource?: 'host' | 'remote';
       repoSeedRemoteBranch?: string;
+      repoSeedFromDroneId?: string;
       containerPort: number;
       build: boolean;
       createdAt: string;

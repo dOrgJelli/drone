@@ -15078,6 +15078,13 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           String(allowDirtyRaw ?? '')
             .trim()
             .toLowerCase() === 'true';
+        const applyConflictsToHostRaw = (body as any)?.applyConflictsToHost;
+        const applyConflictsToHost =
+          applyConflictsToHostRaw === true ||
+          applyConflictsToHostRaw === 1 ||
+          String(applyConflictsToHostRaw ?? '')
+            .trim()
+            .toLowerCase() === 'true';
         const defaultAutoCommitMessage = 'chore(drone): snapshot working tree before apply changes';
         const requestedAutoCommitMessage = String((body as any)?.commitMessage ?? '').trim();
         const autoCommitMessage = requestedAutoCommitMessage || defaultAutoCommitMessage;
@@ -15397,10 +15404,9 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             throw e;
           }
 
-          // Apply imported drone changes onto the host branch without leaving MERGE_HEAD.
-          // Users still review/resolve and commit as normal, but the resulting commit remains single-parent.
-          hostConflictState = true;
-          await applyBranchDiffToMainWorkingTree({ repoRoot, branch: importRefName });
+          // Preview imported drone changes in a temp worktree first. Clean merges apply
+          // directly to the host branch. Conflicts only touch host when explicitly requested.
+          await applyBranchDiffToMainWorkingTree({ repoRoot, branch: importRefName, applyConflictsToHost });
 
           await tryAdvanceContainerExportBase();
 
@@ -15468,11 +15474,16 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         } catch (e: any) {
           let msg = e?.message ?? String(e);
           let patchErr = isRepoPatchApplyError(e) ? e : null;
+          hostConflictState = patchErr?.appliedToHost === true;
 
           if (patchErr?.kind === 'patch_apply_conflict') {
             if (!hostConflictState) {
-              const fullMsg = `${msg}\n\nFailed importing bundle or preparing host apply. Host repo was not modified.`;
-              hubLog('error', 'Repo pull failed before host apply state', {
+              const guidance = [
+                'Host repo was not modified.',
+                'Review the conflicting files in pull preview, or re-run apply and choose to project conflicts onto the host repo for manual resolution.',
+              ].join(' ');
+              const fullMsg = `${msg}\n\n${guidance}`;
+              hubLog('warn', 'Repo pull found host conflicts before apply state', {
                 droneName,
                 repoRoot,
                 fromRef,
@@ -15507,14 +15518,15 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
                 reg2.drones = reg2.drones ?? {};
                 reg2.drones[droneId] = dd;
               });
-              await setDroneHubMetaByIdentity({ droneId, hub: { phase: 'error', message: 'Repo pull failed while importing bundle' } });
-              json(res, 500, {
+              await setDroneHubMetaByIdentity({ droneId, hub: { phase: 'error', message: 'Repo pull found conflicts before host apply' } });
+              json(res, 409, {
                 ok: false,
                 error: fullMsg,
                 code: patchErr.kind,
                 patchName: patchErr.patchName ?? null,
                 conflictFiles: patchErr.conflictFiles ?? [],
                 hostConflictState: false,
+                canApplyConflictsToHost: true,
                 stashed,
                 stashPopOk,
                 stashPopText,

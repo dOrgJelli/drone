@@ -64,6 +64,7 @@ export function createDroneProvisioningController(deps: DroneProvisioningControl
   const PROVISION_QUEUED = new Set<string>();
   let PROVISION_ACTIVE = 0;
   let PROVISION_PUMPING = false;
+  let PROVISION_PUMP_SCHEDULED = false;
 
   async function updatePendingDrone(droneIdRaw: string, patch: PendingDronePatch) {
     await updateRegistry((regAny: any) => {
@@ -497,6 +498,7 @@ export function createDroneProvisioningController(deps: DroneProvisioningControl
   }
 
   function pumpProvisionQueue() {
+    PROVISION_PUMP_SCHEDULED = false;
     if (PROVISION_PUMPING) return;
     PROVISION_PUMPING = true;
     try {
@@ -525,6 +527,14 @@ export function createDroneProvisioningController(deps: DroneProvisioningControl
     }
   }
 
+  function scheduleProvisionQueuePump() {
+    if (PROVISION_PUMP_SCHEDULED) return;
+    PROVISION_PUMP_SCHEDULED = true;
+    setTimeout(() => {
+      pumpProvisionQueue();
+    }, 0);
+  }
+
   function enqueueProvisioningForAllPending(regAny: any) {
     try {
       const pending = regAny?.pending && typeof regAny.pending === 'object' ? Object.entries(regAny.pending) : [];
@@ -547,7 +557,7 @@ export function createDroneProvisioningController(deps: DroneProvisioningControl
     if (PROVISION_QUEUED.has(normalized)) return;
     PROVISION_QUEUED.add(normalized);
     PROVISION_QUEUE.push(normalized);
-    pumpProvisionQueue();
+    scheduleProvisionQueuePump();
   }
 
   function dequeueProvisioning(name: string) {
