@@ -2965,7 +2965,18 @@ export function DroneChangesDock({
           ) : dataMode === 'pull-request' ? (
             pullRequestNumber ? `No file changes found for PR #${pullRequestNumber}.` : 'No pull request selected.'
           ) : dataMode === 'pull-preview' ? (
-            'No apply changes to preview.'
+            <div className="inline-flex flex-col items-start gap-2">
+              <span>No apply changes to preview. This view only shows committed changes from the drone base to HEAD.</span>
+              <span>If you just cancelled Apply because of uncommitted files, open Working Tree to review them there.</span>
+              <button
+                type="button"
+                onClick={() => setBranchChangesMode('working-tree')}
+                className="h-7 px-2.5 rounded-md border border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[10px] font-semibold tracking-wide uppercase text-[var(--accent)] hover:bg-[rgba(92,226,255,.12)]"
+                style={{ fontFamily: 'var(--display)' }}
+              >
+                Open Working Tree
+              </button>
+            </div>
           ) : (
             'Working tree is clean.'
           )}

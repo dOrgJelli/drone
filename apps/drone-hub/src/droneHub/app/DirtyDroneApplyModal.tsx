@@ -51,7 +51,8 @@ export function DirtyDroneApplyModal({
           <div className="mt-2 text-[13px] leading-6 text-[var(--muted)]">
             <span className="font-medium text-[var(--fg-secondary)]">{dirtyDroneApplyModal.droneLabel}</span> has uncommitted changes (
             {dirtyLabel}). Choose whether to snapshot everything into a placeholder commit first, or continue and apply committed
-            changes only.
+            changes only. Cancel leaves both repos unchanged. If your edits are only uncommitted, they remain in Working Tree and
+            will not appear in Apply preview until they are committed.
           </div>
         </div>
 

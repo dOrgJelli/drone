@@ -345,6 +345,32 @@ function parseRemoteBranchName(raw: unknown): string {
     .replace(/^remotes\//, '');
 }
 
+function comparableBranchRefCandidates(raw: unknown): string[] {
+  const value = String(raw ?? '').trim();
+  if (!value) return [];
+  const out = new Set<string>();
+  const push = (nextRaw: unknown) => {
+    const next = String(nextRaw ?? '').trim();
+    if (next) out.add(next);
+  };
+  push(value);
+  const normalized = value
+    .replace(/^refs\/heads\//, '')
+    .replace(/^refs\/remotes\//, '')
+    .replace(/^remotes\//, '');
+  push(normalized);
+  const firstSlash = normalized.indexOf('/');
+  if (firstSlash > 0) push(normalized.slice(firstSlash + 1));
+  return Array.from(out);
+}
+
+function repoBaseRefMatchesCurrentHostBranch(baseRefRaw: unknown, currentHostBranchRaw: unknown): boolean {
+  const baseRefCandidates = comparableBranchRefCandidates(baseRefRaw);
+  const currentHostCandidates = comparableBranchRefCandidates(currentHostBranchRaw);
+  if (baseRefCandidates.length === 0 || currentHostCandidates.length === 0) return false;
+  return currentHostCandidates.some((candidate) => baseRefCandidates.includes(candidate));
+}
+
 function parseCreateRuntime(raw: unknown): DroneRuntime {
   if (raw == null) return 'container';
   const value = String(raw).trim().toLowerCase();
@@ -13675,7 +13701,8 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           try {
             const repoRoot = await gitTopLevel(repoPathRaw);
             const clean = await gitIsClean(repoRoot);
-            if (clean) {
+            const currentHostRef = clean ? await gitCurrentBranchOrSha(repoRoot).catch(() => '') : '';
+            if (clean && repoBaseRefMatchesCurrentHostBranch(droneFromRef, currentHostRef)) {
               // Match pull behavior: once host conflicts are fully resolved and committed,
               // preview from the last exported drone head so counts align with the next pull.
               pullPreviewBaseSha = lastExportedHeadSha;
@@ -15165,7 +15192,12 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             const lastPullAny = d?.repo?.lastPull && typeof d.repo.lastPull === 'object' ? d.repo.lastPull : null;
             const lastMode = String((lastPullAny as any)?.mode ?? '').trim().toLowerCase();
             const lastExportedHeadSha = String((lastPullAny as any)?.exportedHeadSha ?? '').trim().toLowerCase();
-            if (lastMode === 'host-conflicts-ready' && /^[0-9a-f]{40}$/.test(lastExportedHeadSha)) {
+            const currentHostRef = await gitCurrentBranchOrSha(repoRoot).catch(() => '');
+            if (
+              lastMode === 'host-conflicts-ready' &&
+              /^[0-9a-f]{40}$/.test(lastExportedHeadSha) &&
+              repoBaseRefMatchesCurrentHostBranch(fromRef, currentHostRef)
+            ) {
               prePullBaseSha = lastExportedHeadSha;
               try {
                 await dvmRepoSetBaseSha({ container: containerName, repoPathInContainer, baseSha: lastExportedHeadSha });
