@@ -64,6 +64,7 @@ import {
   formatTranscriptJson,
   formatTranscriptMarkdown,
 } from '../chat/transcript-export';
+import { useAgentCopilotOrchestration } from './use-agent-copilot-orchestration';
 
 type LaunchHint =
   | {
@@ -323,6 +324,12 @@ export function SelectedDroneWorkspace({
     () => explicitSelectedChat || resolveChatNameForDrone(currentDrone, selectedChat),
     [currentDrone, explicitSelectedChat, selectedChat],
   );
+  useAgentCopilotOrchestration({
+    requestJson,
+    sourceDroneId: currentDrone.id,
+    sourceChatName: activeChatName,
+    transcripts,
+  });
   const currentDroneHomePath = React.useMemo(() => droneHomePath(currentDrone), [currentDrone]);
   const spawnCurrentDroneHubTask = React.useCallback(
     (mode: DroneHubTaskSpawnMode, task: DroneHubTask) =>
