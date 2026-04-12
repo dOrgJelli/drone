@@ -474,12 +474,14 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
     setCustomAgentModalOpen,
     draftCreateName,
     draftCreateGroup,
+    draftCreateParentDroneId,
     draftCreateError,
     queuedPromptsByDroneChat,
     setDraftChat,
     setDraftCreateOpen,
     setDraftCreateName,
     setDraftCreateGroup,
+    setDraftCreateParentDroneId,
     setDraftAutoRenaming,
     startDraftPrompt,
     startDraftAutomation,
@@ -693,12 +695,16 @@ export function useDroneHubWorkspaceContentProps(args: any): DroneHubWorkspaceCo
           draftRepoBranchesError: draftRepoBranchOptions?.error ?? null,
           draftCreateName,
           draftCreateGroup,
+          draftCreateParentDroneLabel:
+            drones.find((drone: any) => String(drone?.id ?? '').trim() === String(draftCreateParentDroneId ?? '').trim())?.name ??
+            (String(draftCreateParentDroneId ?? '').trim() || null),
           draftCreateError,
           queuedPromptsByDroneChat,
           onCancel: () => {
             setDraftChat(null);
             setDraftCreateOpen(false);
             setDraftCreateError(null);
+            setDraftCreateParentDroneId(null);
             setDraftAutoRenaming(false);
           },
           onStartDraftPrompt: startDraftPrompt,

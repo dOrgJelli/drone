@@ -318,9 +318,10 @@ export function SelectedDroneWorkspace({
     setSelectedChat,
     setTerminalEmulator,
   } = useSelectedDroneWorkspaceUiState();
+  const explicitSelectedChat = String(selectedChat ?? '').trim();
   const activeChatName = React.useMemo(
-    () => resolveChatNameForDrone(currentDrone, selectedChat),
-    [currentDrone, selectedChat],
+    () => explicitSelectedChat || resolveChatNameForDrone(currentDrone, selectedChat),
+    [currentDrone, explicitSelectedChat, selectedChat],
   );
   const currentDroneHomePath = React.useMemo(() => droneHomePath(currentDrone), [currentDrone]);
   const spawnCurrentDroneHubTask = React.useCallback(

@@ -4,6 +4,7 @@ import type { DroneSummary } from '../types';
 import type { ChatSendPayload } from '../chat';
 import type { DraftChatState } from './app-types';
 import { attachmentRefsFromPayload, normalizeChatImageAttachmentPayloads } from './chat-attachment-payloads';
+import { resolveRepoSeedFromParentDroneId } from './child-drone-repo-seed';
 import { createDraftQueuedPrompt } from './draft-chat-queue';
 import {
   buildDraftDroneCreatePayload,
@@ -47,7 +48,7 @@ export type DraftAutomationStartInput = {
 };
 
 type UseDroneCreationActionsArgs = {
-  drones: Array<{ id: string; name: string }>;
+  drones: Array<Pick<DroneSummary, 'id' | 'name' | 'runtime' | 'repoPath' | 'repoAttached'>>;
   creating: boolean;
   createNameRows: string[];
   createMessageSuffixRows: string[];
@@ -67,6 +68,7 @@ type UseDroneCreationActionsArgs = {
   draftCreateMode: 'with-chat' | 'without-chat';
   draftCreateName: string;
   draftCreateGroup: string;
+  draftCreateParentDroneId: string | null;
   draftCreateRepoPath: string;
   startupSeedMissingGraceMs: number;
   suggestCloneName: (sourceName: string) => string;
@@ -111,6 +113,7 @@ type UseDroneCreationActionsArgs = {
   setDraftCreateError: React.Dispatch<React.SetStateAction<string | null>>;
   setDraftCreateName: React.Dispatch<React.SetStateAction<string>>;
   setDraftCreateGroup: React.Dispatch<React.SetStateAction<string>>;
+  setDraftCreateParentDroneId: React.Dispatch<React.SetStateAction<string | null>>;
   setDraftSuggestedName: React.Dispatch<React.SetStateAction<string>>;
   setDraftNameSuggesting: React.Dispatch<React.SetStateAction<boolean>>;
   setDraftNameSuggestionError: React.Dispatch<React.SetStateAction<string | null>>;
@@ -171,6 +174,7 @@ export function useDroneCreationActions({
   draftCreateMode,
   draftCreateName,
   draftCreateGroup,
+  draftCreateParentDroneId,
   draftCreateRepoPath,
   startupSeedMissingGraceMs,
   suggestCloneName,
@@ -199,6 +203,7 @@ export function useDroneCreationActions({
   setDraftCreateError,
   setDraftCreateName,
   setDraftCreateGroup,
+  setDraftCreateParentDroneId,
   setDraftSuggestedName,
   setDraftNameSuggesting,
   setDraftNameSuggestionError,
@@ -619,7 +624,15 @@ export function useDroneCreationActions({
       const nameRaw = String(opts?.name ?? draftCreateName ?? '');
       const name = nameRaw.trim();
       const group = String(opts?.group ?? draftCreateGroup ?? '').trim();
+      const fleetParentId = String(draftCreateParentDroneId ?? '').trim();
+      const runtime = createRuntime;
       const repoPath = String(draftCreateRepoPath ?? '').trim();
+      const repoSeedFromDroneId = resolveRepoSeedFromParentDroneId({
+        drones,
+        parentDroneId: fleetParentId,
+        repoPath,
+        runtime,
+      });
       const remoteBranch = String(repoCreateRemoteBranch ?? '').trim();
       const effectiveRepoBranchSource: RepoBranchSourceMode = createRuntime === 'host' ? 'host' : repoBranchSource;
       if (!createWithoutChat && !prompt && !automationPrompt && !hasDraftAttachments) {
@@ -644,7 +657,6 @@ export function useDroneCreationActions({
       }
 
       const seedAgent = createWithoutChat ? null : resolveAgentKeyToConfig(spawnAgentKey);
-      const runtime = createRuntime;
       if (!runtimeSupportsCustomAgents(runtime) && seedAgent?.kind === 'custom') {
         setDraftCreateError('Host runtime currently supports builtin agents only.');
         return false;
@@ -677,6 +689,8 @@ export function useDroneCreationActions({
           name,
           group,
           repoPath,
+          fleetParentId,
+          repoSeedFromDroneId,
           runtime,
           repoBranchSelection: {
             repoBranchSource: effectiveRepoBranchSource,
@@ -808,6 +822,7 @@ export function useDroneCreationActions({
         setDraftCreateOpen(false);
         setDraftCreateName('');
         setDraftCreateGroup('');
+        setDraftCreateParentDroneId(null);
         setDraftCreateError(postCreateError);
         setDraftNameSuggestionError(null);
         setDraftNameSuggesting(false);
@@ -843,6 +858,7 @@ export function useDroneCreationActions({
       draftCreateMode,
       draftCreateGroup,
       draftCreateName,
+      draftCreateParentDroneId,
       createRuntime,
       drones,
       addOptimisticStartupSeeds,
@@ -863,6 +879,7 @@ export function useDroneCreationActions({
       setDraftChat,
       setDraftCreateError,
       setDraftCreateGroup,
+      setDraftCreateParentDroneId,
       setDraftCreateName,
       setDraftCreateOpen,
       setDraftCreating,

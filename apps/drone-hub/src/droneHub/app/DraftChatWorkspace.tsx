@@ -49,6 +49,7 @@ type DraftChatWorkspaceProps = {
   draftRepoBranchesError: string | null;
   draftCreateName: string;
   draftCreateGroup: string;
+  draftCreateParentDroneLabel: string | null;
   draftCreateError: string | null;
   queuedPromptsByDroneChat: Record<string, QueuedPrompt[]>;
   onCancel: () => void;
@@ -89,6 +90,7 @@ export function DraftChatWorkspace({
   draftRepoBranchesError,
   draftCreateName,
   draftCreateGroup,
+  draftCreateParentDroneLabel,
   draftCreateError,
   queuedPromptsByDroneChat,
   onCancel,
@@ -378,6 +380,11 @@ export function DraftChatWorkspace({
                   <span className="font-semibold text-sm tracking-tight" style={{ fontFamily: 'var(--display)' }}>
                     New drone
                   </span>
+                  {draftCreateParentDroneLabel ? (
+                    <span className="rounded-full border border-[var(--border-subtle)] bg-[rgba(255,255,255,.03)] px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.12em] text-[var(--muted-dim)]">
+                      Child of {draftCreateParentDroneLabel}
+                    </span>
+                  ) : null}
                 </div>
                 <div className="text-[10px] text-[var(--muted)] mt-0.5">
                   {draftChat.prompt
