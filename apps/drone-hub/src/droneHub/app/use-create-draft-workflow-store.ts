@@ -23,6 +23,7 @@ type CreateDraftWorkflowState = {
   draftCreateMode: DraftCreateMode;
   draftCreateName: string;
   draftCreateGroup: string;
+  draftCreateParentDroneId: string | null;
   draftCreateError: string | null;
   draftCreating: boolean;
   draftAutoRenaming: boolean;
@@ -44,6 +45,7 @@ type CreateDraftWorkflowState = {
   setDraftCreateMode: (next: Updater<DraftCreateMode>) => void;
   setDraftCreateName: (next: Updater<string>) => void;
   setDraftCreateGroup: (next: Updater<string>) => void;
+  setDraftCreateParentDroneId: (next: Updater<string | null>) => void;
   setDraftCreateError: (next: Updater<string | null>) => void;
   setDraftCreating: (next: Updater<boolean>) => void;
   setDraftAutoRenaming: (next: Updater<boolean>) => void;
@@ -72,6 +74,7 @@ const useCreateDraftWorkflowStore = create<CreateDraftWorkflowState>((set) => ({
   draftCreateMode: 'with-chat',
   draftCreateName: '',
   draftCreateGroup: '',
+  draftCreateParentDroneId: null,
   draftCreateError: null,
   draftCreating: false,
   draftAutoRenaming: false,
@@ -93,6 +96,7 @@ const useCreateDraftWorkflowStore = create<CreateDraftWorkflowState>((set) => ({
   setDraftCreateMode: (next) => set((s) => ({ draftCreateMode: resolveNext(s.draftCreateMode, next) })),
   setDraftCreateName: (next) => set((s) => ({ draftCreateName: resolveNext(s.draftCreateName, next) })),
   setDraftCreateGroup: (next) => set((s) => ({ draftCreateGroup: resolveNext(s.draftCreateGroup, next) })),
+  setDraftCreateParentDroneId: (next) => set((s) => ({ draftCreateParentDroneId: resolveNext(s.draftCreateParentDroneId, next) })),
   setDraftCreateError: (next) => set((s) => ({ draftCreateError: resolveNext(s.draftCreateError, next) })),
   setDraftCreating: (next) => set((s) => ({ draftCreating: resolveNext(s.draftCreating, next) })),
   setDraftAutoRenaming: (next) => set((s) => ({ draftAutoRenaming: resolveNext(s.draftAutoRenaming, next) })),
@@ -120,6 +124,7 @@ export function useCreateDraftWorkflowState() {
       draftCreateMode: s.draftCreateMode,
       draftCreateName: s.draftCreateName,
       draftCreateGroup: s.draftCreateGroup,
+      draftCreateParentDroneId: s.draftCreateParentDroneId,
       draftCreateError: s.draftCreateError,
       draftCreating: s.draftCreating,
       draftAutoRenaming: s.draftAutoRenaming,
@@ -141,6 +146,7 @@ export function useCreateDraftWorkflowState() {
       setDraftCreateMode: s.setDraftCreateMode,
       setDraftCreateName: s.setDraftCreateName,
       setDraftCreateGroup: s.setDraftCreateGroup,
+      setDraftCreateParentDroneId: s.setDraftCreateParentDroneId,
       setDraftCreateError: s.setDraftCreateError,
       setDraftCreating: s.setDraftCreating,
       setDraftAutoRenaming: s.setDraftAutoRenaming,

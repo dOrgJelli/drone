@@ -148,4 +148,44 @@ describeSocketSuite('create runtime api', () => {
     expect(resp.data?.rejected?.[0]?.status).toBe(404);
     expect(String(resp.data?.rejected?.[0]?.error ?? '')).toContain('unknown fleet parent drone');
   });
+
+  test('single create persists repo seed source drone references', async () => {
+    const now = new Date().toISOString();
+    await updateRegistry((reg: any) => {
+      reg.drones = {
+        ...(reg.drones ?? {}),
+        'seed-parent': {
+          id: 'seed-parent',
+          name: 'seed-parent',
+          runtime: 'container',
+          containerName: 'seed-parent',
+          containerPort: 7777,
+          repoPath: '/work/repo',
+          repo: { dest: '/work/repo', branch: 'dvm/work' },
+          createdAt: now,
+          chats: { default: { createdAt: now, turns: [], pendingPrompts: [] } },
+        },
+      };
+    });
+
+    const resp = await apiFetch('/api/drones', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'seed-child',
+        runtime: 'container',
+        repoPath: '/work/repo',
+        fleetParentId: 'seed-parent',
+        repoSeedFromDroneId: 'seed-parent',
+      }),
+    });
+    expect(resp.r.status).toBe(202);
+    expect(resp.data?.ok).toBe(true);
+    const childId = String(resp.data?.id ?? '').trim();
+    expect(childId).not.toBe('');
+
+    const regAny: any = await loadRegistry();
+    expect(String(regAny?.pending?.[childId]?.repoSeedFromDroneId ?? '')).toBe('seed-parent');
+    expect(String(regAny?.pending?.[childId]?.fleet?.createdBy ?? '')).toBe('seed-parent');
+  });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { resolveSelectedChatForDrone } from '../src/droneHub/app/use-drone-selection-state';
+import { resolveSelectedChatForDrone, shouldKeepPendingSelectedChat } from '../src/droneHub/app/drone-selection-helpers';
 import type { DroneSummary } from '../src/droneHub/types';
 
 function makeDrone(id: string, chats: string[]): DroneSummary {
@@ -56,5 +56,48 @@ describe('resolveSelectedChatForDrone', () => {
     });
 
     expect(selected).toBe('default');
+  });
+});
+
+describe('shouldKeepPendingSelectedChat', () => {
+  test('keeps a newly selected non-default chat while the server list is stale', () => {
+    expect(
+      shouldKeepPendingSelectedChat({
+        selectedChat: 'chat-2',
+        availableChats: ['default'],
+        pendingUntilMs: 2_000,
+        nowMs: 1_000,
+      }),
+    ).toBe(true);
+  });
+
+  test('stops keeping the pending chat after the grace window expires', () => {
+    expect(
+      shouldKeepPendingSelectedChat({
+        selectedChat: 'chat-2',
+        availableChats: ['default'],
+        pendingUntilMs: 1_000,
+        nowMs: 2_000,
+      }),
+    ).toBe(false);
+  });
+
+  test('does not keep default or already-materialized chats', () => {
+    expect(
+      shouldKeepPendingSelectedChat({
+        selectedChat: 'default',
+        availableChats: ['default'],
+        pendingUntilMs: 2_000,
+        nowMs: 1_000,
+      }),
+    ).toBe(false);
+    expect(
+      shouldKeepPendingSelectedChat({
+        selectedChat: 'chat-2',
+        availableChats: ['default', 'chat-2'],
+        pendingUntilMs: 2_000,
+        nowMs: 1_000,
+      }),
+    ).toBe(false);
   });
 });

@@ -1,7 +1,10 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 
 import { loadRegistry, updateRegistry } from '../host/registry';
-import { dvmRepoSeed } from '../host/dvm';
+import { droneRootPath } from '../host/paths';
+import { dvmRepoExport, dvmRepoSeed } from '../host/dvm';
 import { normalizeDroneRuntime } from '../host/runtime';
 import { normalizeDisabledRepoKeys, normalizeEnvVarMap } from './environment-config';
 import {
@@ -14,7 +17,7 @@ import {
 import { resolveDroneContainerNameByIdentity, setDroneHubMetaByIdentity } from './drone-lifecycle-service';
 import { findDroneEntryByIdentity, normalizeDroneIdentity } from './drone-lifecycle-registry';
 import type { PendingPhase, PendingPromptProjection, PendingStartupPrompt } from './drone-pending-state';
-import { gitCurrentBranchOrSha, gitResolveRemoteBranchForCreate, gitTopLevel } from './repoOps';
+import { deleteHostRefBestEffort, gitCurrentBranchOrSha, gitResolveRemoteBranchForCreate, gitTopLevel, importBundleHeadToHostRef } from './repoOps';
 
 type PendingDronePatch = Partial<{
   phase: PendingPhase;
@@ -249,14 +252,55 @@ export function createDroneProvisioningController(deps: DroneProvisioningControl
         droneId: pendingDroneId,
         hub: { phase: 'seeding', message: 'Seeding repo…' },
       });
+      let repoRoot = '';
+      let importedRefName = '';
+      let exportedBundlePath = '';
       try {
-        const repoRoot = await gitTopLevel(repoPath);
+        repoRoot = await gitTopLevel(repoPath);
         const repoSeedSource = String((pending as any)?.repoSeedSource ?? '').trim().toLowerCase() === 'remote' ? 'remote' : 'host';
         const repoSeedRemoteBranch = String((pending as any)?.repoSeedRemoteBranch ?? '').trim();
-        const baseRef =
-          repoSeedSource === 'remote'
-            ? (await gitResolveRemoteBranchForCreate(repoRoot, repoSeedRemoteBranch)).remoteBranch
-            : await gitCurrentBranchOrSha(repoRoot);
+        const repoSeedFromDroneId = String((pending as any)?.repoSeedFromDroneId ?? '').trim();
+        let baseRef = '';
+        if (repoSeedFromDroneId) {
+          const sourceRegistry: any = await loadRegistry();
+          const sourceFound = findDroneEntryByIdentity(sourceRegistry, repoSeedFromDroneId);
+          const sourceEntry = sourceFound?.entry ?? null;
+          const sourceRuntime = normalizeDroneRuntime((sourceEntry as any)?.runtime);
+          const sourceContainerName = sourceEntry
+            ? String((sourceEntry as any)?.containerName ?? (sourceEntry as any)?.name ?? sourceFound?.key ?? '').trim()
+            : '';
+          const sourceRepoPathInContainer = String((sourceEntry as any)?.repo?.dest ?? '/work/repo').trim() || '/work/repo';
+          if (!sourceEntry) throw new Error(`repo seed source not found: ${repoSeedFromDroneId}`);
+          if (sourceRuntime !== 'container') throw new Error(`repo seed source must use container runtime: ${repoSeedFromDroneId}`);
+          if (!sourceContainerName) throw new Error(`repo seed source container is unavailable: ${repoSeedFromDroneId}`);
+
+          const safeSourceRefSeg =
+            String((sourceEntry as any)?.name ?? repoSeedFromDroneId)
+              .toLowerCase()
+              .replace(/[^a-z0-9_.-]+/g, '-')
+              .replace(/^-+|-+$/g, '') || 'drone';
+          const importRunId = `${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
+          importedRefName = `refs/drone/imports/create-child/${safeSourceRefSeg}/${importRunId}`;
+          const bundlesRoot = droneRootPath('repo-exports');
+          await fs.mkdir(bundlesRoot, { recursive: true });
+          const exported = await dvmRepoExport({
+            container: sourceContainerName,
+            repoPathInContainer: sourceRepoPathInContainer,
+            outDir: bundlesRoot,
+            format: 'bundle',
+          });
+          exportedBundlePath = path.resolve(exported.exportedPath);
+          baseRef = await importBundleHeadToHostRef({
+            repoRoot,
+            bundlePath: exportedBundlePath,
+            refName: importedRefName,
+          });
+        } else {
+          baseRef =
+            repoSeedSource === 'remote'
+              ? (await gitResolveRemoteBranchForCreate(repoRoot, repoSeedRemoteBranch)).remoteBranch
+              : await gitCurrentBranchOrSha(repoRoot);
+        }
         const repoSeedContainer = await resolveDroneContainerNameByIdentity(pendingDroneId);
         if (!repoSeedContainer) throw new Error('drone disappeared during repo seed');
 
@@ -293,6 +337,13 @@ export function createDroneProvisioningController(deps: DroneProvisioningControl
           hub: { phase: 'error', message: `Repo seed failed: ${msg}` },
         });
         return;
+      } finally {
+        if (repoRoot && importedRefName) {
+          await deleteHostRefBestEffort({ repoRoot, refName: importedRefName });
+        }
+        if (exportedBundlePath) {
+          await fs.rm(exportedBundlePath, { force: true }).catch(() => {});
+        }
       }
     }
 

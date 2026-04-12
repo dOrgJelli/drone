@@ -37,6 +37,7 @@ type UseDroneHubLifecycleEffectsArgs = {
   setDroneErrorModal: Setter<DroneErrorModalState | null>;
   openFleetDashboard: () => void;
   openDraftChatComposer: (opts?: { repoPath?: string | null; group?: string | null }) => void;
+  openChildDraftChatComposer: () => boolean;
   createDroneChatFromShortcut: () => Promise<boolean>;
   openKanbanBoard: () => void;
   openGroupMultiChat: (group: string) => void;
@@ -53,6 +54,7 @@ type UseDroneHubLifecycleEffectsArgs = {
   setDraftCreating: Setter<boolean>;
   setDraftCreateName: Setter<string>;
   setDraftCreateGroup: Setter<string>;
+  setDraftCreateParentDroneId: Setter<string | null>;
   setDraftNameSuggesting: Setter<boolean>;
   setDraftSuggestedName: Setter<string>;
   setDraftNameSuggestionError: Setter<string | null>;
@@ -109,6 +111,7 @@ export function useDroneHubLifecycleEffects({
   setDroneErrorModal,
   openFleetDashboard,
   openDraftChatComposer,
+  openChildDraftChatComposer,
   createDroneChatFromShortcut,
   openKanbanBoard,
   openGroupMultiChat,
@@ -125,6 +128,7 @@ export function useDroneHubLifecycleEffects({
   setDraftCreating,
   setDraftCreateName,
   setDraftCreateGroup,
+  setDraftCreateParentDroneId,
   setDraftNameSuggesting,
   setDraftSuggestedName,
   setDraftNameSuggestionError,
@@ -305,6 +309,7 @@ export function useDroneHubLifecycleEffects({
         }
         return true;
       },
+      createChildDraftDrone: () => openChildDraftChatComposer(),
       createDroneChat: () => {
         if (!currentDrone) return false;
         void (async () => {
@@ -448,6 +453,7 @@ export function useDroneHubLifecycleEffects({
     currentDrone,
     openFleetDashboard,
     openDraftChatComposer,
+    openChildDraftChatComposer,
     createDroneChatFromShortcut,
     openKanbanBoard,
     openGroupMultiChat,
@@ -502,6 +508,7 @@ export function useDroneHubLifecycleEffects({
     setDraftCreating(false);
     setDraftCreateName('');
     setDraftCreateGroup('');
+    setDraftCreateParentDroneId(null);
     setDraftNameSuggesting(false);
     setDraftSuggestedName('');
     setDraftNameSuggestionError(null);
@@ -511,6 +518,7 @@ export function useDroneHubLifecycleEffects({
     draftNameSuggestSeqRef,
     setDraftCreateError,
     setDraftCreateGroup,
+    setDraftCreateParentDroneId,
     setDraftCreateName,
     setDraftCreateOpen,
     setDraftCreating,

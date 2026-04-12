@@ -289,6 +289,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     draftCreateMode,
     draftCreateName,
     draftCreateGroup,
+    draftCreateParentDroneId,
     draftCreateError,
     draftCreating,
     draftAutoRenaming,
@@ -310,6 +311,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setDraftCreateMode,
     setDraftCreateName,
     setDraftCreateGroup,
+    setDraftCreateParentDroneId,
     setDraftCreateError,
     setDraftCreating,
     setDraftAutoRenaming,
@@ -949,6 +951,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
       setDraftCreateMode,
       setDraftCreateName,
       setDraftCreateGroup,
+      setDraftCreateParentDroneId,
       setDraftCreateError,
       setDraftCreating,
       setDraftAutoRenaming,
@@ -975,26 +978,45 @@ export function useDroneHubAppModel(): DroneHubAppModel {
       },
     });
 
-  const openKanbanBoard = React.useCallback(() => {
-    setAppView('workspace');
-    setCreateOpen(false);
-    setCreateError(null);
+  const closeDraftCreateSurface = React.useCallback(() => {
     setDraftChat(null);
     setDraftCreateOpen(false);
     setDraftCreateError(null);
-    setFleetDashboardOpen(false);
-    setPlaybookRunsOpen(false);
-    setSelectedGroupMultiChat(null);
+  }, [
+    setDraftChat,
+    setDraftCreateError,
+    setDraftCreateOpen,
+  ]);
+  const resetSidebarDroneSelection = React.useCallback(() => {
     setSelectedDrone(null);
     setSelectedDroneIds([]);
     selectionAnchorRef.current = null;
     preferredSelectedDroneRef.current = null;
     preferredSelectedDroneHoldUntilRef.current = 0;
     setSelectedChat('default');
-    setKanbanBoardOpen(true);
   }, [
     preferredSelectedDroneHoldUntilRef,
     preferredSelectedDroneRef,
+    selectionAnchorRef,
+    setSelectedChat,
+    setSelectedDrone,
+    setSelectedDroneIds,
+  ]);
+  const openKanbanBoard = React.useCallback(() => {
+    setAppView('workspace');
+    setCreateOpen(false);
+    setCreateError(null);
+    closeDraftCreateSurface();
+    setFleetDashboardOpen(false);
+    setPlaybookRunsOpen(false);
+    setSelectedGroupMultiChat(null);
+    resetSidebarDroneSelection();
+    setKanbanBoardOpen(true);
+  }, [
+    closeDraftCreateSurface,
+    preferredSelectedDroneHoldUntilRef,
+    preferredSelectedDroneRef,
+    resetSidebarDroneSelection,
     selectionAnchorRef,
     setAppView,
     setCreateError,
@@ -1015,21 +1037,17 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setAppView('workspace');
     setCreateOpen(false);
     setCreateError(null);
-    setDraftChat(null);
-    setDraftCreateOpen(false);
-    setDraftCreateError(null);
+    closeDraftCreateSurface();
     setFleetDashboardOpen(true);
+    setPlaybookRunsOpen(false);
     setSelectedGroupMultiChat(null);
-    setSelectedDrone(null);
-    setSelectedDroneIds([]);
-    selectionAnchorRef.current = null;
-    preferredSelectedDroneRef.current = null;
-    preferredSelectedDroneHoldUntilRef.current = 0;
-    setSelectedChat('default');
+    resetSidebarDroneSelection();
     setKanbanBoardOpen(false);
   }, [
+    closeDraftCreateSurface,
     preferredSelectedDroneHoldUntilRef,
     preferredSelectedDroneRef,
+    resetSidebarDroneSelection,
     selectionAnchorRef,
     setAppView,
     setCreateError,
@@ -1039,6 +1057,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setDraftCreateOpen,
     setFleetDashboardOpen,
     setKanbanBoardOpen,
+    setPlaybookRunsOpen,
     setSelectedChat,
     setSelectedDrone,
     setSelectedDroneIds,
@@ -1227,6 +1246,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
       draftCreateMode,
       draftCreateName,
       draftCreateGroup,
+      draftCreateParentDroneId,
       draftCreateRepoPath: chatHeaderRepoPath,
       startupSeedMissingGraceMs: STARTUP_SEED_MISSING_GRACE_MS,
       suggestCloneName,
@@ -1255,6 +1275,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
       setDraftCreateError,
       setDraftCreateName,
       setDraftCreateGroup,
+      setDraftCreateParentDroneId,
       setDraftSuggestedName,
       setDraftNameSuggesting,
       setDraftNameSuggestionError,
@@ -1729,19 +1750,20 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     [currentDrone],
   );
   const currentSelectionSpawnModel = currentAgent.kind === 'builtin' ? String(currentModel ?? '') : '';
-  const openCreateModal = React.useCallback(() => {
-    openCreateModalBase();
-    if (!selectedDrone || !currentDrone) return;
+  const resolveCurrentSelectionDraftContext = React.useCallback(() => {
+    if (!selectedDrone || !currentDrone) return null;
     const nextRepoPath = normalizeCreateRepoPath(currentSelectionCreateSeed.repoPath);
     setSpawnContextRepoPath(nextRepoPath);
-    setCreateRepoPath(nextRepoPath);
-    setCreateGroup(currentSelectionCreateSeed.group);
     if (effectiveChatInfo) {
       updateSpawnContextForRepo(nextRepoPath, {
         spawnAgentKey: currentAgentKey,
         spawnModel: currentSelectionSpawnModel,
       });
     }
+    return {
+      repoPath: nextRepoPath,
+      group: currentSelectionCreateSeed.group,
+    };
   }, [
     currentAgentKey,
     currentDrone,
@@ -1750,45 +1772,62 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     currentSelectionSpawnModel,
     effectiveChatInfo,
     normalizeCreateRepoPath,
-    openCreateModalBase,
     selectedDrone,
-    setCreateGroup,
-    setCreateRepoPath,
     setSpawnContextRepoPath,
     updateSpawnContextForRepo,
   ]);
+  const openCreateModal = React.useCallback(() => {
+    openCreateModalBase();
+    const selectionDraftContext = resolveCurrentSelectionDraftContext();
+    if (!selectionDraftContext) return;
+    setCreateRepoPath(selectionDraftContext.repoPath);
+    setCreateGroup(selectionDraftContext.group);
+  }, [
+    openCreateModalBase,
+    resolveCurrentSelectionDraftContext,
+    setCreateGroup,
+    setCreateRepoPath,
+  ]);
   const openDraftChatComposer = React.useCallback(
     (opts?: { repoPath?: string | null; group?: string | null }) => {
-      if (!shouldInheritNewDroneContextFromCurrentSelection(opts) || !selectedDrone || !currentDrone) {
+      if (!shouldInheritNewDroneContextFromCurrentSelection(opts)) {
         openDraftChatComposerBase(opts);
         return;
       }
-      const nextRepoPath = normalizeCreateRepoPath(currentSelectionCreateSeed.repoPath);
-      setSpawnContextRepoPath(nextRepoPath);
-      if (effectiveChatInfo) {
-        updateSpawnContextForRepo(nextRepoPath, {
-          spawnAgentKey: currentAgentKey,
-          spawnModel: currentSelectionSpawnModel,
-        });
+      const selectionDraftContext = resolveCurrentSelectionDraftContext();
+      if (!selectionDraftContext) {
+        openDraftChatComposerBase(opts);
+        return;
       }
       openDraftChatComposerBase({
-        repoPath: nextRepoPath,
-        group: currentSelectionCreateSeed.group,
+        repoPath: selectionDraftContext.repoPath,
+        group: selectionDraftContext.group,
       });
     },
     [
-      currentAgentKey,
-      currentDrone,
-      currentSelectionCreateSeed.group,
-      currentSelectionCreateSeed.repoPath,
-      currentSelectionSpawnModel,
-      effectiveChatInfo,
-      normalizeCreateRepoPath,
       openDraftChatComposerBase,
-      selectedDrone,
-      setSpawnContextRepoPath,
-      updateSpawnContextForRepo,
+      resolveCurrentSelectionDraftContext,
     ],
+  );
+  const openSelectionScopedDraftChatComposer = React.useCallback(
+    (parentDroneIdRaw?: string | null): boolean => {
+      const selectionDraftContext = resolveCurrentSelectionDraftContext();
+      if (!selectionDraftContext) return false;
+      openDraftChatComposerBase({
+        repoPath: selectionDraftContext.repoPath,
+        group: selectionDraftContext.group,
+        parentDroneId: String(parentDroneIdRaw ?? '').trim() || undefined,
+      });
+      return true;
+    },
+    [
+      openDraftChatComposerBase,
+      resolveCurrentSelectionDraftContext,
+    ],
+  );
+  const openChildDraftChatComposer = React.useCallback(
+    (): boolean => openSelectionScopedDraftChatComposer(currentDrone?.id),
+    [currentDrone?.id, openSelectionScopedDraftChatComposer],
   );
   const spawnDroneHubTaskFromAgentMessage = React.useCallback(
     async (opts: {
@@ -2544,6 +2583,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setDroneErrorModal,
     openFleetDashboard,
     openDraftChatComposer,
+    openChildDraftChatComposer,
     createDroneChatFromShortcut,
     openKanbanBoard,
     openGroupMultiChat,
@@ -2560,6 +2600,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setDraftCreating,
     setDraftCreateName,
     setDraftCreateGroup,
+    setDraftCreateParentDroneId,
     setDraftNameSuggesting,
     setDraftSuggestedName,
     setDraftNameSuggestionError,
@@ -3216,12 +3257,14 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setCustomAgentModalOpen,
     draftCreateName,
     draftCreateGroup,
+    draftCreateParentDroneId,
     draftCreateError,
     queuedPromptsByDroneChat,
     setDraftChat,
     setDraftCreateOpen,
     setDraftCreateName,
     setDraftCreateGroup,
+    setDraftCreateParentDroneId,
     setDraftAutoRenaming,
     startDraftPrompt,
     startDraftAutomation,

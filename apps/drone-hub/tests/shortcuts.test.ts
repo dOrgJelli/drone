@@ -1,7 +1,7 @@
 import { cloneDefaultShortcutBindings } from '../src/droneHub/app/shortcuts';
 
 describe('shortcut defaults', () => {
-  test('uses Tab for create draft drone, Q for create chat, Z for unread, Enter for chat focus, D for the side panel, and G for hovered multi-chat', () => {
+  test('uses Tab for create draft drone, Q for child drone, W for create chat, Z for unread, Enter for chat focus, D for the side panel, and G for hovered multi-chat', () => {
     const defaults = cloneDefaultShortcutBindings();
     expect(defaults.createDraftDrone).toEqual({
       key: 'tab',
@@ -11,8 +11,16 @@ describe('shortcut defaults', () => {
       alt: false,
       shift: false,
     });
-    expect(defaults.createDroneChat).toEqual({
+    expect(defaults.createChildDraftDrone).toEqual({
       key: 'q',
+      mod: false,
+      ctrl: false,
+      meta: false,
+      alt: false,
+      shift: false,
+    });
+    expect(defaults.createDroneChat).toEqual({
+      key: 'w',
       mod: false,
       ctrl: false,
       meta: false,
