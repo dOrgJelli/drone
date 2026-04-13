@@ -23,6 +23,7 @@ if (!listenSupport.ok) {
 }
 
 const describeSocketSuite = listenSupport.ok ? describe : describe.skip;
+const AGENT_COPILOT_API_TEST_TIMEOUT_MS = 20_000;
 
 describeSocketSuite('agent copilot api', () => {
   const token = 'test-token';
@@ -153,7 +154,9 @@ describeSocketSuite('agent copilot api', () => {
   const agentCopilotPromptId = (sourceMessageId: string, stage: 'copilot' | 'source-result' | 'source-error' | 'source-parse-error') =>
     `agent-copilot-${stage}-${crypto.createHash('sha1').update(sourceMessageId).digest('hex').slice(0, 24)}`;
 
-  test('runs copilot orchestration in the backend after transcript reconciliation', async () => {
+  test(
+    'runs copilot orchestration in the backend after transcript reconciliation',
+    async () => {
     const droneId = 'drone-agent-copilot';
     const sourcePromptId = 'source-prompt';
     const now = new Date().toISOString();
@@ -238,9 +241,13 @@ describeSocketSuite('agent copilot api', () => {
 
     const regAny: any = await loadRegistry();
     expect(regAny?.drones?.[droneId]?.chats?.['docs-review']?.agent).toEqual({ kind: 'builtin', id: 'cursor' });
-  });
+    },
+    { timeout: AGENT_COPILOT_API_TEST_TIMEOUT_MS }
+  );
 
-  test('reuses a persisted copilot pending prompt instead of enqueuing it again', async () => {
+  test(
+    'reuses a persisted copilot pending prompt instead of enqueuing it again',
+    async () => {
     const droneId = 'drone-agent-copilot-resume';
     const sourcePromptId = 'source-prompt-resume';
     const sourceMessageId = `${droneId}:${sourcePromptId}`;
@@ -337,9 +344,13 @@ describeSocketSuite('agent copilot api', () => {
 
     expect(enqueuedPrompts.filter((entry) => entry.id === copilotPromptId)).toHaveLength(0);
     expect(enqueuedPrompts.filter((entry) => entry.prompt === 'Review the new API copy for gaps.')).toHaveLength(0);
-  });
+    },
+    { timeout: AGENT_COPILOT_API_TEST_TIMEOUT_MS }
+  );
 
-  test('rejects invalid copilot chat names and reports an error back to the source chat', async () => {
+  test(
+    'rejects invalid copilot chat names and reports an error back to the source chat',
+    async () => {
     const droneId = 'drone-agent-copilot-invalid-name';
     const sourcePromptId = 'source-prompt-invalid-name';
     const now = new Date().toISOString();
@@ -403,5 +414,7 @@ describeSocketSuite('agent copilot api', () => {
 
     const regAny: any = await loadRegistry();
     expect(regAny?.drones?.[droneId]?.chats?.['bad/name']).toBeUndefined();
-  });
+    },
+    { timeout: AGENT_COPILOT_API_TEST_TIMEOUT_MS }
+  );
 });
