@@ -1,3 +1,5 @@
+import { DEFAULT_GEMINI_FLASH_MODEL_ID } from './llm-models';
+
 export type LlmProviderId = 'openai' | 'gemini';
 
 type LlmRuntime = {
@@ -16,7 +18,7 @@ function providerDisplayName(provider: LlmProviderId): string {
 }
 
 function defaultTldrModelId(provider: LlmProviderId): string {
-  return provider === 'openai' ? 'gpt-4o' : 'gemini-2.0-flash';
+  return provider === 'openai' ? 'gpt-4o' : DEFAULT_GEMINI_FLASH_MODEL_ID;
 }
 
 async function resolveLlmRuntime(opts?: { provider?: LlmProviderId; apiKey?: string }): Promise<LlmRuntime> {
@@ -138,4 +140,3 @@ export async function tldrFromAgentMessage(
   if (!tldr) throw new Error('LLM returned an empty TLDR');
   return tldr;
 }
-

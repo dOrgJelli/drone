@@ -70,6 +70,26 @@ const fixtures: EvalFixture[] = [
     ].join('\n'),
   },
   {
+    label: 'synopsis logline update copy update',
+    expected: 'user-turn',
+    text: 'Updated the user user facing copy from synopsis to logline.',
+  },
+  {
+    label: 'rename synopsis to logline remaining visible copy',
+    expected: 'user-turn',
+    text: 'Continued to rename into the remaining user visible back-end driven copy.',
+  },
+  {
+    label: 'rename synopsis to logline incremental step',
+    expected: 'continue',
+    text: "I'm taking the first incremental step on the core canvas model.",
+  },
+  {
+    label: 'credit usage visibility aligned workspace',
+    expected: 'user-turn',
+    text: "I'm aligned, you want the existing workspace.",
+  },
+  {
     label: 'partial implementation with next edits',
     expected: 'continue',
     text: [

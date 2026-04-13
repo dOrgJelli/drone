@@ -1,3 +1,5 @@
+import { DEFAULT_GEMINI_FLASH_MODEL_ID } from './llm-models';
+
 export type JobSpec = {
   name: string;
   title: string;
@@ -27,15 +29,15 @@ function providerDisplayName(provider: LlmProviderId): string {
 }
 
 function defaultJobsModelId(provider: LlmProviderId): string {
-  return provider === 'openai' ? 'gpt-4o' : 'gemini-2.0-flash';
+  return provider === 'openai' ? 'gpt-4o' : DEFAULT_GEMINI_FLASH_MODEL_ID;
 }
 
 function defaultDroneNameModelId(provider: LlmProviderId): string {
-  return provider === 'openai' ? 'gpt-4o' : 'gemini-2.0-flash';
+  return provider === 'openai' ? 'gpt-4o' : DEFAULT_GEMINI_FLASH_MODEL_ID;
 }
 
 function defaultTaskTitleModelId(provider: LlmProviderId): string {
-  return provider === 'openai' ? 'gpt-4o-mini' : 'gemini-2.0-flash';
+  return provider === 'openai' ? 'gpt-4o-mini' : DEFAULT_GEMINI_FLASH_MODEL_ID;
 }
 
 async function resolveLlmRuntime(opts?: { provider?: LlmProviderId; apiKey?: string }): Promise<LlmRuntime> {

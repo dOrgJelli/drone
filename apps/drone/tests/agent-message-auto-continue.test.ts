@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  classifyAgentMessageAutoContinue,
   classifyAgentMessageAutoContinueBypass,
 } from '../src/hub/agent-message-auto-continue';
 
@@ -42,6 +43,63 @@ describe('agent message auto-continue classifier bypass', () => {
       bucket: 'user-turn',
       reason: 'Message contains agent copilot JSON; auto-continue is disabled for structured copilot handoffs.',
       source: 'agent-copilot-json',
+    });
+  });
+});
+
+describe('agent message auto-continue heuristics', () => {
+  test('classifies the seeded transcript-style examples', async () => {
+    const fixtures = [
+      {
+        message: 'Updated the user user facing copy from synopsis to logline.',
+        expected: {
+          bucket: 'user-turn',
+          reason: 'Short past-tense completion update with no explicit next-step language; keep control with the user.',
+          source: 'heuristic',
+        },
+      },
+      {
+        message: 'Continued to rename into the remaining user visible back-end driven copy.',
+        expected: {
+          bucket: 'user-turn',
+          reason: 'Short past-tense completion update with no explicit next-step language; keep control with the user.',
+          source: 'heuristic',
+        },
+      },
+      {
+        message: "I'm taking the first incremental step on the core canvas model.",
+        expected: {
+          bucket: 'continue',
+          reason: 'Message explicitly says the agent is still working or is taking the next step now.',
+          source: 'heuristic',
+        },
+      },
+      {
+        message: "I'm aligned, you want the existing workspace.",
+        expected: {
+          bucket: 'user-turn',
+          reason: 'Message acknowledges or restates the user request instead of indicating active continued execution.',
+          source: 'heuristic',
+        },
+      },
+    ] as const;
+
+    for (const fixture of fixtures) {
+      await expect(classifyAgentMessageAutoContinue(fixture.message)).resolves.toEqual(fixture.expected);
+    }
+  });
+
+  test('continues when a completion summary also says more work is still in progress', async () => {
+    const message = [
+      'Updated the user facing copy from synopsis to logline across the web UI.',
+      '',
+      "Next I'm wiring the remaining canvas labels and verification pass.",
+    ].join('\n');
+
+    await expect(classifyAgentMessageAutoContinue(message)).resolves.toEqual({
+      bucket: 'continue',
+      reason: 'Message explicitly says the agent is still working or is taking the next step now.',
+      source: 'heuristic',
     });
   });
 });

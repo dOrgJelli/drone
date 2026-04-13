@@ -98,7 +98,7 @@ type DroneRegistryChatEntry = {
     agentMessageAutoContinue?: {
       status?: 'pending' | 'classified' | 'failed';
       bucket?: 'user-turn' | 'continue';
-      source?: 'llm' | 'agent-copilot-json';
+      source?: 'llm' | 'agent-copilot-json' | 'heuristic';
       classifiedAt?: string;
       continuedAt?: string;
       error?: string;

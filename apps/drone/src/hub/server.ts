@@ -2598,7 +2598,7 @@ type TranscriptTurn = {
   agentMessageAutoContinue?: {
     status?: 'pending' | 'classified' | 'failed';
     bucket?: 'user-turn' | 'continue';
-    source?: 'llm' | 'agent-copilot-json';
+    source?: 'llm' | 'agent-copilot-json' | 'heuristic';
     classifiedAt?: string;
     continuedAt?: string;
     error?: string;
@@ -5478,7 +5478,9 @@ function normalizeAgentMessageAutoContinueTurnState(
   return {
     status,
     ...(bucketRaw === 'user-turn' || bucketRaw === 'continue' ? { bucket: bucketRaw } : {}),
-    ...(sourceRaw === 'llm' || sourceRaw === 'agent-copilot-json' ? { source: sourceRaw } : {}),
+    ...(sourceRaw === 'llm' || sourceRaw === 'agent-copilot-json' || sourceRaw === 'heuristic'
+      ? { source: sourceRaw }
+      : {}),
     ...(classifiedAt ? { classifiedAt } : {}),
     ...(continuedAt ? { continuedAt } : {}),
     ...(error ? { error } : {}),

@@ -53,6 +53,7 @@ const IMAGE_EXTENSIONS = new Set([
 function autoContinueSourceLabel(source: AgentMessageAutoContinueState['source'] | undefined): string {
   if (source === 'llm') return 'LLM';
   if (source === 'agent-copilot-json') return 'agent copilot JSON';
+  if (source === 'heuristic') return 'heuristic';
   return 'unknown source';
 }
 

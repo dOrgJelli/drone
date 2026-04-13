@@ -1,4 +1,5 @@
 import type { LlmProviderId } from './hub-settings';
+import { DEFAULT_GEMINI_FLASH_MODEL_ID } from './llm-models';
 
 type LlmRuntime = {
   provider: LlmProviderId;
@@ -31,7 +32,7 @@ function providerDisplayName(provider: LlmProviderId): string {
 }
 
 function defaultModelId(provider: LlmProviderId): string {
-  return provider === 'gemini' ? 'gemini-2.0-flash' : 'gpt-4o-mini';
+  return provider === 'gemini' ? DEFAULT_GEMINI_FLASH_MODEL_ID : 'gpt-4o-mini';
 }
 
 async function resolveLlmRuntime(opts?: { provider?: LlmProviderId; apiKey?: string }): Promise<LlmRuntime> {
