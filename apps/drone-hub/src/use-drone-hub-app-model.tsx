@@ -48,6 +48,7 @@ import { removeDroneIdsFromSidebarNodeOrderByParent } from './droneHub/app/sideb
 import { useDeleteActionSettings } from './droneHub/app/use-delete-action-settings';
 import { useFilesystemSettings } from './droneHub/app/use-filesystem-settings';
 import { useAgentMessageAutoContinueSettings } from './droneHub/app/use-agent-message-auto-continue-settings';
+import { useAgentSuggestionSettings } from './droneHub/app/use-agent-suggestion-settings';
 import { useGithubSettings } from './droneHub/app/use-github-settings';
 import { useAgentsSettings } from './droneHub/app/use-agents-settings';
 import { useProfileSettings } from './droneHub/app/use-profile-settings';
@@ -71,6 +72,7 @@ import { useDroneHubLifecycleEffects } from './droneHub/app/use-drone-hub-lifecy
 import { useDroneHubRegistryData } from './droneHub/app/use-drone-hub-registry-data';
 import { useDroneHubToolbarMenuState } from './droneHub/app/use-drone-hub-toolbar-menu-state';
 import { useTranscriptTldrState } from './droneHub/app/use-transcript-tldr-state';
+import { useAgentSuggestionState } from './droneHub/app/use-agent-suggestion-state';
 import { useWorkspaceNavigationActions } from './droneHub/app/use-workspace-navigation-actions';
 import { useWorkspaceActions } from './droneHub/app/use-workspace-actions';
 import {
@@ -586,6 +588,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
   const agentsSettingsState = useAgentsSettings(requestJson);
   const filesystemSettingsState = useFilesystemSettings(requestJson);
   const agentMessageAutoContinueSettingsState = useAgentMessageAutoContinueSettings(requestJson);
+  const agentSuggestionSettingsState = useAgentSuggestionSettings(requestJson);
   const syncSetsState = useSyncSets(requestJson);
   const profileSettingsState = useProfileSettings(requestJson);
   const setupStatusState = useSetupStatus(requestJson);
@@ -653,6 +656,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setChatAgent,
     setChatModel,
     setAgentMessageAutoContinueEnabled,
+    setAgentSuggestionEnabled,
     handleSetAgentFailure,
   } = useChatConfigState({
     selectedDrone,
@@ -674,6 +678,19 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     transcripts,
     chatUiModeRef,
     requestJson,
+  });
+  const {
+    latestAgentSuggestionTarget,
+    latestAgentSuggestionState,
+    requestAgentSuggestionForMessage,
+  } = useAgentSuggestionState({
+    transcripts,
+    chatUiModeRef,
+    requestJson,
+    transcriptMessageId,
+    enabled: chatInfo?.agentSuggestionEnabled === true,
+    currentPolicyFingerprint:
+      agentSuggestionSettingsState.agentSuggestionSettings?.agentSuggestion.policyFingerprint ?? '',
   });
   const prevChatItemsLenRef = React.useRef(0);
 
@@ -1738,6 +1755,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
           agent: startupSeedForCurrentDrone.agent,
           model: startupSeedForCurrentDrone.model ?? null,
           agentMessageAutoContinueEnabled: false,
+          agentSuggestionEnabled: false,
           sessionName: `drone-hub-chat-${startupSeedForCurrentDrone.chatName || selectedChat || 'default'}`,
           createdAt: startupSeedForCurrentDrone.at || new Date().toISOString(),
         }
@@ -3219,6 +3237,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     deleteActionSettingsState,
     filesystemSettingsState,
     agentMessageAutoContinueSettingsState,
+    agentSuggestionSettingsState,
     syncSetsState,
     profileSettingsState,
     setupStatusState,
@@ -3335,6 +3354,8 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setChatModel,
     agentMessageAutoContinueEnabled: effectiveChatInfo?.agentMessageAutoContinueEnabled === true,
     setAgentMessageAutoContinueEnabled,
+    agentSuggestionEnabled: effectiveChatInfo?.agentSuggestionEnabled === true,
+    setAgentSuggestionEnabled,
     setChatInfoError,
     modelMenuEntries,
     modelDisabled,
@@ -3383,6 +3404,9 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     showTldrByMessageId,
     toggleTldrForAgentMessage,
     handleAgentMessageHover,
+    latestAgentSuggestionTarget,
+    latestAgentSuggestionState,
+    requestAgentSuggestionForMessage,
     chatEndRef,
     outputScrollRef,
     updatePinned,

@@ -80,6 +80,8 @@ type DroneRegistryChatEntry = {
   agent?: DroneRegistryChatAgentConfig;
   agentMessageAutoContinueEnabled?: boolean;
   agentMessageAutoContinueEnabledAt?: string;
+  agentSuggestionEnabled?: boolean;
+  agentSuggestionEnabledAt?: string;
   codexThreadId?: string;
   claudeSessionId?: string;
   openCodeSessionId?: string;
@@ -100,6 +102,12 @@ type DroneRegistryChatEntry = {
       classifiedAt?: string;
       continuedAt?: string;
       error?: string;
+      updatedAt?: string;
+    };
+    agentSuggestion?: {
+      usedDirectAt?: string;
+      suggestionHash?: string;
+      policyFingerprint?: string;
       updatedAt?: string;
     };
   }>;
@@ -150,6 +158,11 @@ type DroneRegistryV1 = {
     };
     agentMessageAutoContinue?: {
       prompt?: string;
+      enabledByDefault?: boolean;
+      updatedAt?: string;
+    };
+    agentSuggestion?: {
+      policyMarkdown?: string;
       enabledByDefault?: boolean;
       updatedAt?: string;
     };

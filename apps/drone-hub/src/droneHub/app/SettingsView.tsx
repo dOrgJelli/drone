@@ -15,6 +15,7 @@ import { useDroneHubUiStore } from './use-drone-hub-ui-store';
 import type { UseDeleteActionSettingsResult } from './use-delete-action-settings';
 import type { UseAgentsSettingsResult } from './use-agents-settings';
 import type { UseAgentMessageAutoContinueSettingsResult } from './use-agent-message-auto-continue-settings';
+import type { UseAgentSuggestionSettingsResult } from './use-agent-suggestion-settings';
 import type { UseFilesystemSettingsResult } from './use-filesystem-settings';
 import type { UseGithubSettingsResult } from './use-github-settings';
 import type { UseHubLogsResult } from './use-hub-logs';
@@ -27,6 +28,7 @@ type SettingsViewProps = {
   github: UseGithubSettingsResult;
   llm: UseLlmSettingsResult;
   agentMessageAutoContinue: UseAgentMessageAutoContinueSettingsResult;
+  agentSuggestion: UseAgentSuggestionSettingsResult;
   agents: UseAgentsSettingsResult;
   skillLibrary: UseSkillLibraryResult;
   deleteAction: UseDeleteActionSettingsResult;
@@ -57,6 +59,7 @@ export function SettingsView({
   github,
   llm,
   agentMessageAutoContinue,
+  agentSuggestion,
   agents,
   skillLibrary,
   deleteAction,
@@ -83,6 +86,7 @@ export function SettingsView({
     github.githubSettingsLoading ||
     llm.llmSettingsLoading ||
     agentMessageAutoContinue.agentMessageAutoContinueSettingsLoading ||
+    agentSuggestion.agentSuggestionSettingsLoading ||
     deleteAction.deleteSettingsLoading ||
     filesystem.filesystemSettingsLoading ||
     syncSets.syncSetsLoading ||
@@ -95,6 +99,7 @@ export function SettingsView({
     llm.clearingGeminiSettings ||
     llm.savingLlmProvider ||
     agentMessageAutoContinue.savingAgentMessageAutoContinueSettings ||
+    agentSuggestion.savingAgentSuggestionSettings ||
     agents.agentsSettingsLoading ||
     agents.savingAgentsSettings ||
     skillLibrary.skillsLoading ||
@@ -141,6 +146,7 @@ export function SettingsView({
     }
     void llm.loadLlmSettings();
     void agentMessageAutoContinue.loadAgentMessageAutoContinueSettings();
+    void agentSuggestion.loadAgentSuggestionSettings();
     void github.loadGithubSettings();
     void deleteAction.loadDeleteSettings();
     void filesystem.loadFilesystemSettings();
@@ -152,7 +158,7 @@ export function SettingsView({
     void hubLogsState.loadHubLogs();
     void skillLibrary.loadSkills();
     void skillLibrary.loadSkillSources();
-  }, [agentMessageAutoContinue, agents, agentsDraftDirty, deleteAction, filesystem, github, hubLogsState, llm, profile, skillLibrary, syncSets]);
+  }, [agentMessageAutoContinue, agentSuggestion, agents, agentsDraftDirty, deleteAction, filesystem, github, hubLogsState, llm, profile, skillLibrary, syncSets]);
 
   const renderActiveTab = () => {
     if (activeTab === 'general') {
@@ -162,6 +168,7 @@ export function SettingsView({
           llm={llm}
           filesystem={filesystem}
           agentMessageAutoContinue={agentMessageAutoContinue}
+          agentSuggestion={agentSuggestion}
           transcriptInlineImages={transcriptInlineImages}
           setTranscriptInlineImages={setTranscriptInlineImages}
           onReplayOnboarding={onReplayOnboarding}

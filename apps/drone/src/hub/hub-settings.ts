@@ -118,6 +118,15 @@ export type EffectiveAgentMessageAutoContinueSettings = {
   enabledByDefaultSource: AgentMessageAutoContinueSettingsSource;
   updatedAt: string | null;
 };
+export type AgentSuggestionSettingsSource = 'settings' | 'default';
+export type EffectiveAgentSuggestionSettings = {
+  policyMarkdown: string;
+  policyMarkdownSource: AgentSuggestionSettingsSource;
+  enabledByDefault: boolean;
+  enabledByDefaultSource: AgentSuggestionSettingsSource;
+  updatedAt: string | null;
+  policyFingerprint: string;
+};
 export type { KanbanBoardTaskType, KanbanBoardCard, KanbanBoardLane, KanbanBoardSettings };
 export type TaskPlaybookButtonSettings = Array<{
   id: string;
@@ -165,6 +174,41 @@ export const FILESYSTEM_UPLOAD_MAX_BYTES_MAX = 8 * 1024 * 1024 * 1024;
 export const FILESYSTEM_UPLOAD_MAX_BYTES_DEFAULT = 2 * 1024 * 1024 * 1024;
 export const AGENT_MESSAGE_AUTO_CONTINUE_PROMPT_DEFAULT = 'continue';
 export const AGENT_MESSAGE_AUTO_CONTINUE_PROMPT_MAX_CHARS = 200;
+export const AGENT_SUGGESTION_ENABLED_BY_DEFAULT = false;
+export const AGENT_SUGGESTION_POLICY_MAX_CHARS = 20_000;
+export const AGENT_SUGGESTION_POLICY_DEFAULT = `# Agent Suggestion Policy
+
+Suggest the most likely next user reply in this developer chat.
+
+## Core Style
+- Prefer short, direct replies.
+- Default to moving the work forward.
+- Prefer concrete code-backed follow-ups over abstract discussion.
+- Prefer simple solutions over extra abstraction.
+- Match existing naming and UX patterns unless there is a clear reason not to.
+
+## Likely Reply Types
+- Approve the next step when the agent's recommendation looks sound.
+- Ask for explanation when naming, architecture, or behavior feels unclear.
+- Push back when the solution seems overcomplicated or introduces hidden behavior.
+- Ask for review when implementation likely needs a regression pass.
+- Ask for commit only when the work sounds stable enough to checkpoint.
+
+## Tone
+- Be pragmatic and concise.
+- It is fine to use terse messages like:
+  - \`Ok, do it\`
+  - \`Continue\`
+  - \`review\`
+  - \`commit\`
+- When asking for explanation, keep it in simple technical terms.
+
+## Preferences
+- Surface regressions, UX inconsistency, naming drift, unnecessary complexity, and hidden behavior.
+- Defer non-essential work rather than expanding scope.
+- If the agent is clearly still mid-task, the likely response is usually a short continuation.
+- If the agent introduced a questionable abstraction or naming choice, the likely response is usually a challenge or clarification question.
+`;
 const UI_AUTOMATION_RUNS_MIN = 1;
 const UI_AUTOMATION_RUNS_MAX = 20;
 const UI_AUTOMATION_RUNS_DEFAULT = 5;
@@ -244,6 +288,19 @@ export function normalizeAgentMessageAutoContinuePrompt(raw: unknown): string {
   return text.length > AGENT_MESSAGE_AUTO_CONTINUE_PROMPT_MAX_CHARS
     ? text.slice(0, AGENT_MESSAGE_AUTO_CONTINUE_PROMPT_MAX_CHARS).trim()
     : text;
+}
+
+export function normalizeAgentSuggestionPolicyMarkdown(raw: unknown): string {
+  const text = typeof raw === 'string' ? raw.trim() : '';
+  if (!text) return '';
+  return text.length > AGENT_SUGGESTION_POLICY_MAX_CHARS
+    ? text.slice(0, AGENT_SUGGESTION_POLICY_MAX_CHARS).trim()
+    : text;
+}
+
+export function agentSuggestionPolicyFingerprint(policyMarkdownRaw: unknown): string {
+  const policyMarkdown = normalizeAgentSuggestionPolicyMarkdown(policyMarkdownRaw) || AGENT_SUGGESTION_POLICY_DEFAULT;
+  return crypto.createHash('sha256').update(policyMarkdown, 'utf8').digest('hex').slice(0, 12);
 }
 
 function normalizeApiKey(raw: unknown): string {
@@ -786,6 +843,95 @@ export async function resolveAgentMessageAutoContinueSettingsResponse(): Promise
       defaultPrompt: AGENT_MESSAGE_AUTO_CONTINUE_PROMPT_DEFAULT,
       defaultEnabledByDefault: false,
       maxPromptChars: AGENT_MESSAGE_AUTO_CONTINUE_PROMPT_MAX_CHARS,
+    },
+  };
+}
+
+async function getStoredAgentSuggestionSettings(): Promise<{
+  policyMarkdown: string | null;
+  enabledByDefault: boolean | null;
+  updatedAt: string | null;
+}> {
+  const reg = await loadRegistry();
+  const raw = reg.settings?.agentSuggestion;
+  const policyMarkdown = normalizeAgentSuggestionPolicyMarkdown(raw?.policyMarkdown);
+  const updatedAtRaw = raw?.updatedAt;
+  const enabledByDefault = raw?.enabledByDefault === true ? true : raw?.enabledByDefault === false ? false : null;
+  return {
+    policyMarkdown: policyMarkdown || null,
+    enabledByDefault,
+    updatedAt: typeof updatedAtRaw === 'string' && updatedAtRaw.trim() ? updatedAtRaw.trim() : null,
+  };
+}
+
+export async function upsertStoredAgentSuggestionSettings(opts: {
+  policyMarkdown?: string | null;
+  enabledByDefault?: boolean | null;
+}): Promise<void> {
+  const nextPolicyMarkdown =
+    opts.policyMarkdown === undefined ? undefined : normalizeAgentSuggestionPolicyMarkdown(opts.policyMarkdown);
+  const enabledByDefault = opts.enabledByDefault === true;
+  const updatedAt = new Date().toISOString();
+  await updateRegistry((reg) => {
+    reg.settings ??= {};
+    const current = reg.settings?.agentSuggestion;
+    const policyMarkdown =
+      nextPolicyMarkdown === undefined ? normalizeAgentSuggestionPolicyMarkdown(current?.policyMarkdown) : nextPolicyMarkdown;
+    const effectiveEnabledByDefault =
+      opts.enabledByDefault === undefined ? current?.enabledByDefault === true : enabledByDefault;
+    if ((!policyMarkdown || policyMarkdown === AGENT_SUGGESTION_POLICY_DEFAULT) && !effectiveEnabledByDefault) {
+      delete reg.settings.agentSuggestion;
+      if (Object.keys(reg.settings).length === 0) delete reg.settings;
+      return;
+    }
+    reg.settings.agentSuggestion = {
+      ...(policyMarkdown && policyMarkdown !== AGENT_SUGGESTION_POLICY_DEFAULT ? { policyMarkdown } : {}),
+      ...(effectiveEnabledByDefault ? { enabledByDefault: true } : {}),
+      updatedAt,
+    };
+  });
+}
+
+export async function resolveEffectiveAgentSuggestionSettings(): Promise<EffectiveAgentSuggestionSettings> {
+  const stored = await getStoredAgentSuggestionSettings();
+  const policyMarkdown = stored.policyMarkdown ?? AGENT_SUGGESTION_POLICY_DEFAULT;
+  return {
+    policyMarkdown,
+    policyMarkdownSource: stored.policyMarkdown ? 'settings' : 'default',
+    enabledByDefault: stored.enabledByDefault === true,
+    enabledByDefaultSource: stored.enabledByDefault === null ? 'default' : 'settings',
+    updatedAt: stored.policyMarkdown || stored.enabledByDefault !== null ? stored.updatedAt : null,
+    policyFingerprint: agentSuggestionPolicyFingerprint(policyMarkdown),
+  };
+}
+
+export async function resolveAgentSuggestionSettingsResponse(): Promise<{
+  ok: true;
+  agentSuggestion: {
+    policyMarkdown: string;
+    policyMarkdownSource: AgentSuggestionSettingsSource;
+    enabledByDefault: boolean;
+    enabledByDefaultSource: AgentSuggestionSettingsSource;
+    updatedAt: string | null;
+    defaultPolicyMarkdown: string;
+    defaultEnabledByDefault: boolean;
+    maxPolicyChars: number;
+    policyFingerprint: string;
+  };
+}> {
+  const settings = await resolveEffectiveAgentSuggestionSettings();
+  return {
+    ok: true,
+    agentSuggestion: {
+      policyMarkdown: settings.policyMarkdown,
+      policyMarkdownSource: settings.policyMarkdownSource,
+      enabledByDefault: settings.enabledByDefault,
+      enabledByDefaultSource: settings.enabledByDefaultSource,
+      updatedAt: settings.updatedAt,
+      defaultPolicyMarkdown: AGENT_SUGGESTION_POLICY_DEFAULT,
+      defaultEnabledByDefault: AGENT_SUGGESTION_ENABLED_BY_DEFAULT,
+      maxPolicyChars: AGENT_SUGGESTION_POLICY_MAX_CHARS,
+      policyFingerprint: settings.policyFingerprint,
     },
   };
 }

@@ -25,7 +25,7 @@ import type {
 import { IconChat, IconChevron, IconCursorApp, IconDrone, IconFolder, IconSidebarExpand } from './icons';
 import { RightPanel } from './RightPanel';
 import { RIGHT_PANEL_MIN_WIDTH_PX, type RightPanelTab } from './app-config';
-import type { StartupSeedState, TldrState } from './app-types';
+import type { AgentSuggestionState, StartupSeedState, TldrState } from './app-types';
 import type { RepoOpErrorMeta } from './helpers';
 import type { RightPanelWidthMode } from './right-panel-width';
 import type { DroneDeleteMode } from './settings-types';
@@ -101,6 +101,8 @@ type SelectedDroneWorkspaceProps = {
   setChatModel: (model: string | null) => Promise<void>;
   agentMessageAutoContinueEnabled: boolean;
   setAgentMessageAutoContinueEnabled: (enabled: boolean) => Promise<void>;
+  agentSuggestionEnabled: boolean;
+  setAgentSuggestionEnabled: (enabled: boolean) => Promise<void>;
   setChatInfoError: React.Dispatch<React.SetStateAction<string | null>>;
   modelMenuEntries: UiMenuSelectEntry[];
   modelDisabled: boolean;
@@ -157,6 +159,9 @@ type SelectedDroneWorkspaceProps = {
   showTldrByMessageId: Record<string, boolean>;
   toggleTldrForAgentMessage: (item: TranscriptItem) => void;
   handleAgentMessageHover: (item: TranscriptItem | null) => void;
+  latestAgentSuggestionTarget: TranscriptItem | null;
+  latestAgentSuggestionState: AgentSuggestionState | null;
+  requestAgentSuggestionForMessage: (item: TranscriptItem, opts?: { force?: boolean }) => Promise<void>;
   chatEndRef: React.RefObject<HTMLDivElement | null>;
   outputScrollRef: React.RefObject<HTMLDivElement | null>;
   updatePinned: (el: HTMLDivElement) => void;
@@ -222,6 +227,8 @@ export function SelectedDroneWorkspace({
   setChatModel,
   agentMessageAutoContinueEnabled,
   setAgentMessageAutoContinueEnabled,
+  agentSuggestionEnabled,
+  setAgentSuggestionEnabled,
   setChatInfoError,
   modelMenuEntries,
   modelDisabled,
@@ -273,6 +280,9 @@ export function SelectedDroneWorkspace({
   showTldrByMessageId,
   toggleTldrForAgentMessage,
   handleAgentMessageHover,
+  latestAgentSuggestionTarget,
+  latestAgentSuggestionState,
+  requestAgentSuggestionForMessage,
   chatEndRef,
   outputScrollRef,
   updatePinned,
@@ -410,6 +420,11 @@ export function SelectedDroneWorkspace({
   );
   const chatDraftValue = useDroneHubUiStore((s) => s.chatInputDrafts[chatDraftKey] ?? '');
   const setChatInputDraft = useDroneHubUiStore((s) => s.setChatInputDraft);
+  const [pendingDirectAgentSuggestion, setPendingDirectAgentSuggestion] = React.useState<{
+    promptId: string;
+    suggestion: string;
+    policyFingerprint: string;
+  } | null>(null);
   const automations = useDroneHubUiStore((s) => s.automations);
   const {
     promptAutomationJob,
@@ -431,6 +446,64 @@ export function SelectedDroneWorkspace({
   const transcriptRenderBlocks = React.useMemo<TranscriptRenderBlock[]>(
     () => buildTranscriptRenderBlocks(transcripts ?? []),
     [transcripts],
+  );
+  const latestAgentSuggestionMessageId = React.useMemo(
+    () => (latestAgentSuggestionTarget ? transcriptMessageId(latestAgentSuggestionTarget) : null),
+    [latestAgentSuggestionTarget, transcriptMessageId],
+  );
+  const latestAgentSuggestionPromptId = React.useMemo(() => {
+    const explicit = String(latestAgentSuggestionTarget?.id ?? '').trim();
+    return explicit || null;
+  }, [latestAgentSuggestionTarget]);
+  const latestAgentSuggestionUsedDirectAt = React.useMemo(() => {
+    const value = String(latestAgentSuggestionTarget?.agentSuggestion?.usedDirectAt ?? '').trim();
+    return value || null;
+  }, [latestAgentSuggestionTarget]);
+  const latestAgentSuggestionKindLabel = React.useMemo(() => {
+    if (!latestAgentSuggestionState || latestAgentSuggestionState.status !== 'ready') return null;
+    const raw = String(latestAgentSuggestionState.kind ?? '').trim();
+    if (!raw) return null;
+    return raw.replace(/[-_]+/g, ' ');
+  }, [latestAgentSuggestionState]);
+
+  React.useEffect(() => {
+    setPendingDirectAgentSuggestion(null);
+  }, [currentDrone.id, activeChatName, latestAgentSuggestionMessageId, agentSuggestionEnabled]);
+
+  const applyAgentSuggestionToDraft = React.useCallback(
+    (mode: 'exact' | 'edit') => {
+      if (!latestAgentSuggestionTarget || latestAgentSuggestionState?.status !== 'ready') return;
+      setChatInputDraft(chatDraftKey, latestAgentSuggestionState.suggestion);
+      if (mode === 'exact' && latestAgentSuggestionPromptId) {
+        setPendingDirectAgentSuggestion({
+          promptId: latestAgentSuggestionPromptId,
+          suggestion: latestAgentSuggestionState.suggestion,
+          policyFingerprint: latestAgentSuggestionState.policyFingerprint,
+        });
+        return;
+      }
+      setPendingDirectAgentSuggestion(null);
+    },
+    [chatDraftKey, latestAgentSuggestionPromptId, latestAgentSuggestionState, latestAgentSuggestionTarget, setChatInputDraft],
+  );
+
+  const markAgentSuggestionUsedDirect = React.useCallback(
+    async (candidate: { promptId: string; suggestion: string; policyFingerprint: string }) => {
+      await requestJson(
+        `/api/drones/${encodeURIComponent(currentDrone.id)}/chats/${encodeURIComponent(activeChatName)}/transcript/${encodeURIComponent(
+          candidate.promptId,
+        )}/agent-suggestion/used-direct`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            suggestion: candidate.suggestion,
+            policyFingerprint: candidate.policyFingerprint,
+          }),
+        },
+      );
+    },
+    [activeChatName, currentDrone.id],
   );
   const { pendingPromptLoopGroups, pendingPlainPrompts } = React.useMemo(
     () => {
@@ -1016,6 +1089,46 @@ export function SelectedDroneWorkspace({
                   />
                 </span>
                 {agentMessageAutoContinueEnabled ? 'On' : 'Off'}
+              </button>
+            </div>
+          ) : null}
+          {hasChats && chatUiMode === 'transcript' ? (
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] font-semibold text-[var(--muted-dim)] tracking-wide uppercase" style={{ fontFamily: 'var(--display)' }}>
+                Agent suggestion
+              </span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={agentSuggestionEnabled}
+                onClick={() => {
+                  void setAgentSuggestionEnabled(!agentSuggestionEnabled).catch((err: any) =>
+                    setChatInfoError(err?.message ?? String(err)),
+                  );
+                }}
+                disabled={loadingChatInfo}
+                className={`inline-flex items-center gap-2 h-[28px] px-2 rounded border text-[10px] font-semibold tracking-wide uppercase transition-all ${
+                  loadingChatInfo
+                    ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
+                    : agentSuggestionEnabled
+                      ? 'bg-[var(--accent-subtle)] border-[var(--accent-muted)] text-[var(--accent)]'
+                      : 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]'
+                }`}
+                style={{ fontFamily: 'var(--display)' }}
+                title="Suggest a likely next user reply for new agent messages in this transcript chat."
+              >
+                <span
+                  className={`relative inline-flex h-3.5 w-6 rounded-full transition-colors ${
+                    agentSuggestionEnabled ? 'bg-[var(--accent)]' : 'bg-[rgba(148,163,184,.3)]'
+                  }`}
+                >
+                  <span
+                    className={`absolute top-[1px] h-3 w-3 rounded-full bg-white transition-transform ${
+                      agentSuggestionEnabled ? 'translate-x-[11px]' : 'translate-x-[1px]'
+                    }`}
+                  />
+                </span>
+                {agentSuggestionEnabled ? 'On' : 'Off'}
               </button>
             </div>
           ) : null}
@@ -1697,12 +1810,100 @@ export function SelectedDroneWorkspace({
 
           {chatUiMode === 'cli' ? <CliPendingPromptStrip items={visibleCliPendingPrompts} /> : null}
 
+          {chatUiMode === 'transcript' && agentSuggestionEnabled && latestAgentSuggestionTarget ? (
+            <div className="mx-4 mb-3 rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.16)] px-3 py-3">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div
+                    className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]"
+                    style={{ fontFamily: 'var(--display)' }}
+                  >
+                    Agent suggestion
+                    {latestAgentSuggestionKindLabel ? (
+                      <span className="ml-2 normal-case tracking-normal text-[var(--muted)]">{latestAgentSuggestionKindLabel}</span>
+                    ) : null}
+                  </div>
+                  {latestAgentSuggestionState?.status === 'loading' ? (
+                    <div className="mt-2 text-[12px] text-[var(--muted-dim)]">Thinking about the likely next reply…</div>
+                  ) : latestAgentSuggestionState?.status === 'error' ? (
+                    <div className="mt-2 text-[12px] text-[var(--red)]">{latestAgentSuggestionState.error}</div>
+                  ) : latestAgentSuggestionState?.status === 'ready' ? (
+                    <>
+                      <div className="mt-2 whitespace-pre-wrap text-[13px] leading-relaxed text-[var(--fg-secondary)]">
+                        {latestAgentSuggestionState.suggestion}
+                      </div>
+                      {latestAgentSuggestionState.reason ? (
+                        <div className="mt-2 text-[11px] text-[var(--muted)]">{latestAgentSuggestionState.reason}</div>
+                      ) : null}
+                      {latestAgentSuggestionUsedDirectAt ? (
+                        <div className="mt-2 text-[11px] text-[var(--muted-dim)]">
+                          Used directly on {new Date(latestAgentSuggestionUsedDirectAt).toLocaleString()}.
+                        </div>
+                      ) : null}
+                    </>
+                  ) : (
+                    <div className="mt-2 text-[12px] text-[var(--muted-dim)]">No suggestion yet.</div>
+                  )}
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => applyAgentSuggestionToDraft('exact')}
+                    disabled={latestAgentSuggestionState?.status !== 'ready'}
+                    className={`h-8 px-3 rounded text-[10px] font-semibold tracking-wide uppercase border transition-all ${
+                      latestAgentSuggestionState?.status !== 'ready'
+                        ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
+                        : 'bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-fg)] hover:shadow-[var(--glow-accent)] hover:brightness-110'
+                    }`}
+                    style={{ fontFamily: 'var(--display)' }}
+                  >
+                    Use exact
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applyAgentSuggestionToDraft('edit')}
+                    disabled={latestAgentSuggestionState?.status !== 'ready'}
+                    className={`h-8 px-3 rounded text-[10px] font-semibold tracking-wide uppercase border transition-all ${
+                      latestAgentSuggestionState?.status !== 'ready'
+                        ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
+                        : 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]'
+                    }`}
+                    style={{ fontFamily: 'var(--display)' }}
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPendingDirectAgentSuggestion(null);
+                      void requestAgentSuggestionForMessage(latestAgentSuggestionTarget, { force: true });
+                    }}
+                    disabled={latestAgentSuggestionState?.status === 'loading'}
+                    className={`h-8 px-3 rounded text-[10px] font-semibold tracking-wide uppercase border transition-all ${
+                      latestAgentSuggestionState?.status === 'loading'
+                        ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
+                        : 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]'
+                    }`}
+                    style={{ fontFamily: 'var(--display)' }}
+                  >
+                    Re-suggest
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
           <ChatInput
             resetKey={`${selectedDroneIdentity}:${selectedChat ?? ''}`}
             droneName={currentDrone.name}
             focusTargetId="primary-chat"
             draftValue={chatDraftValue}
-            onDraftValueChange={(next) => setChatInputDraft(chatDraftKey, next)}
+            onDraftValueChange={(next) => {
+              if (pendingDirectAgentSuggestion && next !== chatDraftValue) {
+                setPendingDirectAgentSuggestion(null);
+              }
+              setChatInputDraft(chatDraftKey, next);
+            }}
             promptError={stopResponseError || promptError}
             sending={sendingPrompt}
             waiting={
@@ -1717,8 +1918,23 @@ export function SelectedDroneWorkspace({
             stopping={stoppingResponse}
             onSend={async (payload: ChatSendPayload) => {
               try {
-                return await sendPromptText(payload);
+                const sent = await sendPromptText(payload);
+                if (
+                  sent &&
+                  pendingDirectAgentSuggestion &&
+                  payload.attachments.length === 0 &&
+                  payload.prompt === pendingDirectAgentSuggestion.suggestion
+                ) {
+                  try {
+                    await markAgentSuggestionUsedDirect(pendingDirectAgentSuggestion);
+                  } catch {
+                    // Ignore analytics write failures; the prompt already sent successfully.
+                  }
+                }
+                setPendingDirectAgentSuggestion(null);
+                return sent;
               } catch {
+                setPendingDirectAgentSuggestion(null);
                 return false;
               }
             }}

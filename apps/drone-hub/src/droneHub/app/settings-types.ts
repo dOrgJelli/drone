@@ -80,6 +80,21 @@ export type AgentMessageAutoContinueSettingsResponse = {
   };
 };
 
+export type AgentSuggestionSettingsResponse = {
+  ok: true;
+  agentSuggestion: {
+    policyMarkdown: string;
+    policyMarkdownSource: 'settings' | 'default';
+    enabledByDefault: boolean;
+    enabledByDefaultSource: 'settings' | 'default';
+    updatedAt: string | null;
+    defaultPolicyMarkdown: string;
+    defaultEnabledByDefault: boolean;
+    maxPolicyChars: number;
+    policyFingerprint: string;
+  };
+};
+
 export type AgentsSettingsResponse = {
   ok: true;
   agents: {

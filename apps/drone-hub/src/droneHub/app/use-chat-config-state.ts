@@ -222,6 +222,7 @@ export function useChatConfigState({
         agent,
         model: prev?.model ?? null,
         agentMessageAutoContinueEnabled: prev?.agentMessageAutoContinueEnabled === true,
+        agentSuggestionEnabled: prev?.agentSuggestionEnabled === true,
         sessionName: prev?.sessionName ?? `drone-hub-chat-${chat}`,
         createdAt: prev?.createdAt ?? new Date().toISOString(),
       }));
@@ -251,6 +252,7 @@ export function useChatConfigState({
         agent: prev?.agent ?? ({ kind: 'builtin', id: 'cursor' } as ChatAgentConfig),
         model: normalized,
         agentMessageAutoContinueEnabled: prev?.agentMessageAutoContinueEnabled === true,
+        agentSuggestionEnabled: prev?.agentSuggestionEnabled === true,
         sessionName: prev?.sessionName ?? `drone-hub-chat-${chat}`,
         createdAt: prev?.createdAt ?? new Date().toISOString(),
       }));
@@ -280,6 +282,36 @@ export function useChatConfigState({
         agent: prev?.agent ?? ({ kind: 'builtin', id: 'cursor' } as ChatAgentConfig),
         model: prev?.model ?? null,
         agentMessageAutoContinueEnabled: enabled,
+        agentSuggestionEnabled: prev?.agentSuggestionEnabled === true,
+        sessionName: prev?.sessionName ?? `drone-hub-chat-${chat}`,
+        createdAt: prev?.createdAt ?? new Date().toISOString(),
+      }));
+      setChatInfoError(null);
+    },
+    [requestJson, selectedChat, selectedDrone],
+  );
+
+  const setAgentSuggestionEnabled = React.useCallback(
+    async (enabled: boolean) => {
+      if (!selectedDrone) return;
+      const chat = selectedChat || 'default';
+      await requestJson(
+        `/api/drones/${encodeURIComponent(selectedDrone)}/chats/${encodeURIComponent(
+          chat,
+        )}/config`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ agentSuggestionEnabled: enabled }),
+        },
+      );
+      setChatInfo((prev) => ({
+        name: selectedDrone,
+        chat,
+        agent: prev?.agent ?? ({ kind: 'builtin', id: 'cursor' } as ChatAgentConfig),
+        model: prev?.model ?? null,
+        agentMessageAutoContinueEnabled: prev?.agentMessageAutoContinueEnabled === true,
+        agentSuggestionEnabled: enabled,
         sessionName: prev?.sessionName ?? `drone-hub-chat-${chat}`,
         createdAt: prev?.createdAt ?? new Date().toISOString(),
       }));
@@ -314,6 +346,7 @@ export function useChatConfigState({
     setChatAgent,
     setChatModel,
     setAgentMessageAutoContinueEnabled,
+    setAgentSuggestionEnabled,
     handleSetAgentFailure,
   };
 }

@@ -16,6 +16,12 @@ export type TldrState =
   | { status: 'ready'; summary: string }
   | { status: 'error'; error: string };
 
+export type AgentSuggestionState =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'ready'; suggestion: string; reason: string; kind: string; policyFingerprint: string }
+  | { status: 'error'; error: string };
+
 export type AppView = 'workspace' | 'settings';
 
 export type StartupSeedState = {

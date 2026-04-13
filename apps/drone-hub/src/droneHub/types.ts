@@ -497,6 +497,12 @@ export type TranscriptItem = {
     error?: string;
     updatedAt?: string;
   };
+  agentSuggestion?: {
+    usedDirectAt?: string;
+    suggestionHash?: string;
+    policyFingerprint?: string;
+    updatedAt?: string;
+  };
 };
 
 export type ChatImageAttachmentRef = {

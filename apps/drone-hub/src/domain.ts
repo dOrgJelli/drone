@@ -8,6 +8,7 @@ export type ChatInfo = {
   agent: ChatAgentConfig;
   model: string | null;
   agentMessageAutoContinueEnabled: boolean;
+  agentSuggestionEnabled: boolean;
   sessionName: string;
   createdAt: string;
 };
@@ -103,6 +104,7 @@ export function normalizeChatInfoPayload(data: any): ChatInfo {
       chat,
       model,
       agentMessageAutoContinueEnabled: data?.agentMessageAutoContinueEnabled === true,
+      agentSuggestionEnabled: data?.agentSuggestionEnabled === true,
       sessionName,
       createdAt,
       agent: { kind: 'builtin', id: builtinId },
@@ -118,6 +120,7 @@ export function normalizeChatInfoPayload(data: any): ChatInfo {
         chat,
         model,
         agentMessageAutoContinueEnabled: data?.agentMessageAutoContinueEnabled === true,
+        agentSuggestionEnabled: data?.agentSuggestionEnabled === true,
         sessionName,
         createdAt,
         agent: { kind: 'custom', id, label, command },
@@ -131,6 +134,7 @@ export function normalizeChatInfoPayload(data: any): ChatInfo {
       chat,
       model,
       agentMessageAutoContinueEnabled: data?.agentMessageAutoContinueEnabled === true,
+      agentSuggestionEnabled: data?.agentSuggestionEnabled === true,
       sessionName,
       createdAt,
       agent: { kind: 'builtin', id: 'claude' },
@@ -142,25 +146,27 @@ export function normalizeChatInfoPayload(data: any): ChatInfo {
       chat,
       model,
       agentMessageAutoContinueEnabled: data?.agentMessageAutoContinueEnabled === true,
+      agentSuggestionEnabled: data?.agentSuggestionEnabled === true,
       sessionName,
       createdAt,
       agent: { kind: 'builtin', id: 'opencode' },
     };
   }
   if (String(data?.piSessionId ?? '').trim()) {
-    return { name, chat, model, agentMessageAutoContinueEnabled: data?.agentMessageAutoContinueEnabled === true, sessionName, createdAt, agent: { kind: 'builtin', id: 'pi' } };
+    return { name, chat, model, agentMessageAutoContinueEnabled: data?.agentMessageAutoContinueEnabled === true, agentSuggestionEnabled: data?.agentSuggestionEnabled === true, sessionName, createdAt, agent: { kind: 'builtin', id: 'pi' } };
   }
   if (String(data?.codexThreadId ?? '').trim()) {
-    return { name, chat, model, agentMessageAutoContinueEnabled: data?.agentMessageAutoContinueEnabled === true, sessionName, createdAt, agent: { kind: 'builtin', id: 'codex' } };
+    return { name, chat, model, agentMessageAutoContinueEnabled: data?.agentMessageAutoContinueEnabled === true, agentSuggestionEnabled: data?.agentSuggestionEnabled === true, sessionName, createdAt, agent: { kind: 'builtin', id: 'codex' } };
   }
   if (String(data?.chatId ?? '').trim()) {
-    return { name, chat, model, agentMessageAutoContinueEnabled: data?.agentMessageAutoContinueEnabled === true, sessionName, createdAt, agent: { kind: 'builtin', id: 'cursor' } };
+    return { name, chat, model, agentMessageAutoContinueEnabled: data?.agentMessageAutoContinueEnabled === true, agentSuggestionEnabled: data?.agentSuggestionEnabled === true, sessionName, createdAt, agent: { kind: 'builtin', id: 'cursor' } };
   }
   return {
     name,
     chat,
     model,
     agentMessageAutoContinueEnabled: data?.agentMessageAutoContinueEnabled === true,
+    agentSuggestionEnabled: data?.agentSuggestionEnabled === true,
     sessionName,
     createdAt,
     agent: { kind: 'builtin', id: 'cursor' },

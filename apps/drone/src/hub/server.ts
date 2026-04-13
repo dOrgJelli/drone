@@ -72,6 +72,7 @@ import {
   classifyAgentMessageAutoContinue,
   type AgentMessageAutoContinueClassification,
 } from './agent-message-auto-continue';
+import { suggestReplyToAgentMessage } from './agent-suggestion';
 import { resolveTranscriptPromptAt } from './transcript-order';
 import { extractAgentCopilotFromAgentMessage, type AgentCopilotRequest } from './agent-copilot-parser';
 import { cloneChatEntryForDroneClone, maybeBootstrapPromptFromTranscript } from './chat-clone';
@@ -206,6 +207,7 @@ import {
   FILESYSTEM_UPLOAD_MAX_BYTES_MAX,
   FILESYSTEM_UPLOAD_MAX_BYTES_MIN,
   normalizeAgentMessageAutoContinuePrompt,
+  normalizeAgentSuggestionPolicyMarkdown,
   KanbanBoardSettingsConflictError,
   hubLog,
   loadHubEnv,
@@ -217,7 +219,9 @@ import {
   providerDisplayName,
   providerKeySettingsResponse,
   resolveAgentMessageAutoContinueSettingsResponse,
+  resolveAgentSuggestionSettingsResponse,
   resolveEffectiveAgentMessageAutoContinueSettings,
+  resolveEffectiveAgentSuggestionSettings,
   resolveKanbanBoardSettingsResponse,
   resolveDeleteActionSettingsResponse,
   resolveEffectiveFilesystemSettings,
@@ -232,6 +236,7 @@ import {
   upsertStoredFilesystemSettings,
   upsertStoredKanbanBoardSettings,
   upsertStoredAgentMessageAutoContinueSettings,
+  upsertStoredAgentSuggestionSettings,
   upsertStoredLlmProvider,
   upsertStoredProviderApiKey,
   upsertStoredTaskPlaybookButtonSettings,
@@ -2597,6 +2602,12 @@ type TranscriptTurn = {
     classifiedAt?: string;
     continuedAt?: string;
     error?: string;
+    updatedAt?: string;
+  };
+  agentSuggestion?: {
+    usedDirectAt?: string;
+    suggestionHash?: string;
+    policyFingerprint?: string;
     updatedAt?: string;
   };
 };
@@ -5475,6 +5486,23 @@ function normalizeAgentMessageAutoContinueTurnState(
   };
 }
 
+function normalizeAgentSuggestionTurnState(
+  raw: TranscriptTurn['agentSuggestion'] | undefined,
+): NonNullable<TranscriptTurn['agentSuggestion']> | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const usedDirectAt = String(raw.usedDirectAt ?? '').trim();
+  const suggestionHash = String(raw.suggestionHash ?? '').trim();
+  const policyFingerprint = String(raw.policyFingerprint ?? '').trim();
+  const updatedAt = String(raw.updatedAt ?? '').trim();
+  if (!usedDirectAt && !suggestionHash && !policyFingerprint && !updatedAt) return null;
+  return {
+    ...(usedDirectAt ? { usedDirectAt } : {}),
+    ...(suggestionHash ? { suggestionHash } : {}),
+    ...(policyFingerprint ? { policyFingerprint } : {}),
+    ...(updatedAt ? { updatedAt } : {}),
+  };
+}
+
 function turnNeedsAgentMessageAutoContinueProcessing(
   turn: TranscriptTurn | null | undefined,
   enabledAtMs: number,
@@ -5550,6 +5578,30 @@ async function markTranscriptTurnAgentMessageAutoContinueFailed(opts: {
       agentMessageAutoContinue: {
         status: 'failed',
         error: opts.error,
+        updatedAt,
+      },
+    }),
+  });
+}
+
+async function markTranscriptTurnAgentSuggestionUsedDirect(opts: {
+  droneId: string;
+  chatName: string;
+  promptId: string;
+  suggestionHash: string;
+  policyFingerprint: string;
+}): Promise<void> {
+  const updatedAt = nowIso();
+  await updateTranscriptTurnById({
+    droneId: opts.droneId,
+    chatName: opts.chatName,
+    promptId: opts.promptId,
+    update: (turn) => ({
+      ...turn,
+      agentSuggestion: {
+        usedDirectAt: updatedAt,
+        suggestionHash: String(opts.suggestionHash ?? '').trim(),
+        policyFingerprint: String(opts.policyFingerprint ?? '').trim(),
         updatedAt,
       },
     }),
@@ -8707,6 +8759,7 @@ function buildNewChatEntry(opts: {
   createdAt: string;
   sourceChatEntry?: any;
   autoContinueEnabledByDefault: boolean;
+  agentSuggestionEnabledByDefault?: boolean;
 }) {
   const agent = opts.sourceChatEntry
     ? inferChatAgent(opts.sourceChatEntry, opts.droneEntry)
@@ -8721,6 +8774,10 @@ function buildNewChatEntry(opts: {
   if (opts.autoContinueEnabledByDefault && agent.kind === 'builtin') {
     entry.agentMessageAutoContinueEnabled = true;
     entry.agentMessageAutoContinueEnabledAt = opts.createdAt;
+  }
+  if (opts.agentSuggestionEnabledByDefault && agent.kind === 'builtin') {
+    entry.agentSuggestionEnabled = true;
+    entry.agentSuggestionEnabledAt = opts.createdAt;
   }
   return entry;
 }
@@ -8812,6 +8869,7 @@ async function ensureHubSessionRunning(opts: {
 
 async function ensureChatEntry(opts: { droneId: string; chatName: string }): Promise<void> {
   const autoContinueEnabledByDefault = (await resolveEffectiveAgentMessageAutoContinueSettings()).enabledByDefault;
+  const agentSuggestionEnabledByDefault = (await resolveEffectiveAgentSuggestionSettings()).enabledByDefault;
   await updateRegistry((reg: any) => {
     const droneId = normalizeDroneIdentity(opts.droneId);
     const d = droneId ? reg?.drones?.[droneId] : null;
@@ -8824,6 +8882,7 @@ async function ensureChatEntry(opts: { droneId: string; chatName: string }): Pro
         droneEntry: d,
         createdAt: new Date().toISOString(),
         autoContinueEnabledByDefault,
+        agentSuggestionEnabledByDefault,
       }) as any;
       reg.drones = reg.drones ?? {};
       reg.drones[droneId] = d;
@@ -8837,6 +8896,7 @@ async function ensureChatEntryCopiedFromChat(opts: {
   copyFromChatName: string;
 }): Promise<void> {
   const autoContinueEnabledByDefault = (await resolveEffectiveAgentMessageAutoContinueSettings()).enabledByDefault;
+  const agentSuggestionEnabledByDefault = (await resolveEffectiveAgentSuggestionSettings()).enabledByDefault;
   await updateRegistry((reg: any) => {
     const droneId = normalizeDroneIdentity(opts.droneId);
     const chatName = parseChatNameForMutation(opts.chatName, 'chat name');
@@ -8852,6 +8912,7 @@ async function ensureChatEntryCopiedFromChat(opts: {
           droneEntry: d,
           createdAt,
           autoContinueEnabledByDefault,
+          agentSuggestionEnabledByDefault,
         });
       } else {
         throw new Error(`unknown chat: ${copyFromChatName}`);
@@ -8861,6 +8922,7 @@ async function ensureChatEntryCopiedFromChat(opts: {
       droneEntry: d,
       createdAt,
       autoContinueEnabledByDefault,
+      agentSuggestionEnabledByDefault,
     });
     if (copyFromChatName) {
       const source = d.chats?.[copyFromChatName];
@@ -8870,6 +8932,7 @@ async function ensureChatEntryCopiedFromChat(opts: {
         createdAt,
         sourceChatEntry: source,
         autoContinueEnabledByDefault,
+        agentSuggestionEnabledByDefault,
       });
     }
     d.chats[chatName] = entry;
@@ -8911,6 +8974,8 @@ async function setChatAgentConfig(opts: {
   model?: string | null;
   setAgentMessageAutoContinueEnabled?: boolean;
   agentMessageAutoContinueEnabled?: boolean;
+  setAgentSuggestionEnabled?: boolean;
+  agentSuggestionEnabled?: boolean;
 }) {
   await updateRegistry((reg: any) => {
     const droneId = normalizeDroneIdentity(opts.droneId);
@@ -8923,6 +8988,13 @@ async function setChatAgentConfig(opts: {
     if (opts.setAgentMessageAutoContinueEnabled && opts.agentMessageAutoContinueEnabled && effectiveAgent.kind !== 'builtin') {
       const error: Error & { statusCode?: number } = new Error(
         'agentMessageAutoContinueEnabled is only supported for builtin transcript chats',
+      );
+      error.statusCode = 400;
+      throw error;
+    }
+    if (opts.setAgentSuggestionEnabled && opts.agentSuggestionEnabled && effectiveAgent.kind !== 'builtin') {
+      const error: Error & { statusCode?: number } = new Error(
+        'agentSuggestionEnabled is only supported for builtin transcript chats',
       );
       error.statusCode = 400;
       throw error;
@@ -8944,6 +9016,17 @@ async function setChatAgentConfig(opts: {
       } else {
         delete cur.agentMessageAutoContinueEnabled;
         delete cur.agentMessageAutoContinueEnabledAt;
+      }
+    }
+    if (opts.setAgentSuggestionEnabled) {
+      if (opts.agentSuggestionEnabled) {
+        cur.agentSuggestionEnabled = true;
+        if (typeof cur.agentSuggestionEnabledAt !== 'string' || !String(cur.agentSuggestionEnabledAt).trim()) {
+          cur.agentSuggestionEnabledAt = nowIso();
+        }
+      } else {
+        delete cur.agentSuggestionEnabled;
+        delete cur.agentSuggestionEnabledAt;
       }
     }
     d.chats[opts.chatName] = cur;
@@ -10027,6 +10110,44 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         }
       }
 
+      if (pathname === '/api/settings/agent-suggestion') {
+        if (method === 'GET') {
+          json(res, 200, await resolveAgentSuggestionSettingsResponse());
+          return;
+        }
+
+        if (method === 'POST') {
+          let body: any = null;
+          try {
+            body = await readJsonBody(req);
+          } catch (e: any) {
+            json(res, 400, { ok: false, error: e?.message ?? String(e) });
+            return;
+          }
+          const policyMarkdown = normalizeAgentSuggestionPolicyMarkdown(body?.policyMarkdown);
+          if (
+            body != null &&
+            typeof body === 'object' &&
+            Object.prototype.hasOwnProperty.call(body, 'enabledByDefault') &&
+            body.enabledByDefault !== true &&
+            body.enabledByDefault !== false &&
+            body.enabledByDefault !== null
+          ) {
+            json(res, 400, { ok: false, error: 'enabledByDefault must be a boolean' });
+            return;
+          }
+          await upsertStoredAgentSuggestionSettings({
+            policyMarkdown: policyMarkdown || undefined,
+            enabledByDefault:
+              body != null && typeof body === 'object' && Object.prototype.hasOwnProperty.call(body, 'enabledByDefault')
+                ? body.enabledByDefault === true
+                : undefined,
+          });
+          json(res, 200, await resolveAgentSuggestionSettingsResponse());
+          return;
+        }
+      }
+
       if (pathname === '/api/settings/agents') {
         if (method === 'GET') {
           const regAny: any = await loadRegistry();
@@ -10555,6 +10676,85 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             hubLog('error', 'tldr/from-message request failed', {
               ...llmProviderEnvLogMeta(),
               model: String(process.env.DRONE_HUB_TLDR_MODEL ?? '').trim() || null,
+              error: e?.message ?? String(e),
+            });
+          }
+          json(res, 500, { ok: false, error: e?.message ?? String(e) });
+          return;
+        }
+      }
+
+      // POST /api/agent-suggestion/from-message
+      // Suggests the most likely next user reply to an agent response.
+      if (method === 'POST' && pathname === '/api/agent-suggestion/from-message') {
+        let body: any = null;
+        try {
+          body = await readJsonBody(req);
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+          return;
+        }
+
+        const response = String(body?.response ?? '').trim();
+        const prompt = typeof body?.prompt === 'string' ? body.prompt : '';
+        const context = Array.isArray(body?.context) ? body.context : [];
+        if (!response) {
+          json(res, 400, { ok: false, error: 'missing response' });
+          return;
+        }
+
+        let selectedProvider: LlmProviderId | null = null;
+        try {
+          const { provider } = await resolveEffectiveLlmProvider();
+          selectedProvider = provider;
+          const resolved = await resolveEffectiveProviderApiKeySettings(provider);
+          if (!resolved.apiKey) {
+            await logProviderApiKeyResolution('warn', 'agent-suggestion/from-message rejected: missing provider key', provider, {
+              pathname,
+              method,
+            });
+            json(res, 412, {
+              ok: false,
+              error: `Missing ${providerDisplayName(provider)} API key. Configure it in Settings.`,
+            });
+            return;
+          }
+          const settings = await resolveEffectiveAgentSuggestionSettings();
+          const result = await suggestReplyToAgentMessage(
+            {
+              prompt,
+              response,
+              context: context
+                .map((t: any) => ({
+                  turn: typeof t?.turn === 'number' ? t.turn : Number(t?.turn ?? 0) || 0,
+                  prompt: String(t?.prompt ?? ''),
+                  response: String(t?.response ?? ''),
+                }))
+                .filter((t: any) => typeof t?.response === 'string'),
+              policyMarkdown: settings.policyMarkdown,
+            },
+            { provider, apiKey: resolved.apiKey },
+          );
+          json(res, 200, {
+            ok: true,
+            suggestion: result.suggestion,
+            reason: result.reason,
+            kind: result.kind,
+            policyFingerprint: settings.policyFingerprint,
+          });
+          return;
+        } catch (e: any) {
+          if (selectedProvider) {
+            await logProviderApiKeyResolution('error', 'agent-suggestion/from-message request failed', selectedProvider, {
+              pathname,
+              method,
+              model: String(process.env.DRONE_HUB_AGENT_SUGGESTION_MODEL ?? '').trim() || null,
+              error: e?.message ?? String(e),
+            });
+          } else {
+            hubLog('error', 'agent-suggestion/from-message request failed', {
+              ...llmProviderEnvLogMeta(),
+              model: String(process.env.DRONE_HUB_AGENT_SUGGESTION_MODEL ?? '').trim() || null,
               error: e?.message ?? String(e),
             });
           }
@@ -19666,6 +19866,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           agent,
           model: (c as any).model ?? null,
           agentMessageAutoContinueEnabled: (c as any).agentMessageAutoContinueEnabled === true,
+          agentSuggestionEnabled: (c as any).agentSuggestionEnabled === true,
           turns: (c as any).turns ?? [],
           sessionName: hubChatSessionName(chatName || 'default'),
           createdAt: c.createdAt,
@@ -19705,8 +19906,11 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           Boolean(body && typeof body === 'object' && Object.prototype.hasOwnProperty.call(body, 'chatModel'));
         const hasAutoContinueField =
           Boolean(body && typeof body === 'object' && Object.prototype.hasOwnProperty.call(body, 'agentMessageAutoContinueEnabled'));
+        const hasAgentSuggestionField =
+          Boolean(body && typeof body === 'object' && Object.prototype.hasOwnProperty.call(body, 'agentSuggestionEnabled'));
         let model: string | null = null;
         let agentMessageAutoContinueEnabled = false;
+        let agentSuggestionEnabled = false;
         if (hasModelField) {
           try {
             model = parseChatModelForUpdate(
@@ -19726,6 +19930,13 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           }
           agentMessageAutoContinueEnabled = body.agentMessageAutoContinueEnabled === true;
         }
+        if (hasAgentSuggestionField) {
+          if (body?.agentSuggestionEnabled !== true && body?.agentSuggestionEnabled !== false) {
+            json(res, 400, { ok: false, error: 'agentSuggestionEnabled must be a boolean' });
+            return;
+          }
+          agentSuggestionEnabled = body.agentSuggestionEnabled === true;
+        }
         try {
           await ensureChatEntry({ droneId, chatName });
           const builtinId = normalizeBuiltinAgentId(kind === 'builtin' ? agentRaw?.id : kind);
@@ -19739,6 +19950,8 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               model,
               setAgentMessageAutoContinueEnabled: hasAutoContinueField,
               agentMessageAutoContinueEnabled,
+              setAgentSuggestionEnabled: hasAgentSuggestionField,
+              agentSuggestionEnabled,
             });
             json(res, 200, {
               ok: true,
@@ -19748,6 +19961,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               agent,
               ...(hasModelField ? { model } : {}),
               ...(hasAutoContinueField ? { agentMessageAutoContinueEnabled } : {}),
+              ...(hasAgentSuggestionField ? { agentSuggestionEnabled } : {}),
             });
             return;
           }
@@ -19767,6 +19981,8 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               model,
               setAgentMessageAutoContinueEnabled: hasAutoContinueField,
               agentMessageAutoContinueEnabled,
+              setAgentSuggestionEnabled: hasAgentSuggestionField,
+              agentSuggestionEnabled,
             });
             json(res, 200, {
               ok: true,
@@ -19776,6 +19992,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               agent,
               ...(hasModelField ? { model } : {}),
               ...(hasAutoContinueField ? { agentMessageAutoContinueEnabled } : {}),
+              ...(hasAgentSuggestionField ? { agentSuggestionEnabled } : {}),
             });
             return;
           }
@@ -19787,8 +20004,18 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               model,
               setAgentMessageAutoContinueEnabled: hasAutoContinueField,
               agentMessageAutoContinueEnabled,
+              setAgentSuggestionEnabled: hasAgentSuggestionField,
+              agentSuggestionEnabled,
             });
-            json(res, 200, { ok: true, id: droneId, name: droneName, chat: chatName, model });
+            json(res, 200, {
+              ok: true,
+              id: droneId,
+              name: droneName,
+              chat: chatName,
+              model,
+              ...(hasAutoContinueField ? { agentMessageAutoContinueEnabled } : {}),
+              ...(hasAgentSuggestionField ? { agentSuggestionEnabled } : {}),
+            });
             return;
           }
           if (hasAutoContinueField) {
@@ -19797,6 +20024,8 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               chatName,
               setAgentMessageAutoContinueEnabled: true,
               agentMessageAutoContinueEnabled,
+              setAgentSuggestionEnabled: hasAgentSuggestionField,
+              agentSuggestionEnabled,
             });
             json(res, 200, {
               ok: true,
@@ -19804,12 +20033,29 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               name: droneName,
               chat: chatName,
               agentMessageAutoContinueEnabled,
+              ...(hasAgentSuggestionField ? { agentSuggestionEnabled } : {}),
+            });
+            return;
+          }
+          if (hasAgentSuggestionField) {
+            await setChatAgentConfig({
+              droneId,
+              chatName,
+              setAgentSuggestionEnabled: true,
+              agentSuggestionEnabled,
+            });
+            json(res, 200, {
+              ok: true,
+              id: droneId,
+              name: droneName,
+              chat: chatName,
+              agentSuggestionEnabled,
             });
             return;
           }
           json(res, 400, {
             ok: false,
-            error: `invalid request (expected agent cursor|codex|claude|opencode|pi|custom, model, or agentMessageAutoContinueEnabled)`,
+            error: `invalid request (expected agent cursor|codex|claude|opencode|pi|custom, model, agentMessageAutoContinueEnabled, or agentSuggestionEnabled)`,
           });
           return;
         } catch (e: any) {
@@ -19901,6 +20147,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             const agentMessageAutoContinue = normalizeAgentMessageAutoContinueTurnState(
               (t as any)?.agentMessageAutoContinue,
             );
+            const agentSuggestion = normalizeAgentSuggestionTurnState((t as any)?.agentSuggestion);
             const ok = Boolean(t?.ok);
             const output = ok ? String(t?.output ?? '') : '';
             const error = ok ? undefined : String(t?.error ?? 'failed');
@@ -19914,6 +20161,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               ...(attachments.length > 0 ? { attachments } : {}),
               ...(automation ? { automation } : {}),
               ...(agentMessageAutoContinue ? { agentMessageAutoContinue } : {}),
+              ...(agentSuggestion ? { agentSuggestion } : {}),
               ...((t as any)?.inheritedFromClone === true ? { inheritedFromClone: true } : {}),
               ok,
               ...(ok ? { output } : { output: '', error }),
@@ -19926,6 +20174,57 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           json(res, 500, { ok: false, error: e?.message ?? String(e) });
           return;
         }
+      }
+
+      // POST /api/drones/:id/chats/:chat/transcript/:promptId/agent-suggestion/used-direct
+      if (
+        method === 'POST' &&
+        parts.length === 9 &&
+        parts[0] === 'api' &&
+        parts[1] === 'drones' &&
+        parts[3] === 'chats' &&
+        parts[5] === 'transcript' &&
+        parts[7] === 'agent-suggestion' &&
+        parts[8] === 'used-direct'
+      ) {
+        const droneRef = decodeURIComponent(parts[2]);
+        const chatName = decodeURIComponent(parts[4]) || 'default';
+        const promptId = String(decodeURIComponent(parts[6] ?? '')).trim();
+        if (!isSafePromptId(promptId)) {
+          json(res, 400, { ok: false, error: 'invalid promptId' });
+          return;
+        }
+        let body: any = null;
+        try {
+          body = await readJsonBody(req);
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+          return;
+        }
+        const suggestion = String(body?.suggestion ?? '').trim();
+        const suggestionHash =
+          String(body?.suggestionHash ?? '').trim() ||
+          (suggestion ? crypto.createHash('sha256').update(suggestion, 'utf8').digest('hex').slice(0, 24) : '');
+        const policyFingerprint = String(body?.policyFingerprint ?? '').trim();
+        if (!suggestionHash) {
+          json(res, 400, { ok: false, error: 'missing suggestion' });
+          return;
+        }
+        if (!policyFingerprint) {
+          json(res, 400, { ok: false, error: 'missing policyFingerprint' });
+          return;
+        }
+        const resolved = await resolveDroneOrRespond(res, droneRef);
+        if (!resolved) return;
+        await markTranscriptTurnAgentSuggestionUsedDirect({
+          droneId: resolved.id,
+          chatName,
+          promptId,
+          suggestionHash,
+          policyFingerprint,
+        });
+        json(res, 200, { ok: true, id: resolved.id, name: resolved.drone?.name ?? droneRef, chat: chatName, promptId });
+        return;
       }
 
       if (pathname.startsWith('/api/')) {
