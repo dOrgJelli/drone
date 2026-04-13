@@ -10689,7 +10689,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
       }
 
       // POST /api/agent-suggestion/from-message
-      // Suggests the most likely next user reply to an agent response.
+      // Suggests the most likely next user reply to an agent response, or no suggestion when silence is better.
       if (method === 'POST' && pathname === '/api/agent-suggestion/from-message') {
         let body: any = null;
         try {
@@ -10741,7 +10741,8 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           );
           json(res, 200, {
             ok: true,
-            suggestion: result.suggestion,
+            outcome: result.outcome,
+            suggestion: result.outcome === 'suggest' ? result.suggestion : null,
             reason: result.reason,
             kind: result.kind,
             policyFingerprint: settings.policyFingerprint,
