@@ -33,6 +33,11 @@ const AUTO_CONTINUE_USER_TURN_PATTERNS: RegExp[] = [
   /^(i['’]?m|i am) aligned\b.*\byou want\b/,
 ];
 
+const AUTO_CONTINUE_DELIVERY_PATTERNS: RegExp[] = [
+  /^pr created and merged\b/,
+  /^pull request created and merged\b/,
+];
+
 const AUTO_CONTINUE_COMPLETION_PATTERNS: RegExp[] = [
   /^(i )?(updated|continued|renamed|changed|fixed|implemented|wired|added|removed|replaced|converted|swapped|refined|cleaned up|moved)\b/,
   /^the (review|work|task|change|changes) (is|are) complete\b/,
@@ -121,6 +126,14 @@ export function classifyAgentMessageAutoContinueHeuristic(textRaw: string): Agen
     return {
       bucket: 'user-turn',
       reason: 'Message acknowledges or restates the user request instead of indicating active continued execution.',
+      source: 'heuristic',
+    };
+  }
+
+  if (AUTO_CONTINUE_DELIVERY_PATTERNS.some((pattern) => pattern.test(compact))) {
+    return {
+      bucket: 'user-turn',
+      reason: 'Agent reports a completed PR/merge outcome and hands the result back to the user.',
       source: 'heuristic',
     };
   }

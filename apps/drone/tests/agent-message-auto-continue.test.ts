@@ -102,4 +102,30 @@ describe('agent message auto-continue heuristics', () => {
       source: 'heuristic',
     });
   });
+
+  test('treats PR created and merged delivery summaries as user-turn', async () => {
+    const message = [
+      'PR created and merged: [#330](https://github.com/nerfZael/drone/pull/330)',
+      '',
+      'Merge commit: `d5a57cf8e86632b2b962a08a768a11efbae700d6`',
+      '',
+      'What shipped:',
+      '- assistant suggestions can now explicitly return no reply',
+      '- dead-end acknowledgements get suppressed',
+      '- suppressed results are hidden in the transcript UI',
+      '- focused backend/frontend tests were added',
+      '',
+      'Verification used:',
+      '- `bun test apps/drone/tests/agent-suggestion.test.ts`',
+      '- `bun test apps/drone-hub/tests/agent-suggestion-state.test.ts`',
+      '',
+      'Broader package checks remain blocked by the existing workspace issues noted earlier.',
+    ].join('\n');
+
+    await expect(classifyAgentMessageAutoContinue(message)).resolves.toEqual({
+      bucket: 'user-turn',
+      reason: 'Agent reports a completed PR/merge outcome and hands the result back to the user.',
+      source: 'heuristic',
+    });
+  });
 });
