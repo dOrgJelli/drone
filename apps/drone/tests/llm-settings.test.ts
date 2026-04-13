@@ -157,4 +157,21 @@ describeSocketSuite('LLM settings api', () => {
     expect(revealed.data.source).toBe('settings');
     expect(revealed.data.apiKey).toBe('stored-openai-key');
   });
+
+  test('reads and updates agent auto-continue settings', async () => {
+    const initial = await apiFetch('/api/settings/agent-message-auto-continue');
+    expect(initial.r.status).toBe(200);
+    expect(initial.data.agentMessageAutoContinue.prompt).toBe('continue');
+    expect(initial.data.agentMessageAutoContinue.promptSource).toBe('default');
+
+    const updated = await apiFetch('/api/settings/agent-message-auto-continue', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'keep going please' }),
+    });
+    expect(updated.r.status).toBe(200);
+    expect(updated.data.agentMessageAutoContinue.prompt).toBe('keep going please');
+    expect(updated.data.agentMessageAutoContinue.promptSource).toBe('settings');
+    expect(updated.data.agentMessageAutoContinue.updatedAt).not.toBeNull();
+  });
 });

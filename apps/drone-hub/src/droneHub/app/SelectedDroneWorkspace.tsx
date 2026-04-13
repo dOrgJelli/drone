@@ -99,6 +99,8 @@ type SelectedDroneWorkspaceProps = {
   availableChatModels: unknown[];
   currentModel: string | null;
   setChatModel: (model: string | null) => Promise<void>;
+  agentMessageAutoContinueEnabled: boolean;
+  setAgentMessageAutoContinueEnabled: (enabled: boolean) => Promise<void>;
   setChatInfoError: React.Dispatch<React.SetStateAction<string | null>>;
   modelMenuEntries: UiMenuSelectEntry[];
   modelDisabled: boolean;
@@ -218,6 +220,8 @@ export function SelectedDroneWorkspace({
   availableChatModels,
   currentModel,
   setChatModel,
+  agentMessageAutoContinueEnabled,
+  setAgentMessageAutoContinueEnabled,
   setChatInfoError,
   modelMenuEntries,
   modelDisabled,
@@ -973,6 +977,46 @@ export function SelectedDroneWorkspace({
                   unavailable
                 </span>
               )}
+            </div>
+          ) : null}
+          {hasChats && chatUiMode === 'transcript' ? (
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] font-semibold text-[var(--muted-dim)] tracking-wide uppercase" style={{ fontFamily: 'var(--display)' }}>
+                Auto-continue
+              </span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={agentMessageAutoContinueEnabled}
+                onClick={() => {
+                  void setAgentMessageAutoContinueEnabled(!agentMessageAutoContinueEnabled).catch((err: any) =>
+                    setChatInfoError(err?.message ?? String(err)),
+                  );
+                }}
+                disabled={loadingChatInfo}
+                className={`inline-flex items-center gap-2 h-[28px] px-2 rounded border text-[10px] font-semibold tracking-wide uppercase transition-all ${
+                  loadingChatInfo
+                    ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
+                    : agentMessageAutoContinueEnabled
+                      ? 'bg-[var(--accent-subtle)] border-[var(--accent-muted)] text-[var(--accent)]'
+                      : 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]'
+                }`}
+                style={{ fontFamily: 'var(--display)' }}
+                title="Monitor agent messages in this chat and auto-send the configured continue prompt when the agent appears to have stopped mid-task."
+              >
+                <span
+                  className={`relative inline-flex h-3.5 w-6 rounded-full transition-colors ${
+                    agentMessageAutoContinueEnabled ? 'bg-[var(--accent)]' : 'bg-[rgba(148,163,184,.3)]'
+                  }`}
+                >
+                  <span
+                    className={`absolute top-[1px] h-3 w-3 rounded-full bg-white transition-transform ${
+                      agentMessageAutoContinueEnabled ? 'translate-x-[11px]' : 'translate-x-[1px]'
+                    }`}
+                  />
+                </span>
+                {agentMessageAutoContinueEnabled ? 'On' : 'Off'}
+              </button>
             </div>
           ) : null}
           {/* Repo (read-only for repo-attached drones only) */}

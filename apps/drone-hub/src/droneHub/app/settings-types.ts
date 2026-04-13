@@ -66,6 +66,17 @@ export type FilesystemSettingsResponse = {
   };
 };
 
+export type AgentMessageAutoContinueSettingsResponse = {
+  ok: true;
+  agentMessageAutoContinue: {
+    prompt: string;
+    promptSource: 'settings' | 'default';
+    updatedAt: string | null;
+    defaultPrompt: string;
+    maxPromptChars: number;
+  };
+};
+
 export type AgentsSettingsResponse = {
   ok: true;
   agents: {

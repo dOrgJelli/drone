@@ -110,6 +110,12 @@ export type EffectiveFilesystemSettings = {
   uploadMaxBytes: number;
   uploadMaxBytesSource: FilesystemSettingsSource;
 };
+export type AgentMessageAutoContinueSettingsSource = 'settings' | 'default';
+export type EffectiveAgentMessageAutoContinueSettings = {
+  prompt: string;
+  promptSource: AgentMessageAutoContinueSettingsSource;
+  updatedAt: string | null;
+};
 export type { KanbanBoardTaskType, KanbanBoardCard, KanbanBoardLane, KanbanBoardSettings };
 export type TaskPlaybookButtonSettings = Array<{
   id: string;
@@ -155,6 +161,8 @@ const DEFAULT_SIDEBAR_DENSITY_MODE: UiPreferencesSettings['sidebarDensityMode'] 
 export const FILESYSTEM_UPLOAD_MAX_BYTES_MIN = 1 * 1024 * 1024;
 export const FILESYSTEM_UPLOAD_MAX_BYTES_MAX = 8 * 1024 * 1024 * 1024;
 export const FILESYSTEM_UPLOAD_MAX_BYTES_DEFAULT = 2 * 1024 * 1024 * 1024;
+export const AGENT_MESSAGE_AUTO_CONTINUE_PROMPT_DEFAULT = 'continue';
+export const AGENT_MESSAGE_AUTO_CONTINUE_PROMPT_MAX_CHARS = 200;
 const UI_AUTOMATION_RUNS_MIN = 1;
 const UI_AUTOMATION_RUNS_MAX = 20;
 const UI_AUTOMATION_RUNS_DEFAULT = 5;
@@ -226,6 +234,14 @@ export function parseFilesystemUploadMaxBytes(raw: unknown): number | null {
   const i = Math.floor(n);
   if (i < FILESYSTEM_UPLOAD_MAX_BYTES_MIN || i > FILESYSTEM_UPLOAD_MAX_BYTES_MAX) return null;
   return i;
+}
+
+export function normalizeAgentMessageAutoContinuePrompt(raw: unknown): string {
+  const text = typeof raw === 'string' ? raw.trim() : '';
+  if (!text) return '';
+  return text.length > AGENT_MESSAGE_AUTO_CONTINUE_PROMPT_MAX_CHARS
+    ? text.slice(0, AGENT_MESSAGE_AUTO_CONTINUE_PROMPT_MAX_CHARS).trim()
+    : text;
 }
 
 function normalizeApiKey(raw: unknown): string {
@@ -684,6 +700,71 @@ export async function resolveFilesystemSettingsResponse(): Promise<{
       minUploadMaxBytes: FILESYSTEM_UPLOAD_MAX_BYTES_MIN,
       maxUploadMaxBytes: FILESYSTEM_UPLOAD_MAX_BYTES_MAX,
       defaultUploadMaxBytes: FILESYSTEM_UPLOAD_MAX_BYTES_DEFAULT,
+    },
+  };
+}
+
+async function getStoredAgentMessageAutoContinueSettings(): Promise<{
+  prompt: string | null;
+  updatedAt: string | null;
+}> {
+  const reg = await loadRegistry();
+  const raw = reg.settings?.agentMessageAutoContinue;
+  const prompt = normalizeAgentMessageAutoContinuePrompt(raw?.prompt);
+  const updatedAtRaw = raw?.updatedAt;
+  return {
+    prompt: prompt || null,
+    updatedAt: typeof updatedAtRaw === 'string' && updatedAtRaw.trim() ? updatedAtRaw.trim() : null,
+  };
+}
+
+export async function upsertStoredAgentMessageAutoContinueSettings(opts: {
+  prompt?: string | null;
+}): Promise<void> {
+  const prompt = normalizeAgentMessageAutoContinuePrompt(opts.prompt);
+  const updatedAt = new Date().toISOString();
+  await updateRegistry((reg) => {
+    reg.settings ??= {};
+    if (!prompt || prompt === AGENT_MESSAGE_AUTO_CONTINUE_PROMPT_DEFAULT) {
+      delete reg.settings.agentMessageAutoContinue;
+      if (Object.keys(reg.settings).length === 0) delete reg.settings;
+      return;
+    }
+    reg.settings.agentMessageAutoContinue = {
+      prompt,
+      updatedAt,
+    };
+  });
+}
+
+export async function resolveEffectiveAgentMessageAutoContinueSettings(): Promise<EffectiveAgentMessageAutoContinueSettings> {
+  const stored = await getStoredAgentMessageAutoContinueSettings();
+  return {
+    prompt: stored.prompt ?? AGENT_MESSAGE_AUTO_CONTINUE_PROMPT_DEFAULT,
+    promptSource: stored.prompt ? 'settings' : 'default',
+    updatedAt: stored.prompt ? stored.updatedAt : null,
+  };
+}
+
+export async function resolveAgentMessageAutoContinueSettingsResponse(): Promise<{
+  ok: true;
+  agentMessageAutoContinue: {
+    prompt: string;
+    promptSource: AgentMessageAutoContinueSettingsSource;
+    updatedAt: string | null;
+    defaultPrompt: string;
+    maxPromptChars: number;
+  };
+}> {
+  const settings = await resolveEffectiveAgentMessageAutoContinueSettings();
+  return {
+    ok: true,
+    agentMessageAutoContinue: {
+      prompt: settings.prompt,
+      promptSource: settings.promptSource,
+      updatedAt: settings.updatedAt,
+      defaultPrompt: AGENT_MESSAGE_AUTO_CONTINUE_PROMPT_DEFAULT,
+      maxPromptChars: AGENT_MESSAGE_AUTO_CONTINUE_PROMPT_MAX_CHARS,
     },
   };
 }

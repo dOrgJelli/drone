@@ -302,6 +302,7 @@ export const TranscriptTurn = React.memo(
     const droneHubTasks = extractedTaskData.tasks;
     const promptIso = item.promptAt || item.at;
     const agentIso = item.completedAt || item.at;
+    const autoContinuePending = item.agentMessageAutoContinue?.status === 'pending';
     const tldrStatus = tldr?.status ?? 'idle';
     const tldrLoading = tldrStatus === 'loading';
     const tldrError = tldr && tldr.status === 'error' ? tldr.error : '';
@@ -440,12 +441,24 @@ export const TranscriptTurn = React.memo(
           )}
           <div className={`${showRoleIcons ? 'min-w-0 flex-1' : 'w-full'} min-w-[120px]`}>
             <div className="flex items-center justify-between mb-1.5">
-              <span
-                className="text-[10px] font-semibold text-[var(--accent)] tracking-wide uppercase"
-                style={{ fontFamily: 'var(--display)' }}
-              >
-                Agent
-              </span>
+              <div className="flex items-center gap-2 min-w-0">
+                <span
+                  className="text-[10px] font-semibold text-[var(--accent)] tracking-wide uppercase"
+                  style={{ fontFamily: 'var(--display)' }}
+                >
+                  Agent
+                </span>
+                {autoContinuePending ? (
+                  <span
+                    className="inline-flex items-center gap-1 rounded border border-[var(--accent-muted)] bg-[rgba(0,0,0,.18)] px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-[var(--accent)]"
+                    style={{ fontFamily: 'var(--display)' }}
+                    title="Checking whether Hub should auto-continue this chat."
+                  >
+                    <IconSpinner className="w-3 h-3" />
+                    Checking
+                  </span>
+                ) : null}
+              </div>
               <RelativeTimeText
                 at={agentIso}
                 className="text-[9px] leading-none text-[var(--muted-dim)] font-mono"
@@ -605,6 +618,11 @@ export const TranscriptTurn = React.memo(
     a.item.session === b.item.session &&
     a.item.logPath === b.item.logPath &&
     a.item.output === b.item.output &&
+    (a.item.agentMessageAutoContinue?.status ?? '') === (b.item.agentMessageAutoContinue?.status ?? '') &&
+    (a.item.agentMessageAutoContinue?.bucket ?? '') === (b.item.agentMessageAutoContinue?.bucket ?? '') &&
+    (a.item.agentMessageAutoContinue?.source ?? '') === (b.item.agentMessageAutoContinue?.source ?? '') &&
+    (a.item.agentMessageAutoContinue?.continuedAt ?? '') === (b.item.agentMessageAutoContinue?.continuedAt ?? '') &&
+    (a.item.agentMessageAutoContinue?.updatedAt ?? '') === (b.item.agentMessageAutoContinue?.updatedAt ?? '') &&
     (a.item.error ?? '') === (b.item.error ?? '') &&
     a.parsingJobs === b.parsingJobs &&
     a.onCreateJobs === b.onCreateJobs &&

@@ -14,6 +14,7 @@ import { SETTINGS_TABS, type SettingsTabId } from './settings-tabs';
 import { useDroneHubUiStore } from './use-drone-hub-ui-store';
 import type { UseDeleteActionSettingsResult } from './use-delete-action-settings';
 import type { UseAgentsSettingsResult } from './use-agents-settings';
+import type { UseAgentMessageAutoContinueSettingsResult } from './use-agent-message-auto-continue-settings';
 import type { UseFilesystemSettingsResult } from './use-filesystem-settings';
 import type { UseGithubSettingsResult } from './use-github-settings';
 import type { UseHubLogsResult } from './use-hub-logs';
@@ -25,6 +26,7 @@ import type { UseSyncSetsResult } from './use-sync-sets';
 type SettingsViewProps = {
   github: UseGithubSettingsResult;
   llm: UseLlmSettingsResult;
+  agentMessageAutoContinue: UseAgentMessageAutoContinueSettingsResult;
   agents: UseAgentsSettingsResult;
   skillLibrary: UseSkillLibraryResult;
   deleteAction: UseDeleteActionSettingsResult;
@@ -54,6 +56,7 @@ function settingsNavButtonClass(active: boolean) {
 export function SettingsView({
   github,
   llm,
+  agentMessageAutoContinue,
   agents,
   skillLibrary,
   deleteAction,
@@ -79,6 +82,7 @@ export function SettingsView({
     hubLogsState.hubLogsLoading ||
     github.githubSettingsLoading ||
     llm.llmSettingsLoading ||
+    agentMessageAutoContinue.agentMessageAutoContinueSettingsLoading ||
     deleteAction.deleteSettingsLoading ||
     filesystem.filesystemSettingsLoading ||
     syncSets.syncSetsLoading ||
@@ -90,6 +94,7 @@ export function SettingsView({
     llm.savingGeminiSettings ||
     llm.clearingGeminiSettings ||
     llm.savingLlmProvider ||
+    agentMessageAutoContinue.savingAgentMessageAutoContinueSettings ||
     agents.agentsSettingsLoading ||
     agents.savingAgentsSettings ||
     skillLibrary.skillsLoading ||
@@ -135,6 +140,7 @@ export function SettingsView({
       if (!ok) return;
     }
     void llm.loadLlmSettings();
+    void agentMessageAutoContinue.loadAgentMessageAutoContinueSettings();
     void github.loadGithubSettings();
     void deleteAction.loadDeleteSettings();
     void filesystem.loadFilesystemSettings();
@@ -146,7 +152,7 @@ export function SettingsView({
     void hubLogsState.loadHubLogs();
     void skillLibrary.loadSkills();
     void skillLibrary.loadSkillSources();
-  }, [agents, agentsDraftDirty, deleteAction, filesystem, github, hubLogsState, llm, profile, skillLibrary, syncSets]);
+  }, [agentMessageAutoContinue, agents, agentsDraftDirty, deleteAction, filesystem, github, hubLogsState, llm, profile, skillLibrary, syncSets]);
 
   const renderActiveTab = () => {
     if (activeTab === 'general') {
@@ -155,6 +161,7 @@ export function SettingsView({
           github={github}
           llm={llm}
           filesystem={filesystem}
+          agentMessageAutoContinue={agentMessageAutoContinue}
           transcriptInlineImages={transcriptInlineImages}
           setTranscriptInlineImages={setTranscriptInlineImages}
           onReplayOnboarding={onReplayOnboarding}

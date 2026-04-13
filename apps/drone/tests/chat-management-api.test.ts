@@ -222,6 +222,58 @@ describeSocketSuite('chat management api', () => {
     expect((listed.data?.chats ?? []).includes('qa')).toBe(false);
   });
 
+  test('stores and returns per-chat auto-continue toggle state', async () => {
+    const droneId = 'drone-chat-auto-continue';
+    await seedDrone(droneId);
+
+    const initial = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats/default`);
+    expect(initial.r.status).toBe(200);
+    expect(initial.data?.agentMessageAutoContinueEnabled).toBe(false);
+
+    const updated = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats/default/config`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentMessageAutoContinueEnabled: true }),
+    });
+    expect(updated.r.status).toBe(200);
+    expect(updated.data?.agentMessageAutoContinueEnabled).toBe(true);
+
+    const chatInfo = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats/default`);
+    expect(chatInfo.r.status).toBe(200);
+    expect(chatInfo.data?.agentMessageAutoContinueEnabled).toBe(true);
+
+    const regAny: any = await loadRegistry();
+    expect(regAny?.drones?.[droneId]?.chats?.default?.agentMessageAutoContinueEnabled).toBe(true);
+    expect(typeof regAny?.drones?.[droneId]?.chats?.default?.agentMessageAutoContinueEnabledAt).toBe('string');
+  });
+
+  test('rejects enabling auto-continue for custom-agent chats', async () => {
+    const droneId = 'drone-chat-auto-continue-custom';
+    await seedDrone(droneId);
+
+    const setCustom = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats/default/config`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        agent: {
+          kind: 'custom',
+          id: 'custom-shell',
+          label: 'Custom Shell',
+          command: 'custom-shell',
+        },
+      }),
+    });
+    expect(setCustom.r.status).toBe(200);
+
+    const updated = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats/default/config`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentMessageAutoContinueEnabled: true }),
+    });
+    expect(updated.r.status).toBe(400);
+    expect(String(updated.data?.error ?? '')).toContain('builtin transcript chats');
+  });
+
   test('archives chats when delete mode is archive and supports restore/delete-now', async () => {
     const droneId = 'drone-chat-archive';
     await seedDrone(droneId);

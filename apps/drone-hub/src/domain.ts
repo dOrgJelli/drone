@@ -7,6 +7,7 @@ export type ChatInfo = {
   chat: string;
   agent: ChatAgentConfig;
   model: string | null;
+  agentMessageAutoContinueEnabled: boolean;
   sessionName: string;
   createdAt: string;
 };
@@ -101,6 +102,7 @@ export function normalizeChatInfoPayload(data: any): ChatInfo {
       name,
       chat,
       model,
+      agentMessageAutoContinueEnabled: data?.agentMessageAutoContinueEnabled === true,
       sessionName,
       createdAt,
       agent: { kind: 'builtin', id: builtinId },
@@ -110,15 +112,57 @@ export function normalizeChatInfoPayload(data: any): ChatInfo {
     const id = String(raw.id ?? '').trim();
     const label = String(raw.label ?? '').trim();
     const command = String(raw.command ?? '').trim();
-    if (id && label && command) return { name, chat, model, sessionName, createdAt, agent: { kind: 'custom', id, label, command } };
+    if (id && label && command) {
+      return {
+        name,
+        chat,
+        model,
+        agentMessageAutoContinueEnabled: data?.agentMessageAutoContinueEnabled === true,
+        sessionName,
+        createdAt,
+        agent: { kind: 'custom', id, label, command },
+      };
+    }
   }
 
-  if (String(data?.claudeSessionId ?? '').trim()) return { name, chat, model, sessionName, createdAt, agent: { kind: 'builtin', id: 'claude' } };
-  if (String(data?.openCodeSessionId ?? '').trim() || String(data?.opencodeSessionId ?? '').trim()) {
-    return { name, chat, model, sessionName, createdAt, agent: { kind: 'builtin', id: 'opencode' } };
+  if (String(data?.claudeSessionId ?? '').trim()) {
+    return {
+      name,
+      chat,
+      model,
+      agentMessageAutoContinueEnabled: data?.agentMessageAutoContinueEnabled === true,
+      sessionName,
+      createdAt,
+      agent: { kind: 'builtin', id: 'claude' },
+    };
   }
-  if (String(data?.piSessionId ?? '').trim()) return { name, chat, model, sessionName, createdAt, agent: { kind: 'builtin', id: 'pi' } };
-  if (String(data?.codexThreadId ?? '').trim()) return { name, chat, model, sessionName, createdAt, agent: { kind: 'builtin', id: 'codex' } };
-  if (String(data?.chatId ?? '').trim()) return { name, chat, model, sessionName, createdAt, agent: { kind: 'builtin', id: 'cursor' } };
-  return { name, chat, model, sessionName, createdAt, agent: { kind: 'builtin', id: 'cursor' } };
+  if (String(data?.openCodeSessionId ?? '').trim() || String(data?.opencodeSessionId ?? '').trim()) {
+    return {
+      name,
+      chat,
+      model,
+      agentMessageAutoContinueEnabled: data?.agentMessageAutoContinueEnabled === true,
+      sessionName,
+      createdAt,
+      agent: { kind: 'builtin', id: 'opencode' },
+    };
+  }
+  if (String(data?.piSessionId ?? '').trim()) {
+    return { name, chat, model, agentMessageAutoContinueEnabled: data?.agentMessageAutoContinueEnabled === true, sessionName, createdAt, agent: { kind: 'builtin', id: 'pi' } };
+  }
+  if (String(data?.codexThreadId ?? '').trim()) {
+    return { name, chat, model, agentMessageAutoContinueEnabled: data?.agentMessageAutoContinueEnabled === true, sessionName, createdAt, agent: { kind: 'builtin', id: 'codex' } };
+  }
+  if (String(data?.chatId ?? '').trim()) {
+    return { name, chat, model, agentMessageAutoContinueEnabled: data?.agentMessageAutoContinueEnabled === true, sessionName, createdAt, agent: { kind: 'builtin', id: 'cursor' } };
+  }
+  return {
+    name,
+    chat,
+    model,
+    agentMessageAutoContinueEnabled: data?.agentMessageAutoContinueEnabled === true,
+    sessionName,
+    createdAt,
+    agent: { kind: 'builtin', id: 'cursor' },
+  };
 }

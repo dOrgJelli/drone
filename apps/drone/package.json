@@ -24,6 +24,7 @@
     "dev": "ts-node src/cli.ts",
     "test": "bun test tests",
     "test:coverage": "bun test --coverage tests",
+    "test:auto-continue-eval": "bun test evals/agent-message-auto-continue.eval.ts",
     "smoke": "node scripts/smoke-cli.cjs",
     "lint": "eslint \"src/**/*.ts\"",
     "format": "prettier --write ."

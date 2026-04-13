@@ -78,6 +78,8 @@ type DroneRegistryChatEntry = {
   chatId?: string;
   model?: string;
   agent?: DroneRegistryChatAgentConfig;
+  agentMessageAutoContinueEnabled?: boolean;
+  agentMessageAutoContinueEnabledAt?: string;
   codexThreadId?: string;
   claudeSessionId?: string;
   openCodeSessionId?: string;
@@ -91,6 +93,15 @@ type DroneRegistryChatEntry = {
     error?: string;
     promptAt?: string;
     completedAt?: string;
+    agentMessageAutoContinue?: {
+      status?: 'pending' | 'classified' | 'failed';
+      bucket?: 'user-turn' | 'continue';
+      source?: 'llm' | 'agent-copilot-json';
+      classifiedAt?: string;
+      continuedAt?: string;
+      error?: string;
+      updatedAt?: string;
+    };
   }>;
   pendingPrompts?: Array<{
     id: string;
@@ -135,6 +146,10 @@ type DroneRegistryV1 = {
     };
     filesystem?: {
       uploadMaxBytes?: number;
+      updatedAt?: string;
+    };
+    agentMessageAutoContinue?: {
+      prompt?: string;
       updatedAt?: string;
     };
     agents?: {

@@ -68,6 +68,10 @@ import {
 } from '../host/api';
 import { jobsPlanFromAgentMessage, suggestDroneNameFromMessage, suggestTaskTitleFromMessage } from './jobs-from-message';
 import { tldrFromAgentMessage } from './tldr-from-message';
+import {
+  classifyAgentMessageAutoContinue,
+  type AgentMessageAutoContinueClassification,
+} from './agent-message-auto-continue';
 import { resolveTranscriptPromptAt } from './transcript-order';
 import { extractAgentCopilotFromAgentMessage, type AgentCopilotRequest } from './agent-copilot-parser';
 import { cloneChatEntryForDroneClone, maybeBootstrapPromptFromTranscript } from './chat-clone';
@@ -201,6 +205,7 @@ import {
   collectProviderApiKeyDiagnostics,
   FILESYSTEM_UPLOAD_MAX_BYTES_MAX,
   FILESYSTEM_UPLOAD_MAX_BYTES_MIN,
+  normalizeAgentMessageAutoContinuePrompt,
   KanbanBoardSettingsConflictError,
   hubLog,
   loadHubEnv,
@@ -211,6 +216,8 @@ import {
   parseLlmProvider,
   providerDisplayName,
   providerKeySettingsResponse,
+  resolveAgentMessageAutoContinueSettingsResponse,
+  resolveEffectiveAgentMessageAutoContinueSettings,
   resolveKanbanBoardSettingsResponse,
   resolveDeleteActionSettingsResponse,
   resolveEffectiveFilesystemSettings,
@@ -224,6 +231,7 @@ import {
   upsertStoredDeleteActionSettings,
   upsertStoredFilesystemSettings,
   upsertStoredKanbanBoardSettings,
+  upsertStoredAgentMessageAutoContinueSettings,
   upsertStoredLlmProvider,
   upsertStoredProviderApiKey,
   upsertStoredTaskPlaybookButtonSettings,
@@ -2582,6 +2590,15 @@ type TranscriptTurn = {
   attachments?: ChatImageAttachmentRef[];
   automation?: PromptAutomationMeta;
   inheritedFromClone?: boolean;
+  agentMessageAutoContinue?: {
+    status?: 'pending' | 'classified' | 'failed';
+    bucket?: 'user-turn' | 'continue';
+    source?: 'llm' | 'agent-copilot-json';
+    classifiedAt?: string;
+    continuedAt?: string;
+    error?: string;
+    updatedAt?: string;
+  };
 };
 
 type PlaybookMessageDefinition = {
@@ -3537,6 +3554,8 @@ const PROMPT_AUTOMATION_ON_FAILURE_PROMPT_MAX_CHARS = 8_000;
 const PROMPT_AUTOMATION_INTER_RUN_SLEEP_CHUNK_MS = 5_000;
 const AGENT_COPILOT_HANDLED_CAP = 500;
 const AGENT_COPILOT_IN_FLIGHT = new Set<string>();
+const AGENT_MESSAGE_AUTO_CONTINUE_IN_FLIGHT = new Set<string>();
+const AGENT_MESSAGE_AUTO_CONTINUE_CHAT_IN_FLIGHT = new Set<string>();
 
 function attachReviewMetadataToPullEntries<T extends { path: string; originalPath: string | null }>(entries: T[]): Array<T & { reviewKey: string; reviewToken: string }> {
   return entries.map((entry) => {
@@ -4222,6 +4241,7 @@ async function sendPromptToChat(opts: {
 const RECONCILE_TASKS = new Map<string, Promise<void>>();
 const RECONCILE_QUEUE: Array<{ droneName: string; chatName: string }> = [];
 const RECONCILE_QUEUED = new Set<string>();
+const RECONCILE_RETRY_TIMERS = new Map<string, ReturnType<typeof setTimeout>>();
 let RECONCILE_ACTIVE = 0;
 let RECONCILE_PUMPING = false;
 
@@ -4277,6 +4297,27 @@ function enqueueReconcile(droneIdRaw: string, chatName: string) {
   RECONCILE_QUEUED.add(key);
   RECONCILE_QUEUE.push({ droneName: dn, chatName: cn });
   pumpReconcileQueue();
+}
+
+function clearScheduledReconcileRetryByKey(key: string): void {
+  const timer = RECONCILE_RETRY_TIMERS.get(key);
+  if (!timer) return;
+  clearTimeout(timer);
+  RECONCILE_RETRY_TIMERS.delete(key);
+}
+
+function scheduleReconcileRetry(droneIdRaw: string, chatNameRaw: string, delayMs: number = 2_000): void {
+  const key = droneChatMapKey(droneIdRaw, chatNameRaw);
+  if (!key || RECONCILE_RETRY_TIMERS.has(key)) return;
+  const droneId = normalizeDroneIdentity(droneIdRaw);
+  const chatName = normalizeChatName(chatNameRaw);
+  if (!droneId || !chatName) return;
+  const timeoutMs = Math.max(250, Math.floor(delayMs || 0));
+  const timer = setTimeout(() => {
+    RECONCILE_RETRY_TIMERS.delete(key);
+    enqueueReconcile(droneId, chatName);
+  }, timeoutMs);
+  RECONCILE_RETRY_TIMERS.set(key, timer);
 }
 
 function looksLikeMissingContainerError(msg: string): boolean {
@@ -5383,6 +5424,230 @@ function getTranscriptTurnByPromptIdFromRegistry(
   return (turns.find((t: any) => String(t?.id ?? '').trim() === opts.promptId) ?? null) as TranscriptTurn | null;
 }
 
+function chatAgentMessageAutoContinueEnabled(chatEntry: any): boolean {
+  return chatEntry?.agentMessageAutoContinueEnabled === true;
+}
+
+function buildAgentMessageAutoContinueSourceMessageId(opts: {
+  droneId: string;
+  chatName: string;
+  turn: TranscriptTurn | null | undefined;
+}): string {
+  const droneId = normalizeDroneIdentity(opts.droneId);
+  const chatName = normalizeChatName(opts.chatName);
+  const turnId = String(opts.turn?.id ?? '').trim();
+  if (droneId && turnId) return `${droneId}:${turnId}`;
+  const at = String(opts.turn?.completedAt ?? opts.turn?.promptAt ?? opts.turn?.at ?? '').trim();
+  if (!droneId || !chatName || !at) return '';
+  return `${droneId}:${chatName}:${at}`;
+}
+
+function buildAgentMessageAutoContinueChatLockId(opts: {
+  droneId: string;
+  chatName: string;
+}): string {
+  const droneId = normalizeDroneIdentity(opts.droneId);
+  const chatName = normalizeChatName(opts.chatName);
+  if (!droneId || !chatName) return '';
+  return `${droneId}:${chatName}`;
+}
+
+function normalizeAgentMessageAutoContinueTurnState(
+  raw: TranscriptTurn['agentMessageAutoContinue'] | undefined,
+): NonNullable<TranscriptTurn['agentMessageAutoContinue']> | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const status = String(raw.status ?? '').trim();
+  if (status !== 'pending' && status !== 'classified' && status !== 'failed') return null;
+  const bucketRaw = String(raw.bucket ?? '').trim();
+  const sourceRaw = String(raw.source ?? '').trim();
+  const classifiedAt = String(raw.classifiedAt ?? '').trim();
+  const continuedAt = String(raw.continuedAt ?? '').trim();
+  const error = String(raw.error ?? '').trim();
+  const updatedAt = String(raw.updatedAt ?? '').trim();
+  return {
+    status,
+    ...(bucketRaw === 'user-turn' || bucketRaw === 'continue' ? { bucket: bucketRaw } : {}),
+    ...(sourceRaw === 'llm' || sourceRaw === 'agent-copilot-json' ? { source: sourceRaw } : {}),
+    ...(classifiedAt ? { classifiedAt } : {}),
+    ...(continuedAt ? { continuedAt } : {}),
+    ...(error ? { error } : {}),
+    ...(updatedAt ? { updatedAt } : {}),
+  };
+}
+
+function turnNeedsAgentMessageAutoContinueProcessing(
+  turn: TranscriptTurn | null | undefined,
+  enabledAtMs: number,
+): boolean {
+  if (!turn?.ok || turn?.inheritedFromClone === true) return false;
+  if (!String(turn?.id ?? '').trim()) return false;
+  const turnIso = String(turn?.completedAt ?? turn?.at ?? '').trim();
+  const turnMs = turnIso ? new Date(turnIso).getTime() : Number.NaN;
+  if (!Number.isFinite(turnMs) || turnMs < enabledAtMs) return false;
+  const state = normalizeAgentMessageAutoContinueTurnState(turn.agentMessageAutoContinue);
+  return !state || state.status === 'pending';
+}
+
+async function markTranscriptTurnAgentMessageAutoContinuePending(opts: {
+  droneId: string;
+  chatName: string;
+  promptId: string;
+}): Promise<void> {
+  const updatedAt = nowIso();
+  await updateTranscriptTurnById({
+    droneId: opts.droneId,
+    chatName: opts.chatName,
+    promptId: opts.promptId,
+    update: (turn) => ({
+      ...turn,
+      agentMessageAutoContinue: {
+        status: 'pending',
+        updatedAt,
+      },
+    }),
+  });
+}
+
+async function markTranscriptTurnAgentMessageAutoContinueResult(opts: {
+  droneId: string;
+  chatName: string;
+  promptId: string;
+  classification: AgentMessageAutoContinueClassification;
+  continuedAt?: string | null;
+}): Promise<void> {
+  const updatedAt = nowIso();
+  await updateTranscriptTurnById({
+    droneId: opts.droneId,
+    chatName: opts.chatName,
+    promptId: opts.promptId,
+    update: (turn) => ({
+      ...turn,
+      agentMessageAutoContinue: {
+        status: 'classified',
+        bucket: opts.classification.bucket,
+        source: opts.classification.source,
+        classifiedAt: updatedAt,
+        ...(opts.continuedAt ? { continuedAt: opts.continuedAt } : {}),
+        updatedAt,
+      },
+    }),
+  });
+}
+
+async function markTranscriptTurnAgentMessageAutoContinueFailed(opts: {
+  droneId: string;
+  chatName: string;
+  promptId: string;
+  error: string;
+}): Promise<void> {
+  const updatedAt = nowIso();
+  await updateTranscriptTurnById({
+    droneId: opts.droneId,
+    chatName: opts.chatName,
+    promptId: opts.promptId,
+    update: (turn) => ({
+      ...turn,
+      agentMessageAutoContinue: {
+        status: 'failed',
+        error: opts.error,
+        updatedAt,
+      },
+    }),
+  });
+}
+
+async function processPendingAgentMessageAutoContinueTurns(opts: {
+  droneId: string;
+  chatName: string;
+}): Promise<void> {
+  const droneId = normalizeDroneIdentity(opts.droneId);
+  const chatName = normalizeChatName(opts.chatName);
+  if (!droneId || !chatName) return;
+  const chatLockId = buildAgentMessageAutoContinueChatLockId({ droneId, chatName });
+  if (!chatLockId || AGENT_MESSAGE_AUTO_CONTINUE_CHAT_IN_FLIGHT.has(chatLockId)) return;
+
+  const regAny: any = await loadRegistry();
+  const chatEntry = regAny?.drones?.[droneId]?.chats?.[chatName] ?? null;
+  if (!chatEntry || !chatAgentMessageAutoContinueEnabled(chatEntry)) return;
+  const turns: TranscriptTurn[] = Array.isArray(chatEntry?.turns) ? chatEntry.turns : [];
+  if (turns.length === 0) return;
+  const enabledAtIso = String(chatEntry?.agentMessageAutoContinueEnabledAt ?? '').trim();
+  const enabledAtMs = enabledAtIso ? new Date(enabledAtIso).getTime() : Number.NaN;
+  if (!Number.isFinite(enabledAtMs)) return;
+
+  const llmProvider = await resolveEffectiveLlmProvider();
+  const providerSettings = await resolveEffectiveProviderApiKeySettings(llmProvider.provider);
+  const autoContinueSettings = await resolveEffectiveAgentMessageAutoContinueSettings();
+
+  for (let turnIndex = 0; turnIndex < turns.length; turnIndex += 1) {
+    const turn = turns[turnIndex] ?? null;
+    if (!turnNeedsAgentMessageAutoContinueProcessing(turn, enabledAtMs)) continue;
+    const promptId = String(turn?.id ?? '').trim();
+    if (!promptId) continue;
+    const sourceMessageId = buildAgentMessageAutoContinueSourceMessageId({
+      droneId,
+      chatName,
+      turn,
+    });
+    if (!sourceMessageId || AGENT_MESSAGE_AUTO_CONTINUE_IN_FLIGHT.has(sourceMessageId)) continue;
+
+    AGENT_MESSAGE_AUTO_CONTINUE_CHAT_IN_FLIGHT.add(chatLockId);
+    AGENT_MESSAGE_AUTO_CONTINUE_IN_FLIGHT.add(sourceMessageId);
+    await markTranscriptTurnAgentMessageAutoContinuePending({
+      droneId,
+      chatName,
+      promptId,
+    });
+
+    void (async () => {
+      try {
+        const output = stripAnsiFromCliOutput(String(turn?.output ?? ''));
+        const classification = await classifyAgentMessageAutoContinue(output, {
+          provider: llmProvider.provider,
+          apiKey: providerSettings.apiKey ?? undefined,
+        });
+
+        await markTranscriptTurnAgentMessageAutoContinueResult({
+          droneId,
+          chatName,
+          promptId,
+          classification,
+        });
+
+        let continuedAt: string | null = null;
+        if (classification.bucket === 'continue') {
+          const enqueued = await createOrEnqueuePromptUnified({
+            droneId,
+            chatName,
+            prompt: autoContinueSettings.prompt,
+          });
+          if (enqueued.kind === 'error') throw new Error(enqueued.error);
+          continuedAt = nowIso();
+        }
+
+        await markTranscriptTurnAgentMessageAutoContinueResult({
+          droneId,
+          chatName,
+          promptId,
+          classification,
+          ...(continuedAt ? { continuedAt } : {}),
+        });
+      } catch (error: any) {
+        await markTranscriptTurnAgentMessageAutoContinueFailed({
+          droneId,
+          chatName,
+          promptId,
+          error: String(error?.message ?? error ?? 'Unknown error.'),
+        });
+      } finally {
+        AGENT_MESSAGE_AUTO_CONTINUE_IN_FLIGHT.delete(sourceMessageId);
+        AGENT_MESSAGE_AUTO_CONTINUE_CHAT_IN_FLIGHT.delete(chatLockId);
+      }
+    })();
+    return;
+  }
+}
+
 function buildAgentCopilotSourceMessageId(opts: {
   droneId: string;
   chatName: string;
@@ -6331,6 +6596,7 @@ function clearInMemoryChatStateForDelete(opts: { droneId: string; chatName: stri
 
   PROMPT_AUTOMATION_LANES.delete(key);
 
+  clearScheduledReconcileRetryByKey(key);
   RECONCILE_QUEUED.delete(key);
   for (let i = RECONCILE_QUEUE.length - 1; i >= 0; i -= 1) {
     const item = RECONCILE_QUEUE[i];
@@ -6368,6 +6634,7 @@ function migrateInMemoryChatStateForRename(opts: { droneId: string; fromChatName
     PROMPT_AUTOMATION_LANES.set(toKey, lane);
   }
 
+  clearScheduledReconcileRetryByKey(fromKey);
   if (RECONCILE_QUEUED.delete(fromKey)) RECONCILE_QUEUED.add(toKey);
   for (const item of RECONCILE_QUEUE) {
     if (droneChatMapKey(String(item?.droneName ?? ''), String(item?.chatName ?? '')) !== fromKey) continue;
@@ -6449,8 +6716,16 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
 
   const pendingList: any[] = Array.isArray(entry?.pendingPrompts) ? entry.pendingPrompts : [];
   if (pendingList.length === 0) {
+    clearScheduledReconcileRetryByKey(droneChatMapKey(droneId, chatName));
     void processPendingAgentCopilotTurns({ droneId, chatName }).catch((error: any) => {
       hubLog('warn', 'agent copilot scan failed after reconcile', {
+        droneId,
+        chatName,
+        error: String(error?.message ?? error ?? 'unknown error'),
+      });
+    });
+    void processPendingAgentMessageAutoContinueTurns({ droneId, chatName }).catch((error: any) => {
+      hubLog('warn', 'agent message auto-continue scan failed after reconcile', {
         droneId,
         chatName,
         error: String(error?.message ?? error ?? 'unknown error'),
@@ -6798,8 +7073,21 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
     enqueuePendingPromptPump(droneId, chatName);
   }
 
+  if (chatHasReconcilablePendingPrompts({ pendingPrompts: pendingList, turns })) {
+    scheduleReconcileRetry(droneId, chatName);
+  } else {
+    clearScheduledReconcileRetryByKey(droneChatMapKey(droneId, chatName));
+  }
+
   void processPendingAgentCopilotTurns({ droneId, chatName }).catch((error: any) => {
     hubLog('warn', 'agent copilot scan failed after reconcile', {
+      droneId,
+      chatName,
+      error: String(error?.message ?? error ?? 'unknown error'),
+    });
+  });
+  void processPendingAgentMessageAutoContinueTurns({ droneId, chatName }).catch((error: any) => {
+    hubLog('warn', 'agent message auto-continue scan failed after reconcile', {
       droneId,
       chatName,
       error: String(error?.message ?? error ?? 'unknown error'),
@@ -8584,6 +8872,8 @@ async function setChatAgentConfig(opts: {
   agent?: ChatAgentConfig;
   setModel?: boolean;
   model?: string | null;
+  setAgentMessageAutoContinueEnabled?: boolean;
+  agentMessageAutoContinueEnabled?: boolean;
 }) {
   await updateRegistry((reg: any) => {
     const droneId = normalizeDroneIdentity(opts.droneId);
@@ -8592,6 +8882,14 @@ async function setChatAgentConfig(opts: {
     d.chats = d.chats ?? {};
     const cur = d.chats?.[opts.chatName];
     if (!cur) throw new Error(`unknown chat: ${opts.chatName}`);
+    const effectiveAgent = opts.agent ?? inferChatAgent(cur, d);
+    if (opts.setAgentMessageAutoContinueEnabled && opts.agentMessageAutoContinueEnabled && effectiveAgent.kind !== 'builtin') {
+      const error: Error & { statusCode?: number } = new Error(
+        'agentMessageAutoContinueEnabled is only supported for builtin transcript chats',
+      );
+      error.statusCode = 400;
+      throw error;
+    }
     if (opts.agent) {
       assertChatAgentSupportedForDrone(d, opts.agent);
       cur.agent = opts.agent as any;
@@ -8599,6 +8897,17 @@ async function setChatAgentConfig(opts: {
     if (opts.setModel) {
       if (opts.model) cur.model = opts.model;
       else delete cur.model;
+    }
+    if (opts.setAgentMessageAutoContinueEnabled) {
+      if (opts.agentMessageAutoContinueEnabled) {
+        cur.agentMessageAutoContinueEnabled = true;
+        if (typeof cur.agentMessageAutoContinueEnabledAt !== 'string' || !String(cur.agentMessageAutoContinueEnabledAt).trim()) {
+          cur.agentMessageAutoContinueEnabledAt = nowIso();
+        }
+      } else {
+        delete cur.agentMessageAutoContinueEnabled;
+        delete cur.agentMessageAutoContinueEnabledAt;
+      }
     }
     d.chats[opts.chatName] = cur;
     reg.drones = reg.drones ?? {};
@@ -8879,6 +9188,29 @@ async function recordTranscriptTurn(opts: {
     reg.drones = reg.drones ?? {};
     reg.drones[opts.droneName] = d;
   });
+}
+
+async function updateTranscriptTurnById(opts: {
+  droneId: string;
+  chatName: string;
+  promptId: string;
+  update: (turn: TranscriptTurn) => TranscriptTurn;
+}): Promise<boolean> {
+  let changed = false;
+  await updateRegistry((reg: any) => {
+    const droneId = normalizeDroneIdentity(opts.droneId);
+    const chatName = normalizeChatName(opts.chatName);
+    const chat = droneId ? reg?.drones?.[droneId]?.chats?.[chatName] : null;
+    const turns: TranscriptTurn[] = Array.isArray(chat?.turns) ? chat.turns : [];
+    const index = turns.findIndex((turn: any) => String(turn?.id ?? '').trim() === opts.promptId);
+    if (!chat || index < 0) return;
+    const current = turns[index] ?? null;
+    if (!current) return;
+    turns[index] = opts.update(current);
+    chat.turns = turns;
+    changed = true;
+  });
+  return changed;
 }
 
 async function runNodeCli(args: string[], opts?: { cwd?: string; timeoutMs?: number }) {
@@ -9606,6 +9938,29 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           }
           await upsertStoredFilesystemSettings({ uploadMaxBytes });
           json(res, 200, await resolveFilesystemSettingsResponse());
+          return;
+        }
+      }
+
+      if (pathname === '/api/settings/agent-message-auto-continue') {
+        if (method === 'GET') {
+          json(res, 200, await resolveAgentMessageAutoContinueSettingsResponse());
+          return;
+        }
+
+        if (method === 'POST') {
+          let body: any = null;
+          try {
+            body = await readJsonBody(req);
+          } catch (e: any) {
+            json(res, 400, { ok: false, error: e?.message ?? String(e) });
+            return;
+          }
+          const prompt = normalizeAgentMessageAutoContinuePrompt(body?.prompt);
+          await upsertStoredAgentMessageAutoContinueSettings({
+            prompt: prompt || undefined,
+          });
+          json(res, 200, await resolveAgentMessageAutoContinueSettingsResponse());
           return;
         }
       }
@@ -19239,6 +19594,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           chat: chatName,
           agent,
           model: (c as any).model ?? null,
+          agentMessageAutoContinueEnabled: (c as any).agentMessageAutoContinueEnabled === true,
           turns: (c as any).turns ?? [],
           sessionName: hubChatSessionName(chatName || 'default'),
           createdAt: c.createdAt,
@@ -19276,7 +19632,10 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         const hasModelField =
           Boolean(body && typeof body === 'object' && Object.prototype.hasOwnProperty.call(body, 'model')) ||
           Boolean(body && typeof body === 'object' && Object.prototype.hasOwnProperty.call(body, 'chatModel'));
+        const hasAutoContinueField =
+          Boolean(body && typeof body === 'object' && Object.prototype.hasOwnProperty.call(body, 'agentMessageAutoContinueEnabled'));
         let model: string | null = null;
+        let agentMessageAutoContinueEnabled = false;
         if (hasModelField) {
           try {
             model = parseChatModelForUpdate(
@@ -19289,13 +19648,36 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             return;
           }
         }
+        if (hasAutoContinueField) {
+          if (body?.agentMessageAutoContinueEnabled !== true && body?.agentMessageAutoContinueEnabled !== false) {
+            json(res, 400, { ok: false, error: 'agentMessageAutoContinueEnabled must be a boolean' });
+            return;
+          }
+          agentMessageAutoContinueEnabled = body.agentMessageAutoContinueEnabled === true;
+        }
         try {
           await ensureChatEntry({ droneId, chatName });
           const builtinId = normalizeBuiltinAgentId(kind === 'builtin' ? agentRaw?.id : kind);
           if (builtinId) {
             const agent: ChatAgentConfig = { kind: 'builtin', id: builtinId };
-            await setChatAgentConfig({ droneId, chatName, agent, setModel: hasModelField, model });
-            json(res, 200, { ok: true, id: droneId, name: droneName, chat: chatName, agent, ...(hasModelField ? { model } : {}) });
+            await setChatAgentConfig({
+              droneId,
+              chatName,
+              agent,
+              setModel: hasModelField,
+              model,
+              setAgentMessageAutoContinueEnabled: hasAutoContinueField,
+              agentMessageAutoContinueEnabled,
+            });
+            json(res, 200, {
+              ok: true,
+              id: droneId,
+              name: droneName,
+              chat: chatName,
+              agent,
+              ...(hasModelField ? { model } : {}),
+              ...(hasAutoContinueField ? { agentMessageAutoContinueEnabled } : {}),
+            });
             return;
           }
           if (kind === 'custom') {
@@ -19306,18 +19688,57 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             if (!label) throw new Error('missing agent.label');
             if (!command) throw new Error('missing agent.command');
             const agent: ChatAgentConfig = { kind: 'custom', id, label, command };
-            await setChatAgentConfig({ droneId, chatName, agent, setModel: hasModelField, model });
-            json(res, 200, { ok: true, id: droneId, name: droneName, chat: chatName, agent, ...(hasModelField ? { model } : {}) });
+            await setChatAgentConfig({
+              droneId,
+              chatName,
+              agent,
+              setModel: hasModelField,
+              model,
+              setAgentMessageAutoContinueEnabled: hasAutoContinueField,
+              agentMessageAutoContinueEnabled,
+            });
+            json(res, 200, {
+              ok: true,
+              id: droneId,
+              name: droneName,
+              chat: chatName,
+              agent,
+              ...(hasModelField ? { model } : {}),
+              ...(hasAutoContinueField ? { agentMessageAutoContinueEnabled } : {}),
+            });
             return;
           }
           if (hasModelField) {
-            await setChatAgentConfig({ droneId, chatName, setModel: true, model });
+            await setChatAgentConfig({
+              droneId,
+              chatName,
+              setModel: true,
+              model,
+              setAgentMessageAutoContinueEnabled: hasAutoContinueField,
+              agentMessageAutoContinueEnabled,
+            });
             json(res, 200, { ok: true, id: droneId, name: droneName, chat: chatName, model });
+            return;
+          }
+          if (hasAutoContinueField) {
+            await setChatAgentConfig({
+              droneId,
+              chatName,
+              setAgentMessageAutoContinueEnabled: true,
+              agentMessageAutoContinueEnabled,
+            });
+            json(res, 200, {
+              ok: true,
+              id: droneId,
+              name: droneName,
+              chat: chatName,
+              agentMessageAutoContinueEnabled,
+            });
             return;
           }
           json(res, 400, {
             ok: false,
-            error: `invalid request (expected agent cursor|codex|claude|opencode|pi|custom or model)`,
+            error: `invalid request (expected agent cursor|codex|claude|opencode|pi|custom, model, or agentMessageAutoContinueEnabled)`,
           });
           return;
         } catch (e: any) {
@@ -19406,6 +19827,9 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             const prompt = String(t?.prompt ?? '');
             const attachments = normalizeChatImageAttachmentRefs((t as any)?.attachments);
             const automation = normalizePromptAutomationMeta((t as any)?.automation);
+            const agentMessageAutoContinue = normalizeAgentMessageAutoContinueTurnState(
+              (t as any)?.agentMessageAutoContinue,
+            );
             const ok = Boolean(t?.ok);
             const output = ok ? String(t?.output ?? '') : '';
             const error = ok ? undefined : String(t?.error ?? 'failed');
@@ -19418,6 +19842,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               prompt,
               ...(attachments.length > 0 ? { attachments } : {}),
               ...(automation ? { automation } : {}),
+              ...(agentMessageAutoContinue ? { agentMessageAutoContinue } : {}),
               ...((t as any)?.inheritedFromClone === true ? { inheritedFromClone: true } : {}),
               ok,
               ...(ok ? { output } : { output: '', error }),

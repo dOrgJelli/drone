@@ -488,6 +488,15 @@ export type TranscriptItem = {
   ok: boolean;
   error?: string;
   output: string;
+  agentMessageAutoContinue?: {
+    status?: 'pending' | 'classified' | 'failed';
+    bucket?: 'user-turn' | 'continue';
+    source?: 'llm' | 'agent-copilot-json';
+    classifiedAt?: string;
+    continuedAt?: string;
+    error?: string;
+    updatedAt?: string;
+  };
 };
 
 export type ChatImageAttachmentRef = {

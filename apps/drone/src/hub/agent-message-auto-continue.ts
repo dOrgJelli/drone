@@ -1,0 +1,126 @@
+import { extractAgentCopilotFromAgentMessage } from './agent-copilot-parser';
+import type { LlmProviderId } from './hub-settings';
+
+type LlmRuntime = {
+  provider: LlmProviderId;
+  z: any;
+  generateObject: any;
+  modelFactory: (modelId: string) => any;
+};
+
+export type AgentMessageAutoContinueBucket = 'user-turn' | 'continue';
+
+export type AgentMessageAutoContinueClassification = {
+  bucket: AgentMessageAutoContinueBucket;
+  reason: string;
+  source: 'llm' | 'agent-copilot-json';
+};
+
+function normalizeProvider(raw: unknown): LlmProviderId {
+  return String(raw ?? '').trim().toLowerCase() === 'gemini' ? 'gemini' : 'openai';
+}
+
+function providerDisplayName(provider: LlmProviderId): string {
+  return provider === 'gemini' ? 'Gemini' : 'OpenAI';
+}
+
+function defaultModelId(provider: LlmProviderId): string {
+  return provider === 'gemini' ? 'gemini-2.0-flash' : 'gpt-4o-mini';
+}
+
+async function resolveLlmRuntime(opts?: { provider?: LlmProviderId; apiKey?: string }): Promise<LlmRuntime> {
+  const provider = normalizeProvider(opts?.provider);
+  const apiKey = String(opts?.apiKey ?? '').trim();
+  if (!apiKey) throw new Error(`Missing ${providerDisplayName(provider)} API key. Configure it in Settings.`);
+
+  const [{ generateObject }, { z }] = await Promise.all([import('ai'), import('zod')]);
+
+  if (provider === 'gemini') {
+    const { createGoogleGenerativeAI } = await import('@ai-sdk/google');
+    const google = createGoogleGenerativeAI({ apiKey });
+    return { provider, z, generateObject, modelFactory: google };
+  }
+
+  const { createOpenAI } = await import('@ai-sdk/openai');
+  const openai = createOpenAI({ apiKey });
+  return { provider, z, generateObject, modelFactory: openai };
+}
+
+function normalizeNewlines(s: string): string {
+  return String(s ?? '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+function clip(s: string, maxChars: number): string {
+  const text = normalizeNewlines(String(s ?? '')).trim();
+  if (!text) return '';
+  return text.length > maxChars ? `${text.slice(0, maxChars).trimEnd()}…` : text;
+}
+
+export function classifyAgentMessageAutoContinueBypass(textRaw: string): AgentMessageAutoContinueClassification | null {
+  const extracted = extractAgentCopilotFromAgentMessage(String(textRaw ?? ''));
+  if (!extracted.copilot && !extracted.error) return null;
+  return {
+    bucket: 'user-turn',
+    reason: extracted.error
+      ? 'Message contains agent copilot JSON; auto-continue is disabled for structured copilot handoffs.'
+      : 'Message contains agent copilot JSON; auto-continue is disabled for structured copilot handoffs.',
+    source: 'agent-copilot-json',
+  };
+}
+
+export async function classifyAgentMessageAutoContinue(
+  textRaw: string,
+  llm?: { provider?: LlmProviderId; apiKey?: string },
+): Promise<AgentMessageAutoContinueClassification> {
+  const bypass = classifyAgentMessageAutoContinueBypass(textRaw);
+  if (bypass) return bypass;
+
+  const text = clip(String(textRaw ?? ''), 14_000);
+  if (!text) throw new Error('missing agent message');
+
+  const runtime = await resolveLlmRuntime(llm);
+  const modelId = String(process.env.DRONE_HUB_AGENT_MESSAGE_AUTO_CONTINUE_MODEL ?? '').trim() || defaultModelId(runtime.provider);
+
+  const schema = runtime.z.object({
+    bucket: runtime.z.enum(['user-turn', 'continue']),
+    reason: runtime.z
+      .string()
+      .min(1)
+      .max(240)
+      .describe('Brief justification for the chosen bucket.'),
+  });
+
+  const system = [
+    'You classify a single agent response from a developer chat.',
+    'Return ONLY the structured output required by the schema.',
+    'Pick `user-turn` when the agent is done, answered the question, is asking the user for input, or is intentionally waiting on another agent/copilot/system.',
+    'Pick `continue` when the agent clearly stopped mid-task, gave only a progress update, said it will do more next, or is still investigating/running/checking/implementing and the work should keep going.',
+    'Treat implementation-complete messages with verification still running as `continue` if the agent is explicitly still doing that verification now.',
+    'Do not rely on whether the message starts with a specific phrase.',
+    'Be conservative: if the message hands control back to the user, choose `user-turn`.',
+  ].join('\n');
+
+  const prompt = ['Classify this agent response:', '', clip(text, 14_000)].join('\n');
+
+  let object: any = null;
+  try {
+    const out = await runtime.generateObject({
+      model: runtime.modelFactory(modelId),
+      schema,
+      system,
+      prompt,
+      temperature: 0,
+      maxRetries: 2,
+    });
+    object = out.object;
+  } catch (e: any) {
+    const msg = e?.message ?? String(e);
+    throw new Error(`${providerDisplayName(runtime.provider)} auto-continue classification failed (model: ${modelId}): ${msg}`);
+  }
+
+  return {
+    bucket: object?.bucket === 'continue' ? 'continue' : 'user-turn',
+    reason: clip(String(object?.reason ?? ''), 240) || 'No reason provided.',
+    source: 'llm',
+  };
+}

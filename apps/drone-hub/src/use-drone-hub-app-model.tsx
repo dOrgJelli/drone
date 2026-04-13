@@ -47,6 +47,7 @@ import { useUiPreferencesSettings } from './droneHub/app/use-ui-preferences-sett
 import { removeDroneIdsFromSidebarNodeOrderByParent } from './droneHub/app/sidebar-node-order';
 import { useDeleteActionSettings } from './droneHub/app/use-delete-action-settings';
 import { useFilesystemSettings } from './droneHub/app/use-filesystem-settings';
+import { useAgentMessageAutoContinueSettings } from './droneHub/app/use-agent-message-auto-continue-settings';
 import { useGithubSettings } from './droneHub/app/use-github-settings';
 import { useAgentsSettings } from './droneHub/app/use-agents-settings';
 import { useProfileSettings } from './droneHub/app/use-profile-settings';
@@ -584,6 +585,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
   const githubSettingsState = useGithubSettings(requestJson);
   const agentsSettingsState = useAgentsSettings(requestJson);
   const filesystemSettingsState = useFilesystemSettings(requestJson);
+  const agentMessageAutoContinueSettingsState = useAgentMessageAutoContinueSettings(requestJson);
   const syncSetsState = useSyncSets(requestJson);
   const profileSettingsState = useProfileSettings(requestJson);
   const setupStatusState = useSetupStatus(requestJson);
@@ -650,6 +652,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setManualChatModelInput,
     setChatAgent,
     setChatModel,
+    setAgentMessageAutoContinueEnabled,
     handleSetAgentFailure,
   } = useChatConfigState({
     selectedDrone,
@@ -1734,6 +1737,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
           chat: startupSeedForCurrentDrone.chatName || selectedChat || 'default',
           agent: startupSeedForCurrentDrone.agent,
           model: startupSeedForCurrentDrone.model ?? null,
+          agentMessageAutoContinueEnabled: false,
           sessionName: `drone-hub-chat-${startupSeedForCurrentDrone.chatName || selectedChat || 'default'}`,
           createdAt: startupSeedForCurrentDrone.at || new Date().toISOString(),
         }
@@ -3214,6 +3218,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     agentsSettingsState,
     deleteActionSettingsState,
     filesystemSettingsState,
+    agentMessageAutoContinueSettingsState,
     syncSetsState,
     profileSettingsState,
     setupStatusState,
@@ -3328,6 +3333,8 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     availableChatModels,
     currentModel,
     setChatModel,
+    agentMessageAutoContinueEnabled: effectiveChatInfo?.agentMessageAutoContinueEnabled === true,
+    setAgentMessageAutoContinueEnabled,
     setChatInfoError,
     modelMenuEntries,
     modelDisabled,

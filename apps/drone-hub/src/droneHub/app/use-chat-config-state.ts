@@ -221,6 +221,7 @@ export function useChatConfigState({
         chat,
         agent,
         model: prev?.model ?? null,
+        agentMessageAutoContinueEnabled: prev?.agentMessageAutoContinueEnabled === true,
         sessionName: prev?.sessionName ?? `drone-hub-chat-${chat}`,
         createdAt: prev?.createdAt ?? new Date().toISOString(),
       }));
@@ -249,10 +250,39 @@ export function useChatConfigState({
         chat,
         agent: prev?.agent ?? ({ kind: 'builtin', id: 'cursor' } as ChatAgentConfig),
         model: normalized,
+        agentMessageAutoContinueEnabled: prev?.agentMessageAutoContinueEnabled === true,
         sessionName: prev?.sessionName ?? `drone-hub-chat-${chat}`,
         createdAt: prev?.createdAt ?? new Date().toISOString(),
       }));
       setManualChatModelInput(normalized ?? '');
+      setChatInfoError(null);
+    },
+    [requestJson, selectedChat, selectedDrone],
+  );
+
+  const setAgentMessageAutoContinueEnabled = React.useCallback(
+    async (enabled: boolean) => {
+      if (!selectedDrone) return;
+      const chat = selectedChat || 'default';
+      await requestJson(
+        `/api/drones/${encodeURIComponent(selectedDrone)}/chats/${encodeURIComponent(
+          chat,
+        )}/config`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ agentMessageAutoContinueEnabled: enabled }),
+        },
+      );
+      setChatInfo((prev) => ({
+        name: selectedDrone,
+        chat,
+        agent: prev?.agent ?? ({ kind: 'builtin', id: 'cursor' } as ChatAgentConfig),
+        model: prev?.model ?? null,
+        agentMessageAutoContinueEnabled: enabled,
+        sessionName: prev?.sessionName ?? `drone-hub-chat-${chat}`,
+        createdAt: prev?.createdAt ?? new Date().toISOString(),
+      }));
       setChatInfoError(null);
     },
     [requestJson, selectedChat, selectedDrone],
@@ -283,6 +313,7 @@ export function useChatConfigState({
     setManualChatModelInput,
     setChatAgent,
     setChatModel,
+    setAgentMessageAutoContinueEnabled,
     handleSetAgentFailure,
   };
 }
