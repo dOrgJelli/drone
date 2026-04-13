@@ -183,6 +183,7 @@ Suggest the most likely next user reply in this developer chat after an assistan
 ## Core Style
 - Prefer short, direct replies.
 - Default to moving the work forward.
+- It is valid to return no suggestion when silence is more useful than a reply.
 - Prefer concrete code-backed follow-ups over abstract discussion.
 - Prefer simple solutions over extra abstraction.
 - Match existing naming and UX patterns unless there is a clear reason not to.
@@ -208,6 +209,8 @@ Suggest the most likely next user reply in this developer chat after an assistan
 - Defer non-essential work rather than expanding scope.
 - If the assistant is clearly still mid-task, the likely response is usually a short continuation.
 - If the assistant introduced a questionable abstraction or naming choice, the likely response is usually a challenge or clarification question.
+- If the agent turn is complete and the only plausible reply is a low-value acknowledgement like \`ok\`, \`sounds good\`, or \`thanks\`, return no suggestion.
+- If you are uncertain and would rather have the user decide what to say next, return no suggestion instead of guessing.
 `;
 const UI_AUTOMATION_RUNS_MIN = 1;
 const UI_AUTOMATION_RUNS_MAX = 20;

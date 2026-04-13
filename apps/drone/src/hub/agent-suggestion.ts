@@ -15,13 +15,21 @@ export type AgentSuggestionKind =
   | 'instruction'
   | 'review'
   | 'commit'
-  | 'status';
+  | 'status'
+  | 'none';
 
-export type AgentSuggestionResult = {
-  suggestion: string;
-  reason: string;
-  kind: AgentSuggestionKind;
-};
+export type AgentSuggestionResult =
+  | {
+      outcome: 'suggest';
+      suggestion: string;
+      reason: string;
+      kind: Exclude<AgentSuggestionKind, 'none'>;
+    }
+  | {
+      outcome: 'none';
+      reason: string;
+      kind: 'none';
+    };
 
 function normalizeProvider(raw: unknown): LlmProviderId {
   return String(raw ?? '').trim().toLowerCase() === 'gemini' ? 'gemini' : 'openai';
@@ -63,6 +71,82 @@ function clip(s: string, maxChars: number): string {
   return text.length > maxChars ? `${text.slice(0, maxChars).trimEnd()}…` : text;
 }
 
+function normalizeSuggestionToken(raw: string): string {
+  return String(raw ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[`"'([{]+/g, '')
+    .replace(/[`"')\]}!?.,;:]+/g, '')
+    .replace(/\s+/g, ' ');
+}
+
+export function isLowValueAcknowledgementSuggestion(raw: unknown): boolean {
+  const token = normalizeSuggestionToken(String(raw ?? ''));
+  if (!token) return false;
+  return (
+    token === 'ok' ||
+    token === 'okay' ||
+    token === 'kk' ||
+    token === 'got it' ||
+    token === 'understood' ||
+    token === 'noted' ||
+    token === 'sounds good' ||
+    token === 'looks good' ||
+    token === 'makes sense' ||
+    token === 'perfect' ||
+    token === 'great' ||
+    token === 'awesome' ||
+    token === 'thanks' ||
+    token === 'thank you'
+  );
+}
+
+export function normalizeAgentSuggestionResult(object: {
+  outcome?: unknown;
+  suggestion?: unknown;
+  reason?: unknown;
+  kind?: unknown;
+}): AgentSuggestionResult {
+  const reason = clip(String(object?.reason ?? ''), 240) || 'No reason provided.';
+  const outcome = String(object?.outcome ?? '').trim().toLowerCase() === 'none' ? 'none' : 'suggest';
+  if (outcome === 'none') {
+    return {
+      outcome: 'none',
+      reason,
+      kind: 'none',
+    };
+  }
+
+  const suggestion = clip(String(object?.suggestion ?? ''), 1200);
+  if (!suggestion) throw new Error('LLM returned an empty suggestion');
+  if (isLowValueAcknowledgementSuggestion(suggestion)) {
+    return {
+      outcome: 'none',
+      reason,
+      kind: 'none',
+    };
+  }
+
+  const kindRaw = String(object?.kind ?? '').trim().toLowerCase();
+  const kind: Exclude<AgentSuggestionKind, 'none'> =
+    kindRaw === 'approval' ||
+    kindRaw === 'question' ||
+    kindRaw === 'correction' ||
+    kindRaw === 'instruction' ||
+    kindRaw === 'review' ||
+    kindRaw === 'commit' ||
+    kindRaw === 'status'
+      ? kindRaw
+      : 'instruction';
+
+  return {
+    outcome: 'suggest',
+    suggestion,
+    reason,
+    kind,
+  };
+}
+
 export async function suggestReplyToAgentMessage(
   opts: {
     prompt?: string;
@@ -82,17 +166,22 @@ export async function suggestReplyToAgentMessage(
   const modelId = String(process.env.DRONE_HUB_AGENT_SUGGESTION_MODEL ?? '').trim() || defaultModelId(runtime.provider);
 
   const schema = runtime.z.object({
+    outcome: runtime.z
+      .enum(['suggest', 'none'])
+      .describe(
+        'Use "suggest" when a concrete next user reply would be useful. Use "none" when the right outcome is no suggestion.',
+      ),
     suggestion: runtime.z
       .string()
-      .min(1)
       .max(1200)
-      .describe('The single most likely next user reply. Keep it concise and natural.'),
+      .optional()
+      .describe('The single most likely next user reply. Leave empty when outcome is "none".'),
     reason: runtime.z
       .string()
       .min(1)
       .max(240)
-      .describe('Brief explanation of why this is the likely next reply.'),
-    kind: runtime.z.enum(['approval', 'question', 'correction', 'instruction', 'review', 'commit', 'status']),
+      .describe('Brief explanation of why this reply should be suggested or suppressed.'),
+    kind: runtime.z.enum(['approval', 'question', 'correction', 'instruction', 'review', 'commit', 'status', 'none']),
   });
 
   const system = [
@@ -101,7 +190,11 @@ export async function suggestReplyToAgentMessage(
     'The reply should follow the policy below, not imitate a generic assistant.',
     'Prefer short, practical replies unless the conversation clearly calls for more detail.',
     'Do not invent new requirements beyond what the current conversation supports.',
-    'If the agent recommendation looks sound, prefer a short approval or instruction.',
+    'Sometimes the correct result is no suggestion.',
+    'Use outcome="none" when the agent conversation is effectively finished and the only plausible reply would be a low-value acknowledgement like "ok", "sounds good", or "thanks".',
+    'Use outcome="none" when you are too uncertain to make a useful suggestion and the user should decide what to say next.',
+    'Do not force a reply just to fill the slot.',
+    'If the agent recommendation looks sound and a reply would still move the work forward, prefer a short approval or instruction.',
     'If the agent introduced questionable naming, architecture, abstraction, or hidden behavior, prefer a correction or question.',
     'If the agent likely needs a regression pass, prefer a review-oriented reply.',
     'Use terse operator-style replies when appropriate.',
@@ -160,18 +253,5 @@ export async function suggestReplyToAgentMessage(
     throw new Error(`${providerDisplayName(runtime.provider)} assistant suggestion failed (model: ${modelId}): ${msg}`);
   }
 
-  const suggestion = clip(String(object?.suggestion ?? ''), 1200);
-  if (!suggestion) throw new Error('LLM returned an empty suggestion');
-
-  const kindRaw = String(object?.kind ?? '').trim().toLowerCase();
-  const kind: AgentSuggestionKind =
-    kindRaw === 'approval' || kindRaw === 'question' || kindRaw === 'correction' || kindRaw === 'instruction' || kindRaw === 'review' || kindRaw === 'commit' || kindRaw === 'status'
-      ? kindRaw
-      : 'instruction';
-
-  return {
-    suggestion,
-    reason: clip(String(object?.reason ?? ''), 240) || 'No reason provided.',
-    kind,
-  };
+  return normalizeAgentSuggestionResult(object ?? {});
 }
