@@ -21,6 +21,16 @@ function transcriptTurnSortKey(raw: TranscriptTurnLike | null | undefined): numb
 
 export function cloneChatEntryForDroneClone(entryRaw: any): any {
   const cloned = entryRaw && typeof entryRaw === 'object' ? JSON.parse(JSON.stringify(entryRaw)) : {};
+  if (Array.isArray(cloned.turns)) {
+    cloned.turns = cloned.turns.map((turn: any) =>
+      turn && typeof turn === 'object'
+        ? {
+            ...turn,
+            inheritedFromClone: true,
+          }
+        : turn,
+    );
+  }
   delete cloned.pendingPrompts;
   return cloned;
 }

@@ -37,7 +37,6 @@ import {
 import { parseIsoDateMs, type GroupMultiChatColumnRuntimeState } from './group-multi-chat-sort';
 import { openDroneTabFromLastPreview, resolveDroneOpenTabUrl } from './quick-actions';
 import { useDroneHubUiStore } from './use-drone-hub-ui-store';
-import { useAgentCopilotOrchestration } from './use-agent-copilot-orchestration';
 import { fetchDroneChatTranscript, sendDroneChatPrompt } from './chat-api';
 
 export type GroupMultiChatColumnProps = {
@@ -94,13 +93,6 @@ export function GroupMultiChatColumn({
   const repoAttached = Boolean(drone.repoAttached ?? Boolean(String(drone.repoPath ?? '').trim()));
   const quickOpenTabUrl = resolveDroneOpenTabUrl(drone);
   const disabledByProvisioning = isDroneStartingOrSeeding(drone.hubPhase);
-
-  useAgentCopilotOrchestration({
-    requestJson,
-    sourceDroneId: drone.id,
-    sourceChatName: chatName,
-    transcripts,
-  });
 
   const scrollColumnToBottom = React.useCallback(() => {
     const el = columnScrollRef.current;

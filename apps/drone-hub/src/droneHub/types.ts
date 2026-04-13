@@ -482,6 +482,7 @@ export type TranscriptItem = {
   prompt: string;
   attachments?: ChatImageAttachmentRef[];
   automation?: ChatPromptAutomationMeta;
+  inheritedFromClone?: boolean;
   session: string;
   logPath: string;
   ok: boolean;

@@ -82,7 +82,15 @@ describe('chat clone transcript bootstrap', () => {
     expect(cloned.claudeSessionId).toBe('claude-session-id');
     expect(cloned.openCodeSessionId).toBe('opencode-session-id');
     expect(cloned.piSessionId).toBe('550e8400-e29b-41d4-a716-446655440000');
-    expect(cloned.turns).toEqual([{ at: '2026-03-17T10:00:00.000Z', prompt: 'hi', ok: true, output: 'hello' }]);
+    expect(cloned.turns).toEqual([
+      {
+        at: '2026-03-17T10:00:00.000Z',
+        prompt: 'hi',
+        ok: true,
+        output: 'hello',
+        inheritedFromClone: true,
+      },
+    ]);
     expect(cloned.pendingPrompts).toBeUndefined();
     expect(cloned.nested).toEqual({ keep: true });
   });

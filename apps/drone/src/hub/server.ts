@@ -69,6 +69,7 @@ import {
 import { jobsPlanFromAgentMessage, suggestDroneNameFromMessage, suggestTaskTitleFromMessage } from './jobs-from-message';
 import { tldrFromAgentMessage } from './tldr-from-message';
 import { resolveTranscriptPromptAt } from './transcript-order';
+import { extractAgentCopilotFromAgentMessage, type AgentCopilotRequest } from './agent-copilot-parser';
 import { cloneChatEntryForDroneClone, maybeBootstrapPromptFromTranscript } from './chat-clone';
 import {
   formatTranscriptJobFailure,
@@ -2580,6 +2581,7 @@ type TranscriptTurn = {
   completedAt?: string;
   attachments?: ChatImageAttachmentRef[];
   automation?: PromptAutomationMeta;
+  inheritedFromClone?: boolean;
 };
 
 type PlaybookMessageDefinition = {
@@ -3533,6 +3535,8 @@ const PROMPT_AUTOMATION_WAIT_FOR_IDLE_TIMEOUT_MS = 30 * 60_000;
 const PROMPT_AUTOMATION_WAIT_FOR_PROMPT_TIMEOUT_MS = 30 * 60_000;
 const PROMPT_AUTOMATION_ON_FAILURE_PROMPT_MAX_CHARS = 8_000;
 const PROMPT_AUTOMATION_INTER_RUN_SLEEP_CHUNK_MS = 5_000;
+const AGENT_COPILOT_HANDLED_CAP = 500;
+const AGENT_COPILOT_IN_FLIGHT = new Set<string>();
 
 function attachReviewMetadataToPullEntries<T extends { path: string; originalPath: string | null }>(entries: T[]): Array<T & { reviewKey: string; reviewToken: string }> {
   return entries.map((entry) => {
@@ -5362,14 +5366,287 @@ async function readPromptAutomationTurnOutput(opts: {
   promptId: string;
 }): Promise<string> {
   const regAny: any = await loadRegistry();
-  const turns = Array.isArray(regAny?.drones?.[opts.droneId]?.chats?.[opts.chatName]?.turns)
-    ? regAny.drones[opts.droneId].chats[opts.chatName].turns
-    : [];
-  const found = turns.find((t: any) => String(t?.id ?? '').trim() === opts.promptId) ?? null;
+  const found = getTranscriptTurnByPromptIdFromRegistry(regAny, opts);
   if (!found) return '';
   const output = String(found?.output ?? '');
   const error = String(found?.error ?? '');
   return [output, error].filter(Boolean).join('\n');
+}
+
+function getTranscriptTurnByPromptIdFromRegistry(
+  regAny: any,
+  opts: { droneId: string; chatName: string; promptId: string },
+): TranscriptTurn | null {
+  const turns = Array.isArray(regAny?.drones?.[opts.droneId]?.chats?.[opts.chatName]?.turns)
+    ? regAny.drones[opts.droneId].chats[opts.chatName].turns
+    : [];
+  return (turns.find((t: any) => String(t?.id ?? '').trim() === opts.promptId) ?? null) as TranscriptTurn | null;
+}
+
+function buildAgentCopilotSourceMessageId(opts: {
+  droneId: string;
+  chatName: string;
+  turn: TranscriptTurn | null | undefined;
+  turnIndex: number;
+}): string {
+  const droneId = normalizeDroneIdentity(opts.droneId);
+  const chatName = normalizeChatName(opts.chatName);
+  const turnId = String(opts.turn?.id ?? '').trim();
+  if (droneId && turnId) return `${droneId}:${turnId}`;
+  const at = String(opts.turn?.completedAt ?? opts.turn?.promptAt ?? opts.turn?.at ?? '').trim();
+  if (!droneId || !chatName || !at) return '';
+  return `${droneId}:${chatName}:${opts.turnIndex}:${at}`;
+}
+
+function readHandledAgentCopilotSourceMessageIds(chatEntry: any): string[] {
+  return Array.from(
+    new Set(
+      (Array.isArray(chatEntry?.agentCopilotHandledSourceMessageIds) ? chatEntry.agentCopilotHandledSourceMessageIds : [])
+        .map((item: any) => String(item ?? '').trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
+function hasHandledAgentCopilotSourceMessage(chatEntry: any, sourceMessageIdRaw: string): boolean {
+  const sourceMessageId = String(sourceMessageIdRaw ?? '').trim();
+  if (!sourceMessageId) return false;
+  return readHandledAgentCopilotSourceMessageIds(chatEntry).includes(sourceMessageId);
+}
+
+async function markAgentCopilotSourceMessageHandled(opts: {
+  droneId: string;
+  chatName: string;
+  sourceMessageId: string;
+}): Promise<void> {
+  const sourceMessageId = String(opts.sourceMessageId ?? '').trim();
+  if (!sourceMessageId) return;
+  await updateRegistry((reg: any) => {
+    const droneId = normalizeDroneIdentity(opts.droneId);
+    const chatName = normalizeChatName(opts.chatName);
+    const chat = droneId ? reg?.drones?.[droneId]?.chats?.[chatName] : null;
+    if (!chat) return;
+    const handledIds = readHandledAgentCopilotSourceMessageIds(chat);
+    if (handledIds.includes(sourceMessageId)) return;
+    handledIds.push(sourceMessageId);
+    chat.agentCopilotHandledSourceMessageIds =
+      handledIds.length > AGENT_COPILOT_HANDLED_CAP ? handledIds.slice(-AGENT_COPILOT_HANDLED_CAP) : handledIds;
+  });
+}
+
+function buildAgentCopilotResponsePrompt(nameRaw: string, responseRaw: string): string {
+  const name = String(nameRaw ?? '').trim();
+  const response = String(responseRaw ?? '').trim();
+  return `This is what copilot '${name}' responded with:\n${response}`;
+}
+
+function buildAgentCopilotErrorPrompt(errorRaw: string, nameRaw?: string): string {
+  const error = String(errorRaw ?? '').trim() || 'Unknown error.';
+  const name = String(nameRaw ?? '').trim();
+  if (!name) return `Agent copilot error: ${error}`;
+  return `Copilot '${name}' failed: ${error}`;
+}
+
+function buildAgentCopilotPromptId(opts: {
+  sourceMessageId: string;
+  stage: 'copilot' | 'source-result' | 'source-error' | 'source-parse-error';
+}): string {
+  const sourceMessageId = String(opts.sourceMessageId ?? '').trim();
+  const digest = crypto.createHash('sha1').update(sourceMessageId).digest('hex').slice(0, 24);
+  return `agent-copilot-${opts.stage}-${digest}`;
+}
+
+function getPendingPromptByIdFromRegistry(
+  regAny: any,
+  opts: { droneId: string; chatName: string; promptId: string },
+): PendingPrompt | null {
+  const pending = Array.isArray(regAny?.drones?.[opts.droneId]?.chats?.[opts.chatName]?.pendingPrompts)
+    ? regAny.drones[opts.droneId].chats[opts.chatName].pendingPrompts
+    : [];
+  return (pending.find((item: any) => String(item?.id ?? '').trim() === opts.promptId) ?? null) as PendingPrompt | null;
+}
+
+async function ensureAgentCopilotPromptCompleted(opts: {
+  droneId: string;
+  chatName: string;
+  promptId: string;
+  prompt: string;
+}): Promise<TranscriptTurn> {
+  const initialRegistry: any = await loadRegistry();
+  const existingTurn = getTranscriptTurnByPromptIdFromRegistry(initialRegistry, opts);
+  if (existingTurn) return existingTurn;
+
+  const existingPending = getPendingPromptByIdFromRegistry(initialRegistry, opts);
+  if (!existingPending || existingPending.state === 'failed') {
+    const enqueued = await createOrEnqueuePromptUnified({
+      id: opts.promptId,
+      droneId: opts.droneId,
+      chatName: opts.chatName,
+      prompt: opts.prompt,
+    });
+    if (enqueued.kind === 'error') throw new Error(enqueued.error);
+  }
+
+  await waitForPromptAutomationPromptCompletion({
+    droneId: opts.droneId,
+    chatName: opts.chatName,
+    promptId: opts.promptId,
+    timeoutMs: PROMPT_AUTOMATION_WAIT_FOR_PROMPT_TIMEOUT_MS,
+    signal: new AbortController().signal,
+  });
+
+  const finalRegistry: any = await loadRegistry();
+  const turn = getTranscriptTurnByPromptIdFromRegistry(finalRegistry, opts);
+  if (turn) return turn;
+  const pending = getPendingPromptByIdFromRegistry(finalRegistry, opts);
+  if (pending?.state === 'failed') {
+    throw new Error(String(pending.error ?? `prompt ${opts.promptId} failed`).trim() || `prompt ${opts.promptId} failed`);
+  }
+  throw new Error(`Timed out waiting for prompt ${opts.promptId} completion`);
+}
+
+async function ensureAgentCopilotSourcePromptCompleted(opts: {
+  droneId: string;
+  chatName: string;
+  promptId: string;
+  prompt: string;
+}): Promise<void> {
+  await ensureAgentCopilotPromptCompleted(opts);
+}
+
+async function processAgentCopilotRequest(opts: {
+  sourceDroneId: string;
+  sourceChatName: string;
+  sourceMessageId: string;
+  copilot: AgentCopilotRequest | null;
+  parseError: string | null;
+}): Promise<void> {
+  if (opts.parseError) {
+    const parseErrorPromptId = buildAgentCopilotPromptId({
+      sourceMessageId: opts.sourceMessageId,
+      stage: 'source-parse-error',
+    });
+    await ensureAgentCopilotSourcePromptCompleted({
+      droneId: opts.sourceDroneId,
+      chatName: opts.sourceChatName,
+      promptId: parseErrorPromptId,
+      prompt: buildAgentCopilotErrorPrompt(opts.parseError),
+    });
+    await markAgentCopilotSourceMessageHandled({
+      droneId: opts.sourceDroneId,
+      chatName: opts.sourceChatName,
+      sourceMessageId: opts.sourceMessageId,
+    });
+    return;
+  }
+
+  if (!opts.copilot) return;
+
+  const copilotChatName = parseChatNameForMutation(opts.copilot.name, 'agent copilot name');
+  const copilotPromptId = buildAgentCopilotPromptId({
+    sourceMessageId: opts.sourceMessageId,
+    stage: 'copilot',
+  });
+  const sourceResultPromptId = buildAgentCopilotPromptId({
+    sourceMessageId: opts.sourceMessageId,
+    stage: 'source-result',
+  });
+
+  await ensureChatEntryCopiedFromChat({
+    droneId: opts.sourceDroneId,
+    chatName: copilotChatName,
+    copyFromChatName: opts.sourceChatName,
+  });
+  const responseTurn = await ensureAgentCopilotPromptCompleted({
+    droneId: opts.sourceDroneId,
+    chatName: copilotChatName,
+    promptId: copilotPromptId,
+    prompt: opts.copilot.message,
+  });
+
+  const followupPrompt = responseTurn.ok
+    ? buildAgentCopilotResponsePrompt(copilotChatName, stripAnsiFromCliOutput(String(responseTurn.output ?? '')))
+    : buildAgentCopilotErrorPrompt(String(responseTurn.error ?? 'Copilot failed.'), copilotChatName);
+  await ensureAgentCopilotSourcePromptCompleted({
+    droneId: opts.sourceDroneId,
+    chatName: opts.sourceChatName,
+    promptId: sourceResultPromptId,
+    prompt: followupPrompt,
+  });
+
+  await markAgentCopilotSourceMessageHandled({
+    droneId: opts.sourceDroneId,
+    chatName: opts.sourceChatName,
+    sourceMessageId: opts.sourceMessageId,
+  });
+}
+
+async function processPendingAgentCopilotTurns(opts: {
+  droneId: string;
+  chatName: string;
+}): Promise<void> {
+  const droneId = normalizeDroneIdentity(opts.droneId);
+  const chatName = normalizeChatName(opts.chatName);
+  if (!droneId || !chatName) return;
+
+  const regAny: any = await loadRegistry();
+  const chatEntry = regAny?.drones?.[droneId]?.chats?.[chatName] ?? null;
+  if (!chatEntry) return;
+  const turns: TranscriptTurn[] = Array.isArray(chatEntry?.turns) ? chatEntry.turns : [];
+
+  for (let turnIndex = 0; turnIndex < turns.length; turnIndex += 1) {
+    const turn = turns[turnIndex] ?? null;
+    if (!turn?.ok || turn?.inheritedFromClone === true) continue;
+    const sourceMessageId = buildAgentCopilotSourceMessageId({
+      droneId,
+      chatName,
+      turn,
+      turnIndex,
+    });
+    if (!sourceMessageId) continue;
+    if (hasHandledAgentCopilotSourceMessage(chatEntry, sourceMessageId) || AGENT_COPILOT_IN_FLIGHT.has(sourceMessageId)) {
+      continue;
+    }
+
+    const extracted = extractAgentCopilotFromAgentMessage(stripAnsiFromCliOutput(String(turn.output ?? '')));
+    if (!extracted.copilot && !extracted.error) continue;
+
+    AGENT_COPILOT_IN_FLIGHT.add(sourceMessageId);
+    void processAgentCopilotRequest({
+      sourceDroneId: droneId,
+      sourceChatName: chatName,
+      sourceMessageId,
+      copilot: extracted.copilot,
+      parseError: extracted.error,
+    })
+      .catch(async (error: any) => {
+        try {
+          const sourceErrorPromptId = buildAgentCopilotPromptId({
+            sourceMessageId,
+            stage: 'source-error',
+          });
+          await ensureAgentCopilotSourcePromptCompleted({
+            droneId,
+            chatName,
+            promptId: sourceErrorPromptId,
+            prompt: buildAgentCopilotErrorPrompt(
+              String(error?.message ?? error ?? 'Unknown error.'),
+              extracted.copilot?.name,
+            ),
+          });
+          await markAgentCopilotSourceMessageHandled({
+            droneId,
+            chatName,
+            sourceMessageId,
+          });
+        } catch {
+          // Leave the source message unhandled so a later reconcile can retry.
+        }
+      })
+      .finally(() => {
+        AGENT_COPILOT_IN_FLIGHT.delete(sourceMessageId);
+      });
+  }
 }
 
 function promptAutomationOutputContainsStopPhrase(opts: {
@@ -6154,6 +6431,7 @@ function chatHasReconcilablePendingPrompts(entry: any): boolean {
 async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string }): Promise<void> {
   const regAny: any = await loadRegistry();
   const droneId = normalizeDroneIdentity(opts.droneId);
+  const chatName = normalizeChatName(opts.chatName);
   const d = droneId ? regAny?.drones?.[droneId] : null;
   if (!d) return;
   const token = typeof d.token === 'string' ? d.token : '';
@@ -6164,13 +6442,22 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
       : await resolveHostPort(containerName, d.containerPort);
   if (!hostPort || !token) return;
 
-  const entry = d?.chats?.[opts.chatName];
+  const entry = d?.chats?.[chatName];
   if (!entry) return;
   const agent = inferChatAgent(entry, d);
   if (!agent || agent.kind !== 'builtin') return;
 
   const pendingList: any[] = Array.isArray(entry?.pendingPrompts) ? entry.pendingPrompts : [];
-  if (pendingList.length === 0) return;
+  if (pendingList.length === 0) {
+    void processPendingAgentCopilotTurns({ droneId, chatName }).catch((error: any) => {
+      hubLog('warn', 'agent copilot scan failed after reconcile', {
+        droneId,
+        chatName,
+        error: String(error?.message ?? error ?? 'unknown error'),
+      });
+    });
+    return;
+  }
 
   const turns: any[] = Array.isArray(entry?.turns) ? entry.turns : [];
   const transcriptIds = new Set(turns.map((t: any) => String(t?.id ?? '').trim()).filter(Boolean));
@@ -6479,13 +6766,13 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
     entry.turns = turns;
     entry.pendingPrompts = pendingList;
     d.chats = d.chats ?? {};
-    d.chats[opts.chatName] = entry;
+    d.chats[chatName] = entry;
     regAny.drones[droneId] = d;
     await updateRegistry((regLatest: any) => {
       const dLatest = regLatest?.drones?.[droneId];
       if (!dLatest) return;
       dLatest.chats = dLatest.chats ?? {};
-      const cur = dLatest.chats[opts.chatName] ?? { createdAt: nowIso() };
+      const cur = dLatest.chats[chatName] ?? { createdAt: nowIso() };
       // Preserve other chat metadata, but apply transcript + pending updates atomically.
       cur.turns = turns;
       cur.pendingPrompts = pendingList;
@@ -6501,15 +6788,23 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
       if (entry && typeof entry === 'object' && typeof (entry as any).piSessionId === 'string' && String((entry as any).piSessionId).trim()) {
         cur.piSessionId = String((entry as any).piSessionId).trim();
       }
-      dLatest.chats[opts.chatName] = cur;
+      dLatest.chats[chatName] = cur;
       regLatest.drones = regLatest.drones ?? {};
       regLatest.drones[droneId] = dLatest;
     });
 
     // Best-effort: session ids may have been established (codexThreadId/openCodeSessionId/piSessionId)
     // or a prior prompt may have completed/failed, unblocking queued follow-ups.
-    enqueuePendingPromptPump(droneId, opts.chatName);
+    enqueuePendingPromptPump(droneId, chatName);
   }
+
+  void processPendingAgentCopilotTurns({ droneId, chatName }).catch((error: any) => {
+    hubLog('warn', 'agent copilot scan failed after reconcile', {
+      droneId,
+      chatName,
+      error: String(error?.message ?? error ?? 'unknown error'),
+    });
+  });
 }
 
 async function enqueuePrompt(opts: {
@@ -8212,6 +8507,49 @@ async function ensureChatEntry(opts: { droneId: string; chatName: string }): Pro
       reg.drones = reg.drones ?? {};
       reg.drones[droneId] = d;
     }
+  });
+}
+
+async function ensureChatEntryCopiedFromChat(opts: {
+  droneId: string;
+  chatName: string;
+  copyFromChatName: string;
+}): Promise<void> {
+  await updateRegistry((reg: any) => {
+    const droneId = normalizeDroneIdentity(opts.droneId);
+    const chatName = parseChatNameForMutation(opts.chatName, 'chat name');
+    const copyFromChatName = normalizeChatName(opts.copyFromChatName);
+    const d = droneId ? reg?.drones?.[droneId] : null;
+    if (!d) throw new Error(`unknown drone: ${opts.droneId}`);
+    d.chats = d.chats ?? {};
+    if (d.chats[chatName]) return;
+    const createdAt = nowIso();
+    if (copyFromChatName && !d.chats[copyFromChatName]) {
+      if (copyFromChatName === 'default' && Object.keys(d.chats).length === 0) {
+        d.chats.default = {
+          createdAt,
+          agent: defaultChatAgentConfigForDrone(d),
+        };
+      } else {
+        throw new Error(`unknown chat: ${copyFromChatName}`);
+      }
+    }
+    let entry: any = {
+      createdAt,
+      agent: defaultChatAgentConfigForDrone(d),
+    };
+    if (copyFromChatName) {
+      const source = d.chats?.[copyFromChatName];
+      if (!source) throw new Error(`unknown chat: ${copyFromChatName}`);
+      entry = {
+        createdAt,
+        agent: inferChatAgent(source, d),
+        ...(normalizeChatModel(source?.model) ? { model: normalizeChatModel(source?.model) } : {}),
+      };
+    }
+    d.chats[chatName] = entry;
+    reg.drones = reg.drones ?? {};
+    reg.drones[droneId] = d;
   });
 }
 
@@ -19080,6 +19418,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               prompt,
               ...(attachments.length > 0 ? { attachments } : {}),
               ...(automation ? { automation } : {}),
+              ...((t as any)?.inheritedFromClone === true ? { inheritedFromClone: true } : {}),
               ok,
               ...(ok ? { output } : { output: '', error }),
             });
