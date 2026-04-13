@@ -461,6 +461,7 @@ export function SelectedDroneWorkspace({
     if (!raw) return null;
     return raw.replace(/[-_]+/g, ' ');
   }, [latestAgentSuggestionState]);
+  const showLatestAgentSuggestion = latestAgentSuggestionState?.status !== 'suppressed';
 
   React.useEffect(() => {
     setSendingDirectAgentSuggestion(false);
@@ -1841,7 +1842,7 @@ export function SelectedDroneWorkspace({
 
           {chatUiMode === 'cli' ? <CliPendingPromptStrip items={visibleCliPendingPrompts} /> : null}
 
-          {chatUiMode === 'transcript' && agentSuggestionEnabled && latestAgentSuggestionTarget ? (
+          {chatUiMode === 'transcript' && agentSuggestionEnabled && latestAgentSuggestionTarget && showLatestAgentSuggestion ? (
             <div className="mx-4 mb-3 rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.16)] px-3 py-3">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="min-w-0 flex-1">

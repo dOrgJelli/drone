@@ -2,6 +2,11 @@ import React from 'react';
 import { stripAnsi } from '../../domain';
 import type { PendingPrompt, TranscriptItem } from '../types';
 import type { AgentSuggestionState } from './app-types';
+import {
+  resolveAgentSuggestionStateFromResponse,
+  type AgentSuggestionResponse,
+} from './agent-suggestion-response';
+import { resolveLatestAgentSuggestionTarget as selectLatestAgentSuggestionTarget } from './agent-suggestion-target';
 
 type RequestJsonFn = <T>(url: string, init?: RequestInit) => Promise<T>;
 
@@ -15,24 +20,13 @@ type UseAgentSuggestionStateArgs = {
   currentPolicyFingerprint: string;
 };
 
-type AgentSuggestionResponse = {
-  ok: true;
-  suggestion: string;
-  reason: string;
-  kind: string;
-  policyFingerprint: string;
-};
-
 const CONTEXT_TURNS = 3;
 
 export function resolveLatestAgentSuggestionTarget(
   transcripts: TranscriptItem[] | null,
   pendingPrompts: PendingPrompt[],
 ): TranscriptItem | null {
-  const list = Array.isArray(transcripts) ? transcripts : [];
-  if (list.length === 0) return null;
-  if (Array.isArray(pendingPrompts) && pendingPrompts.length > 0) return null;
-  return list[list.length - 1] ?? null;
+  return selectLatestAgentSuggestionTarget(transcripts, pendingPrompts);
 }
 
 export function useAgentSuggestionState({
@@ -81,10 +75,17 @@ export function useAgentSuggestionState({
       const messageId = transcriptMessageId(target);
       const existing = agentSuggestionByMessageIdRef.current?.[messageId] ?? null;
       const existingPolicyFingerprint =
-        existing?.status === 'ready' ? String(existing.policyFingerprint ?? '').trim() : '';
+        existing?.status === 'ready' || existing?.status === 'suppressed'
+          ? String(existing.policyFingerprint ?? '').trim()
+          : '';
       const inFlightPolicyFingerprint = String(latestRequestPolicyByMessageIdRef.current?.[messageId] ?? '').trim();
       if (!opts?.force) {
-        if (existing?.status === 'ready' && existingPolicyFingerprint === currentPolicyFingerprint) return;
+        if (
+          (existing?.status === 'ready' || existing?.status === 'suppressed') &&
+          existingPolicyFingerprint === currentPolicyFingerprint
+        ) {
+          return;
+        }
         if (existing?.status === 'loading' && inFlightPolicyFingerprint === currentPolicyFingerprint) return;
       }
 
@@ -113,18 +114,10 @@ export function useAgentSuggestionState({
             })),
           }),
         });
-        const suggestion = String(data?.suggestion ?? '').trim();
-        if (!suggestion) throw new Error('Empty assistant suggestion response.');
         if (latestRequestTokenByMessageIdRef.current?.[messageId] !== requestToken) return;
         setAgentSuggestionByMessageId((prev) => ({
           ...prev,
-          [messageId]: {
-            status: 'ready',
-            suggestion,
-            reason: String(data?.reason ?? '').trim(),
-            kind: String(data?.kind ?? '').trim(),
-            policyFingerprint: String(data?.policyFingerprint ?? '').trim(),
-          },
+          [messageId]: resolveAgentSuggestionStateFromResponse(data),
         }));
       } catch (e: any) {
         if (latestRequestTokenByMessageIdRef.current?.[messageId] !== requestToken) return;
