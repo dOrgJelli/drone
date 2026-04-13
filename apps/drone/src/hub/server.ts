@@ -8022,6 +8022,7 @@ async function archiveChatById(opts: {
   const droneId = normalizeDroneIdentity(opts.droneId);
   const chatName = normalizeChatName(opts.chatName);
   const retention = normalizeArchiveRetention(opts.archiveRetention);
+  const autoContinueEnabledByDefault = (await resolveEffectiveAgentMessageAutoContinueSettings()).enabledByDefault;
   if (!droneId || !chatName) {
     return {
       hadDrone: false,
@@ -8078,7 +8079,11 @@ async function archiveChatById(opts: {
     };
     delete droneEntry.chats[chatName];
     if (Object.keys(droneEntry.chats).length === 0) {
-      droneEntry.chats.default = { createdAt: nowIso(), agent: defaultChatAgentConfigForDrone(droneEntry) };
+      droneEntry.chats.default = buildNewChatEntry({
+        droneEntry,
+        createdAt: nowIso(),
+        autoContinueEnabledByDefault,
+      });
     }
     regAny.drones = regAny.drones ?? {};
     regAny.drones[droneId] = droneEntry;
@@ -8697,6 +8702,29 @@ function defaultChatAgentConfigForDrone(droneEntry: any): ChatAgentConfig {
   return { kind: 'builtin', id: defaultBuiltinChatAgentIdForDrone(droneEntry) };
 }
 
+function buildNewChatEntry(opts: {
+  droneEntry: any;
+  createdAt: string;
+  sourceChatEntry?: any;
+  autoContinueEnabledByDefault: boolean;
+}) {
+  const agent = opts.sourceChatEntry
+    ? inferChatAgent(opts.sourceChatEntry, opts.droneEntry)
+    : defaultChatAgentConfigForDrone(opts.droneEntry);
+  const entry: any = {
+    createdAt: opts.createdAt,
+    agent,
+    ...(opts.sourceChatEntry && normalizeChatModel(opts.sourceChatEntry?.model)
+      ? { model: normalizeChatModel(opts.sourceChatEntry?.model) }
+      : {}),
+  };
+  if (opts.autoContinueEnabledByDefault && agent.kind === 'builtin') {
+    entry.agentMessageAutoContinueEnabled = true;
+    entry.agentMessageAutoContinueEnabledAt = opts.createdAt;
+  }
+  return entry;
+}
+
 const HUB_WEB_TERMINAL_DEFAULT_TAIL_LINES = 300;
 const HUB_WEB_TERMINAL_MAX_TAIL_LINES = 1000;
 const HUB_WEB_TERMINAL_MAX_BYTES = 200_000;
@@ -8783,6 +8811,7 @@ async function ensureHubSessionRunning(opts: {
 }
 
 async function ensureChatEntry(opts: { droneId: string; chatName: string }): Promise<void> {
+  const autoContinueEnabledByDefault = (await resolveEffectiveAgentMessageAutoContinueSettings()).enabledByDefault;
   await updateRegistry((reg: any) => {
     const droneId = normalizeDroneIdentity(opts.droneId);
     const d = droneId ? reg?.drones?.[droneId] : null;
@@ -8791,7 +8820,11 @@ async function ensureChatEntry(opts: { droneId: string; chatName: string }): Pro
     if (!d.chats[opts.chatName]) {
       // Fleet-created drones default to Codex; other drones keep Cursor.
       // NOTE: chatId is intentionally omitted (it is created lazily on first prompt).
-      d.chats[opts.chatName] = { createdAt: new Date().toISOString(), agent: defaultChatAgentConfigForDrone(d) } as any;
+      d.chats[opts.chatName] = buildNewChatEntry({
+        droneEntry: d,
+        createdAt: new Date().toISOString(),
+        autoContinueEnabledByDefault,
+      }) as any;
       reg.drones = reg.drones ?? {};
       reg.drones[droneId] = d;
     }
@@ -8803,6 +8836,7 @@ async function ensureChatEntryCopiedFromChat(opts: {
   chatName: string;
   copyFromChatName: string;
 }): Promise<void> {
+  const autoContinueEnabledByDefault = (await resolveEffectiveAgentMessageAutoContinueSettings()).enabledByDefault;
   await updateRegistry((reg: any) => {
     const droneId = normalizeDroneIdentity(opts.droneId);
     const chatName = parseChatNameForMutation(opts.chatName, 'chat name');
@@ -8814,26 +8848,29 @@ async function ensureChatEntryCopiedFromChat(opts: {
     const createdAt = nowIso();
     if (copyFromChatName && !d.chats[copyFromChatName]) {
       if (copyFromChatName === 'default' && Object.keys(d.chats).length === 0) {
-        d.chats.default = {
+        d.chats.default = buildNewChatEntry({
+          droneEntry: d,
           createdAt,
-          agent: defaultChatAgentConfigForDrone(d),
-        };
+          autoContinueEnabledByDefault,
+        });
       } else {
         throw new Error(`unknown chat: ${copyFromChatName}`);
       }
     }
-    let entry: any = {
+    let entry: any = buildNewChatEntry({
+      droneEntry: d,
       createdAt,
-      agent: defaultChatAgentConfigForDrone(d),
-    };
+      autoContinueEnabledByDefault,
+    });
     if (copyFromChatName) {
       const source = d.chats?.[copyFromChatName];
       if (!source) throw new Error(`unknown chat: ${copyFromChatName}`);
-      entry = {
+      entry = buildNewChatEntry({
+        droneEntry: d,
         createdAt,
-        agent: inferChatAgent(source, d),
-        ...(normalizeChatModel(source?.model) ? { model: normalizeChatModel(source?.model) } : {}),
-      };
+        sourceChatEntry: source,
+        autoContinueEnabledByDefault,
+      });
     }
     d.chats[chatName] = entry;
     reg.drones = reg.drones ?? {};
@@ -9317,6 +9354,16 @@ async function logHubLlmStartupSnapshot() {
 }
 
 export async function startDroneHubApiServer(opts: { port: number; host?: string; apiToken: string; allowedOrigins?: string[] }) {
+  for (const timer of RECONCILE_RETRY_TIMERS.values()) {
+    try {
+      clearTimeout(timer);
+    } catch {
+      // ignore
+    }
+  }
+  RECONCILE_RETRY_TIMERS.clear();
+  AGENT_MESSAGE_AUTO_CONTINUE_IN_FLIGHT.clear();
+  AGENT_MESSAGE_AUTO_CONTINUE_CHAT_IN_FLIGHT.clear();
   loadHubEnv();
   await logHubLlmStartupSnapshot();
   const host = opts.host ?? '127.0.0.1';
@@ -9957,8 +10004,23 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             return;
           }
           const prompt = normalizeAgentMessageAutoContinuePrompt(body?.prompt);
+          if (
+            body != null &&
+            typeof body === 'object' &&
+            Object.prototype.hasOwnProperty.call(body, 'enabledByDefault') &&
+            body.enabledByDefault !== true &&
+            body.enabledByDefault !== false &&
+            body.enabledByDefault !== null
+          ) {
+            json(res, 400, { ok: false, error: 'enabledByDefault must be a boolean' });
+            return;
+          }
           await upsertStoredAgentMessageAutoContinueSettings({
             prompt: prompt || undefined,
+            enabledByDefault:
+              body != null && typeof body === 'object' && Object.prototype.hasOwnProperty.call(body, 'enabledByDefault')
+                ? body.enabledByDefault === true
+                : undefined,
           });
           json(res, 200, await resolveAgentMessageAutoContinueSettingsResponse());
           return;
@@ -19297,6 +19359,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         }
         const copyFromRaw = String(body?.copyFrom ?? body?.copyFromChat ?? body?.fromChat ?? '').trim();
         const copyFrom = copyFromRaw ? normalizeChatName(copyFromRaw) : '';
+        const autoContinueEnabledByDefault = (await resolveEffectiveAgentMessageAutoContinueSettings()).enabledByDefault;
 
         try {
           const chats = await updateRegistry((regAny: any) => {
@@ -19310,26 +19373,29 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               // and have no materialized chat entries yet. Backfill that default entry
               // so creating a second chat from it does not fail with 404.
               if (copyFrom === 'default' && Object.keys(d.chats).length === 0) {
-                d.chats.default = {
+                d.chats.default = buildNewChatEntry({
+                  droneEntry: d,
                   createdAt,
-                  agent: defaultChatAgentConfigForDrone(d),
-                };
+                  autoContinueEnabledByDefault,
+                });
               } else {
                 throw new Error(`unknown chat: ${copyFrom}`);
               }
             }
-            let entry: any = {
+            let entry: any = buildNewChatEntry({
+              droneEntry: d,
               createdAt,
-              agent: defaultChatAgentConfigForDrone(d),
-            };
+              autoContinueEnabledByDefault,
+            });
             if (copyFrom) {
               const source = d.chats?.[copyFrom];
               if (!source) throw new Error(`unknown chat: ${copyFrom}`);
-              entry = {
+              entry = buildNewChatEntry({
+                droneEntry: d,
                 createdAt,
-                agent: inferChatAgent(source, d),
-                ...(normalizeChatModel(source?.model) ? { model: normalizeChatModel(source?.model) } : {}),
-              };
+                sourceChatEntry: source,
+                autoContinueEnabledByDefault,
+              });
             }
             d.chats[chatName] = entry;
             regAny.drones = regAny.drones ?? {};
@@ -19501,6 +19567,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         const deleteSettings = await resolveEffectiveDeleteActionSettings();
 
         try {
+          const autoContinueEnabledByDefault = (await resolveEffectiveAgentMessageAutoContinueSettings()).enabledByDefault;
           await stopSingleDroneChatActivity({
             droneId,
             chatName,
@@ -19538,7 +19605,11 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             if (!d.chats?.[chatName]) throw new Error(`unknown chat: ${chatName}`);
             delete d.chats[chatName];
             if (Object.keys(d.chats).length === 0) {
-              d.chats.default = { createdAt: nowIso(), agent: defaultChatAgentConfigForDrone(d) };
+              d.chats.default = buildNewChatEntry({
+                droneEntry: d,
+                createdAt: nowIso(),
+                autoContinueEnabledByDefault,
+              });
             }
             regAny.drones = regAny.drones ?? {};
             regAny.drones[droneId] = d;
@@ -20029,6 +20100,16 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         }
         FLEET_RECONCILE_INTERVAL = null;
       }
+      for (const timer of RECONCILE_RETRY_TIMERS.values()) {
+        try {
+          clearTimeout(timer);
+        } catch {
+          // ignore
+        }
+      }
+      RECONCILE_RETRY_TIMERS.clear();
+      AGENT_MESSAGE_AUTO_CONTINUE_IN_FLIGHT.clear();
+      AGENT_MESSAGE_AUTO_CONTINUE_CHAT_IN_FLIGHT.clear();
     },
   };
 }

@@ -110,6 +110,41 @@ describeSocketSuite('chat management api', () => {
     expect((listed.data?.chats ?? []).includes('review')).toBe(true);
   });
 
+  test('applies the auto-continue default to newly created builtin chats', async () => {
+    const droneId = 'drone-chat-create-auto-continue-default';
+    await seedDrone(droneId);
+
+    const settingsUpdated = await apiFetch('/api/settings/agent-message-auto-continue', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ enabledByDefault: true }),
+    });
+    expect(settingsUpdated.r.status).toBe(200);
+    expect(settingsUpdated.data?.agentMessageAutoContinue?.enabledByDefault).toBe(true);
+
+    const created = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'review' }),
+    });
+    expect(created.r.status).toBe(201);
+
+    const reviewChat = await apiFetch(`/api/drones/${encodeURIComponent(droneId)}/chats/review`);
+    expect(reviewChat.r.status).toBe(200);
+    expect(reviewChat.data?.agentMessageAutoContinueEnabled).toBe(true);
+
+    const regAny: any = await loadRegistry();
+    expect(regAny?.drones?.[droneId]?.chats?.review?.agentMessageAutoContinueEnabled).toBe(true);
+    expect(typeof regAny?.drones?.[droneId]?.chats?.review?.agentMessageAutoContinueEnabledAt).toBe('string');
+
+    const settingsReset = await apiFetch('/api/settings/agent-message-auto-continue', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ enabledByDefault: false }),
+    });
+    expect(settingsReset.r.status).toBe(200);
+  });
+
   test('creates a chat from the implicit default on legacy drones without chats', async () => {
     const droneId = 'drone-chat-legacy-default';
     const now = new Date().toISOString();

@@ -150,6 +150,7 @@ type DroneRegistryV1 = {
     };
     agentMessageAutoContinue?: {
       prompt?: string;
+      enabledByDefault?: boolean;
       updatedAt?: string;
     };
     agents?: {

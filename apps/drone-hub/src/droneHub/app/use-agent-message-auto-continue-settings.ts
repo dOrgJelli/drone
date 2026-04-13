@@ -9,8 +9,10 @@ export type UseAgentMessageAutoContinueSettingsResult = {
   agentMessageAutoContinueSettingsError: string | null;
   agentMessageAutoContinueSettingsNotice: string | null;
   autoContinuePromptDraft: string;
+  autoContinueEnabledByDefaultDraft: boolean;
   savingAgentMessageAutoContinueSettings: boolean;
   setAutoContinuePromptDraft: React.Dispatch<React.SetStateAction<string>>;
+  setAutoContinueEnabledByDefaultDraft: React.Dispatch<React.SetStateAction<boolean>>;
   loadAgentMessageAutoContinueSettings: () => Promise<void>;
   saveAgentMessageAutoContinueSettings: () => Promise<void>;
 };
@@ -27,6 +29,7 @@ export function useAgentMessageAutoContinueSettings(
   const [agentMessageAutoContinueSettingsNotice, setAgentMessageAutoContinueSettingsNotice] =
     React.useState<string | null>(null);
   const [autoContinuePromptDraft, setAutoContinuePromptDraft] = React.useState('continue');
+  const [autoContinueEnabledByDefaultDraft, setAutoContinueEnabledByDefaultDraft] = React.useState(false);
   const [savingAgentMessageAutoContinueSettings, setSavingAgentMessageAutoContinueSettings] =
     React.useState(false);
 
@@ -40,6 +43,7 @@ export function useAgentMessageAutoContinueSettings(
       );
       setAgentMessageAutoContinueSettings(data);
       setAutoContinuePromptDraft(data.agentMessageAutoContinue.prompt);
+      setAutoContinueEnabledByDefaultDraft(data.agentMessageAutoContinue.enabledByDefault);
     } catch (e: any) {
       setAgentMessageAutoContinueSettingsError(e?.message ?? String(e));
     } finally {
@@ -61,18 +65,22 @@ export function useAgentMessageAutoContinueSettings(
         {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ prompt: autoContinuePromptDraft }),
+          body: JSON.stringify({
+            prompt: autoContinuePromptDraft,
+            enabledByDefault: autoContinueEnabledByDefaultDraft,
+          }),
         },
       );
       setAgentMessageAutoContinueSettings(data);
       setAutoContinuePromptDraft(data.agentMessageAutoContinue.prompt);
-      setAgentMessageAutoContinueSettingsNotice('Saved auto-continue prompt.');
+      setAutoContinueEnabledByDefaultDraft(data.agentMessageAutoContinue.enabledByDefault);
+      setAgentMessageAutoContinueSettingsNotice('Saved auto-continue settings.');
     } catch (e: any) {
       setAgentMessageAutoContinueSettingsError(e?.message ?? String(e));
     } finally {
       setSavingAgentMessageAutoContinueSettings(false);
     }
-  }, [autoContinuePromptDraft, requestJson]);
+  }, [autoContinueEnabledByDefaultDraft, autoContinuePromptDraft, requestJson]);
 
   return {
     agentMessageAutoContinueSettings,
@@ -80,8 +88,10 @@ export function useAgentMessageAutoContinueSettings(
     agentMessageAutoContinueSettingsError,
     agentMessageAutoContinueSettingsNotice,
     autoContinuePromptDraft,
+    autoContinueEnabledByDefaultDraft,
     savingAgentMessageAutoContinueSettings,
     setAutoContinuePromptDraft,
+    setAutoContinueEnabledByDefaultDraft,
     loadAgentMessageAutoContinueSettings,
     saveAgentMessageAutoContinueSettings,
   };

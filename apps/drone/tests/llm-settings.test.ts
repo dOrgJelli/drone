@@ -163,15 +163,19 @@ describeSocketSuite('LLM settings api', () => {
     expect(initial.r.status).toBe(200);
     expect(initial.data.agentMessageAutoContinue.prompt).toBe('continue');
     expect(initial.data.agentMessageAutoContinue.promptSource).toBe('default');
+    expect(initial.data.agentMessageAutoContinue.enabledByDefault).toBe(false);
+    expect(initial.data.agentMessageAutoContinue.enabledByDefaultSource).toBe('default');
 
     const updated = await apiFetch('/api/settings/agent-message-auto-continue', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ prompt: 'keep going please' }),
+      body: JSON.stringify({ prompt: 'keep going please', enabledByDefault: true }),
     });
     expect(updated.r.status).toBe(200);
     expect(updated.data.agentMessageAutoContinue.prompt).toBe('keep going please');
     expect(updated.data.agentMessageAutoContinue.promptSource).toBe('settings');
+    expect(updated.data.agentMessageAutoContinue.enabledByDefault).toBe(true);
+    expect(updated.data.agentMessageAutoContinue.enabledByDefaultSource).toBe('settings');
     expect(updated.data.agentMessageAutoContinue.updatedAt).not.toBeNull();
   });
 });

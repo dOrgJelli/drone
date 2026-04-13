@@ -71,8 +71,11 @@ export type AgentMessageAutoContinueSettingsResponse = {
   agentMessageAutoContinue: {
     prompt: string;
     promptSource: 'settings' | 'default';
+    enabledByDefault: boolean;
+    enabledByDefaultSource: 'settings' | 'default';
     updatedAt: string | null;
     defaultPrompt: string;
+    defaultEnabledByDefault: boolean;
     maxPromptChars: number;
   };
 };

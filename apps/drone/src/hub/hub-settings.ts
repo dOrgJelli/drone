@@ -114,6 +114,8 @@ export type AgentMessageAutoContinueSettingsSource = 'settings' | 'default';
 export type EffectiveAgentMessageAutoContinueSettings = {
   prompt: string;
   promptSource: AgentMessageAutoContinueSettingsSource;
+  enabledByDefault: boolean;
+  enabledByDefaultSource: AgentMessageAutoContinueSettingsSource;
   updatedAt: string | null;
 };
 export type { KanbanBoardTaskType, KanbanBoardCard, KanbanBoardLane, KanbanBoardSettings };
@@ -706,32 +708,43 @@ export async function resolveFilesystemSettingsResponse(): Promise<{
 
 async function getStoredAgentMessageAutoContinueSettings(): Promise<{
   prompt: string | null;
+  enabledByDefault: boolean | null;
   updatedAt: string | null;
 }> {
   const reg = await loadRegistry();
   const raw = reg.settings?.agentMessageAutoContinue;
   const prompt = normalizeAgentMessageAutoContinuePrompt(raw?.prompt);
   const updatedAtRaw = raw?.updatedAt;
+  const enabledByDefault = raw?.enabledByDefault === true ? true : raw?.enabledByDefault === false ? false : null;
   return {
     prompt: prompt || null,
+    enabledByDefault,
     updatedAt: typeof updatedAtRaw === 'string' && updatedAtRaw.trim() ? updatedAtRaw.trim() : null,
   };
 }
 
 export async function upsertStoredAgentMessageAutoContinueSettings(opts: {
   prompt?: string | null;
+  enabledByDefault?: boolean | null;
 }): Promise<void> {
-  const prompt = normalizeAgentMessageAutoContinuePrompt(opts.prompt);
+  const nextPrompt =
+    opts.prompt === undefined ? undefined : normalizeAgentMessageAutoContinuePrompt(opts.prompt);
+  const enabledByDefault = opts.enabledByDefault === true;
   const updatedAt = new Date().toISOString();
   await updateRegistry((reg) => {
     reg.settings ??= {};
-    if (!prompt || prompt === AGENT_MESSAGE_AUTO_CONTINUE_PROMPT_DEFAULT) {
+    const current = reg.settings?.agentMessageAutoContinue;
+    const prompt = nextPrompt === undefined ? normalizeAgentMessageAutoContinuePrompt(current?.prompt) : nextPrompt;
+    const effectiveEnabledByDefault =
+      opts.enabledByDefault === undefined ? current?.enabledByDefault === true : enabledByDefault;
+    if ((!prompt || prompt === AGENT_MESSAGE_AUTO_CONTINUE_PROMPT_DEFAULT) && !effectiveEnabledByDefault) {
       delete reg.settings.agentMessageAutoContinue;
       if (Object.keys(reg.settings).length === 0) delete reg.settings;
       return;
     }
     reg.settings.agentMessageAutoContinue = {
-      prompt,
+      ...(prompt && prompt !== AGENT_MESSAGE_AUTO_CONTINUE_PROMPT_DEFAULT ? { prompt } : {}),
+      ...(effectiveEnabledByDefault ? { enabledByDefault: true } : {}),
       updatedAt,
     };
   });
@@ -742,7 +755,9 @@ export async function resolveEffectiveAgentMessageAutoContinueSettings(): Promis
   return {
     prompt: stored.prompt ?? AGENT_MESSAGE_AUTO_CONTINUE_PROMPT_DEFAULT,
     promptSource: stored.prompt ? 'settings' : 'default',
-    updatedAt: stored.prompt ? stored.updatedAt : null,
+    enabledByDefault: stored.enabledByDefault === true,
+    enabledByDefaultSource: stored.enabledByDefault === null ? 'default' : 'settings',
+    updatedAt: stored.prompt || stored.enabledByDefault !== null ? stored.updatedAt : null,
   };
 }
 
@@ -751,8 +766,11 @@ export async function resolveAgentMessageAutoContinueSettingsResponse(): Promise
   agentMessageAutoContinue: {
     prompt: string;
     promptSource: AgentMessageAutoContinueSettingsSource;
+    enabledByDefault: boolean;
+    enabledByDefaultSource: AgentMessageAutoContinueSettingsSource;
     updatedAt: string | null;
     defaultPrompt: string;
+    defaultEnabledByDefault: boolean;
     maxPromptChars: number;
   };
 }> {
@@ -762,8 +780,11 @@ export async function resolveAgentMessageAutoContinueSettingsResponse(): Promise
     agentMessageAutoContinue: {
       prompt: settings.prompt,
       promptSource: settings.promptSource,
+      enabledByDefault: settings.enabledByDefault,
+      enabledByDefaultSource: settings.enabledByDefaultSource,
       updatedAt: settings.updatedAt,
       defaultPrompt: AGENT_MESSAGE_AUTO_CONTINUE_PROMPT_DEFAULT,
+      defaultEnabledByDefault: false,
       maxPromptChars: AGENT_MESSAGE_AUTO_CONTINUE_PROMPT_MAX_CHARS,
     },
   };

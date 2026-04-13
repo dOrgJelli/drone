@@ -66,8 +66,10 @@ export function GeneralSettingsTab({
     agentMessageAutoContinueSettingsError,
     agentMessageAutoContinueSettingsNotice,
     autoContinuePromptDraft,
+    autoContinueEnabledByDefaultDraft,
     savingAgentMessageAutoContinueSettings,
     setAutoContinuePromptDraft,
+    setAutoContinueEnabledByDefaultDraft,
     saveAgentMessageAutoContinueSettings,
   } = agentMessageAutoContinue;
 
@@ -84,8 +86,13 @@ export function GeneralSettingsTab({
   const filesystemDefaultMiB =
     filesystemSettings != null ? bytesToNearestMiB(filesystemSettings.filesystem.defaultUploadMaxBytes) : 2048;
   const currentAutoContinuePrompt = agentMessageAutoContinueSettings?.agentMessageAutoContinue.prompt ?? 'continue';
+  const currentAutoContinueEnabledByDefault =
+    agentMessageAutoContinueSettings?.agentMessageAutoContinue.enabledByDefault ?? false;
   const autoContinuePromptMaxChars = agentMessageAutoContinueSettings?.agentMessageAutoContinue.maxPromptChars ?? 200;
   const autoContinuePromptDirty = autoContinuePromptDraft !== currentAutoContinuePrompt;
+  const autoContinueEnabledByDefaultDirty =
+    autoContinueEnabledByDefaultDraft !== currentAutoContinueEnabledByDefault;
+  const autoContinueSettingsDirty = autoContinuePromptDirty || autoContinueEnabledByDefaultDirty;
   const githubStatus = github.githubSettings?.github ?? null;
   const githubAuthLabel =
     githubStatus?.authSource === 'environment'
@@ -486,6 +493,46 @@ export function GeneralSettingsTab({
                   </span>{' '}
                   ({agentMessageAutoContinueSettings?.agentMessageAutoContinue.promptSource === 'settings' ? 'from settings' : 'default'})
                 </div>
+                <div className="text-[11px] text-[var(--muted-dim)]">
+                  New chats default:{' '}
+                  <span className="text-[var(--fg-secondary)]">
+                    {currentAutoContinueEnabledByDefault ? 'On' : 'Off'}
+                  </span>{' '}
+                  ({agentMessageAutoContinueSettings?.agentMessageAutoContinue.enabledByDefaultSource === 'settings' ? 'from settings' : 'default'})
+                </div>
+                <div className="flex flex-col gap-1">
+                  <span className="text-[10px] uppercase tracking-[0.08em] text-[var(--muted-dim)] font-semibold">
+                    Enable for new chats by default
+                  </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setAutoContinueEnabledByDefaultDraft(true)}
+                      disabled={agentMessageAutoContinueSettingsLoading || savingAgentMessageAutoContinueSettings}
+                      className={`h-8 px-3 rounded text-[10px] font-semibold tracking-wide uppercase border transition-all ${
+                        autoContinueEnabledByDefaultDraft
+                          ? 'bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-fg)]'
+                          : 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]'
+                      } ${agentMessageAutoContinueSettingsLoading || savingAgentMessageAutoContinueSettings ? 'opacity-40 cursor-not-allowed' : ''}`}
+                      style={{ fontFamily: 'var(--display)' }}
+                    >
+                      Default on
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAutoContinueEnabledByDefaultDraft(false)}
+                      disabled={agentMessageAutoContinueSettingsLoading || savingAgentMessageAutoContinueSettings}
+                      className={`h-8 px-3 rounded text-[10px] font-semibold tracking-wide uppercase border transition-all ${
+                        !autoContinueEnabledByDefaultDraft
+                          ? 'bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-fg)]'
+                          : 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]'
+                      } ${agentMessageAutoContinueSettingsLoading || savingAgentMessageAutoContinueSettings ? 'opacity-40 cursor-not-allowed' : ''}`}
+                      style={{ fontFamily: 'var(--display)' }}
+                    >
+                      Default off
+                    </button>
+                  </div>
+                </div>
                 <label className="flex flex-col gap-1">
                   <span className="text-[10px] uppercase tracking-[0.08em] text-[var(--muted-dim)] font-semibold">Auto-reply prompt</span>
                   <input
@@ -500,11 +547,14 @@ export function GeneralSettingsTab({
                 <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
-                    onClick={() =>
+                    onClick={() => {
                       setAutoContinuePromptDraft(
                         agentMessageAutoContinueSettings?.agentMessageAutoContinue.defaultPrompt ?? 'continue',
-                      )
-                    }
+                      );
+                      setAutoContinueEnabledByDefaultDraft(
+                        agentMessageAutoContinueSettings?.agentMessageAutoContinue.defaultEnabledByDefault ?? false,
+                      );
+                    }}
                     disabled={agentMessageAutoContinueSettingsLoading || savingAgentMessageAutoContinueSettings}
                     className={`h-9 px-3 rounded text-[11px] font-semibold tracking-wide uppercase border transition-all ${
                       agentMessageAutoContinueSettingsLoading || savingAgentMessageAutoContinueSettings
@@ -518,15 +568,15 @@ export function GeneralSettingsTab({
                   <button
                     type="button"
                     onClick={() => void saveAgentMessageAutoContinueSettings()}
-                    disabled={!autoContinuePromptDirty || agentMessageAutoContinueSettingsLoading || savingAgentMessageAutoContinueSettings}
+                    disabled={!autoContinueSettingsDirty || agentMessageAutoContinueSettingsLoading || savingAgentMessageAutoContinueSettings}
                     className={`h-9 px-3 rounded text-[11px] font-semibold tracking-wide uppercase border transition-all ${
-                      !autoContinuePromptDirty || agentMessageAutoContinueSettingsLoading || savingAgentMessageAutoContinueSettings
+                      !autoContinueSettingsDirty || agentMessageAutoContinueSettingsLoading || savingAgentMessageAutoContinueSettings
                         ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
                         : 'bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-fg)] hover:shadow-[var(--glow-accent)] hover:brightness-110'
                     }`}
                     style={{ fontFamily: 'var(--display)' }}
                   >
-                    {savingAgentMessageAutoContinueSettings ? 'Saving…' : 'Save auto-continue prompt'}
+                    {savingAgentMessageAutoContinueSettings ? 'Saving…' : 'Save auto-continue settings'}
                   </button>
                 </div>
                 <div className="text-[10px] text-[var(--muted-dim)]">
