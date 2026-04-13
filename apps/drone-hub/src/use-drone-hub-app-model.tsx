@@ -679,19 +679,6 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     chatUiModeRef,
     requestJson,
   });
-  const {
-    latestAgentSuggestionTarget,
-    latestAgentSuggestionState,
-    requestAgentSuggestionForMessage,
-  } = useAgentSuggestionState({
-    transcripts,
-    chatUiModeRef,
-    requestJson,
-    transcriptMessageId,
-    enabled: chatInfo?.agentSuggestionEnabled === true,
-    currentPolicyFingerprint:
-      agentSuggestionSettingsState.agentSuggestionSettings?.agentSuggestion.policyFingerprint ?? '',
-  });
   const prevChatItemsLenRef = React.useRef(0);
 
   React.useEffect(() => {
