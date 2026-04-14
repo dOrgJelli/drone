@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  buildAgentSuggestionSystemPrompt,
   isLowValueAcknowledgementSuggestion,
   normalizeAgentSuggestionResult,
 } from '../src/hub/agent-suggestion';
@@ -56,5 +57,13 @@ describe('agent suggestion normalization', () => {
     expect(isLowValueAcknowledgementSuggestion('  thank you  ')).toBe(true);
     expect(isLowValueAcknowledgementSuggestion('continue')).toBe(false);
     expect(isLowValueAcknowledgementSuggestion('review')).toBe(false);
+  });
+
+  test('system prompt tells the model not to repeat already-completed actions', () => {
+    const prompt = buildAgentSuggestionSystemPrompt();
+    expect(prompt).toContain(
+      'Use outcome="none" when the agent already reports that an action is completed and the candidate reply would only repeat that same action.',
+    );
+    expect(prompt).toContain('if the agent says it already committed or merged the work, do not suggest `commit`');
   });
 });

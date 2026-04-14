@@ -210,6 +210,8 @@ Suggest the most likely next user reply in this developer chat after an assistan
 - If the assistant is clearly still mid-task, the likely response is usually a short continuation.
 - If the assistant introduced a questionable abstraction or naming choice, the likely response is usually a challenge or clarification question.
 - If the agent turn is complete and the only plausible reply is a low-value acknowledgement like \`ok\`, \`sounds good\`, or \`thanks\`, return no suggestion.
+- If the agent already reported that an action is completed, do not suggest repeating that same action.
+- Example: if the agent says it already committed or merged the work, return no suggestion instead of \`commit\`.
 - If you are uncertain and would rather have the user decide what to say next, return no suggestion instead of guessing.
 `;
 const UI_AUTOMATION_RUNS_MIN = 1;

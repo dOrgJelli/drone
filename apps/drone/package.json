@@ -24,7 +24,8 @@
     "dev": "ts-node src/cli.ts",
     "test": "bun test --timeout 20000 --max-concurrency 1 tests",
     "test:coverage": "bun test --timeout 20000 --max-concurrency 1 --coverage tests",
-    "test:auto-continue-eval": "bun test evals/agent-message-auto-continue.eval.ts",
+    "test:auto-continue-eval": "bun test ./evals/agent-message-auto-continue.eval.ts",
+    "test:agent-suggestion-eval": "bun test ./evals/agent-suggestion.eval.ts",
     "smoke": "node scripts/smoke-cli.cjs",
     "lint": "eslint \"src/**/*.ts\"",
     "format": "prettier --write ."
