@@ -78,9 +78,6 @@ export function shouldDispatchEditableShortcutAction({
   if (matchedActionId === 'createDraftDrone') {
     return targetInPrimaryChatInput || targetInCanvasMessageInput;
   }
-  if (matchedActionId === 'createChildDraftDrone') {
-    return targetInPrimaryChatInput;
-  }
   if (matchedActionId === 'createDroneChat') {
     return targetInPrimaryChatInput;
   }
