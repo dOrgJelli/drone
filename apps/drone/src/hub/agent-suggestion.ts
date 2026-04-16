@@ -147,6 +147,26 @@ export function normalizeAgentSuggestionResult(object: {
   };
 }
 
+export function buildAgentSuggestionSystemPrompt(): string {
+  return [
+    'You suggest the single most likely next user reply in a developer chat.',
+    'Return ONLY the structured output required by the schema.',
+    'The reply should follow the policy below, not imitate a generic assistant.',
+    'Prefer short, practical replies unless the conversation clearly calls for more detail.',
+    'Do not invent new requirements beyond what the current conversation supports.',
+    'Sometimes the correct result is no suggestion.',
+    'Use outcome="none" when the agent conversation is effectively finished and the only plausible reply would be a low-value acknowledgement like "ok", "sounds good", or "thanks".',
+    'Use outcome="none" when you are too uncertain to make a useful suggestion and the user should decide what to say next.',
+    'Use outcome="none" when the agent already reports that an action is completed and the candidate reply would only repeat that same action.',
+    'For example: if the agent says it already committed or merged the work, do not suggest `commit`.',
+    'Do not force a reply just to fill the slot.',
+    'If the agent recommendation looks sound and a reply would still move the work forward, prefer a short approval or instruction.',
+    'If the agent introduced questionable naming, architecture, abstraction, or hidden behavior, prefer a correction or question.',
+    'If the agent likely needs a regression pass, prefer a review-oriented reply.',
+    'Use terse operator-style replies when appropriate.',
+  ].join('\n');
+}
+
 export async function suggestReplyToAgentMessage(
   opts: {
     prompt?: string;
@@ -184,21 +204,7 @@ export async function suggestReplyToAgentMessage(
     kind: runtime.z.enum(['approval', 'question', 'correction', 'instruction', 'review', 'commit', 'status', 'none']),
   });
 
-  const system = [
-    'You suggest the single most likely next user reply in a developer chat.',
-    'Return ONLY the structured output required by the schema.',
-    'The reply should follow the policy below, not imitate a generic assistant.',
-    'Prefer short, practical replies unless the conversation clearly calls for more detail.',
-    'Do not invent new requirements beyond what the current conversation supports.',
-    'Sometimes the correct result is no suggestion.',
-    'Use outcome="none" when the agent conversation is effectively finished and the only plausible reply would be a low-value acknowledgement like "ok", "sounds good", or "thanks".',
-    'Use outcome="none" when you are too uncertain to make a useful suggestion and the user should decide what to say next.',
-    'Do not force a reply just to fill the slot.',
-    'If the agent recommendation looks sound and a reply would still move the work forward, prefer a short approval or instruction.',
-    'If the agent introduced questionable naming, architecture, abstraction, or hidden behavior, prefer a correction or question.',
-    'If the agent likely needs a regression pass, prefer a review-oriented reply.',
-    'Use terse operator-style replies when appropriate.',
-  ].join('\n');
+  const system = buildAgentSuggestionSystemPrompt();
 
   const ctx = Array.isArray(opts?.context) ? opts.context : [];
   const ctxText =

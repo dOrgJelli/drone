@@ -29,14 +29,14 @@ describe('editable shortcut dispatch', () => {
     expect(out).toBe(false);
   });
 
-  test('allows create-chat shortcut from primary chat input only', () => {
+  test('does not allow create-chat shortcut from chat inputs', () => {
     expect(
       shouldDispatchEditableShortcutAction({
         matchedActionId: 'createDroneChat',
         targetInPrimaryChatInput: true,
         targetInCanvasMessageInput: false,
       }),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       shouldDispatchEditableShortcutAction({
         matchedActionId: 'createDroneChat',
@@ -46,14 +46,14 @@ describe('editable shortcut dispatch', () => {
     ).toBe(false);
   });
 
-  test('allows child-drone shortcut from primary chat input only', () => {
+  test('does not allow child-drone shortcut from chat inputs', () => {
     expect(
       shouldDispatchEditableShortcutAction({
         matchedActionId: 'createChildDraftDrone',
         targetInPrimaryChatInput: true,
         targetInCanvasMessageInput: false,
       }),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       shouldDispatchEditableShortcutAction({
         matchedActionId: 'createChildDraftDrone',

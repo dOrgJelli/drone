@@ -70,19 +70,10 @@ export function computeTranscriptAutoScrollDecision({
   };
 }
 
-export function shouldDispatchEditableShortcutAction({
-  matchedActionId,
-  targetInPrimaryChatInput,
-  targetInCanvasMessageInput,
-}: EditableShortcutDispatchArgs): boolean {
+export function shouldDispatchEditableShortcutAction(_args: EditableShortcutDispatchArgs): boolean {
+  const { matchedActionId, targetInPrimaryChatInput, targetInCanvasMessageInput } = _args;
   if (matchedActionId === 'createDraftDrone') {
     return targetInPrimaryChatInput || targetInCanvasMessageInput;
-  }
-  if (matchedActionId === 'createChildDraftDrone') {
-    return targetInPrimaryChatInput;
-  }
-  if (matchedActionId === 'createDroneChat') {
-    return targetInPrimaryChatInput;
   }
   return false;
 }
