@@ -18,7 +18,7 @@ async function waitFor(check: () => Promise<boolean>, timeoutMs = 1500): Promise
   throw new Error(`condition not met within ${timeoutMs}ms`);
 }
 
-function createControllerHarness() {
+function createControllerHarness(opts?: { agentSuggestionEnabledByDefault?: boolean }) {
   const pendingStateHelpers = createPendingDroneStateHelpers({
     normalizeChatName: (raw: any) => String(raw ?? 'default').trim() || 'default',
     nowIso: () => '2026-03-26T12:00:00.000Z',
@@ -60,6 +60,7 @@ function createControllerHarness() {
     nowIso: () => '2026-03-26T12:00:00.000Z',
     parseSeedAgent: (raw: any) => (raw && typeof raw === 'object' ? raw : null),
     playbookMetaFromEntry: () => null,
+    resolveAgentSuggestionEnabledByDefault: async () => opts?.agentSuggestionEnabledByDefault === true,
     resolveDroneCliPath: () => '/mock/drone-cli.js',
     resolvePendingDroneDisplayName: pendingStateHelpers.resolvePendingDroneDisplayName,
     runNodeCli: async (args) => {
@@ -226,9 +227,63 @@ describe('drone provisioning controller', () => {
           agent: { kind: 'builtin', id: 'codex' },
           setModel: true,
           model: 'gpt-5.4',
+          setAgentSuggestionEnabled: true,
+          agentSuggestionEnabled: false,
         },
       ]);
       expect(harness.enqueuePromptCalls).toHaveLength(0);
+    });
+  });
+
+  test('uses the assistant suggestion default for cloned chat toggles', async () => {
+    await withTempDroneDataDir('drone-provisioning-', async () => {
+      await updateRegistry((reg: any) => {
+        reg.drones = {
+          source: {
+            id: 'source',
+            name: 'source',
+            runtime: 'host',
+            createdAt: '2026-03-26T10:00:00.000Z',
+            chats: {
+              default: {
+                createdAt: '2026-03-26T10:05:00.000Z',
+                agent: { kind: 'builtin', id: 'codex' },
+                agentSuggestionEnabled: true,
+                agentSuggestionEnabledAt: '2026-03-26T10:05:00.000Z',
+              },
+            },
+          },
+        };
+        reg.pending = {
+          clone: {
+            id: 'clone',
+            name: 'clone',
+            runtime: 'host',
+            repoPath: '',
+            build: false,
+            cloneFrom: 'source',
+            cloneChats: true,
+            createdAt: '2026-03-26T11:00:00.000Z',
+            updatedAt: '2026-03-26T11:00:00.000Z',
+            phase: 'starting',
+            message: 'Starting...',
+          },
+        };
+      });
+
+      const harness = createControllerHarness({ agentSuggestionEnabledByDefault: false });
+      harness.controller.enqueueProvisioning('clone');
+
+      await waitFor(async () => {
+        const reg: any = await loadRegistry();
+        return !reg?.pending?.clone && Boolean(reg?.drones?.clone?.chats?.default);
+      });
+
+      const reg: any = await loadRegistry();
+      const clonedDefault = reg?.drones?.clone?.chats?.default;
+      expect(clonedDefault?.agent).toEqual({ kind: 'builtin', id: 'codex' });
+      expect(clonedDefault?.agentSuggestionEnabled).toBeUndefined();
+      expect(clonedDefault?.agentSuggestionEnabledAt).toBeUndefined();
     });
   });
 });
