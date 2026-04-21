@@ -48,9 +48,18 @@ type DroneProvisioningControllerDeps = {
   parseSeedAgent: (raw: any) => any | null;
   playbookMetaFromEntry: (raw: unknown) => any | null;
   resolveDroneCliPath: () => string;
+  resolveAgentSuggestionEnabledByDefault: () => Promise<boolean>;
   resolvePendingDroneDisplayName: (pendingEntry: any, fallbackRaw: unknown) => string;
   runNodeCli: (args: string[], opts?: { cwd?: string; timeoutMs?: number }) => Promise<{ code: number; stdout: string; stderr: string }>;
-  setChatAgentConfig: (opts: { droneId: string; chatName: string; agent?: any; setModel: boolean; model?: string | null }) => Promise<void>;
+  setChatAgentConfig: (opts: {
+    droneId: string;
+    chatName: string;
+    agent?: any;
+    setModel: boolean;
+    model?: string | null;
+    setAgentSuggestionEnabled?: boolean;
+    agentSuggestionEnabled?: boolean;
+  }) => Promise<void>;
   startupPromptToPendingPrompt: (prompt: PendingStartupPrompt) => PendingPromptProjection;
   syncRepoAgentsInstructionsForDrone: (opts: { droneId: string; droneEntry: any }) => Promise<void>;
   syncSkillLibraryForDrone: (opts: { droneId: string; droneEntry: any }) => Promise<void>;
@@ -364,6 +373,7 @@ export function createDroneProvisioningController(deps: DroneProvisioningControl
     const seedModel = deps.normalizeChatModel(seed?.model);
 
     if (cloneFrom && cloneChats) {
+      const agentSuggestionEnabledByDefault = await deps.resolveAgentSuggestionEnabledByDefault();
       try {
         await updateRegistry((reg3Any: any) => {
           const src = reg3Any?.drones?.[cloneFrom];
@@ -382,6 +392,12 @@ export function createDroneProvisioningController(deps: DroneProvisioningControl
             entry.agent = agent;
             if (model) entry.model = model;
             else delete entry.model;
+            delete entry.agentSuggestionEnabled;
+            delete entry.agentSuggestionEnabledAt;
+            if (agentSuggestionEnabledByDefault && agent?.kind === 'builtin') {
+              entry.agentSuggestionEnabled = true;
+              entry.agentSuggestionEnabledAt = createdAt;
+            }
             cloned[String(chatName)] = entry;
           }
           dst.chats = dst.chats ?? {};
@@ -472,6 +488,7 @@ export function createDroneProvisioningController(deps: DroneProvisioningControl
     });
     try {
       if (seedAgent || seedModel) {
+        const agentSuggestionEnabledByDefault = await deps.resolveAgentSuggestionEnabledByDefault();
         await deps.ensureChatEntry({ droneId: pendingDroneId, chatName });
         await deps.setChatAgentConfig({
           droneId: pendingDroneId,
@@ -479,6 +496,8 @@ export function createDroneProvisioningController(deps: DroneProvisioningControl
           ...(seedAgent ? { agent: seedAgent } : {}),
           setModel: true,
           model: seedModel,
+          setAgentSuggestionEnabled: true,
+          agentSuggestionEnabled: agentSuggestionEnabledByDefault && seedAgent?.kind !== 'custom',
         });
       }
       if (prompt) {

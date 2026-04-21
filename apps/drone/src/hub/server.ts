@@ -7574,6 +7574,7 @@ const { dequeueProvisioning, enqueueProvisioning, enqueueProvisioningForAllPendi
   nowIso,
   parseSeedAgent,
   playbookMetaFromEntry,
+  resolveAgentSuggestionEnabledByDefault: async () => (await resolveEffectiveAgentSuggestionSettings()).enabledByDefault,
   resolveDroneCliPath,
   resolvePendingDroneDisplayName,
   runNodeCli,
