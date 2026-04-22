@@ -8,6 +8,7 @@ import net from 'node:net';
 import path from 'node:path';
 
 import { health, procStart, procStop, readOutput, sendInput, sendKeys, status } from './host/api';
+import { ensureContainerDroneDaemonSession } from './host/container-daemon';
 import { dvmClone, dvmCopyToContainer, dvmCreate, dvmExec, dvmLs, dvmPorts, dvmRemove, dvmSessionStart } from './host/dvm';
 import { droneRootPath } from './host/paths';
 import {
@@ -38,6 +39,8 @@ import {
   hostDroneDaemonTokenPath,
   hostDroneRootPath,
   hostDroneWorkspacePath,
+  buildContainerDroneDaemonLaunchScript,
+  DRONE_DAEMON_SESSION_NAME,
   installFleetCliScript,
   installTasksCliScript,
   missingHostDependencyMessage,
@@ -958,6 +961,23 @@ function makeClient(hostPort: number, token: string) {
   return { baseUrl: `http://127.0.0.1:${hostPort}`, token };
 }
 
+async function ensureContainerDroneReady(drone: DroneRegistryEntry, hostPort: number, token: string): Promise<void> {
+  const containerName = String((drone as any)?.containerName ?? (drone as any)?.name ?? '').trim();
+  const containerPort = Number((drone as any)?.containerPort ?? NaN);
+  if (!containerName || !Number.isFinite(containerPort) || containerPort <= 0 || !token) return;
+
+  const client = makeClient(hostPort, token);
+  try {
+    await health(client);
+    return;
+  } catch {
+    // Best-effort self-heal when the container came back but the daemon tmux session did not.
+  }
+
+  await ensureContainerDroneDaemonSession({ containerName, containerPort: Math.floor(containerPort) });
+  await waitForHealth(hostPort, token);
+}
+
 async function hostCommandExists(command: string): Promise<boolean> {
   const name = String(command ?? '').trim();
   if (!name) return false;
@@ -981,6 +1001,9 @@ async function withDroneClient<T>(
     runtime === 'host'
       ? normalizeHostPort((drone as any)?.hostPort)
       : await resolveHostPort(containerName, Number((drone as any)?.containerPort ?? 7777));
+  if (runtime === 'container') {
+    await ensureContainerDroneReady(drone as any, hostPort, String((drone as any)?.token ?? ''));
+  }
   const client = makeClient(hostPort, (drone as any).token);
   return await fn({ drone: drone as any, hostPort, client });
 }
@@ -1225,9 +1248,9 @@ createCommand
 
     await dvmSessionStart(
       containerName,
-      'drone-daemon',
+      DRONE_DAEMON_SESSION_NAME,
       'bash',
-      ['-lc', `node /dvm-data/drone/dist/daemon.js --host 0.0.0.0 --port ${containerPort} --data-dir /dvm-data/drone --token-file /dvm-data/drone/token`],
+      ['-lc', buildContainerDroneDaemonLaunchScript(containerPort)],
       true
     );
 
@@ -1586,6 +1609,9 @@ program
           runtime === 'host'
             ? normalizeHostPort((d as any)?.hostPort)
             : await resolveHostPort(containerName, d.containerPort);
+        if (runtime === 'container') {
+          await ensureContainerDroneReady(d as any, hostPort, String((d as any)?.token ?? ''));
+        }
         const s = await status(makeClient(hostPort, d.token));
         out.push({
           name: d.name,

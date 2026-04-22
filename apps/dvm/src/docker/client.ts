@@ -55,6 +55,7 @@ export interface ExecCommandResult {
 
 export class DockerClient {
   private docker: Docker;
+  static readonly DEFAULT_RESTART_POLICY_NAME = 'unless-stopped';
 
   constructor() {
     this.docker = new Docker();
@@ -218,6 +219,9 @@ export class DockerClient {
         PortBindings: portBindings,
         NetworkMode: config.network,
         Mounts: mounts.length > 0 ? (mounts as Docker.MountConfig) : undefined,
+        RestartPolicy: {
+          Name: DockerClient.DEFAULT_RESTART_POLICY_NAME,
+        },
       },
       Env: config.environment,
       AttachStdout: true,
@@ -228,6 +232,19 @@ export class DockerClient {
 
     const container = await this.docker.createContainer(containerConfig);
     return container;
+  }
+
+  async ensureContainerRestartPolicy(name: string, policyName = DockerClient.DEFAULT_RESTART_POLICY_NAME): Promise<void> {
+    const container = await this.getContainer(name);
+    if (!container) {
+      throw new Error(`Container ${name} not found`);
+    }
+
+    const desiredPolicy = String(policyName ?? '').trim() || DockerClient.DEFAULT_RESTART_POLICY_NAME;
+    const info = await container.inspect();
+    const currentPolicy = String(info.HostConfig?.RestartPolicy?.Name ?? '').trim();
+    if (currentPolicy === desiredPolicy) return;
+    await container.update({ RestartPolicy: { Name: desiredPolicy } });
   }
 
   async listNetworks(): Promise<Docker.NetworkInspectInfo[]> {
@@ -284,6 +301,8 @@ export class DockerClient {
     if (!container) {
       throw new Error(`Container ${name} not found`);
     }
+
+    await this.ensureContainerRestartPolicy(name);
 
     const info = await container.inspect();
     if (info.State?.Running) {

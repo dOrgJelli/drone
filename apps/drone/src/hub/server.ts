@@ -11,6 +11,7 @@ import { URL } from 'node:url';
 import { RawData, WebSocket, WebSocketServer } from 'ws';
 import { BaseConfigManager } from 'dvm';
 
+import { ensureContainerDroneDaemonSession } from '../host/container-daemon';
 import { droneRootPath } from '../host/paths';
 import { readActiveProfileName } from '../host/profiles';
 import {
@@ -23,7 +24,14 @@ import {
   useProfile as useManagedProfile,
 } from '../host/profile-manager';
 import { loadRegistry, updateRegistry } from '../host/registry';
-import { installFleetCliScript, installTasksCliScript, normalizeDroneRuntime, type DroneRuntime } from '../host/runtime';
+import {
+  buildContainerDroneDaemonLaunchScript,
+  DRONE_DAEMON_SESSION_NAME,
+  installFleetCliScript,
+  installTasksCliScript,
+  normalizeDroneRuntime,
+  type DroneRuntime,
+} from '../host/runtime';
 import { dismissWelcomeForScope, ensureHubSetupState, resolveHubSetupScopeKey } from '../host/setup-state';
 import { resolveContainerTerminalShellCommand, resolveHostTerminalShellCommand } from '../host/shell';
 import {
@@ -1934,7 +1942,21 @@ async function resolveDroneDaemonClientForEntry(
     }
   }
   if (!hostPort) return null;
-  return { client: makeClient(hostPort, token), hostPort, token };
+  const client = makeClient(hostPort, token);
+  const containerName = String((drone as any)?.containerName ?? (drone as any)?.name ?? '').trim();
+  const containerPort = Number((drone as any)?.containerPort ?? NaN);
+  if (containerName && Number.isFinite(containerPort) && containerPort > 0) {
+    try {
+      await droneStatus(client);
+    } catch {
+      try {
+        await ensureContainerDroneDaemonSession({ containerName, containerPort: Math.floor(containerPort) });
+      } catch {
+        // Ignore best-effort recovery here; callers still perform their own readiness checks.
+      }
+    }
+  }
+  return { client, hostPort, token };
 }
 
 function droneRepoPathInContainer(drone: any): string {
@@ -4838,6 +4860,10 @@ async function runDroneLifecycleAction(opts: { droneId: string; droneEntry: any;
       const msg = e?.message ?? String(e);
       if (!looksLikeContainerAlreadyRunningError(msg)) throw e;
     }
+    await ensureContainerDroneDaemonSession({
+      containerName,
+      containerPort: Number(droneEntry?.containerPort ?? 7777),
+    });
   }
 
   await clearDroneHubState(droneId);
@@ -7570,12 +7596,12 @@ async function upgradeDroneDaemonInContainer(opts: { containerName: string; cont
   }
 
   // Restart daemon session so new code is loaded.
-  await dvmExec(opts.containerName, 'bash', ['-lc', 'tmux kill-session -t drone-daemon 2>/dev/null || true']);
+  await dvmExec(opts.containerName, 'bash', ['-lc', `tmux kill-session -t ${DRONE_DAEMON_SESSION_NAME} 2>/dev/null || true`]);
   await dvmSessionStart(
     opts.containerName,
-    'drone-daemon',
+    DRONE_DAEMON_SESSION_NAME,
     'bash',
-    ['-lc', `node /dvm-data/drone/dist/daemon.js --host 0.0.0.0 --port ${opts.containerPort} --data-dir /dvm-data/drone --token-file /dvm-data/drone/token`],
+    ['-lc', buildContainerDroneDaemonLaunchScript(opts.containerPort)],
     true
   );
 }
@@ -12842,6 +12868,18 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
                     }
                   } catch (e2: any) {
                     statusError = e2?.message ?? String(e2);
+                  }
+                } else if (runtime !== 'host') {
+                  try {
+                    await ensureContainerDroneDaemonSession({
+                      containerName,
+                      containerPort: Number(d?.containerPort ?? 7777),
+                    });
+                    status = await droneStatus(makeClient(hostPort, token));
+                    statusOk = true;
+                    statusError = null;
+                  } catch (recoveryError: any) {
+                    statusError = recoveryError?.message ?? firstErr;
                   }
                 } else {
                   statusError = firstErr;

@@ -2,6 +2,7 @@ import path from 'node:path';
 import { droneRootPath } from './paths';
 
 export type DroneRuntime = 'container' | 'host';
+export const DRONE_DAEMON_SESSION_NAME = 'drone-daemon';
 
 export function missingHostDependencyMessage(binary: string, contextRaw?: string): string {
   const tool = String(binary ?? '').trim() || 'required tool';
@@ -81,5 +82,41 @@ export function installTasksCliScript(opts?: { runtimeDir?: string; binPath?: st
     `exec node ${shellQuote(tasksJs)} "$@"`,
     'EOF',
     `chmod 755 ${shellQuote(binPath)}`,
+  ].join('\n');
+}
+
+export function buildContainerDroneDaemonLaunchScript(
+  containerPortRaw: number,
+  opts?: {
+    runtimeDir?: string;
+    legacyDaemonPath?: string;
+    dataDir?: string;
+    tokenPath?: string;
+    host?: string;
+  }
+): string {
+  const containerPort = Number(containerPortRaw);
+  if (!Number.isFinite(containerPort) || containerPort <= 0 || Math.floor(containerPort) !== containerPort) {
+    throw new Error(`invalid container daemon port: ${containerPortRaw}`);
+  }
+
+  const runtimeDir = String(opts?.runtimeDir ?? '/dvm-data/drone/dist').trim() || '/dvm-data/drone/dist';
+  const legacyDaemonPath = String(opts?.legacyDaemonPath ?? '/dvm-data/drone/daemon.js').trim() || '/dvm-data/drone/daemon.js';
+  const dataDir = String(opts?.dataDir ?? '/dvm-data/drone').trim() || '/dvm-data/drone';
+  const tokenPath = String(opts?.tokenPath ?? '/dvm-data/drone/token').trim() || '/dvm-data/drone/token';
+  const host = String(opts?.host ?? '0.0.0.0').trim() || '0.0.0.0';
+  const runtimeDaemonPath = path.posix.join(runtimeDir, 'daemon.js');
+
+  return [
+    'set -euo pipefail',
+    `if [ -f ${shellQuote(runtimeDaemonPath)} ]; then`,
+    `  daemon_js=${shellQuote(runtimeDaemonPath)}`,
+    `elif [ -f ${shellQuote(legacyDaemonPath)} ]; then`,
+    `  daemon_js=${shellQuote(legacyDaemonPath)}`,
+    'else',
+    `  echo ${shellQuote(`missing drone daemon runtime (${runtimeDaemonPath} or ${legacyDaemonPath})`)} 1>&2`,
+    '  exit 1',
+    'fi',
+    `exec node "$daemon_js" --host ${shellQuote(host)} --port ${shellQuote(String(containerPort))} --data-dir ${shellQuote(dataDir)} --token-file ${shellQuote(tokenPath)}`,
   ].join('\n');
 }
