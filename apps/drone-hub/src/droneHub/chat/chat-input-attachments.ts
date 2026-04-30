@@ -1,8 +1,10 @@
 export const CHAT_INPUT_MAX_IMAGES = 8;
 export const CHAT_INPUT_MAX_BYTES_EACH = 6 * 1024 * 1024;
 export const CHAT_INPUT_MAX_BYTES_TOTAL = 20 * 1024 * 1024;
+export const CHAT_INPUT_PASTE_TEXT_AS_ATTACHMENT_MIN_CHARS = 50_000;
 
 export type DraftImageAttachment = {
+  kind: 'image';
   id: string;
   file: File;
   name: string;
@@ -10,6 +12,17 @@ export type DraftImageAttachment = {
   size: number;
   previewUrl: string;
 };
+
+export type DraftTextAttachment = {
+  kind: 'text';
+  id: string;
+  text: string;
+  name: string;
+  mime: 'text/plain';
+  size: number;
+};
+
+export type DraftChatAttachment = DraftImageAttachment | DraftTextAttachment;
 
 export function makeDraftImageAttachmentId(): string {
   // Non-crypto id; only used for React keys.
@@ -38,6 +51,10 @@ export function formatBytes(n: number): string {
 }
 
 export async function fileToBase64(file: File): Promise<string> {
+  return await blobToBase64(file);
+}
+
+export async function blobToBase64(blob: Blob): Promise<string> {
   return await new Promise((resolve, reject) => {
     const r = new FileReader();
     r.onerror = () => reject(r.error ?? new Error('Failed reading file'));
@@ -47,12 +64,17 @@ export async function fileToBase64(file: File): Promise<string> {
       const comma = res.indexOf(',');
       resolve(comma >= 0 ? res.slice(comma + 1) : res);
     };
-    r.readAsDataURL(file);
+    r.readAsDataURL(blob);
   });
 }
 
-export function revokeDraftImagePreviewUrls(items: DraftImageAttachment[]): void {
+export function textByteLength(text: string): number {
+  return new TextEncoder().encode(String(text ?? '')).length;
+}
+
+export function revokeDraftImagePreviewUrls(items: DraftChatAttachment[]): void {
   for (const item of items) {
+    if (item.kind !== 'image') continue;
     try {
       URL.revokeObjectURL(item.previewUrl);
     } catch {

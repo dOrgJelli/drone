@@ -35,6 +35,18 @@ export type ChatImageAttachmentRef = {
 
 const CHAT_ATTACHMENTS_DIR_NAME = '.drone-hub/attachments';
 
+function isImageAttachmentMime(mimeRaw: string): boolean {
+  return String(mimeRaw ?? '').trim().toLowerCase().startsWith('image/');
+}
+
+function isTextAttachmentMime(mimeRaw: string): boolean {
+  return String(mimeRaw ?? '').trim().toLowerCase() === 'text/plain';
+}
+
+function isSupportedAttachmentMime(mimeRaw: string): boolean {
+  return isImageAttachmentMime(mimeRaw) || isTextAttachmentMime(mimeRaw);
+}
+
 function normalizeAttachmentsStorageRoot(storageRootRaw: string | undefined, cwd: string): string {
   const storageRoot = normalizeContainerPath(String(storageRootRaw ?? '').trim());
   if (storageRoot && storageRoot !== '/') return storageRoot;
@@ -64,7 +76,7 @@ function base64DecodedByteLength(b64Raw: string): number {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
-function extForImageMime(mimeRaw: string): string {
+function extForAttachmentMime(mimeRaw: string): string {
   const mime = String(mimeRaw ?? '').trim().toLowerCase();
   switch (mime) {
     case 'image/png':
@@ -85,8 +97,10 @@ function extForImageMime(mimeRaw: string): string {
     case 'image/tif':
     case 'image/tiff':
       return 'tiff';
+    case 'text/plain':
+      return 'txt';
     default:
-      return 'png';
+      return isImageAttachmentMime(mime) ? 'png' : 'txt';
   }
 }
 
@@ -119,7 +133,7 @@ export function normalizeChatImageAttachments(raw: unknown): ChatImageAttachment
     if (!item || typeof item !== 'object') continue;
 
     const mime = String(item.mime ?? '').trim().toLowerCase();
-    if (!mime.startsWith('image/')) throw new Error('only image attachments are supported');
+    if (!isSupportedAttachmentMime(mime)) throw new Error('only image and text attachments are supported');
 
     const dataBase64 = String(item.dataBase64 ?? '').replace(/\s+/g, '');
     if (!dataBase64) throw new Error('attachment is missing dataBase64');
@@ -137,7 +151,7 @@ export function normalizeChatImageAttachments(raw: unknown): ChatImageAttachment
     if (effectiveSize > CHAT_ATTACHMENTS_MAX_BYTES_EACH) {
       throw new Error(`attachment too large (${effectiveSize} bytes, max ${CHAT_ATTACHMENTS_MAX_BYTES_EACH})`);
     }
-    if (out.length >= CHAT_ATTACHMENTS_MAX_IMAGES) {
+    if (isImageAttachmentMime(mime) && out.filter((entry) => isImageAttachmentMime(entry.mime)).length >= CHAT_ATTACHMENTS_MAX_IMAGES) {
       throw new Error(`too many attachments (max ${CHAT_ATTACHMENTS_MAX_IMAGES})`);
     }
     total += effectiveSize;
@@ -145,8 +159,8 @@ export function normalizeChatImageAttachments(raw: unknown): ChatImageAttachment
       throw new Error(`attachments too large in total (max ${CHAT_ATTACHMENTS_MAX_BYTES_TOTAL} bytes)`);
     }
 
-    const ext = extForImageMime(mime);
-    const fallbackBase = `image-${out.length + 1}`;
+    const ext = extForAttachmentMime(mime);
+    const fallbackBase = isImageAttachmentMime(mime) ? `image-${out.length + 1}` : `text-${out.length + 1}`;
     const name = String(item.name ?? '').trim() || `${fallbackBase}.${ext}`;
     const fileName = sanitizeAttachmentFileName(name, fallbackBase, ext);
 
@@ -162,14 +176,28 @@ export function promptWithImageAttachments(
 ): string {
   const prompt = String(promptRaw ?? '').trim();
   if (!files || files.length === 0) return prompt;
-  const header = files.length === 1 ? 'Image attachment:' : 'Image attachments:';
-  const lines = files.map((f, i) => {
+  const imageFiles = files.filter((item) => isImageAttachmentMime(item.mime));
+  const textFiles = files.filter((item) => isTextAttachmentMime(item.mime));
+  const otherFiles = files.filter((item) => !isImageAttachmentMime(item.mime) && !isTextAttachmentMime(item.mime));
+  const formatLine = (f: { name: string; mime: string; size: number; path: string; relativePath?: string }, i: number) => {
     const absPath = String(f.path ?? '').trim();
     const relPath = String(f.relativePath ?? '').trim();
     const shownPath = relPath && relPath !== absPath ? `${relPath} (absolute: ${absPath})` : relPath || absPath;
     return `${i + 1}. ${f.name} (${f.mime}, ${f.size} bytes): ${shownPath}`;
-  });
-  const block = `${header}\n${lines.join('\n')}`;
+  };
+  const blocks: string[] = [];
+  if (textFiles.length > 0) {
+    blocks.push(
+      `${textFiles.length === 1 ? 'Text attachment:' : 'Text attachments:'}\n${textFiles.map(formatLine).join('\n')}\nRead the text attachment file${textFiles.length === 1 ? '' : 's'} and treat the content as part of the user's message/context.`,
+    );
+  }
+  if (imageFiles.length > 0) {
+    blocks.push(`${imageFiles.length === 1 ? 'Image attachment:' : 'Image attachments:'}\n${imageFiles.map(formatLine).join('\n')}`);
+  }
+  if (otherFiles.length > 0) {
+    blocks.push(`${otherFiles.length === 1 ? 'Attachment:' : 'Attachments:'}\n${otherFiles.map(formatLine).join('\n')}`);
+  }
+  const block = blocks.join('\n\n');
   return prompt ? `${prompt}\n\n${block}` : block;
 }
 

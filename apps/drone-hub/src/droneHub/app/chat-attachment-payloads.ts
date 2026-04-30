@@ -1,6 +1,15 @@
 import type { ChatImageAttachmentPayload } from '../chat';
 import type { ChatImageAttachmentRef } from '../types';
 
+function isSupportedAttachmentMime(mimeRaw: unknown): boolean {
+  const mime = String(mimeRaw ?? '').trim().toLowerCase();
+  return mime.startsWith('image/') || mime === 'text/plain';
+}
+
+function isImageAttachmentMime(mimeRaw: unknown): boolean {
+  return String(mimeRaw ?? '').trim().toLowerCase().startsWith('image/');
+}
+
 export function normalizeChatImageAttachmentPayloads(raw: unknown): ChatImageAttachmentPayload[] {
   const list = Array.isArray(raw) ? raw : [];
   const out: ChatImageAttachmentPayload[] = [];
@@ -10,7 +19,7 @@ export function normalizeChatImageAttachmentPayloads(raw: unknown): ChatImageAtt
     const mime = String((item as any).mime ?? '').trim().toLowerCase();
     const sizeNum = Number((item as any).size ?? 0);
     const dataBase64 = String((item as any).dataBase64 ?? '').trim();
-    if (!name || !mime.startsWith('image/') || !Number.isFinite(sizeNum) || sizeNum <= 0 || !dataBase64) continue;
+    if (!name || !isSupportedAttachmentMime(mime) || !Number.isFinite(sizeNum) || sizeNum <= 0 || !dataBase64) continue;
     out.push({
       name,
       mime,
@@ -26,6 +35,6 @@ export function attachmentRefsFromPayload(raw: unknown): ChatImageAttachmentRef[
     name: item.name,
     mime: item.mime,
     size: item.size,
-    previewDataUrl: `data:${item.mime};base64,${item.dataBase64}`,
+    ...(isImageAttachmentMime(item.mime) ? { previewDataUrl: `data:${item.mime};base64,${item.dataBase64}` } : {}),
   }));
 }

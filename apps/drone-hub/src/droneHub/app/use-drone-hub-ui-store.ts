@@ -48,7 +48,7 @@ type SpawnContextPreferences = {
   repoCreateRemoteBranch: string;
   pullHostBranchBeforeCreate: boolean;
 };
-const CHAT_INPUT_DRAFT_MAX_CHARS = 4_000;
+const CHAT_INPUT_DRAFT_MAX_CHARS = 300_000;
 const CHAT_INPUT_DRAFT_MAX_KEYS = 80;
 const CHAT_INPUT_DRAFTS_STORAGE_KEY = profileStorageKey('droneHub.chatInputDrafts');
 const CHAT_INPUT_DRAFTS_PERSIST_DEBOUNCE_MS = 300;

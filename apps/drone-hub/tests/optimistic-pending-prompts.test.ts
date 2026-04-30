@@ -36,6 +36,15 @@ describe('optimistic pending prompt helpers', () => {
     expect(item?.prompt).toBe('[image attachment]');
   });
 
+  test('creates a readable label for text-only attachment prompts', () => {
+    const item = createOptimisticPendingPrompt({
+      prompt: '',
+      attachments: [{ name: 'pasted.txt', mime: 'text/plain', size: 420, dataBase64: 'abc123' }],
+    });
+
+    expect(item?.prompt).toBe('[text attachment]');
+  });
+
   test('reconciles a temporary optimistic id to the confirmed server id', () => {
     const optimistic = createOptimisticPendingPrompt({
       id: 'optimistic-1',

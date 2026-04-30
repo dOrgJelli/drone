@@ -4460,7 +4460,7 @@ function normalizeChatImageAttachmentRefs(raw: unknown): ChatImageAttachmentRef[
     const fileName = String((item as any).fileName ?? '').trim();
     const pathRaw = String((item as any).path ?? '').trim();
     const relRaw = String((item as any).relativePath ?? '').trim();
-    if (!name || !mime.startsWith('image/')) continue;
+    if (!name || (!mime.startsWith('image/') && mime !== 'text/plain')) continue;
     if (!Number.isFinite(sizeNum) || sizeNum <= 0) continue;
     if (!pathRaw || !pathRaw.startsWith('/')) continue;
     out.push({
@@ -4473,6 +4473,20 @@ function normalizeChatImageAttachmentRefs(raw: unknown): ChatImageAttachmentRef[
     });
   }
   return out.slice(0, 8);
+}
+
+function attachmentOnlyPromptLabel(attachmentsRaw: ChatImageAttachment[] | ChatImageAttachmentRef[]): string {
+  const attachments = Array.isArray(attachmentsRaw) ? attachmentsRaw : [];
+  if (attachments.length === 0) return '';
+  const imageCount = attachments.filter((item) => String(item?.mime ?? '').trim().toLowerCase().startsWith('image/')).length;
+  const textCount = attachments.filter((item) => String(item?.mime ?? '').trim().toLowerCase() === 'text/plain').length;
+  if (imageCount === attachments.length) {
+    return imageCount === 1 ? '[image attachment]' : `[${imageCount} image attachments]`;
+  }
+  if (textCount === attachments.length) {
+    return textCount === 1 ? '[text attachment]' : `[${textCount} text attachments]`;
+  }
+  return attachments.length === 1 ? '[attachment]' : `[${attachments.length} attachments]`;
 }
 
 function normalizePromptAutomationMeta(raw: unknown): PromptAutomationMeta | undefined {
@@ -7316,9 +7330,9 @@ async function enqueuePrompt(opts: {
           droneId,
           chatName,
           id,
-          patch: { state: 'failed', error: `failed staging queued image attachments: ${errText}` },
+          patch: { state: 'failed', error: `failed staging queued attachments: ${errText}` },
         });
-        throw new Error(`failed staging queued image attachments: ${errText}`);
+        throw new Error(`failed staging queued attachments: ${errText}`);
       }
     }
     // Persisted as queued; a reconcile/update that establishes session id will pump it.
@@ -7537,7 +7551,7 @@ async function createOrEnqueuePromptUnified(opts: {
       return {
         kind: 'error',
         status: 409,
-        error: `drone "${droneId}" is still starting (image attachments require an active drone)`,
+        error: `drone "${droneId}" is still starting (attachments require an active drone)`,
       };
     }
     const queuedPending: PendingPrompt = {
@@ -19138,7 +19152,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           return;
         }
         if (!prompt && attachments.length > 0) {
-          prompt = attachments.length === 1 ? '[image attachment]' : `[${attachments.length} image attachments]`;
+          prompt = attachmentOnlyPromptLabel(attachments);
         }
 
         try {
@@ -19165,7 +19179,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               r = {
                 kind: 'error',
                 status: 409,
-                error: `drone "${droneId}" is still starting (image attachments require an active drone)`,
+                error: `drone "${droneId}" is still starting (attachments require an active drone)`,
               };
             } else {
               const pendingPromptId = promptIdRaw || crypto.randomBytes(9).toString('hex');

@@ -1,5 +1,11 @@
 import { describe, expect, test } from 'bun:test';
-import { buildChatAttachmentsDirectory, buildChatImageAttachmentRefs, promptWithImageAttachments, type ChatImageAttachment } from '../src/hub/chat-attachments';
+import {
+  buildChatAttachmentsDirectory,
+  buildChatImageAttachmentRefs,
+  normalizeChatImageAttachments,
+  promptWithImageAttachments,
+  type ChatImageAttachment,
+} from '../src/hub/chat-attachments';
 
 describe('chat attachments paths', () => {
   const sample: ChatImageAttachment = {
@@ -67,5 +73,34 @@ describe('promptWithImageAttachments', () => {
     expect(text).toContain('Please inspect this image.');
     expect(text).toContain('/dvm-data/drone-hub/attachments/default/prompt-123/screenshot.png');
     expect(text).not.toContain('(absolute:');
+  });
+
+  test('includes instructions for text attachments', () => {
+    const text = promptWithImageAttachments('Summarize this.', [
+      {
+        name: 'pasted-text.txt',
+        mime: 'text/plain',
+        size: 54321,
+        path: '/dvm-data/drone-hub/attachments/default/prompt-123/pasted-text.txt',
+        relativePath: 'attachments/default/prompt-123/pasted-text.txt',
+      },
+    ]);
+
+    expect(text).toContain('Text attachment:');
+    expect(text).toContain('Read the text attachment file');
+    expect(text).toContain('attachments/default/prompt-123/pasted-text.txt');
+  });
+});
+
+describe('normalizeChatImageAttachments', () => {
+  test('accepts text attachments alongside images', () => {
+    const attachments = normalizeChatImageAttachments([
+      { name: 'pasted-text.txt', mime: 'text/plain', size: 5, dataBase64: 'aGVsbG8=' },
+      { name: 'screenshot.png', mime: 'image/png', size: 8, dataBase64: 'iVBORw0KGgo=' },
+    ]);
+
+    expect(attachments).toHaveLength(2);
+    expect(attachments[0]?.mime).toBe('text/plain');
+    expect(attachments[1]?.mime).toBe('image/png');
   });
 });

@@ -272,7 +272,7 @@ export function GroupMultiChatColumn({
       if (!prompt && attachments.length === 0) return false;
       if (isDroneStartingOrSeeding(drone.hubPhase)) {
         if (attachments.length > 0) {
-          setPromptError(`\"${shownName}\" is still starting. Image attachments can be sent once it is ready.`);
+          setPromptError(`\"${shownName}\" is still starting. Attachments can be sent once it is ready.`);
           return false;
         }
         setPromptError(`\"${shownName}\" is still starting.`);

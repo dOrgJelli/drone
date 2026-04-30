@@ -18,27 +18,32 @@ import {
   CHAT_INPUT_MAX_BYTES_EACH,
   CHAT_INPUT_MAX_BYTES_TOTAL,
   CHAT_INPUT_MAX_IMAGES,
+  CHAT_INPUT_PASTE_TEXT_AS_ATTACHMENT_MIN_CHARS,
+  blobToBase64,
   fileToBase64,
   formatBytes,
   isLikelyImageFile,
   makeDraftImageAttachmentId,
   revokeDraftImagePreviewUrls,
-  type DraftImageAttachment,
+  textByteLength,
+  type DraftChatAttachment,
 } from './chat-input-attachments';
 
 const CHAT_INPUT_TEXTAREA_MIN_HEIGHT_PX = 36;
 const CHAT_INPUT_TEXTAREA_MAX_HEIGHT_PX = 160;
 
-export type ChatImageAttachmentPayload = {
+export type ChatAttachmentPayload = {
   name: string;
   mime: string;
   size: number;
   dataBase64: string;
 };
 
+export type ChatImageAttachmentPayload = ChatAttachmentPayload;
+
 export type ChatSendPayload = {
   prompt: string;
-  attachments: ChatImageAttachmentPayload[];
+  attachments: ChatAttachmentPayload[];
 };
 
 export type ChatDraftAutomationPayload = ChatSendPayload & {
@@ -105,7 +110,7 @@ export function ChatInput({
   stopping?: boolean;
 }) {
   const [uncontrolledDraft, setUncontrolledDraft] = React.useState('');
-  const [attachments, setAttachments] = React.useState<DraftImageAttachment[]>([]);
+  const [attachments, setAttachments] = React.useState<DraftChatAttachment[]>([]);
   const [attachmentError, setAttachmentError] = React.useState<string | null>(null);
   const [dragActive, setDragActive] = React.useState(false);
   const [automationPanelOpen, setAutomationPanelOpen] = React.useState(false);
@@ -156,6 +161,14 @@ export function ChatInput({
   );
 
   const attachmentsOn = attachmentsEnabled !== false;
+  const imageAttachmentCount = React.useMemo(
+    () => attachments.filter((attachment) => attachment.kind === 'image').length,
+    [attachments],
+  );
+  const textAttachmentCount = React.useMemo(
+    () => attachments.filter((attachment) => attachment.kind === 'text').length,
+    [attachments],
+  );
   React.useEffect(() => {
     draftRef.current = draft;
   }, [draft]);
@@ -275,6 +288,10 @@ export function ChatInput({
     });
   }
 
+  function makePastedTextAttachmentName(existingCount: number): string {
+    return existingCount <= 0 ? 'pasted-text.txt' : `pasted-text-${existingCount + 1}.txt`;
+  }
+
   function addFiles(files: File[] | FileList | null | undefined) {
     if (!attachmentsOn) return;
     if (!files) return;
@@ -317,11 +334,33 @@ export function ChatInput({
         const mime = String((f as any).type ?? '').trim() || 'application/octet-stream';
         const name = String((f as any).name ?? '').trim() || `image-${next.length + 1}`;
         const previewUrl = URL.createObjectURL(f);
-        next.push({ id: makeDraftImageAttachmentId(), file: f, name, mime, size: Math.floor(size), previewUrl });
+        next.push({ kind: 'image', id: makeDraftImageAttachmentId(), file: f, name, mime, size: Math.floor(size), previewUrl });
         total += size;
       }
 
       return next;
+    });
+  }
+
+  function addPastedTextAttachment(textRaw: string) {
+    if (!attachmentsOn) return;
+    const text = String(textRaw ?? '');
+    if (!text) return;
+    const size = textByteLength(text);
+    setAttachmentError(null);
+    setAttachments((prev) => {
+      const textCount = prev.filter((attachment) => attachment.kind === 'text').length;
+      return [
+        ...prev,
+        {
+          kind: 'text',
+          id: makeDraftImageAttachmentId(),
+          text,
+          name: makePastedTextAttachmentName(textCount),
+          mime: 'text/plain',
+          size,
+        },
+      ];
     });
   }
 
@@ -330,7 +369,7 @@ export function ChatInput({
     const snapshotAttachments = attachments.slice();
     if (!prompt && snapshotAttachments.length === 0) return;
     if (draftAutomationActive && snapshotAttachments.length > 0) {
-      setAttachmentError('Recurring chat automations do not support image attachments yet.');
+      setAttachmentError('Recurring chat automations do not support attachments yet.');
       return;
     }
     setDraft('');
@@ -351,19 +390,28 @@ export function ChatInput({
         }
         return;
       }
-      let encoded: ChatImageAttachmentPayload[] = [];
+      let encoded: ChatAttachmentPayload[] = [];
       try {
         encoded = await Promise.all(
-          snapshotAttachments.map(async (a) => ({
-            name: a.name,
-            mime: a.mime,
-            size: a.size,
-            dataBase64: await fileToBase64(a.file),
-          })),
+          snapshotAttachments.map(async (a) =>
+            a.kind === 'image'
+              ? {
+                  name: a.name,
+                  mime: a.mime,
+                  size: a.size,
+                  dataBase64: await fileToBase64(a.file),
+                }
+              : {
+                  name: a.name,
+                  mime: a.mime,
+                  size: a.size,
+                  dataBase64: await blobToBase64(new Blob([a.text], { type: a.mime })),
+                },
+          ),
         );
       } catch (e: any) {
         const msg = e?.message ?? String(e);
-        setAttachmentError(`Failed to read image attachment: ${msg}`);
+        setAttachmentError(`Failed to read attachment: ${msg}`);
         // Restore state (best-effort).
         setDraft((cur) => (cur.trim().length === 0 ? prompt : cur));
         setAttachments((cur) => (cur.length === 0 ? snapshotAttachments : cur));
@@ -477,7 +525,9 @@ export function ChatInput({
                   className="text-[10px] text-[var(--muted-dim)] tracking-wide uppercase"
                   style={{ fontFamily: 'var(--display)' }}
                 >
-                  {attachments.length} image{attachments.length === 1 ? '' : 's'} attached
+                  {attachments.length} attachment{attachments.length === 1 ? '' : 's'} attached
+                  {imageAttachmentCount > 0 ? ` • ${imageAttachmentCount} image${imageAttachmentCount === 1 ? '' : 's'}` : ''}
+                  {textAttachmentCount > 0 ? ` • ${textAttachmentCount} text attachment${textAttachmentCount === 1 ? '' : 's'}` : ''}
                 </div>
                 <button
                   type="button"
@@ -497,11 +547,24 @@ export function ChatInput({
               <div className="mt-2 flex gap-2 overflow-x-auto pb-1 no-scrollbar">
                 {attachments.map((a) => (
                   <div key={a.id} className="relative flex-shrink-0">
-                    <img
-                      src={a.previewUrl}
-                      alt={a.name}
-                      className="w-14 h-14 object-cover rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.15)]"
-                    />
+                    {a.kind === 'image' ? (
+                      <img
+                        src={a.previewUrl}
+                        alt={a.name}
+                        className="w-14 h-14 object-cover rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.15)]"
+                      />
+                    ) : (
+                      <div className="w-[180px] min-h-[56px] rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.15)] px-2 py-1.5">
+                        <div
+                          className="text-[9px] uppercase tracking-wide text-[var(--muted-dim)]"
+                          style={{ fontFamily: 'var(--display)' }}
+                        >
+                          Text attachment
+                        </div>
+                        <div className="mt-1 truncate text-[10px] text-[var(--fg-secondary)]">{a.name}</div>
+                        <div className="mt-0.5 text-[9px] text-[var(--muted-dim)]">{formatBytes(a.size)}</div>
+                      </div>
+                    )}
                     <button
                       type="button"
                       onClick={() => removeAttachment(a.id)}
@@ -511,8 +574,8 @@ export function ChatInput({
                           ? 'opacity-40 cursor-not-allowed bg-[var(--panel-raised)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
                           : 'bg-[var(--panel-raised)] border-[var(--border)] text-[var(--muted)] hover:text-[var(--red)] hover:border-[var(--red)]'
                       }`}
-                      title="Remove image"
-                      aria-label="Remove image"
+                      title={`Remove ${a.kind} attachment`}
+                      aria-label={`Remove ${a.kind} attachment`}
                     >
                       x
                     </button>
@@ -564,8 +627,6 @@ export function ChatInput({
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onPaste={(e) => {
-                if (!attachmentsOn) return;
-                if (attachmentControlsLocked) return;
                 const items = Array.from(e.clipboardData?.items ?? []);
                 const files: File[] = [];
                 for (const it of items) {
@@ -573,7 +634,16 @@ export function ChatInput({
                   const f = it.getAsFile();
                   if (f && isLikelyImageFile(f)) files.push(f);
                 }
-                if (files.length > 0) addFiles(files);
+                if (attachmentsOn && !attachmentControlsLocked && files.length > 0) addFiles(files);
+                const pastedText = String(e.clipboardData?.getData('text/plain') ?? '');
+                if (
+                  attachmentsOn &&
+                  !attachmentControlsLocked &&
+                  pastedText.length >= CHAT_INPUT_PASTE_TEXT_AS_ATTACHMENT_MIN_CHARS
+                ) {
+                  e.preventDefault();
+                  addPastedTextAttachment(pastedText);
+                }
               }}
               onKeyDown={(e) => {
                 if ((e.nativeEvent as any)?.isComposing) return;
