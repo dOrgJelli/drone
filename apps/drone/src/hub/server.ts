@@ -314,6 +314,12 @@ import {
 } from './drone-pending-state';
 import { createDronePendingPromptStore, type PendingPrompt } from './drone-pending-prompts';
 import { createDroneProvisioningController } from './drone-provisioning';
+import {
+  HubAssistantService,
+  type AssistantCreateDroneResult,
+  type AssistantDroneSummary,
+  type AssistantSetDroneGroupResult,
+} from './assistant';
 
 const HUB_API_LOADED_AT = new Date().toISOString();
 const HUB_API_BUILD_ID = crypto.randomBytes(6).toString('hex');
@@ -9930,6 +9936,117 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
     void sendReadyAndStart();
   });
 
+  const callLocalHubApi = async (pathname: string, body: any): Promise<any> => {
+    const response = await fetch(`http://127.0.0.1:${opts.port}${pathname}`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${apiToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(body ?? {}),
+    });
+    const text = await response.text();
+    let data: any = null;
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = { error: text };
+      }
+    }
+    if (!response.ok) throw new Error(data?.error ?? `${response.status} ${response.statusText}`);
+    return data;
+  };
+
+  const assistantService = new HubAssistantService({
+    listDrones: async (): Promise<AssistantDroneSummary[]> => {
+      const regAny: any = await loadRegistry();
+      const out: AssistantDroneSummary[] = [];
+      const drones = regAny?.drones && typeof regAny.drones === 'object' ? regAny.drones : {};
+      for (const [idRaw, d] of Object.entries(drones) as any[]) {
+        const id = normalizeDroneIdentity((d as any)?.id) || normalizeDroneIdentity(idRaw);
+        if (!id) continue;
+        const chatObj = (d as any)?.chats && typeof (d as any).chats === 'object' ? (d as any).chats : {};
+        const chats = Object.keys(chatObj);
+        if (chats.length === 0) chats.push('default');
+        out.push({
+          id,
+          name: String((d as any)?.name ?? id).trim() || id,
+          group: String((d as any)?.group ?? '').trim() || null,
+          runtime: normalizeDroneRuntime((d as any)?.runtime),
+          repoPath: String((d as any)?.repoPath ?? '').trim(),
+          status: String((d as any)?.hub?.phase ?? 'ready').trim() || 'ready',
+          chats,
+        });
+      }
+      const pending = regAny?.pending && typeof regAny.pending === 'object' ? regAny.pending : {};
+      for (const [idRaw, d] of Object.entries(pending) as any[]) {
+        const id = normalizeDroneIdentity((d as any)?.id) || normalizeDroneIdentity(idRaw);
+        if (!id || out.some((item) => item.id === id)) continue;
+        out.push({
+          id,
+          name: String((d as any)?.name ?? id).trim() || id,
+          group: String((d as any)?.group ?? '').trim() || null,
+          runtime: normalizeDroneRuntime((d as any)?.runtime),
+          repoPath: String((d as any)?.repoPath ?? '').trim(),
+          status: String((d as any)?.phase ?? 'starting').trim() || 'starting',
+          chats: ['default'],
+        });
+      }
+      return out.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+    },
+    createDrone: async (request): Promise<AssistantCreateDroneResult> => {
+      const data = await callLocalHubApi('/api/drones', request);
+      return {
+        id: String(data?.id ?? '').trim(),
+        name: String(data?.name ?? '').trim(),
+        runtime: String(data?.runtime ?? request?.runtime ?? 'container').trim() || 'container',
+        phase: String(data?.phase ?? 'starting').trim() || 'starting',
+        request,
+      };
+    },
+    setDroneGroup: async ({ droneIds, group }): Promise<AssistantSetDroneGroupResult> => {
+      const data = await callLocalHubApi('/api/drones/group-set', { droneIds, group });
+      return {
+        group: typeof data?.group === 'string' && data.group.trim() ? data.group.trim() : null,
+        moved: Array.isArray(data?.moved) ? data.moved : [],
+        rejected: Array.isArray(data?.rejected) ? data.rejected : [],
+        total: Number.isFinite(Number(data?.total)) ? Number(data.total) : 0,
+      };
+    },
+    messageDrone: async ({ droneId, chatName, prompt }) => {
+      const resolved = await resolveDroneOrPendingForReadRef(droneId);
+      if (!resolved) throw new Error(`unknown drone: ${droneId}`);
+      const id = resolved.id;
+      const chat = normalizeChatName(chatName || 'default');
+      const message = String(prompt ?? '').trim();
+      if (!message) throw new Error('missing prompt');
+      if (resolved.kind === 'pending') {
+        const pendingPromptId = crypto.randomBytes(9).toString('hex');
+        const queuedStatus = await pushPendingStartupPrompt({
+          droneId: id,
+          chatName: chat,
+          pending: {
+            id: pendingPromptId,
+            at: nowIso(),
+            prompt: message,
+            state: 'queued',
+            updatedAt: nowIso(),
+          },
+        });
+        if (queuedStatus !== 'queued') {
+          const r = await createOrEnqueuePromptUnified({ id: pendingPromptId, droneId: id, chatName: chat, prompt: message, cwd: null });
+          if (r.kind === 'error') throw new Error(r.error);
+          return { promptId: r.id, pendingState: r.pendingState, blockedByAutomation: r.blockedByAutomation };
+        }
+        return { promptId: pendingPromptId, pendingState: 'queued', blockedByAutomation: false };
+      }
+      const r = await createOrEnqueuePromptUnified({ droneId: id, chatName: chat, prompt: message, cwd: null });
+      if (r.kind === 'error') throw new Error(r.error);
+      return { promptId: r.id, pendingState: r.pendingState, blockedByAutomation: r.blockedByAutomation };
+    },
+  });
+
   const server = http.createServer(async (req, res) => {
     try {
       const method = (req.method ?? 'GET').toUpperCase();
@@ -9992,6 +10109,164 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           },
         });
         return;
+      }
+
+      if (pathname === '/api/assistant/threads' && method === 'GET') {
+        json(res, 200, await assistantService.snapshot());
+        return;
+      }
+
+      if (pathname === '/api/assistant/threads' && method === 'POST') {
+        let body: any = null;
+        try {
+          body = await readJsonBody(req);
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+          return;
+        }
+        json(res, 201, await assistantService.createThread(body ?? {}));
+        return;
+      }
+
+      if (pathname === '/api/assistant/context' && method === 'POST') {
+        let body: any = null;
+        try {
+          body = await readJsonBody(req);
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+          return;
+        }
+        assistantService.updateAppContext(body ?? {});
+        json(res, 200, { ok: true });
+        return;
+      }
+
+      if (pathname === '/api/assistant/scope' && method === 'POST') {
+        let body: any = null;
+        try {
+          body = await readJsonBody(req);
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+          return;
+        }
+        try {
+          await assistantService.updateAccessScope(body ?? {});
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+          return;
+        }
+        json(res, 200, { ok: true });
+        return;
+      }
+
+      {
+        const assistantParts = pathname.split('/').filter(Boolean);
+        if (
+          assistantParts.length >= 4 &&
+          assistantParts[0] === 'api' &&
+          assistantParts[1] === 'assistant' &&
+          assistantParts[2] === 'threads'
+        ) {
+          const threadId = decodeURIComponent(assistantParts[3] ?? '');
+
+          if (assistantParts.length === 4 && method === 'GET') {
+            const snapshot = await assistantService.snapshot();
+            const thread = snapshot.threads.find((item) => item.id === threadId);
+            if (!thread) {
+              json(res, 404, { ok: false, error: `unknown assistant thread: ${threadId}` });
+              return;
+            }
+            json(res, 200, snapshot);
+            return;
+          }
+
+          if (assistantParts.length === 4 && method === 'PATCH') {
+            let body: any = null;
+            try {
+              body = await readJsonBody(req);
+            } catch (e: any) {
+              json(res, 400, { ok: false, error: e?.message ?? String(e) });
+              return;
+            }
+            try {
+              json(res, 200, await assistantService.updateThread(threadId, body ?? {}));
+            } catch (e: any) {
+              json(res, /unknown assistant thread/i.test(String(e?.message ?? e)) ? 404 : 400, { ok: false, error: e?.message ?? String(e) });
+            }
+            return;
+          }
+
+          if (assistantParts.length === 4 && method === 'DELETE') {
+            try {
+              json(res, 200, await assistantService.deleteThread(threadId));
+            } catch (e: any) {
+              json(res, /unknown assistant thread/i.test(String(e?.message ?? e)) ? 404 : 400, { ok: false, error: e?.message ?? String(e) });
+            }
+            return;
+          }
+
+          if (assistantParts.length === 5 && assistantParts[4] === 'stop' && method === 'POST') {
+            try {
+              json(res, 200, await assistantService.stopThread(threadId));
+            } catch (e: any) {
+              json(res, /unknown assistant thread/i.test(String(e?.message ?? e)) ? 404 : 400, { ok: false, error: e?.message ?? String(e) });
+            }
+            return;
+          }
+
+          if (assistantParts.length === 6 && assistantParts[4] === 'queued' && method === 'DELETE') {
+            const queuedPromptId = decodeURIComponent(assistantParts[5] ?? '');
+            try {
+              json(res, 200, await assistantService.cancelQueuedPrompt(threadId, queuedPromptId));
+            } catch (e: any) {
+              json(res, /unknown (assistant thread|queued assistant message)/i.test(String(e?.message ?? e)) ? 404 : 400, { ok: false, error: e?.message ?? String(e) });
+            }
+            return;
+          }
+
+          if (assistantParts.length === 5 && assistantParts[4] === 'prompt' && method === 'POST') {
+            let body: any = null;
+            try {
+              body = await readJsonBody(req);
+            } catch (e: any) {
+              json(res, 400, { ok: false, error: e?.message ?? String(e) });
+              return;
+            }
+
+            res.statusCode = 200;
+            res.setHeader('content-type', 'application/x-ndjson; charset=utf-8');
+            res.setHeader('cache-control', 'no-cache, no-transform');
+            res.setHeader('connection', 'keep-alive');
+            const writeEvent = (event: any) => {
+              if (res.destroyed) return;
+              res.write(`${JSON.stringify(event)}\n`);
+            };
+            try {
+              await assistantService.promptThread(threadId, body ?? {}, writeEvent);
+              writeEvent({ type: 'done' });
+            } catch (e: any) {
+              writeEvent({ type: 'error', error: e?.message ?? String(e) });
+            } finally {
+              res.end();
+            }
+            return;
+          }
+
+          if (
+            assistantParts.length === 7 &&
+            assistantParts[4] === 'approvals' &&
+            (assistantParts[6] === 'approve' || assistantParts[6] === 'deny') &&
+            method === 'POST'
+          ) {
+            const approvalId = decodeURIComponent(assistantParts[5] ?? '');
+            try {
+              json(res, 200, await assistantService.approve(approvalId, assistantParts[6] === 'approve'));
+            } catch (e: any) {
+              json(res, /unknown approval/i.test(String(e?.message ?? e)) ? 404 : 400, { ok: false, error: e?.message ?? String(e) });
+            }
+            return;
+          }
+        }
       }
 
       if (pathname === '/api/setup/status' && method === 'GET') {

@@ -8,6 +8,7 @@ import { SelectedDroneWorkspace } from './SelectedDroneWorkspace';
 import { SettingsView } from './SettingsView';
 import { SetupWelcomeView } from './SetupWelcomeView';
 import type { AppView } from './app-types';
+import { FloatingAssistantDock } from '../assistant';
 
 export type DroneHubWorkspaceContentProps = {
   appView: AppView;
@@ -43,6 +44,11 @@ export function DroneHubWorkspaceContent({
     activeDroneId: null,
     previewVisible: false,
   });
+  const assistantEmbeddedVisible = Boolean(
+    selectedDroneWorkspaceProps?.rightPanelOpen &&
+      (selectedDroneWorkspaceProps.rightPanelTab === 'assistant' ||
+        (selectedDroneWorkspaceProps.rightPanelSplit && selectedDroneWorkspaceProps.rightPanelBottomTab === 'assistant')),
+  );
 
   return (
     <div data-drone-workspace-root="1" className="relative flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden bg-[var(--panel)]">
@@ -71,6 +77,7 @@ export function DroneHubWorkspaceContent({
           {renderPersistentPreviewContent(previewHostState.activeDroneId, previewHostState.previewVisible)}
         </div>
       </div>
+      <FloatingAssistantDock embeddedVisible={assistantEmbeddedVisible} />
     </div>
   );
 }

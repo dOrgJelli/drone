@@ -1329,6 +1329,20 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     setDroneDropActionModal(null);
   }, []);
   React.useEffect(() => {
+    void fetch('/api/assistant/context', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        activeDroneId: currentDrone?.id ?? null,
+        activeDroneName: currentDrone?.name ?? null,
+        activeChatName: currentDrone ? (String(selectedChat ?? '').trim() || 'default') : null,
+        appView,
+      }),
+    }).catch(() => {
+      // Context reporting is best effort; assistant chat still works without it.
+    });
+  }, [appView, currentDrone?.id, currentDrone?.name, selectedChat]);
+  React.useEffect(() => {
     const selectedNodeId = createCanvasChatNodeId(String(selectedDrone ?? '').trim(), String(selectedChat ?? '').trim() || 'default');
     if (!selectedNodeId) return;
     clearChatsUnread([selectedNodeId]);

@@ -36,6 +36,8 @@
     "ai": "^6.0.77",
     "commander": "^12.1.0",
     "dvm": "workspace:*",
+    "@mariozechner/pi-agent-core": "workspace:*",
+    "@mariozechner/pi-ai": "workspace:*",
     "dotenv": "^17.2.4",
     "ws": "^8.19.0",
     "zod": "^4.3.6"

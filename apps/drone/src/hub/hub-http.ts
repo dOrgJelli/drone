@@ -48,8 +48,7 @@ export function withCors(req: IncomingMessage, res: ServerResponse, allowedOrigi
   if (!origin || !allowedOrigins.has(origin)) return false;
 
   res.setHeader('access-control-allow-origin', origin);
-  res.setHeader('access-control-allow-methods', 'GET,POST,DELETE,OPTIONS');
+  res.setHeader('access-control-allow-methods', 'GET,POST,PATCH,DELETE,OPTIONS');
   res.setHeader('access-control-allow-headers', 'content-type,authorization');
   return true;
 }
-
