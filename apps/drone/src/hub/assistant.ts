@@ -205,6 +205,7 @@ const CHAT_IDLE_DEFAULT_IDLE_FOR_MS = 1000;
 const CHAT_IDLE_MAX_TARGETS = 20;
 const DEFAULT_OPENAI_MODEL = 'gpt-5.5';
 const DEFAULT_GEMINI_MODEL = 'gemini-3-flash-preview';
+const DEFAULT_CODEX_MODEL = 'gpt-5.3-codex';
 const DEFAULT_THREAD_TITLE = 'New thread';
 const ASSISTANT_MODEL_OPTIONS: Array<{
   provider: LlmProviderId;
@@ -215,6 +216,9 @@ const ASSISTANT_MODEL_OPTIONS: Array<{
   { provider: 'openai', id: 'gpt-5.5', name: 'GPT-5.5 Instant', thinkingLevel: 'off' },
   { provider: 'openai', id: 'gpt-5.5', name: 'GPT-5.5 Medium', thinkingLevel: 'medium' },
   { provider: 'openai', id: 'gpt-5.5', name: 'GPT-5.5 High', thinkingLevel: 'high' },
+  { provider: 'codex', id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex Medium', thinkingLevel: 'medium' },
+  { provider: 'codex', id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex High', thinkingLevel: 'high' },
+  { provider: 'codex', id: 'gpt-5.3-codex-spark', name: 'GPT-5.3 Codex Spark', thinkingLevel: 'high' },
   { provider: 'gemini', id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash', thinkingLevel: 'medium' },
 ];
 
@@ -229,14 +233,19 @@ function makeAssistantId(prefix: string): string {
 }
 
 function normalizeProvider(raw: unknown): LlmProviderId {
-  return String(raw ?? '').trim().toLowerCase() === 'gemini' ? 'gemini' : 'openai';
+  const value = String(raw ?? '').trim().toLowerCase();
+  if (value === 'gemini') return 'gemini';
+  if (value === 'codex' || value === 'openai-codex' || value === 'chatgpt-codex') return 'codex';
+  return 'openai';
 }
 
-function providerToPiProvider(provider: LlmProviderId): 'openai' | 'google' {
+function providerToPiProvider(provider: LlmProviderId): 'openai' | 'google' | 'openai-codex' {
+  if (provider === 'codex') return 'openai-codex';
   return provider === 'gemini' ? 'google' : 'openai';
 }
 
 function defaultModelForProvider(provider: LlmProviderId): string {
+  if (provider === 'codex') return DEFAULT_CODEX_MODEL;
   return provider === 'gemini' ? DEFAULT_GEMINI_MODEL : DEFAULT_OPENAI_MODEL;
 }
 
@@ -250,6 +259,9 @@ function allowedModelForProvider(provider: LlmProviderId, raw: unknown): string 
 function allowedThinkingLevelForModel(provider: LlmProviderId, model: string, raw: unknown): AssistantThinkingLevel {
   const requested = normalizeThinkingLevel(raw);
   if (provider === 'openai' && model === DEFAULT_OPENAI_MODEL && (requested === 'off' || requested === 'medium' || requested === 'high')) {
+    return requested;
+  }
+  if (provider === 'codex' && model === DEFAULT_CODEX_MODEL && (requested === 'medium' || requested === 'high' || requested === 'xhigh')) {
     return requested;
   }
   if (provider === 'gemini' && model === DEFAULT_GEMINI_MODEL) return 'medium';
@@ -1200,10 +1212,14 @@ export class HubAssistantService {
           tools,
           messages: thread.messages.map(sanitizeMessage),
         },
-        ...(thread.provider === 'openai' ? { convertToLlm: convertMessagesForOpenAi } : {}),
+        ...(thread.provider === 'openai' || thread.provider === 'codex' ? { convertToLlm: convertMessagesForOpenAi } : {}),
         getApiKey: async (provider: string) => {
           if (provider === 'google') {
             const resolved = await resolveEffectiveProviderApiKeySettings('gemini');
+            return resolved.apiKey;
+          }
+          if (provider === 'openai-codex') {
+            const resolved = await resolveEffectiveProviderApiKeySettings('codex');
             return resolved.apiKey;
           }
           if (provider === 'openai') {
@@ -1370,7 +1386,7 @@ export class HubAssistantService {
           id: defaultModelForProvider(provider),
           name: defaultModelForProvider(provider),
           reasoning: false,
-          thinkingLevel: provider === 'gemini' ? 'medium' : 'off',
+          thinkingLevel: provider === 'gemini' || provider === 'codex' ? 'medium' : 'off',
         },
       ];
     }
