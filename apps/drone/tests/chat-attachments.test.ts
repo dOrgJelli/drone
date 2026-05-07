@@ -121,4 +121,14 @@ describe('normalizeChatImageAttachments', () => {
     expect(attachments[0]?.mime).toBe('text/plain');
     expect(attachments[1]?.mime).toBe('image/png');
   });
+
+  test('deduplicates staged filenames for attachments with the same name', () => {
+    const attachments = normalizeChatImageAttachments([
+      { name: 'image.png', mime: 'image/png', size: 5, dataBase64: 'aGVsbG8=' },
+      { name: 'image.png', mime: 'image/png', size: 5, dataBase64: 'd29ybGQ=' },
+      { name: 'IMAGE.png', mime: 'image/png', size: 1, dataBase64: 'IQ==' },
+    ]);
+
+    expect(attachments.map((attachment) => attachment.fileName)).toEqual(['image.png', 'image-2.png', 'IMAGE-3.png']);
+  });
 });

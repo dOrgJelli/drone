@@ -22,6 +22,7 @@ import {
   blobToBase64,
   fileToBase64,
   formatBytes,
+  imageFilesFromClipboardData,
   isLikelyImageFile,
   makeDraftImageAttachmentId,
   revokeDraftImagePreviewUrls,
@@ -627,14 +628,10 @@ export function ChatInput({
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onPaste={(e) => {
-                const items = Array.from(e.clipboardData?.items ?? []);
-                const files: File[] = [];
-                for (const it of items) {
-                  if (it.kind !== 'file') continue;
-                  const f = it.getAsFile();
-                  if (f && isLikelyImageFile(f)) files.push(f);
+                const files = imageFilesFromClipboardData(e.clipboardData);
+                if (attachmentsOn && !attachmentControlsLocked && files.length > 0) {
+                  addFiles(files);
                 }
-                if (attachmentsOn && !attachmentControlsLocked && files.length > 0) addFiles(files);
                 const pastedText = String(e.clipboardData?.getData('text/plain') ?? '');
                 if (
                   attachmentsOn &&
