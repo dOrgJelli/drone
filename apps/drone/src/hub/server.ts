@@ -134,8 +134,10 @@ import { createSyncSetService } from './sync-set-service';
 import { hasActivePriorPendingPrompt, shouldDeferQueuedTranscriptPrompt, stalePendingPromptState } from './pendingPromptEnqueue';
 import {
   applyBranchDiffToMainWorkingTree,
+  applyBranchMergeNoCommitToMainWorkingTree,
   buildReviewScopeId,
   cleanupQuarantineWorktree,
+  createHostAuthoredMirrorCommit,
   deleteHostRefBestEffort,
   gitRepoCommitDetails,
   gitRepoCommitDiffForPath,
@@ -143,6 +145,7 @@ import {
   gitCurrentBranchOrSha,
   gitPullHostBranchBeforeCreate,
   gitRepoDiffForPath,
+  gitResolveCommitSha,
   gitIsClean,
   gitIsAncestor,
   gitMergeBase,
@@ -159,6 +162,7 @@ import {
   isRepoPatchApplyError,
   repoChangeReviewKey,
   quarantineWorktreePath,
+  updateHostRef,
 } from './repoOps';
 import { isHubApiAuthorized, isHubApiAuthorizedForWebSocket, rejectWebSocketUpgrade } from './hub-auth';
 import { bashQuote, encodeRemotePath, hexEncodeUtf8, normalizeContainerPath, parseBoolParam, shellQuoteIfNeeded } from './hub-format';
@@ -1736,6 +1740,15 @@ function isRepoAttachedDrone(drone: any): boolean {
   );
 }
 
+function safeDroneRefSegment(raw: unknown, fallback = 'drone'): string {
+  return (
+    String(raw ?? '')
+      .toLowerCase()
+      .replace(/[^a-z0-9_.-]+/g, '-')
+      .replace(/^-+|-+$/g, '') || fallback
+  );
+}
+
 function unsupportedHostCustomAgentError(): Error & { statusCode?: number } {
   const err = new Error('custom agents are not yet supported for host runtime') as Error & { statusCode?: number };
   err.statusCode = 400;
@@ -2789,6 +2802,133 @@ type PlaybookRunQueueGate = {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+async function reconcilePendingHostMirrorApply(opts: {
+  droneId: string;
+  droneName: string;
+  droneEntry: any;
+  repoRoot: string;
+  repoPathInContainer: string;
+}): Promise<{
+  promoted: boolean;
+  cleanedAbortedCandidate: boolean;
+  hostMirrorRef: string | null;
+  hostMirrorSha: string | null;
+  droneHeadSha: string | null;
+  error: string | null;
+}> {
+  const d = opts.droneEntry;
+  const lastPull = d?.repo?.lastPull && typeof d.repo.lastPull === 'object' ? d.repo.lastPull : null;
+  const mode = String((lastPull as any)?.mode ?? '').trim().toLowerCase();
+  const pendingRef = String((lastPull as any)?.hostMirrorCandidateRef ?? '').trim();
+  const pendingSha = String((lastPull as any)?.hostMirrorCandidateSha ?? '').trim().toLowerCase();
+  const droneHeadSha = String((lastPull as any)?.exportedHeadSha ?? '').trim().toLowerCase();
+  const currentMirrorRef = String((lastPull as any)?.hostMirrorRef ?? '').trim() || null;
+  const currentMirrorSha = String((lastPull as any)?.hostMirrorSha ?? '').trim().toLowerCase() || null;
+
+  if (mode !== 'host-mirror-merge-pending' || !pendingRef || !/^[0-9a-f]{40}$/.test(pendingSha)) {
+    return {
+      promoted: false,
+      cleanedAbortedCandidate: false,
+      hostMirrorRef: currentMirrorRef,
+      hostMirrorSha: currentMirrorSha,
+      droneHeadSha: /^[0-9a-f]{40}$/.test(droneHeadSha) ? droneHeadSha : null,
+      error: null,
+    };
+  }
+
+  const clean = await gitIsClean(opts.repoRoot).catch(() => false);
+  if (!clean) {
+    return {
+      promoted: false,
+      cleanedAbortedCandidate: false,
+      hostMirrorRef: currentMirrorRef,
+      hostMirrorSha: currentMirrorSha,
+      droneHeadSha: /^[0-9a-f]{40}$/.test(droneHeadSha) ? droneHeadSha : null,
+      error: null,
+    };
+  }
+
+  const isCommitted = /^[0-9a-f]{40}$/.test(droneHeadSha) && (await gitIsAncestor(opts.repoRoot, pendingSha, 'HEAD'));
+  if (!isCommitted) {
+    await deleteHostRefBestEffort({ repoRoot: opts.repoRoot, refName: pendingRef });
+    await updateRegistry((reg2: any) => {
+      const dd = reg2?.drones?.[opts.droneId];
+      if (!dd) return;
+      dd.repo = dd.repo ?? {};
+      const previousLastPull = dd.repo.lastPull && typeof dd.repo.lastPull === 'object' ? dd.repo.lastPull : {};
+      dd.repo.lastPullAt = nowIso();
+      dd.repo.lastPullError = null;
+      dd.repo.lastPull = {
+        ...previousLastPull,
+        mode: 'host-mirror-merge-aborted',
+        hostMirrorRef: currentMirrorRef,
+        hostMirrorSha: currentMirrorSha,
+        hostMirrorCandidateRef: null,
+        hostMirrorCandidateSha: null,
+        mergeSourceRef: null,
+        baseAdvanced: false,
+        baseAdvanceError: null,
+      };
+      reg2.drones = reg2.drones ?? {};
+      reg2.drones[opts.droneId] = dd;
+    });
+    return {
+      promoted: false,
+      cleanedAbortedCandidate: true,
+      hostMirrorRef: currentMirrorRef,
+      hostMirrorSha: currentMirrorSha,
+      droneHeadSha: /^[0-9a-f]{40}$/.test(droneHeadSha) ? droneHeadSha : null,
+      error: null,
+    };
+  }
+
+  const appliedRef = `refs/drone/mirrors/${safeDroneRefSegment(opts.droneName)}/applied`;
+  try {
+    await withLockedDroneContainer({ requestedDroneName: opts.droneName, droneEntry: d }, async ({ containerName }) => {
+      await dvmRepoSetBaseSha({ container: containerName, repoPathInContainer: opts.repoPathInContainer, baseSha: droneHeadSha });
+    });
+    await updateHostRef({ repoRoot: opts.repoRoot, refName: appliedRef, target: pendingSha });
+    if (pendingRef !== appliedRef) {
+      await deleteHostRefBestEffort({ repoRoot: opts.repoRoot, refName: pendingRef });
+    }
+    await updateRegistry((reg2: any) => {
+      const dd = reg2?.drones?.[opts.droneId];
+      if (!dd) return;
+      dd.repo = dd.repo ?? {};
+      const previousLastPull = dd.repo.lastPull && typeof dd.repo.lastPull === 'object' ? dd.repo.lastPull : {};
+      dd.repo.lastPull = {
+        ...previousLastPull,
+        mode: 'host-mirror-merge-committed',
+        hostMirrorRef: appliedRef,
+        hostMirrorSha: pendingSha,
+        hostMirrorCandidateRef: null,
+        hostMirrorCandidateSha: null,
+        baseAdvanced: true,
+        baseAdvanceError: null,
+      };
+      reg2.drones = reg2.drones ?? {};
+      reg2.drones[opts.droneId] = dd;
+    });
+    return {
+      promoted: true,
+      cleanedAbortedCandidate: false,
+      hostMirrorRef: appliedRef,
+      hostMirrorSha: pendingSha,
+      droneHeadSha,
+      error: null,
+    };
+  } catch (e: any) {
+    return {
+      promoted: false,
+      cleanedAbortedCandidate: false,
+      hostMirrorRef: currentMirrorRef,
+      hostMirrorSha: currentMirrorSha,
+      droneHeadSha,
+      error: e?.message ?? String(e),
+    };
+  }
 }
 
 function buildTaskTemplateContext(task: ReturnType<typeof findScopedTaskById>): TaskTemplateContext | null {
@@ -15148,6 +15288,36 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           }
         }
         try {
+          let reconciledHostMirrorRef: string | null = null;
+          let reconciledHostMirrorSha: string | null = null;
+          let reconciledHostMirrorCacheState = '';
+          if (repoPathRaw) {
+            try {
+              const repoRoot = await gitTopLevel(repoPathRaw);
+              const reconciled = await reconcilePendingHostMirrorApply({
+                droneId,
+                droneName,
+                droneEntry: d,
+                repoRoot,
+                repoPathInContainer,
+              });
+              reconciledHostMirrorRef = reconciled.hostMirrorRef;
+              reconciledHostMirrorSha = reconciled.hostMirrorSha;
+              reconciledHostMirrorCacheState = [
+                reconciled.promoted ? 'promoted' : '',
+                reconciled.cleanedAbortedCandidate ? 'aborted' : '',
+                reconciled.hostMirrorRef ?? '',
+                reconciled.hostMirrorSha ?? '',
+                reconciled.droneHeadSha ?? '',
+              ].join('\u0000');
+            } catch (e: any) {
+              hubLog('warn', 'Pull preview pending mirror reconciliation failed; using current drone base', {
+                droneName,
+                repoPathRaw,
+                error: e?.message ?? String(e),
+              });
+            }
+          }
           let summary = await withLockedDroneContainer({ requestedDroneName: droneName, droneEntry: d }, async ({ containerName }) => {
             return await droneRepoPullChangesSummary({
               container: containerName,
@@ -15204,7 +15374,15 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
               const hostHeadSha = String(hostSummary.branch.oid ?? '').trim().toLowerCase();
               if (/^[0-9a-f]{40}$/.test(hostHeadSha)) {
                 hostHeadShaForReview = hostHeadSha;
-                const cacheKey = [droneId, repoRoot, hostHeadSha, summary.baseSha, summary.headSha].join('\u0000');
+                const mirrorCacheState = [
+                  String((lastPullAny as any)?.mode ?? '').trim().toLowerCase(),
+                  String((lastPullAny as any)?.hostMirrorRef ?? '').trim(),
+                  String((lastPullAny as any)?.hostMirrorSha ?? '').trim().toLowerCase(),
+                  String((lastPullAny as any)?.hostMirrorCandidateRef ?? '').trim(),
+                  String((lastPullAny as any)?.hostMirrorCandidateSha ?? '').trim().toLowerCase(),
+                  reconciledHostMirrorCacheState,
+                ].join('\u0000');
+                const cacheKey = [droneId, repoRoot, hostHeadSha, summary.baseSha, summary.headSha, mirrorCacheState].join('\u0000');
                 const now = Date.now();
                 const cached = pullPreviewHostMergeCache.get(cacheKey);
                 if (cached && now - cached.atMs < PULL_PREVIEW_HOST_MERGE_CACHE_TTL_MS) {
@@ -15212,26 +15390,23 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
                 } else {
                   let exportPath = '';
                   let importRefName = '';
+                  let mirrorPreviewRefName = '';
                   try {
                     const patchesOutRoot = droneRootPath('repo-exports');
                     await fs.mkdir(patchesOutRoot, { recursive: true });
-                    const safeDroneRefSeg =
-                      String(droneName ?? '')
-                        .toLowerCase()
-                        .replace(/[^a-z0-9_.-]+/g, '-')
-                        .replace(/^-+|-+$/g, '') || 'drone';
+                    const safeDroneRefSeg = safeDroneRefSegment(droneName);
                     const importRunId = `${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
                     importRefName = `refs/drone/imports/${safeDroneRefSeg}/preview-${importRunId}`;
+                    mirrorPreviewRefName = `refs/drone/mirrors/${safeDroneRefSeg}/preview/${importRunId}`;
                     try {
                       const exported = await withLockedDroneContainer(
                         { requestedDroneName: droneName, droneEntry: d },
                         async ({ containerName }) => {
-                          return await dvmRepoExport({
-                            container: containerName,
+                          return await exportFullHeadBundleFromDrone({
                             repoPathInContainer,
                             outDir: patchesOutRoot,
-                            format: 'bundle',
-                            base: summary.baseSha,
+                            containerName,
+                            label: droneName,
                           });
                         },
                       );
@@ -15247,10 +15422,25 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
 
                     if (exportPath) {
                       await importBundleHeadToHostRef({ repoRoot, bundlePath: exportPath, refName: importRefName });
+                      const storedMirrorRef = reconciledHostMirrorRef || String((lastPullAny as any)?.hostMirrorRef ?? '').trim();
+                      const storedMirrorSha = reconciledHostMirrorSha || String((lastPullAny as any)?.hostMirrorSha ?? '').trim().toLowerCase();
+                      const mirrorParentRef =
+                        storedMirrorRef && /^[0-9a-f]{40}$/.test(storedMirrorSha) && (await gitResolveCommitSha(repoRoot, storedMirrorRef))
+                          ? storedMirrorRef
+                          : summary.baseSha;
+                      const mirrorParentSha = (await gitResolveCommitSha(repoRoot, mirrorParentRef)) ?? '';
+                      if (!mirrorParentSha) throw new Error('Host repo is missing the mirror parent for pull preview.');
+                      const mirrorPreviewSha = await createHostAuthoredMirrorCommit({
+                        repoRoot,
+                        sourceRef: importRefName,
+                        parentRef: mirrorParentSha,
+                        message: `chore(drone): preview ${droneName} changes for host apply`,
+                      });
+                      await updateHostRef({ repoRoot, refName: mirrorPreviewRefName, target: mirrorPreviewSha });
                       const mergedNameStatus = await gitMergePreviewNameStatusEntries({
                         repoRoot,
                         oursRef: 'HEAD',
-                        theirsRef: importRefName,
+                        theirsRef: mirrorPreviewRefName,
                       });
                       entriesForPreview = mergedNameStatus.map((entry) => ({
                         path: entry.path,
@@ -15272,6 +15462,9 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
                     }
                     if (importRefName) {
                       await deleteHostRefBestEffort({ repoRoot, refName: importRefName });
+                    }
+                    if (mirrorPreviewRefName) {
+                      await deleteHostRefBestEffort({ repoRoot, refName: mirrorPreviewRefName });
                     }
                   }
                 }
@@ -16516,12 +16709,19 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         let exportPath = '';
         let importRefName = '';
         let importRefSha = '';
+        let mirrorParentRef = '';
+        let mirrorParentSha = '';
+        let mirrorCandidateRef = '';
+        let mirrorCandidateSha = '';
+        let mirrorAppliedToHost = false;
+        let pendingMirrorPromoted = false;
         const repoPathInContainer = String(d?.repo?.dest ?? '/work/repo').trim() || '/work/repo';
         const containerName = String((d as any)?.containerName ?? (d as any)?.name ?? droneName).trim() || droneName;
         let stashed = false;
         let stashPopOk: boolean | null = null;
         let stashPopText: string | null = null;
         let exportedHeadSha: string | null = null;
+        let droneBaseShaForApply: string | null = null;
         let baseAdvanced = false;
         let baseAdvanceError: string | null = null;
         let prePullBaseSha: string | null = null;
@@ -16558,6 +16758,24 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             });
             return;
           }
+
+          const lastPullBeforeApply = d?.repo?.lastPull && typeof d.repo.lastPull === 'object' ? d.repo.lastPull : null;
+          const mirrorReconcile = await reconcilePendingHostMirrorApply({
+            droneId,
+            droneName,
+            droneEntry: d,
+            repoRoot,
+            repoPathInContainer,
+          });
+          pendingMirrorPromoted = mirrorReconcile.promoted;
+          if (mirrorReconcile.promoted && mirrorReconcile.droneHeadSha) {
+            prePullBaseSha = mirrorReconcile.droneHeadSha;
+            prePullBaseAdvanced = true;
+          }
+          if (mirrorReconcile.error) {
+            prePullBaseAdvanceError = mirrorReconcile.error;
+          }
+
           const dronePrepare = await withLockedDroneContainer({ requestedDroneName: droneName, droneEntry: d }, async ({ containerName }) => {
             const status = await runGitInDroneOrThrow({
               container: containerName,
@@ -16677,23 +16895,35 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           } catch (e: any) {
             baseAdvanceError = e?.message ?? String(e);
           }
+          try {
+            droneBaseShaForApply = await droneRepoBaseSha({ container: containerName, repoPathInContainer });
+          } catch (e: any) {
+            if (!baseAdvanceError) baseAdvanceError = e?.message ?? String(e);
+          }
 
-          // Export container repo delta as a git bundle, then import to a temporary host ref.
+          if (
+            exportedHeadSha &&
+            droneBaseShaForApply &&
+            exportedHeadSha.toLowerCase() === droneBaseShaForApply.toLowerCase()
+          ) {
+            noChangesToPull = true;
+          }
+
+          // Export the full container repo HEAD as a git bundle, then import to a
+          // temporary host ref. The host-authored mirror commit uses only the
+          // imported tree, so original drone commits are not kept in host history.
           const patchesOutRoot = droneRootPath('repo-exports');
           await fs.mkdir(patchesOutRoot, { recursive: true });
-          try {
-            const exported = await dvmRepoExport({
-              container: containerName,
-              repoPathInContainer,
-              outDir: patchesOutRoot,
-              format: 'bundle',
-            });
-            exportPath = exported.exportedPath;
-          } catch (e: any) {
-            const exportMsg = e?.message ?? String(e);
-            if (looksLikeEmptyBundleExportError(exportMsg)) {
-              noChangesToPull = true;
-            } else {
+          if (!noChangesToPull) {
+            try {
+              const exported = await exportFullHeadBundleFromDrone({
+                containerName,
+                repoPathInContainer,
+                outDir: patchesOutRoot,
+                label: droneName,
+              });
+              exportPath = exported.exportedPath;
+            } catch (e: any) {
               throw e;
             }
           }
@@ -16716,6 +16946,12 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
                 importedRef: null,
                 importedRefSha: null,
                 mergeSourceRef: null,
+                hostMirrorRef: pendingMirrorPromoted
+                  ? mirrorReconcile.hostMirrorRef
+                  : String((lastPullBeforeApply as any)?.hostMirrorRef ?? '').trim() || null,
+                hostMirrorSha: pendingMirrorPromoted
+                  ? mirrorReconcile.hostMirrorSha
+                  : String((lastPullBeforeApply as any)?.hostMirrorSha ?? '').trim() || null,
                 stashed,
                 stashPopOk,
                 stashPopText,
@@ -16824,11 +17060,36 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             throw e;
           }
 
-          // Preview imported drone changes in a temp worktree first. Clean merges apply
-          // directly to the host branch. Conflicts only touch host when explicitly requested.
-          await applyBranchDiffToMainWorkingTree({ repoRoot, branch: importRefName, applyConflictsToHost });
+          const lastPullForMirror = d?.repo?.lastPull && typeof d.repo.lastPull === 'object' ? d.repo.lastPull : null;
+          const storedMirrorRef = pendingMirrorPromoted
+            ? String(mirrorReconcile.hostMirrorRef ?? '').trim()
+            : String((lastPullForMirror as any)?.hostMirrorRef ?? '').trim();
+          const storedMirrorSha = pendingMirrorPromoted
+            ? String(mirrorReconcile.hostMirrorSha ?? '').trim().toLowerCase()
+            : String((lastPullForMirror as any)?.hostMirrorSha ?? '').trim().toLowerCase();
+          mirrorParentRef =
+            storedMirrorRef && /^[0-9a-f]{40}$/.test(storedMirrorSha) && (await gitResolveCommitSha(repoRoot, storedMirrorRef))
+              ? storedMirrorRef
+              : String(droneBaseShaForApply ?? '').trim();
+          mirrorParentSha = (await gitResolveCommitSha(repoRoot, mirrorParentRef)) ?? '';
+          if (!mirrorParentSha) {
+            throw new Error('Host repo is missing the mirror parent for this drone apply. Re-seed the drone and apply again.');
+          }
 
-          await tryAdvanceContainerExportBase();
+          mirrorCandidateRef = `refs/drone/mirrors/${safeDroneRefSeg}/candidate/${importRunId}`;
+          mirrorCandidateSha = await createHostAuthoredMirrorCommit({
+            repoRoot,
+            sourceRef: importRefName,
+            parentRef: mirrorParentSha,
+            message: `chore(drone): mirror ${droneName} changes for host apply`,
+          });
+          await updateHostRef({ repoRoot, refName: mirrorCandidateRef, target: mirrorCandidateSha });
+
+          // Preview the host-authored mirror in a temp worktree first. Clean merges
+          // are left as a real pending merge in the host repo; conflicts only touch
+          // host when explicitly requested.
+          await applyBranchMergeNoCommitToMainWorkingTree({ repoRoot, branch: mirrorCandidateRef, applyConflictsToHost });
+          mirrorAppliedToHost = true;
 
           await updateRegistry((reg2: any) => {
             const dd = reg2?.drones?.[droneId];
@@ -16840,12 +17101,16 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             dd.repo.lastPullAt = nowIso();
             dd.repo.lastPullError = null;
             dd.repo.lastPull = {
-              mode: 'bundle-apply-no-commit',
+              mode: 'host-mirror-merge-pending',
               exportFormat: 'bundle',
               exportPath,
-              importedRef: importRefName,
+              importedRef: null,
               importedRefSha: importRefSha || null,
-              mergeSourceRef: importRefName,
+              mergeSourceRef: mirrorCandidateRef,
+              hostMirrorParentRef: mirrorParentRef,
+              hostMirrorParentSha: mirrorParentSha || null,
+              hostMirrorCandidateRef: mirrorCandidateRef,
+              hostMirrorCandidateSha: mirrorCandidateSha || null,
               quarantineBranch: null,
               worktreePath: null,
               stashed,
@@ -16869,14 +17134,18 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           json(res, 200, {
             ok: true,
             name: droneName,
-            mode: 'bundle-apply-no-commit',
+            mode: 'host-mirror-merge-pending',
             repoRoot,
             fromRef,
             exportFormat: 'bundle',
             exportPath,
-            importedRef: importRefName,
+            importedRef: null,
             importedRefSha: importRefSha || null,
-            mergeSourceRef: importRefName,
+            mergeSourceRef: mirrorCandidateRef,
+            hostMirrorParentRef: mirrorParentRef,
+            hostMirrorParentSha: mirrorParentSha || null,
+            hostMirrorCandidateRef: mirrorCandidateRef,
+            hostMirrorCandidateSha: mirrorCandidateSha || null,
             stashed,
             stashPopOk,
             stashPopText,
@@ -16920,9 +17189,13 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
                   mode: 'bundle-prepare-conflict',
                   exportFormat: 'bundle',
                   exportPath: exportPath || null,
-                  importedRef: importRefName || null,
+                  importedRef: null,
                   importedRefSha: importRefSha || null,
-                  mergeSourceRef: importRefName || null,
+                  mergeSourceRef: mirrorCandidateRef || null,
+                  hostMirrorParentRef: mirrorParentRef || null,
+                  hostMirrorParentSha: mirrorParentSha || null,
+                  hostMirrorCandidateRef: mirrorCandidateRef || null,
+                  hostMirrorCandidateSha: mirrorCandidateSha || null,
                   quarantineBranch: null,
                   worktreePath: null,
                   stashed,
@@ -16962,7 +17235,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
 
             const guidance = [
               'Conflicts were applied to your host repo as normal Git conflict markers.',
-              'Conflict marker mapping: <<<<<<< ours is your current host branch; >>>>>>> theirs is the pulled drone branch.',
+              'Conflict marker mapping: <<<<<<< ours is your current host branch; >>>>>>> theirs is the host-authored drone mirror.',
               'Resolve conflicts in your current branch, then stage and commit as usual.',
               stashed
                 ? 'Your previous local changes were auto-stashed and left in stash. After resolving pull conflicts, run `git stash pop` when ready.'
@@ -16987,9 +17260,13 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
                 mode: 'host-conflicts-ready',
                 exportFormat: 'bundle',
                 exportPath: exportPath || null,
-                importedRef: importRefName || null,
+                importedRef: null,
                 importedRefSha: importRefSha || null,
-                mergeSourceRef: importRefName || null,
+                mergeSourceRef: mirrorCandidateRef || null,
+                hostMirrorParentRef: mirrorParentRef || null,
+                hostMirrorParentSha: mirrorParentSha || null,
+                hostMirrorCandidateRef: mirrorCandidateRef || null,
+                hostMirrorCandidateSha: mirrorCandidateSha || null,
                 patchesDir: null,
                 diffPath: null,
                 quarantineBranch: null,
@@ -17092,6 +17369,9 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           }
           if (repoRoot && importRefName) {
             await deleteHostRefBestEffort({ repoRoot, refName: importRefName });
+          }
+          if (repoRoot && mirrorCandidateRef && !mirrorAppliedToHost && !hostConflictState) {
+            await deleteHostRefBestEffort({ repoRoot, refName: mirrorCandidateRef });
           }
         }
       }

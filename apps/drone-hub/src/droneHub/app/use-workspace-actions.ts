@@ -142,7 +142,7 @@ function formatRepoPullSuccessMessage(data: any, currentDrone: DroneSummary | nu
   const suffix: string[] = [];
   if (autoCommitSha) suffix.push(`Snapshot commit ${autoCommitSha} captured prior drone edits.`);
   if (keptDirtyChanges) suffix.push('Uncommitted drone edits remain in the drone workspace and were not applied.');
-  suffix.push('Review the host working tree and commit when ready.');
+  suffix.push('Review the pending host merge and commit or abort when ready.');
 
   return {
     title: 'Drone changes applied to host',
