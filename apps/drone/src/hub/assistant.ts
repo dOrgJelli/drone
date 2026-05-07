@@ -1283,6 +1283,7 @@ export class HubAssistantService {
         }
         if (event.type === 'message_start' && this.removeDeliveredSteeringPrompt(thread, event.message)) {
           thread.updatedAt = nowIso();
+          await this.persist();
         }
         if (event.type === 'message_end' || event.type === 'agent_end' || event.type === 'turn_end') {
           thread.messages = agent.state.messages.map(sanitizeMessage).slice(-ASSISTANT_THREAD_MESSAGE_LIMIT);
