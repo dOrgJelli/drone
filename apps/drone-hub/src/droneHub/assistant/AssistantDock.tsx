@@ -28,7 +28,7 @@ type AssistantQueuedPrompt = {
   id: string;
   prompt: string;
   createdAt: string;
-  provider: 'openai' | 'gemini';
+  provider: AssistantProviderId;
   model: string;
   thinkingLevel: string;
   deliveryMode?: AssistantPromptDeliveryMode;
@@ -42,7 +42,7 @@ type AssistantThread = {
   createdAt: string;
   updatedAt: string;
   model: string;
-  provider: 'openai' | 'gemini';
+  provider: AssistantProviderId;
   thinkingLevel: string;
   accessScope: AssistantAccessScope;
   messages: AssistantMessage[];
@@ -63,12 +63,14 @@ type AssistantApproval = {
 };
 
 type AssistantModelOption = {
-  provider: 'openai' | 'gemini';
+  provider: AssistantProviderId;
   id: string;
   name: string;
   reasoning: boolean;
   thinkingLevel: string;
 };
+
+type AssistantProviderId = 'openai' | 'gemini' | 'codex';
 
 type AssistantAccessScope = { readMode: 'all' | 'selected'; writeMode: 'all' | 'selected'; droneIds: string[]; updatedAt: string };
 
@@ -96,6 +98,12 @@ type AssistantSystemPromptSettings = {
 
 type AssistantScopeDrone = { id: string; name: string };
 type AssistantScopeMode = 'all' | 'selected';
+
+const ASSISTANT_PROVIDERS: Array<{ id: AssistantProviderId; label: string; authLabel: string; title: string }> = [
+  { id: 'codex', label: 'Codex', authLabel: 'CLI subscription', title: 'Use Codex CLI ChatGPT authentication for Codex models.' },
+  { id: 'openai', label: 'OpenAI', authLabel: 'API key', title: 'Use the configured OpenAI API key for OpenAI models.' },
+  { id: 'gemini', label: 'Gemini', authLabel: 'API key', title: 'Use the configured Gemini API key for Gemini models.' },
+];
 
 function readInitialAutoApprove(): boolean {
   if (typeof window === 'undefined') return false;
@@ -1439,7 +1447,36 @@ export function AssistantDock() {
   }, [activePendingApprovals, approvalBusyId, autoApprove, resolveApproval]);
 
   const modelOptions = snapshot?.models ?? [];
+  const activeProvider = activeThread?.provider ?? modelOptions[0]?.provider ?? 'openai';
+  const providerOptions = React.useMemo(
+    () => ASSISTANT_PROVIDERS.map((provider) => ({
+      ...provider,
+      models: modelOptions.filter((model) => model.provider === provider.id),
+    })),
+    [modelOptions],
+  );
+  const activeProviderOptions = React.useMemo(
+    () => providerOptions.find((provider) => provider.id === activeProvider)?.models ?? [],
+    [activeProvider, providerOptions],
+  );
+  const displayedModelOptions = React.useMemo(() => {
+    if (!activeThread) return activeProviderOptions;
+    const selectedKey = `${activeThread.provider}:${activeThread.model}:${activeThread.thinkingLevel}`;
+    const hasSelected = activeProviderOptions.some((model) => `${model.provider}:${model.id}:${model.thinkingLevel}` === selectedKey);
+    if (hasSelected) return activeProviderOptions;
+    return [
+      {
+        provider: activeThread.provider,
+        id: activeThread.model,
+        name: activeThread.model,
+        reasoning: activeThread.thinkingLevel !== 'off',
+        thinkingLevel: activeThread.thinkingLevel,
+      },
+      ...activeProviderOptions,
+    ];
+  }, [activeProviderOptions, activeThread]);
   const selectedModelKey = activeThread ? `${activeThread.provider}:${activeThread.model}:${activeThread.thinkingLevel}` : '';
+  const activeProviderMeta = providerOptions.find((provider) => provider.id === activeProvider) ?? ASSISTANT_PROVIDERS[0];
   const selectedScopeDisabled = scopeDrones.length === 0;
 
   return (
@@ -1603,6 +1640,51 @@ export function AssistantDock() {
       </div>
 
       <div className="flex-shrink-0 border-t border-[var(--border)] bg-[rgba(0,0,0,.12)] p-2">
+        <div className="mb-2 flex min-w-0 flex-wrap items-center gap-1.5">
+          <div
+            className="mr-0.5 text-[9px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]"
+            style={{ fontFamily: 'var(--display)' }}
+          >
+            Provider
+          </div>
+          <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto no-scrollbar">
+            {providerOptions.map((provider) => {
+              const selected = provider.id === activeProvider;
+              const disabled = !activeThread || running || provider.models.length === 0;
+              return (
+                <button
+                  key={provider.id}
+                  type="button"
+                  disabled={disabled}
+                  aria-pressed={selected}
+                  title={provider.title}
+                  onClick={() => {
+                    const nextModel = provider.models[0];
+                    void updateThread({
+                      provider: provider.id,
+                      ...(nextModel ? { model: nextModel.id, thinkingLevel: nextModel.thinkingLevel } : {}),
+                    });
+                  }}
+                  className={`inline-flex h-7 min-w-[72px] flex-shrink-0 items-center justify-center rounded border px-2 text-[10px] font-semibold uppercase tracking-wide disabled:cursor-not-allowed disabled:opacity-45 ${
+                    selected
+                      ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
+                      : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:text-[var(--fg-secondary)]'
+                  }`}
+                  style={{ fontFamily: 'var(--display)' }}
+                >
+                  {provider.label}
+                </button>
+              );
+            })}
+          </div>
+          <div
+            className="inline-flex h-7 max-w-full items-center gap-1.5 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-2 text-[10px] text-[var(--muted)]"
+            title={activeProviderMeta.title}
+          >
+            <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${activeProvider === 'codex' ? 'bg-[var(--green)]' : 'bg-[var(--muted-dim)]'}`} />
+            <span className="truncate">{activeProviderMeta.authLabel}</span>
+          </div>
+        </div>
         <textarea
           ref={inputRef}
           value={draft}
@@ -1627,7 +1709,7 @@ export function AssistantDock() {
             }}
             className="min-w-0 flex-1 rounded border border-[var(--border-subtle)] bg-[var(--panel)] px-2 py-1 text-[11px] text-[var(--fg-secondary)] focus:outline-none disabled:opacity-50"
           >
-            {modelOptions.map((model) => (
+            {displayedModelOptions.map((model) => (
               <option key={`${model.provider}:${model.id}:${model.thinkingLevel}`} value={`${model.provider}:${model.id}:${model.thinkingLevel}`}>
                 {model.name}
               </option>

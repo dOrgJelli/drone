@@ -533,7 +533,7 @@ export function useDroneHubLifecycleEffects({
     const prompt = String(draftChat?.prompt?.prompt ?? '').trim();
     if (!prompt) return;
     const selectedProvider = llmSettings?.provider?.selected ?? 'openai';
-    const selectedSettings = selectedProvider === 'gemini' ? llmSettings?.gemini : llmSettings?.openai;
+    const selectedSettings = selectedProvider === 'gemini' ? llmSettings?.gemini : selectedProvider === 'codex' ? llmSettings?.codex : llmSettings?.openai;
     if (!selectedSettings?.hasKey) return;
     let mounted = true;
     const seq = draftNameSuggestSeqRef.current + 1;
