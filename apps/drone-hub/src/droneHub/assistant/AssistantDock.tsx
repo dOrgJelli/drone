@@ -9,6 +9,7 @@ import { useDroneHubUiStore } from '../app/use-drone-hub-ui-store';
 const ASSISTANT_AUTO_APPROVE_STORAGE_KEY = 'droneHub.assistant.autoApprove';
 const ASSISTANT_SCOPE_STORAGE_KEY = 'droneHub.assistant.scope';
 const ASSISTANT_THREAD_SIDEBAR_OPEN_STORAGE_KEY = 'droneHub.assistant.threadSidebarOpen';
+const ASSISTANT_PROMPT_DELIVERY_MODE_STORAGE_KEY = 'droneHub.assistant.promptDeliveryMode';
 
 type AssistantThreadStatus = 'idle' | 'running' | 'waiting_for_approval' | 'error';
 
@@ -28,7 +29,10 @@ type AssistantQueuedPrompt = {
   provider: 'openai' | 'gemini';
   model: string;
   thinkingLevel: string;
+  deliveryMode?: AssistantPromptDeliveryMode;
 };
+
+type AssistantPromptDeliveryMode = 'queue' | 'asap';
 
 type AssistantThread = {
   id: string;
@@ -98,6 +102,11 @@ function readInitialAutoApprove(): boolean {
 function readInitialThreadSidebarOpen(): boolean {
   if (typeof window === 'undefined') return true;
   return window.localStorage.getItem(ASSISTANT_THREAD_SIDEBAR_OPEN_STORAGE_KEY) !== '0';
+}
+
+function readInitialPromptDeliveryMode(): AssistantPromptDeliveryMode {
+  if (typeof window === 'undefined') return 'queue';
+  return window.localStorage.getItem(ASSISTANT_PROMPT_DELIVERY_MODE_STORAGE_KEY) === 'asap' ? 'asap' : 'queue';
 }
 
 function readInitialScope(): { readMode: AssistantScopeMode; writeMode: AssistantScopeMode; drones: AssistantScopeDrone[] } {
@@ -391,11 +400,12 @@ function QueuedPromptRow({
   busy: boolean;
   onCancel: () => void;
 }) {
+  const asap = prompt.deliveryMode === 'asap';
   return (
     <div className="px-3 py-2 bg-[rgba(255,255,255,.018)] border-y border-[var(--border-subtle)]">
       <div className="mb-1 flex items-center justify-between gap-2">
         <div className="text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
-          Queued
+          {asap ? 'ASAP queue' : 'Queued'}
         </div>
         <button
           type="button"
@@ -843,6 +853,7 @@ export function AssistantDock() {
   const [error, setError] = React.useState<string | null>(null);
   const [draft, setDraft] = React.useState('');
   const [threadSidebarOpen, setThreadSidebarOpen] = React.useState(readInitialThreadSidebarOpen);
+  const [promptDeliveryMode, setPromptDeliveryMode] = React.useState<AssistantPromptDeliveryMode>(readInitialPromptDeliveryMode);
   const [autoApprove, setAutoApprove] = React.useState(readInitialAutoApprove);
   const initialScope = React.useMemo(readInitialScope, []);
   const [scopeReadMode, setScopeReadMode] = React.useState<AssistantScopeMode>(() => initialScope.readMode);
@@ -964,6 +975,11 @@ export function AssistantDock() {
     if (typeof window === 'undefined') return;
     window.localStorage.setItem(ASSISTANT_THREAD_SIDEBAR_OPEN_STORAGE_KEY, threadSidebarOpen ? '1' : '0');
   }, [threadSidebarOpen]);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(ASSISTANT_PROMPT_DELIVERY_MODE_STORAGE_KEY, promptDeliveryMode);
+  }, [promptDeliveryMode]);
 
   const resolveScopeDroneNames = React.useCallback(async (ids: string[], fallbackLabel?: string): Promise<AssistantScopeDrone[]> => {
     const cleanIds = Array.from(new Set(ids.map((id) => String(id ?? '').trim()).filter(Boolean)));
@@ -1185,6 +1201,7 @@ export function AssistantDock() {
         provider: activeThread.provider,
         model: activeThread.model,
         thinkingLevel: activeThread.thinkingLevel,
+        deliveryMode: promptDeliveryMode,
       }),
     });
     try {
@@ -1199,7 +1216,7 @@ export function AssistantDock() {
     } finally {
       void refresh();
     }
-  }, [activeThread, draft, refresh]);
+  }, [activeThread, draft, promptDeliveryMode, refresh]);
 
   const stop = React.useCallback(async () => {
     if (!activeThread) return;
@@ -1430,7 +1447,7 @@ export function AssistantDock() {
             }
           }}
           disabled={!activeThread}
-          placeholder={running ? 'Queue a message' : 'Ask the assistant'}
+          placeholder={running ? (promptDeliveryMode === 'asap' ? 'Send at next turn' : 'Queue a message') : 'Ask the assistant'}
           className="h-20 w-full resize-none rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.03)] px-3 py-2 text-[12px] text-[var(--fg)] placeholder:text-[var(--muted-dim)] focus:border-[var(--accent-muted)] focus:outline-none disabled:opacity-50"
         />
         <div className="mt-2 flex items-center gap-2">
@@ -1449,6 +1466,30 @@ export function AssistantDock() {
               </option>
             ))}
           </select>
+          <div
+            className="grid h-8 flex-shrink-0 grid-cols-2 overflow-hidden rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)]"
+            role="group"
+            aria-label="Assistant message delivery"
+          >
+            {(['queue', 'asap'] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                disabled={!activeThread}
+                onClick={() => setPromptDeliveryMode(mode)}
+                aria-pressed={promptDeliveryMode === mode}
+                title={mode === 'queue' ? 'Queue after the assistant finishes' : 'Inject after the current turn before the next assistant response'}
+                className={`min-w-[42px] px-2 text-[10px] font-semibold uppercase tracking-wide disabled:opacity-40 ${
+                  promptDeliveryMode === mode
+                    ? 'bg-[var(--accent-subtle)] text-[var(--accent)]'
+                    : 'text-[var(--muted)] hover:bg-[rgba(255,255,255,.025)] hover:text-[var(--fg-secondary)]'
+                }`}
+                style={{ fontFamily: 'var(--display)' }}
+              >
+                {mode === 'queue' ? 'Queue' : 'ASAP'}
+              </button>
+            ))}
+          </div>
           {running ? (
             <button
               type="button"

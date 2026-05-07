@@ -72,7 +72,10 @@ type AssistantQueuedPrompt = {
   provider: LlmProviderId;
   model: string;
   thinkingLevel: AssistantThinkingLevel;
+  deliveryMode: AssistantPromptDeliveryMode;
 };
+
+type AssistantPromptDeliveryMode = 'queue' | 'asap';
 
 type AssistantApproval = {
   id: string;
@@ -301,6 +304,19 @@ function normalizeThinkingLevel(raw: unknown): AssistantThinkingLevel {
   const value = String(raw ?? '').trim().toLowerCase();
   if (value === 'minimal' || value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh') return value;
   return 'off';
+}
+
+function normalizeAssistantPromptDeliveryMode(raw: unknown): AssistantPromptDeliveryMode {
+  const value = String(raw ?? '').trim().toLowerCase();
+  return value === 'asap' || value === 'steer' || value === 'steering' ? 'asap' : 'queue';
+}
+
+function makeAssistantUserMessage(prompt: string): any {
+  return {
+    role: 'user',
+    content: [{ type: 'text', text: prompt }],
+    timestamp: Date.now(),
+  };
 }
 
 function titleFromPrompt(prompt: string): string {
@@ -865,6 +881,7 @@ function normalizeQueuedPrompt(raw: any, fallback: { provider: LlmProviderId; mo
     provider,
     model,
     thinkingLevel: allowedThinkingLevelForModel(provider, model, raw.thinkingLevel ?? fallback.thinkingLevel ?? 'off'),
+    deliveryMode: normalizeAssistantPromptDeliveryMode(raw.deliveryMode),
   };
 }
 
@@ -1181,6 +1198,7 @@ export class HubAssistantService {
     if (next.length === thread.queuedPrompts.length) throw new Error(`unknown queued assistant message: ${queuedPromptId}`);
     thread.queuedPrompts = next;
     thread.updatedAt = nowIso();
+    this.syncActiveSteeringQueue(thread);
     await this.persist();
     return await this.snapshot();
   }
@@ -1197,13 +1215,24 @@ export class HubAssistantService {
 
   async promptThread(
     threadId: string,
-    input: { prompt?: unknown; model?: unknown; provider?: unknown; thinkingLevel?: unknown },
+    input: { prompt?: unknown; model?: unknown; provider?: unknown; thinkingLevel?: unknown; deliveryMode?: unknown },
     onEvent?: (event: AssistantPromptEvent) => void | Promise<void>,
   ): Promise<void> {
     await this.ensureLoaded();
     const thread = this.requireThread(threadId);
     const queuedPrompt = this.makeQueuedPrompt(thread, input);
+    const canSteerActiveThread = this.activeAgent && this.activeThreadRunId === thread.id;
+    if (canSteerActiveThread && queuedPrompt.deliveryMode === 'asap') {
+      thread.queuedPrompts.push(queuedPrompt);
+      this.activeAgent.steer?.(makeAssistantUserMessage(queuedPrompt.prompt));
+      thread.updatedAt = nowIso();
+      await this.persist();
+      await onEvent?.({ type: 'snapshot', snapshot: await this.snapshot() });
+      return;
+    }
+
     if (this.activeAgent || this.queuePumpPromise || this.hasQueuedPrompts()) {
+      if (!canSteerActiveThread) queuedPrompt.deliveryMode = 'queue';
       thread.queuedPrompts.push(queuedPrompt);
       thread.updatedAt = nowIso();
       await this.persist();
@@ -1230,7 +1259,10 @@ export class HubAssistantService {
     return this.threads.some((thread) => thread.queuedPrompts.length > 0);
   }
 
-  private makeQueuedPrompt(thread: AssistantThread, input: { prompt?: unknown; model?: unknown; provider?: unknown; thinkingLevel?: unknown }): AssistantQueuedPrompt {
+  private makeQueuedPrompt(
+    thread: AssistantThread,
+    input: { prompt?: unknown; model?: unknown; provider?: unknown; thinkingLevel?: unknown; deliveryMode?: unknown },
+  ): AssistantQueuedPrompt {
     const prompt = String(input.prompt ?? '').trim();
     if (!prompt) throw new Error('missing prompt');
     const provider = normalizeProvider(input.provider ?? thread.provider);
@@ -1242,7 +1274,29 @@ export class HubAssistantService {
       provider,
       model,
       thinkingLevel: allowedThinkingLevelForModel(provider, model, input.thinkingLevel ?? thread.thinkingLevel),
+      deliveryMode: normalizeAssistantPromptDeliveryMode(input.deliveryMode),
     };
+  }
+
+  private syncActiveSteeringQueue(thread: AssistantThread): void {
+    if (!this.activeAgent || this.activeThreadRunId !== thread.id) return;
+    this.activeAgent.clearSteeringQueue?.();
+    for (const queuedPrompt of thread.queuedPrompts) {
+      if (queuedPrompt.deliveryMode !== 'asap') continue;
+      this.activeAgent.steer?.(makeAssistantUserMessage(queuedPrompt.prompt));
+    }
+  }
+
+  private removeDeliveredSteeringPrompt(thread: AssistantThread, message: any): boolean {
+    if (message?.role !== 'user') return false;
+    const prompt = textFromMessage(message).trim();
+    if (!prompt) return false;
+    const index = thread.queuedPrompts.findIndex(
+      (queuedPrompt) => queuedPrompt.deliveryMode === 'asap' && queuedPrompt.prompt.trim() === prompt,
+    );
+    if (index < 0) return false;
+    thread.queuedPrompts.splice(index, 1);
+    return true;
   }
 
   private shiftNextQueuedPrompt(): { thread: AssistantThread; queuedPrompt: AssistantQueuedPrompt } | null {
@@ -1324,6 +1378,10 @@ export class HubAssistantService {
       agent.subscribe(async (event: any) => {
         if (event.type === 'message_update') {
           this.streamingMessage = sanitizeMessage(event.message);
+        }
+        if (event.type === 'message_start' && this.removeDeliveredSteeringPrompt(thread, event.message)) {
+          thread.updatedAt = nowIso();
+          await this.persist();
         }
         if (event.type === 'message_end' || event.type === 'agent_end' || event.type === 'turn_end') {
           thread.messages = agent.state.messages.map(sanitizeMessage).slice(-ASSISTANT_THREAD_MESSAGE_LIMIT);
