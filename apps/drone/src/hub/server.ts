@@ -10113,6 +10113,29 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         return;
       }
 
+      if (pathname === '/api/assistant/system-prompt') {
+        if (method === 'GET') {
+          json(res, 200, await assistantService.systemPromptSettings());
+          return;
+        }
+
+        if (method === 'POST') {
+          let body: any = null;
+          try {
+            body = await readJsonBody(req);
+          } catch (e: any) {
+            json(res, 400, { ok: false, error: e?.message ?? String(e) });
+            return;
+          }
+          try {
+            json(res, 200, await assistantService.updateSystemPrompt(body ?? {}));
+          } catch (e: any) {
+            json(res, 400, { ok: false, error: e?.message ?? String(e) });
+          }
+          return;
+        }
+      }
+
       if (pathname === '/api/assistant/threads' && method === 'GET') {
         json(res, 200, await assistantService.snapshot());
         return;

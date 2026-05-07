@@ -50,6 +50,7 @@ type AssistantThread = {
   model: string;
   provider: LlmProviderId;
   thinkingLevel: AssistantThinkingLevel;
+  systemPrompt: string;
   accessScope: AssistantAccessScope;
   messages: any[];
   queuedPrompts: AssistantQueuedPrompt[];
@@ -80,6 +81,8 @@ type AssistantApproval = {
 type StoredAssistantState = {
   activeThreadId?: string | null;
   threads?: AssistantThread[];
+  systemPrompt?: string;
+  systemPromptUpdatedAt?: string;
   updatedAt?: string;
 };
 
@@ -193,8 +196,21 @@ export type AssistantModelOption = {
   thinkingLevel: AssistantThinkingLevel;
 };
 
+export type AssistantSystemPromptSettings = {
+  ok: true;
+  assistantSystemPrompt: {
+    prompt: string;
+    promptSource: 'settings' | 'default';
+    updatedAt: string | null;
+    defaultPrompt: string;
+    maxPromptChars: number;
+    runtimeAppendix: string;
+  };
+};
+
 const ASSISTANT_THREAD_MESSAGE_LIMIT = 80;
 const ASSISTANT_REGISTRY_MAX_THREADS = 24;
+const ASSISTANT_SYSTEM_PROMPT_MAX_CHARS = 20_000;
 const CHAT_MESSAGE_DEFAULT_LIMIT = 10;
 const CHAT_MESSAGE_MAX_LIMIT = 50;
 const CHAT_MESSAGE_RESPONSE_MAX_BYTES = 500_000;
@@ -206,6 +222,23 @@ const CHAT_IDLE_MAX_TARGETS = 20;
 const DEFAULT_OPENAI_MODEL = 'gpt-5.5';
 const DEFAULT_GEMINI_MODEL = 'gemini-3-flash-preview';
 const DEFAULT_THREAD_TITLE = 'New thread';
+const ASSISTANT_SYSTEM_PROMPT_RUNTIME_APPENDIX =
+  'Current access scope is appended at run time. The assistant must not claim read or write access outside that scope.';
+const ASSISTANT_SYSTEM_PROMPT_DEFAULT = [
+  'You are Drone Hub Assistant, a concise operator assistant embedded in the Drone Hub app.',
+  'You help the user understand available drones and coordinate work across drone chats.',
+  'Use get_current_context when the user asks about the current, active, selected, or open drone/chat, or before acting on phrases like "this drone".',
+  'Use list_drones before referring to specific drones unless the user already provided an exact drone id.',
+  'Use get_chat_overview before reading chat details, then read_chat_messages in pages when you need conversation context.',
+  'Chat timelines contain user messages and agent messages. Queued or pending user messages appear in the same timeline with a non-completed status.',
+  'When you send a drone chat message and need the result, call wait_for_agent_chats_idle on the target chat before reading the transcript again. This blocks server-side and avoids repeated LLM polling.',
+  'Do not load more chat pages than needed. Start with the latest page.',
+  'Creating drones, changing drone groups, and sending a user message to a drone are actions that require user approval; explain briefly what you intend to do.',
+  'If one of those write tools returns successfully, the user already approved that action. Do not ask for the same approval again.',
+  'When creating a drone, omit fields you want inherited from the current open drone. Only set repoBranchSource=remote when the user asked for a remote branch and you have a remoteBranch value.',
+  'Do not claim a drone completed work unless the drone transcript or user says so.',
+  'Keep responses practical and short.',
+].join('\n');
 const ASSISTANT_MODEL_OPTIONS: Array<{
   provider: LlmProviderId;
   id: string;
@@ -406,6 +439,14 @@ function normalizeAssistantRepoBranchSource(raw: unknown): 'host' | 'remote' {
 
 function cleanOptionalString(raw: unknown): string {
   return String(raw ?? '').trim();
+}
+
+function normalizeAssistantSystemPrompt(raw: unknown): string {
+  const text = typeof raw === 'string' ? raw.trim() : '';
+  if (!text) return '';
+  return text.length > ASSISTANT_SYSTEM_PROMPT_MAX_CHARS
+    ? text.slice(0, ASSISTANT_SYSTEM_PROMPT_MAX_CHARS).trim()
+    : text;
 }
 
 function clampChatIdleTimeoutMs(raw: unknown): number {
@@ -828,7 +869,7 @@ function sanitizeThread(thread: AssistantThread): AssistantThread {
   };
 }
 
-function normalizeThread(raw: any, fallback: { provider: LlmProviderId; model: string }): AssistantThread | null {
+function normalizeThread(raw: any, fallback: { provider: LlmProviderId; model: string; systemPrompt?: string }): AssistantThread | null {
   if (!raw || typeof raw !== 'object') return null;
   const id = String(raw.id ?? '').trim();
   if (!id) return null;
@@ -851,6 +892,7 @@ function normalizeThread(raw: any, fallback: { provider: LlmProviderId; model: s
     model,
     provider,
     thinkingLevel,
+    systemPrompt: normalizeAssistantSystemPrompt(raw.systemPrompt) || fallback.systemPrompt || ASSISTANT_SYSTEM_PROMPT_DEFAULT,
     accessScope: makeAssistantAccessScope(raw.accessScope),
     messages,
     queuedPrompts,
@@ -859,10 +901,22 @@ function normalizeThread(raw: any, fallback: { provider: LlmProviderId; model: s
   };
 }
 
-function serializeState(activeThreadId: string, threads: AssistantThread[]): StoredAssistantState {
+function serializeState(input: {
+  activeThreadId: string;
+  threads: AssistantThread[];
+  systemPrompt: string;
+  systemPromptUpdatedAt: string | null;
+}): StoredAssistantState {
+  const systemPrompt = normalizeAssistantSystemPrompt(input.systemPrompt) || ASSISTANT_SYSTEM_PROMPT_DEFAULT;
   return {
-    activeThreadId,
-    threads: threads.slice(0, ASSISTANT_REGISTRY_MAX_THREADS).map(sanitizeThread),
+    activeThreadId: input.activeThreadId,
+    threads: input.threads.slice(0, ASSISTANT_REGISTRY_MAX_THREADS).map(sanitizeThread),
+    ...(systemPrompt !== ASSISTANT_SYSTEM_PROMPT_DEFAULT
+      ? {
+          systemPrompt,
+          systemPromptUpdatedAt: input.systemPromptUpdatedAt ?? nowIso(),
+        }
+      : {}),
     updatedAt: nowIso(),
   };
 }
@@ -882,6 +936,8 @@ export class HubAssistantService {
   private activeThreadRunId: string | null = null;
   private queuePumpPromise: Promise<void> | null = null;
   private streamingMessage: any = null;
+  private defaultSystemPrompt = ASSISTANT_SYSTEM_PROMPT_DEFAULT;
+  private defaultSystemPromptUpdatedAt: string | null = null;
   private appContext: AssistantAppContext = {
     activeDroneId: null,
     activeDroneName: null,
@@ -1037,6 +1093,21 @@ export class HubAssistantService {
     this.activeThreadId = thread.id;
     await this.persist();
     return await this.snapshot();
+  }
+
+  async systemPromptSettings(): Promise<AssistantSystemPromptSettings> {
+    await this.ensureLoaded();
+    return this.systemPromptSettingsSync();
+  }
+
+  async updateSystemPrompt(input: { prompt?: unknown }): Promise<AssistantSystemPromptSettings> {
+    await this.ensureLoaded();
+    const prompt = normalizeAssistantSystemPrompt(input.prompt);
+    if (!prompt) throw new Error('missing system prompt');
+    this.defaultSystemPrompt = prompt;
+    this.defaultSystemPromptUpdatedAt = prompt === ASSISTANT_SYSTEM_PROMPT_DEFAULT ? null : nowIso();
+    await this.persist();
+    return this.systemPromptSettingsSync();
   }
 
   async updateThread(threadId: string, patch: { title?: unknown; model?: unknown; provider?: unknown; thinkingLevel?: unknown }): Promise<AssistantSnapshot> {
@@ -1269,13 +1340,23 @@ export class HubAssistantService {
   private async ensureLoaded(): Promise<void> {
     if (this.loaded) return;
     const { provider } = await resolveEffectiveLlmProvider();
-    const fallback = { provider, model: defaultModelForProvider(provider) };
     const regAny: any = await loadRegistry();
     const stored = regAny?.settings?.assistant as StoredAssistantState | undefined;
+    const storedSystemPrompt = normalizeAssistantSystemPrompt(stored?.systemPrompt);
+    this.defaultSystemPrompt = storedSystemPrompt || ASSISTANT_SYSTEM_PROMPT_DEFAULT;
+    this.defaultSystemPromptUpdatedAt =
+      storedSystemPrompt && typeof stored?.systemPromptUpdatedAt === 'string' && stored.systemPromptUpdatedAt.trim()
+        ? stored.systemPromptUpdatedAt.trim()
+        : null;
+    const fallback = {
+      provider,
+      model: defaultModelForProvider(provider),
+      systemPrompt: ASSISTANT_SYSTEM_PROMPT_DEFAULT,
+    };
     const threads = Array.isArray(stored?.threads)
       ? stored.threads.map((thread) => normalizeThread(thread, fallback)).filter(Boolean) as AssistantThread[]
       : [];
-    this.threads = threads.length > 0 ? threads : [this.makeThread(fallback)];
+    this.threads = threads.length > 0 ? threads : [this.makeThread({ ...fallback, systemPrompt: this.defaultSystemPrompt })];
     const activeThreadId = String(stored?.activeThreadId ?? '').trim();
     this.activeThreadId = this.threads.some((thread) => thread.id === activeThreadId) ? activeThreadId : this.threads[0].id;
     this.loaded = true;
@@ -1290,7 +1371,7 @@ export class HubAssistantService {
     return makeAssistantAccessScope({ readMode: 'all', writeMode: 'selected', droneIds: [activeDroneId] });
   }
 
-  private makeThread(input?: { provider?: LlmProviderId; model?: string; title?: string; accessScope?: AssistantAccessScope }): AssistantThread {
+  private makeThread(input?: { provider?: LlmProviderId; model?: string; title?: string; accessScope?: AssistantAccessScope; systemPrompt?: string }): AssistantThread {
     const provider = normalizeProvider(input?.provider);
     const at = nowIso();
     return {
@@ -1301,6 +1382,7 @@ export class HubAssistantService {
       provider,
       model: allowedModelForProvider(provider, input?.model),
       thinkingLevel: allowedThinkingLevelForModel(provider, allowedModelForProvider(provider, input?.model), 'off'),
+      systemPrompt: normalizeAssistantSystemPrompt(input?.systemPrompt) || this.defaultSystemPrompt,
       accessScope: input?.accessScope ?? makeAssistantAccessScope(),
       messages: [],
       queuedPrompts: [],
@@ -1319,7 +1401,12 @@ export class HubAssistantService {
 
   private async persist(): Promise<void> {
     const activeThread = firstThread(this.threads, this.activeThreadId);
-    const state = serializeState(activeThread.id, this.threads);
+    const state = serializeState({
+      activeThreadId: activeThread.id,
+      threads: this.threads,
+      systemPrompt: this.defaultSystemPrompt,
+      systemPromptUpdatedAt: this.defaultSystemPromptUpdatedAt,
+    });
     await updateRegistry((regAny: any) => {
       regAny.settings = regAny.settings ?? {};
       regAny.settings.assistant = state;
@@ -1782,26 +1869,28 @@ export class HubAssistantService {
     }));
   }
 
+  private systemPromptSettingsSync(): AssistantSystemPromptSettings {
+    const prompt = normalizeAssistantSystemPrompt(this.defaultSystemPrompt) || ASSISTANT_SYSTEM_PROMPT_DEFAULT;
+    return {
+      ok: true,
+      assistantSystemPrompt: {
+        prompt,
+        promptSource: prompt === ASSISTANT_SYSTEM_PROMPT_DEFAULT ? 'default' : 'settings',
+        updatedAt: prompt === ASSISTANT_SYSTEM_PROMPT_DEFAULT ? null : this.defaultSystemPromptUpdatedAt,
+        defaultPrompt: ASSISTANT_SYSTEM_PROMPT_DEFAULT,
+        maxPromptChars: ASSISTANT_SYSTEM_PROMPT_MAX_CHARS,
+        runtimeAppendix: ASSISTANT_SYSTEM_PROMPT_RUNTIME_APPENDIX,
+      },
+    };
+  }
+
   private systemPrompt(threadId?: string): string {
+    const thread = threadId ? this.threads.find((item) => item.id === threadId) : null;
     const accessScope = this.activeAccessScope(threadId);
     const readScope = accessScope.readMode === 'selected' ? `selected drones (${accessScope.droneIds.join(', ')})` : 'all drones';
     const writeScope = accessScope.writeMode === 'selected' ? `selected drones (${accessScope.droneIds.join(', ')})` : 'all drones';
     const scopeText = `Current access scope: read=${readScope}; write=${writeScope}. Do not claim read or write access outside those scopes.`;
-    return [
-      'You are Drone Hub Assistant, a concise operator assistant embedded in the Drone Hub app.',
-      'You help the user understand available drones and coordinate work across drone chats.',
-      scopeText,
-      'Use get_current_context when the user asks about the current, active, selected, or open drone/chat, or before acting on phrases like "this drone".',
-      'Use list_drones before referring to specific drones unless the user already provided an exact drone id.',
-      'Use get_chat_overview before reading chat details, then read_chat_messages in pages when you need conversation context.',
-      'Chat timelines contain user messages and agent messages. Queued or pending user messages appear in the same timeline with a non-completed status.',
-      'When you send a drone chat message and need the result, call wait_for_agent_chats_idle on the target chat before reading the transcript again. This blocks server-side and avoids repeated LLM polling.',
-      'Do not load more chat pages than needed. Start with the latest page.',
-      'Creating drones, changing drone groups, and sending a user message to a drone are actions that require user approval; explain briefly what you intend to do.',
-      'If one of those write tools returns successfully, the user already approved that action. Do not ask for the same approval again.',
-      'When creating a drone, omit fields you want inherited from the current open drone. Only set repoBranchSource=remote when the user asked for a remote branch and you have a remoteBranch value.',
-      'Do not claim a drone completed work unless the drone transcript or user says so.',
-      'Keep responses practical and short.',
-    ].join('\n');
+    const basePrompt = normalizeAssistantSystemPrompt(thread?.systemPrompt) || this.defaultSystemPrompt;
+    return [basePrompt, scopeText].join('\n\n');
   }
 }
