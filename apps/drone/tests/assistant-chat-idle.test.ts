@@ -1,0 +1,158 @@
+import { describe, expect, test } from 'bun:test';
+import {
+  summarizeAssistantChatIdle,
+  waitForAssistantChatIdle,
+} from '../src/hub/assistant';
+import { loadRegistry, updateRegistry } from '../src/host/registry';
+import { withTempDroneDataDir } from './test-helpers';
+
+function seedChat(reg: any, pendingPrompts: any[] = [], turns: any[] = []): void {
+  const now = new Date().toISOString();
+  reg.drones = reg.drones ?? {};
+  reg.drones['drone-a'] = {
+    id: 'drone-a',
+    name: 'Drone A',
+    createdAt: now,
+    chats: {
+      default: {
+        createdAt: now,
+        turns,
+        pendingPrompts,
+      },
+    },
+  };
+}
+
+describe('assistant chat idle wait', () => {
+  test('treats queued user messages as active and failed pending messages as idle', async () => {
+    await withTempDroneDataDir('assistant-chat-idle-', async () => {
+      await updateRegistry((reg: any) => {
+        seedChat(reg, [
+          {
+            id: 'prompt-1',
+            at: new Date().toISOString(),
+            prompt: 'please work',
+            state: 'queued',
+          },
+        ]);
+      });
+
+      let status = summarizeAssistantChatIdle(await loadRegistry(), { droneId: 'drone-a', chatName: 'default' });
+      expect(status.idle).toBe(false);
+      expect(status.reason).toBe('active_user_messages');
+      expect(status.activeUserMessages).toBe(1);
+
+      await updateRegistry((reg: any) => {
+        seedChat(reg, [
+          {
+            id: 'prompt-1',
+            at: new Date().toISOString(),
+            prompt: 'please work',
+            state: 'failed',
+            error: 'agent failed before accepting prompt',
+          },
+        ]);
+      });
+
+      status = summarizeAssistantChatIdle(await loadRegistry(), { droneId: 'drone-a', chatName: 'default' });
+      expect(status.idle).toBe(true);
+      expect(status.reason).toBe('latest_user_failed');
+      expect(status.failedUserMessages).toBe(1);
+    });
+  });
+
+  test('waits until a pending prompt becomes an agent turn', async () => {
+    await withTempDroneDataDir('assistant-chat-idle-wait-', async () => {
+      const startedAt = new Date().toISOString();
+      await updateRegistry((reg: any) => {
+        seedChat(reg, [
+          {
+            id: 'prompt-2',
+            at: startedAt,
+            prompt: 'finish this',
+            state: 'sent',
+          },
+        ]);
+      });
+
+      setTimeout(() => {
+        void updateRegistry((reg: any) => {
+          seedChat(
+            reg,
+            [],
+            [
+              {
+                id: 'prompt-2',
+                at: startedAt,
+                promptAt: startedAt,
+                completedAt: new Date().toISOString(),
+                prompt: 'finish this',
+                ok: true,
+                output: 'done',
+              },
+            ],
+          );
+        });
+      }, 50);
+
+      const result = await waitForAssistantChatIdle({
+        targets: [{ droneId: 'drone-a', chatName: 'default' }],
+        timeoutMs: 2000,
+        pollIntervalMs: 25,
+        idleForMs: 0,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.timedOut).toBe(false);
+      expect(result.targets[0]?.idle).toBe(true);
+      expect(result.targets[0]?.reason).toBe('latest_agent_message');
+      expect(result.targets[0]?.latest?.role).toBe('agent');
+      expect(result.targets[0]?.latest?.text).toBe('done');
+    });
+  });
+
+  test('rejects unknown chat targets instead of treating them as idle', async () => {
+    await withTempDroneDataDir('assistant-chat-idle-missing-chat-', async () => {
+      await updateRegistry((reg: any) => {
+        seedChat(reg);
+      });
+
+      await expect(
+        waitForAssistantChatIdle({
+          targets: [{ droneId: 'drone-a', chatName: 'missing-chat' }],
+          timeoutMs: 1000,
+          pollIntervalMs: 25,
+          idleForMs: 0,
+        }),
+      ).rejects.toThrow('unknown chat: drone-a/missing-chat');
+    });
+  });
+
+  test('aborts an active wait when the caller signal is cancelled', async () => {
+    await withTempDroneDataDir('assistant-chat-idle-abort-', async () => {
+      await updateRegistry((reg: any) => {
+        seedChat(reg, [
+          {
+            id: 'prompt-3',
+            at: new Date().toISOString(),
+            prompt: 'keep waiting',
+            state: 'sent',
+          },
+        ]);
+      });
+
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 50);
+
+      await expect(
+        waitForAssistantChatIdle({
+          targets: [{ droneId: 'drone-a', chatName: 'default' }],
+          timeoutMs: 5000,
+          pollIntervalMs: 1000,
+          idleForMs: 0,
+          signal: controller.signal,
+        }),
+      ).rejects.toThrow('aborted');
+    });
+  });
+});

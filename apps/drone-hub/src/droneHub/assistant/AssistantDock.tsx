@@ -3,10 +3,12 @@ import { useDndMonitor, useDroppable } from '@dnd-kit/core';
 import { requestJson } from '../http';
 import { MarkdownMessage } from '../chat/MarkdownMessage';
 import { parseDroneHubDragData } from '../app/drone-hub-dnd';
+import { IconChatThread, IconPlus, IconSidebarCollapse, IconSidebarExpand, IconTrash } from '../app/icons';
 import { useDroneHubUiStore } from '../app/use-drone-hub-ui-store';
 
 const ASSISTANT_AUTO_APPROVE_STORAGE_KEY = 'droneHub.assistant.autoApprove';
 const ASSISTANT_SCOPE_STORAGE_KEY = 'droneHub.assistant.scope';
+const ASSISTANT_THREAD_SIDEBAR_OPEN_STORAGE_KEY = 'droneHub.assistant.threadSidebarOpen';
 
 type AssistantThreadStatus = 'idle' | 'running' | 'waiting_for_approval' | 'error';
 
@@ -81,6 +83,11 @@ function readInitialAutoApprove(): boolean {
   return window.localStorage.getItem(ASSISTANT_AUTO_APPROVE_STORAGE_KEY) === '1';
 }
 
+function readInitialThreadSidebarOpen(): boolean {
+  if (typeof window === 'undefined') return true;
+  return window.localStorage.getItem(ASSISTANT_THREAD_SIDEBAR_OPEN_STORAGE_KEY) !== '0';
+}
+
 function readInitialScope(): { readMode: AssistantScopeMode; writeMode: AssistantScopeMode; drones: AssistantScopeDrone[] } {
   if (typeof window === 'undefined') return { readMode: 'all', writeMode: 'all', drones: [] };
   try {
@@ -151,6 +158,7 @@ const TOOL_LABELS: Record<string, string> = {
   read_chat_messages: 'Read chat messages',
   search_chat_messages: 'Search chat messages',
   set_drone_group: 'Set drone group',
+  wait_for_agent_chats_idle: 'Wait for chats idle',
 };
 
 function toolLabel(name: string | undefined): string {
@@ -207,6 +215,13 @@ function formatUpdatedAt(raw: string): string {
   if (delta < 60 * 60_000) return `${Math.max(1, Math.floor(delta / 60_000))}m`;
   if (delta < 24 * 60 * 60_000) return `${Math.max(1, Math.floor(delta / (60 * 60_000)))}h`;
   return new Date(ms).toLocaleDateString();
+}
+
+function assistantThreadStatusTone(status: AssistantThreadStatus): string {
+  if (status === 'running') return 'bg-[var(--green)]';
+  if (status === 'waiting_for_approval') return 'bg-[var(--accent)]';
+  if (status === 'error') return 'bg-[var(--red)]';
+  return 'bg-[var(--muted-dim)]';
 }
 
 async function readNdjson(response: Response, onEvent: (event: any) => void): Promise<void> {
@@ -541,6 +556,114 @@ function ApprovalCard({
   );
 }
 
+function AssistantThreadSidebar({
+  threads,
+  activeThreadId,
+  onCreateThread,
+  onSelectThread,
+  onDeleteThread,
+  onCollapse,
+}: {
+  threads: AssistantThread[];
+  activeThreadId: string | null;
+  onCreateThread: () => void;
+  onSelectThread: (thread: AssistantThread) => void;
+  onDeleteThread: (thread: AssistantThread) => void;
+  onCollapse: () => void;
+}) {
+  return (
+    <aside className="flex w-52 max-w-[46%] min-w-0 flex-shrink-0 flex-col border-r border-[var(--border)] bg-[rgba(0,0,0,.14)]">
+      <div className="flex h-11 flex-shrink-0 items-center gap-2 border-b border-[var(--border)] px-2">
+        <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.03)] text-[var(--muted)]">
+          <IconChatThread className="h-3.5 w-3.5" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[11px] font-semibold uppercase tracking-wide text-[var(--muted)]" style={{ fontFamily: 'var(--display)' }}>
+            Threads
+          </div>
+          <div className="text-[10px] text-[var(--muted-dim)]">{threads.length || 0} total</div>
+        </div>
+        <button
+          type="button"
+          onClick={onCollapse}
+          className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:text-[var(--fg-secondary)]"
+          title="Hide thread sidebar"
+          aria-label="Hide thread sidebar"
+        >
+          <IconSidebarCollapse className="h-3.5 w-3.5" />
+        </button>
+      </div>
+      <div className="flex-shrink-0 border-b border-[var(--border-subtle)] p-2">
+        <button
+          type="button"
+          onClick={onCreateThread}
+          className="flex h-8 w-full items-center justify-center gap-1.5 rounded border border-[var(--accent-muted)] bg-[var(--accent-subtle)] px-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--accent)] hover:bg-[rgba(167,139,250,.16)]"
+          style={{ fontFamily: 'var(--display)' }}
+        >
+          <IconPlus className="h-3.5 w-3.5" />
+          New Thread
+        </button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
+        {threads.length === 0 ? (
+          <div className="px-2 py-3 text-[11px] text-[var(--muted-dim)]">No assistant threads yet.</div>
+        ) : (
+          <div className="space-y-1">
+            {threads.map((thread) => {
+              const active = thread.id === activeThreadId;
+              const messageCount = thread.messages.length + (thread.queuedPrompts?.length ?? 0);
+              return (
+                <div
+                  key={thread.id}
+                  className={`group relative rounded border transition-colors ${
+                    active
+                      ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)]'
+                      : 'border-transparent hover:border-[var(--border-subtle)] hover:bg-[var(--hover)]'
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => onSelectThread(thread)}
+                    className="min-h-[58px] w-full min-w-0 px-2 py-1.5 pr-8 text-left"
+                    aria-current={active ? 'true' : undefined}
+                  >
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${assistantThreadStatusTone(thread.status)}`} />
+                      <span className={`min-w-0 flex-1 truncate text-[12px] font-semibold ${active ? 'text-[var(--fg)]' : 'text-[var(--fg-secondary)]'}`}>
+                        {thread.title || 'Untitled thread'}
+                      </span>
+                    </div>
+                    <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[10px] text-[var(--muted-dim)]">
+                      <span className="truncate">{thread.status.replace(/_/g, ' ')}</span>
+                      <span aria-hidden="true">·</span>
+                      <span>{formatUpdatedAt(thread.updatedAt)}</span>
+                      {messageCount > 0 ? (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span>{messageCount}</span>
+                        </>
+                      ) : null}
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onDeleteThread(thread)}
+                    className="absolute right-1.5 top-1.5 flex h-6 w-6 items-center justify-center rounded text-[var(--muted-dim)] opacity-0 hover:bg-[rgba(255,90,90,.1)] hover:text-[var(--red)] group-hover:opacity-100 focus:opacity-100"
+                    title={`Delete ${thread.title || 'thread'}`}
+                    aria-label={`Delete ${thread.title || 'thread'}`}
+                  >
+                    <IconTrash className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </aside>
+  );
+}
+
 function ScopeModeControl({
   label,
   mode,
@@ -553,17 +676,17 @@ function ScopeModeControl({
   onChange: (mode: AssistantScopeMode) => void;
 }) {
   return (
-    <div className="flex items-center gap-1">
-      <div className="w-10 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+    <div className="flex items-center gap-1 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] p-0.5">
+      <div className="px-1 text-[9px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
         {label}
       </div>
       <button
         type="button"
         onClick={() => onChange('all')}
-        className={`h-6 rounded border px-2 text-[10px] font-semibold uppercase tracking-wide ${
+        className={`h-5 rounded px-1.5 text-[9px] font-semibold uppercase tracking-wide ${
           mode === 'all'
-            ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
-            : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:text-[var(--fg-secondary)]'
+            ? 'bg-[var(--accent-subtle)] text-[var(--accent)]'
+            : 'text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]'
         }`}
         style={{ fontFamily: 'var(--display)' }}
       >
@@ -573,10 +696,10 @@ function ScopeModeControl({
         type="button"
         onClick={() => onChange('selected')}
         disabled={selectedDisabled}
-        className={`h-6 rounded border px-2 text-[10px] font-semibold uppercase tracking-wide disabled:opacity-45 ${
+        className={`h-5 rounded px-1.5 text-[9px] font-semibold uppercase tracking-wide disabled:opacity-45 ${
           mode === 'selected'
-            ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
-            : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:text-[var(--fg-secondary)]'
+            ? 'bg-[var(--accent-subtle)] text-[var(--accent)]'
+            : 'text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]'
         }`}
         style={{ fontFamily: 'var(--display)' }}
       >
@@ -591,7 +714,7 @@ export function AssistantDock() {
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [draft, setDraft] = React.useState('');
-  const [threadMenuOpen, setThreadMenuOpen] = React.useState(false);
+  const [threadSidebarOpen, setThreadSidebarOpen] = React.useState(readInitialThreadSidebarOpen);
   const [autoApprove, setAutoApprove] = React.useState(readInitialAutoApprove);
   const initialScope = React.useMemo(readInitialScope, []);
   const [scopeReadMode, setScopeReadMode] = React.useState<AssistantScopeMode>(() => initialScope.readMode);
@@ -662,16 +785,20 @@ export function AssistantDock() {
     window.localStorage.setItem(ASSISTANT_AUTO_APPROVE_STORAGE_KEY, autoApprove ? '1' : '0');
   }, [autoApprove]);
 
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(ASSISTANT_THREAD_SIDEBAR_OPEN_STORAGE_KEY, threadSidebarOpen ? '1' : '0');
+  }, [threadSidebarOpen]);
+
   const resolveScopeDroneNames = React.useCallback(async (ids: string[], fallbackLabel?: string): Promise<AssistantScopeDrone[]> => {
     const cleanIds = Array.from(new Set(ids.map((id) => String(id ?? '').trim()).filter(Boolean)));
     if (cleanIds.length === 0) return [];
     try {
       const data = await requestJson<{ ok: true; drones?: Array<{ id?: string; name?: string }> }>('/api/drones');
-      const nameById = new Map(
-        (Array.isArray(data?.drones) ? data.drones : [])
-          .map((drone) => [String(drone?.id ?? '').trim(), String(drone?.name ?? '').trim()])
-          .filter(([id]) => Boolean(id)),
-      );
+      const nameEntries: Array<[string, string]> = (Array.isArray(data?.drones) ? data.drones : [])
+        .map((drone): [string, string] => [String(drone?.id ?? '').trim(), String(drone?.name ?? '').trim()])
+        .filter(([id]) => Boolean(id));
+      const nameById = new Map<string, string>(nameEntries);
       return cleanIds.map((id) => ({ id, name: nameById.get(id) || (cleanIds.length === 1 ? fallbackLabel || id : id) }));
     } catch {
       return cleanIds.map((id) => ({ id, name: cleanIds.length === 1 ? fallbackLabel || id : id }));
@@ -825,7 +952,6 @@ export function AssistantDock() {
         }),
       });
       setSnapshot(next);
-      setThreadMenuOpen(false);
       setDraft('');
     } catch (err: any) {
       setError(err?.message ?? String(err));
@@ -840,7 +966,6 @@ export function AssistantDock() {
         body: JSON.stringify({}),
       });
       setSnapshot(next);
-      setThreadMenuOpen(false);
       setDraft('');
     } catch (err: any) {
       setError(err?.message ?? String(err));
@@ -959,36 +1084,58 @@ export function AssistantDock() {
   const selectedScopeDisabled = scopeDrones.length === 0;
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[var(--panel-alt)]">
-      <div className="relative flex-shrink-0 border-b border-[var(--border)] bg-[rgba(255,255,255,.025)] px-3 py-2">
-        <div className="flex items-center gap-2">
+    <div className="flex h-full min-h-0 bg-[var(--panel-alt)]">
+      {threadSidebarOpen ? (
+        <AssistantThreadSidebar
+          threads={snapshot?.threads ?? []}
+          activeThreadId={activeThread?.id ?? null}
+          onCreateThread={() => void createThread()}
+          onSelectThread={(thread) => void selectThread(thread)}
+          onDeleteThread={(thread) => void deleteThread(thread)}
+          onCollapse={() => setThreadSidebarOpen(false)}
+        />
+      ) : null}
+      <div className="flex min-w-0 flex-1 flex-col">
+        <div className="flex h-11 flex-shrink-0 items-center gap-2 border-b border-[var(--border)] bg-[rgba(255,255,255,.025)] px-2">
           <button
             type="button"
-            onClick={() => setThreadMenuOpen((open) => !open)}
-            className="min-w-0 flex-1 rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.16)] px-2 py-1.5 text-left hover:border-[var(--border)]"
-            title="Switch assistant thread"
+            onClick={() => setThreadSidebarOpen((open) => !open)}
+            className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded border text-[var(--muted)] hover:text-[var(--fg-secondary)] ${
+              threadSidebarOpen
+                ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
+                : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)]'
+            }`}
+            title={threadSidebarOpen ? 'Hide thread sidebar' : 'Show thread sidebar'}
+            aria-label={threadSidebarOpen ? 'Hide thread sidebar' : 'Show thread sidebar'}
+            aria-pressed={threadSidebarOpen}
           >
+            {threadSidebarOpen ? <IconSidebarCollapse className="h-3.5 w-3.5" /> : <IconSidebarExpand className="h-3.5 w-3.5" />}
+          </button>
+          <div className="min-w-0 flex-1">
             <div className="truncate text-[12px] font-semibold text-[var(--fg)]">{activeThread?.title ?? 'Assistant'}</div>
-            <div className="mt-0.5 text-[10px] uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
-              {activeThread?.status ?? (loading ? 'loading' : 'idle')}
+            <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+              {activeThread ? <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${assistantThreadStatusTone(activeThread.status)}`} /> : null}
+              <span className="truncate">{activeThread?.status?.replace(/_/g, ' ') ?? (loading ? 'loading' : 'idle')}</span>
             </div>
-          </button>
-          <button
-            type="button"
-            onClick={createThread}
-            className="h-9 w-9 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[18px] text-[var(--muted)] hover:text-[var(--fg)]"
-            title="New assistant thread"
-            aria-label="New assistant thread"
-          >
-            +
-          </button>
+          </div>
+          {!threadSidebarOpen ? (
+            <button
+              type="button"
+              onClick={() => void createThread()}
+              className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:text-[var(--fg)]"
+              title="New assistant thread"
+              aria-label="New assistant thread"
+            >
+              <IconPlus className="h-3.5 w-3.5" />
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={() => setAutoApprove((value) => !value)}
             aria-pressed={autoApprove}
             aria-label="Toggle auto-approve proposals"
             title={autoApprove ? 'Auto-approve proposals is on' : 'Auto-approve proposals is off'}
-            className={`h-9 w-9 rounded border text-[var(--muted)] hover:text-[var(--fg)] ${
+            className={`h-8 w-8 flex-shrink-0 rounded border text-[var(--muted)] hover:text-[var(--fg)] ${
               autoApprove
                 ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
                 : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)]'
@@ -1007,54 +1154,36 @@ export function AssistantDock() {
             </svg>
           </button>
         </div>
-        {threadMenuOpen ? (
-          <div className="absolute left-3 right-3 top-[52px] z-40 max-h-[320px] overflow-auto rounded border border-[var(--border)] bg-[var(--panel)] shadow-[0_18px_50px_rgba(0,0,0,.45)]">
-            {(snapshot?.threads ?? []).map((thread) => (
-              <div key={thread.id} className="flex items-center gap-1 border-b border-[var(--border-subtle)] p-1 last:border-b-0">
-                <button type="button" onClick={() => selectThread(thread)} className="min-w-0 flex-1 rounded px-2 py-1.5 text-left hover:bg-[var(--hover)]">
-                  <div className="truncate text-[12px] text-[var(--fg-secondary)]">{thread.title}</div>
-                  <div className="mt-0.5 text-[10px] text-[var(--muted-dim)]">{thread.status} · {formatUpdatedAt(thread.updatedAt)}</div>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => deleteThread(thread)}
-                  className="h-7 rounded px-2 text-[10px] uppercase tracking-wide text-[var(--muted-dim)] hover:bg-[rgba(255,90,90,.1)] hover:text-[var(--red)]"
-                  style={{ fontFamily: 'var(--display)' }}
-                >
-                  Delete
-                </button>
-              </div>
-            ))}
-          </div>
-        ) : null}
-      </div>
 
       <div
         ref={setScopeDropNodeRef}
-        className={`flex-shrink-0 border-b border-[var(--border)] px-3 py-2 transition-colors ${
+        className={`flex-shrink-0 border-b border-[var(--border)] px-2 py-1.5 transition-colors ${
           scopeDropIsOver ? 'bg-[var(--accent-subtle)]' : 'bg-[rgba(0,0,0,.08)]'
         }`}
       >
-        <div className="flex min-w-0 items-start gap-2">
-          <div className="grid flex-shrink-0 gap-1">
-            <ScopeModeControl label="Read" mode={scopeReadMode} selectedDisabled={selectedScopeDisabled} onChange={setScopeReadMode} />
-            <ScopeModeControl label="Write" mode={scopeWriteMode} selectedDisabled={selectedScopeDisabled} onChange={setScopeWriteMode} />
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+          <div className="mr-0.5 text-[9px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+            Access
           </div>
-          <div className="min-w-0 flex-1 pt-0.5">
+          <div className="flex flex-shrink-0 items-center gap-1">
+            <ScopeModeControl label="R" mode={scopeReadMode} selectedDisabled={selectedScopeDisabled} onChange={setScopeReadMode} />
+            <ScopeModeControl label="W" mode={scopeWriteMode} selectedDisabled={selectedScopeDisabled} onChange={setScopeWriteMode} />
+          </div>
+          <div className="min-w-[120px] flex-1 overflow-hidden">
             {scopeDrones.length === 0 ? (
-              <div className="truncate text-[11px] text-[var(--muted-dim)]">Drop sidebar drones here to limit assistant access.</div>
+              <div className="truncate text-[10px] text-[var(--muted-dim)]">Drop drones here to limit access.</div>
             ) : (
-              <div className="flex min-w-0 flex-wrap gap-1">
+              <div className="flex min-w-0 gap-1 overflow-x-auto no-scrollbar">
                 {scopeDrones.map((drone) => (
                   <span
                     key={drone.id}
-                    className="inline-flex max-w-[180px] items-center gap-1 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.03)] px-1.5 py-0.5 text-[11px] text-[var(--fg-secondary)]"
+                    className="inline-flex max-w-[150px] flex-shrink-0 items-center gap-1 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.03)] px-1.5 py-0.5 text-[10px] text-[var(--fg-secondary)]"
                   >
                     <span className="min-w-0 truncate">{drone.name || drone.id}</span>
                     <button
                       type="button"
                       onClick={() => removeScopeDrone(drone.id)}
-                      className="text-[12px] leading-none text-[var(--muted-dim)] hover:text-[var(--red)]"
+                      className="text-[11px] leading-none text-[var(--muted-dim)] hover:text-[var(--red)]"
                       title={`Remove ${drone.name || drone.id} from assistant scope`}
                       aria-label={`Remove ${drone.name || drone.id} from assistant scope`}
                     >
@@ -1156,6 +1285,7 @@ export function AssistantDock() {
             Send
           </button>
         </div>
+      </div>
       </div>
     </div>
   );

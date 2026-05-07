@@ -150,6 +150,31 @@ type ChatMessagePage = {
   newerCursor: string | null;
 };
 
+export type AssistantChatIdleTarget = {
+  droneId: string;
+  chatName: string;
+};
+
+export type AssistantChatIdleStatus = {
+  droneId: string;
+  chatName: string;
+  idle: boolean;
+  reason: 'no_messages' | 'active_user_messages' | 'latest_agent_message' | 'latest_user_failed' | 'latest_user_message';
+  activeUserMessages: number;
+  queuedUserMessages: number;
+  failedUserMessages: number;
+  latest: null | Pick<ChatTimelineMessage, 'id' | 'role' | 'status' | 'at' | 'text' | 'turnId'>;
+};
+
+export type AssistantChatIdleWaitResult = {
+  ok: boolean;
+  timedOut: boolean;
+  elapsedMs: number;
+  timeoutMs: number;
+  idleForMs: number;
+  targets: AssistantChatIdleStatus[];
+};
+
 export type AssistantSnapshot = {
   ok: true;
   activeThreadId: string;
@@ -173,6 +198,11 @@ const ASSISTANT_REGISTRY_MAX_THREADS = 24;
 const CHAT_MESSAGE_DEFAULT_LIMIT = 10;
 const CHAT_MESSAGE_MAX_LIMIT = 50;
 const CHAT_MESSAGE_RESPONSE_MAX_BYTES = 500_000;
+const CHAT_IDLE_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
+const CHAT_IDLE_MAX_TIMEOUT_MS = 30 * 60 * 1000;
+const CHAT_IDLE_DEFAULT_POLL_INTERVAL_MS = 1000;
+const CHAT_IDLE_DEFAULT_IDLE_FOR_MS = 1000;
+const CHAT_IDLE_MAX_TARGETS = 20;
 const DEFAULT_OPENAI_MODEL = 'gpt-5.5';
 const DEFAULT_GEMINI_MODEL = 'gemini-3-flash-preview';
 const DEFAULT_THREAD_TITLE = 'New thread';
@@ -306,6 +336,35 @@ function ensureMessageResponseFits(value: unknown): void {
   }
 }
 
+function abortError(): Error {
+  const error = new Error('aborted');
+  error.name = 'AbortError';
+  return error;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortError();
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortError());
+      return;
+    }
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const onAbort = () => {
+      if (timeout) clearTimeout(timeout);
+      reject(abortError());
+    };
+    timeout = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, Math.max(0, ms));
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 function droneEntryByAssistantId(regAny: any, droneIdRaw: unknown): { id: string; drone: any } {
   const droneId = String(droneIdRaw ?? '').trim();
   const drones = regAny?.drones && typeof regAny.drones === 'object' ? regAny.drones : {};
@@ -349,11 +408,36 @@ function cleanOptionalString(raw: unknown): string {
   return String(raw ?? '').trim();
 }
 
-function buildChatTimelineMessages(regAny: any, opts: { droneId: string; chatName: string }): ChatTimelineMessage[] {
+function clampChatIdleTimeoutMs(raw: unknown): number {
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return CHAT_IDLE_DEFAULT_TIMEOUT_MS;
+  return Math.max(1000, Math.min(CHAT_IDLE_MAX_TIMEOUT_MS, Math.floor(value)));
+}
+
+function clampChatIdlePollIntervalMs(raw: unknown): number {
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return CHAT_IDLE_DEFAULT_POLL_INTERVAL_MS;
+  return Math.max(250, Math.min(5000, Math.floor(value)));
+}
+
+function clampChatIdleForMs(raw: unknown): number {
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return CHAT_IDLE_DEFAULT_IDLE_FOR_MS;
+  return Math.max(0, Math.min(10_000, Math.floor(value)));
+}
+
+function buildChatTimelineMessages(
+  regAny: any,
+  opts: { droneId: string; chatName: string },
+  options?: { requireChat?: boolean },
+): ChatTimelineMessage[] {
   const { id: droneId, drone } = droneEntryByAssistantId(regAny, opts.droneId);
   const chatName = normalizeChatNameForAssistant(opts.chatName);
   const chat = drone?.chats?.[chatName] ?? (chatName === 'default' ? drone?.chats?.default : null);
-  if (!chat) return [];
+  if (!chat) {
+    if (options?.requireChat) throw new Error(`unknown chat: ${droneId}/${chatName}`);
+    return [];
+  }
 
   const out: ChatTimelineMessage[] = [];
   const turns = Array.isArray(chat.turns) ? chat.turns : [];
@@ -419,6 +503,110 @@ function buildChatTimelineMessages(regAny: any, opts: { droneId: string; chatNam
     if (a.turnId && a.turnId === b.turnId && a.role !== b.role) return a.role === 'user' ? -1 : 1;
     return a.id.localeCompare(b.id);
   });
+}
+
+export function summarizeAssistantChatIdle(
+  regAny: any,
+  target: AssistantChatIdleTarget,
+  options?: { requireChat?: boolean },
+): AssistantChatIdleStatus {
+  const messages = buildChatTimelineMessages(regAny, target, options);
+  const activeUserMessages = messages.filter(
+    (message) => message.role === 'user' && (message.status === 'queued' || message.status === 'sending' || message.status === 'sent'),
+  ).length;
+  const queuedUserMessages = messages.filter((message) => message.role === 'user' && message.status === 'queued').length;
+  const failedUserMessages = messages.filter((message) => message.role === 'user' && message.status === 'failed').length;
+  const latest = messages[messages.length - 1] ?? null;
+  const reason: AssistantChatIdleStatus['reason'] =
+    activeUserMessages > 0
+      ? 'active_user_messages'
+      : !latest
+        ? 'no_messages'
+        : latest.role === 'agent'
+          ? 'latest_agent_message'
+          : latest.status === 'failed'
+            ? 'latest_user_failed'
+            : 'latest_user_message';
+  const idle = activeUserMessages === 0 && (reason === 'no_messages' || reason === 'latest_agent_message' || reason === 'latest_user_failed');
+  return {
+    droneId: target.droneId,
+    chatName: normalizeChatNameForAssistant(target.chatName),
+    idle,
+    reason,
+    activeUserMessages,
+    queuedUserMessages,
+    failedUserMessages,
+    latest: latest
+      ? {
+          id: latest.id,
+          role: latest.role,
+          status: latest.status,
+          at: latest.at,
+          text: latest.text,
+          ...(latest.turnId ? { turnId: latest.turnId } : {}),
+        }
+      : null,
+  };
+}
+
+export async function waitForAssistantChatIdle(opts: {
+  targets: AssistantChatIdleTarget[];
+  timeoutMs?: unknown;
+  pollIntervalMs?: unknown;
+  idleForMs?: unknown;
+  signal?: AbortSignal;
+}): Promise<AssistantChatIdleWaitResult> {
+  const targets = opts.targets
+    .map((target) => ({
+      droneId: String(target?.droneId ?? '').trim(),
+      chatName: normalizeChatNameForAssistant(target?.chatName),
+    }))
+    .filter((target) => target.droneId)
+    .slice(0, CHAT_IDLE_MAX_TARGETS);
+  if (targets.length === 0) throw new Error('missing chat targets');
+  const timeoutMs = clampChatIdleTimeoutMs(opts.timeoutMs);
+  const pollIntervalMs = clampChatIdlePollIntervalMs(opts.pollIntervalMs);
+  const idleForMs = clampChatIdleForMs(opts.idleForMs);
+  const startedAt = Date.now();
+  const deadline = startedAt + timeoutMs;
+  let idleSince: number | null = null;
+  let lastStatuses: AssistantChatIdleStatus[] = [];
+
+  while (true) {
+    throwIfAborted(opts.signal);
+    const now = Date.now();
+    const regAny: any = await loadRegistry();
+    lastStatuses = targets.map((target) => summarizeAssistantChatIdle(regAny, target, { requireChat: true }));
+    const allIdle = lastStatuses.every((status) => status.idle);
+    if (allIdle) {
+      idleSince ??= now;
+      if (now - idleSince >= idleForMs) {
+        return {
+          ok: true,
+          timedOut: false,
+          elapsedMs: now - startedAt,
+          timeoutMs,
+          idleForMs,
+          targets: lastStatuses,
+        };
+      }
+    } else {
+      idleSince = null;
+    }
+
+    if (now >= deadline) {
+      return {
+        ok: false,
+        timedOut: true,
+        elapsedMs: now - startedAt,
+        timeoutMs,
+        idleForMs,
+        targets: lastStatuses,
+      };
+    }
+    const idleRemainingMs = allIdle && idleSince != null ? Math.max(0, idleForMs - (now - idleSince)) : pollIntervalMs;
+    await sleep(Math.max(1, Math.min(pollIntervalMs, idleRemainingMs || pollIntervalMs, deadline - now)), opts.signal);
+  }
 }
 
 async function readChatMessagePage(opts: {
@@ -1305,6 +1493,58 @@ export class HubAssistantService {
         },
       },
       {
+        name: 'wait_for_agent_chats_idle',
+        label: 'Wait for agent chats to go idle',
+        description:
+          'Block until one or more drone chats stop processing queued or running user messages. A chat is idle when there are no queued/sending/sent user messages and the latest timeline item is either an agent message or a failed user message.',
+        parameters: Type.Object({
+          targets: Type.Array(
+            Type.Object({
+              droneId: Type.String({ description: 'Drone id or visible name.' }),
+              chatName: Type.Optional(Type.String({ description: 'Chat name. Defaults to default.' })),
+            }),
+            { minItems: 1, maxItems: CHAT_IDLE_MAX_TARGETS },
+          ),
+          timeoutMs: Type.Optional(Type.Number({ description: `Maximum wait time in milliseconds. Defaults to ${CHAT_IDLE_DEFAULT_TIMEOUT_MS}.` })),
+          pollIntervalMs: Type.Optional(Type.Number({ description: `Registry polling interval in milliseconds. Defaults to ${CHAT_IDLE_DEFAULT_POLL_INTERVAL_MS}.` })),
+          idleForMs: Type.Optional(Type.Number({ description: `Require all targets to remain idle for this long before returning. Defaults to ${CHAT_IDLE_DEFAULT_IDLE_FOR_MS}.` })),
+        }),
+        execute: async (_toolCallId: string, params: any, signal?: AbortSignal) => {
+          const rawTargets = Array.isArray(params?.targets) ? params.targets : [];
+          if (rawTargets.length === 0) throw new Error('missing targets');
+          const targets: AssistantChatIdleTarget[] = [];
+          const seen = new Set<string>();
+          for (const rawTarget of rawTargets.slice(0, CHAT_IDLE_MAX_TARGETS)) {
+            const droneId = await this.requireDroneInScope(rawTarget?.droneId, 'read', threadId);
+            const chatName = normalizeChatNameForAssistant(rawTarget?.chatName);
+            const key = `${droneId}\u0000${chatName}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            targets.push({ droneId, chatName });
+          }
+          if (targets.length === 0) throw new Error('missing targets');
+          const result = await waitForAssistantChatIdle({
+            targets,
+            timeoutMs: params?.timeoutMs,
+            pollIntervalMs: params?.pollIntervalMs,
+            idleForMs: params?.idleForMs,
+            signal,
+          });
+          const idleCount = result.targets.filter((target) => target.idle).length;
+          return {
+            content: [
+              {
+                type: 'text',
+                text: result.ok
+                  ? `All ${idleCount} target chat${idleCount === 1 ? '' : 's'} are idle after ${result.elapsedMs}ms.`
+                  : `Timed out after ${result.elapsedMs}ms waiting for ${result.targets.length - idleCount} of ${result.targets.length} target chat${result.targets.length === 1 ? '' : 's'} to go idle.`,
+              },
+            ],
+            details: result,
+          };
+        },
+      },
+      {
         name: 'create_drone',
         label: 'Create drone',
         description:
@@ -1555,6 +1795,7 @@ export class HubAssistantService {
       'Use list_drones before referring to specific drones unless the user already provided an exact drone id.',
       'Use get_chat_overview before reading chat details, then read_chat_messages in pages when you need conversation context.',
       'Chat timelines contain user messages and agent messages. Queued or pending user messages appear in the same timeline with a non-completed status.',
+      'When you send a drone chat message and need the result, call wait_for_agent_chats_idle on the target chat before reading the transcript again. This blocks server-side and avoids repeated LLM polling.',
       'Do not load more chat pages than needed. Start with the latest page.',
       'Creating drones, changing drone groups, and sending a user message to a drone are actions that require user approval; explain briefly what you intend to do.',
       'If one of those write tools returns successfully, the user already approved that action. Do not ask for the same approval again.',
