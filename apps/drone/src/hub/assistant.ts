@@ -7,6 +7,13 @@ import {
   resolveEffectiveProviderApiKeySettings,
   type LlmProviderId,
 } from './hub-settings';
+import {
+  deleteAssistantArtifactsForThread,
+  listAssistantArtifactFiles,
+  readAssistantArtifactFile,
+  runAssistantArtifactAction,
+  type AssistantArtifactActionInput,
+} from './assistant-artifacts';
 
 type AssistantThreadStatus = 'idle' | 'running' | 'waiting_for_approval' | 'error';
 type AssistantThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
@@ -230,6 +237,7 @@ const ASSISTANT_SYSTEM_PROMPT_DEFAULT = [
   'Use get_current_context when the user asks about the current, active, selected, or open drone/chat, or before acting on phrases like "this drone".',
   'Use list_drones before referring to specific drones unless the user already provided an exact drone id.',
   'Use get_chat_overview before reading chat details, then read_chat_messages in pages when you need conversation context.',
+  'Use assistant_files to maintain private, thread-scoped Markdown notes when tracking work, decisions, plans, questions, or handoff details. These files are for the user-facing Artifacts UI and are not visible to drones.',
   'Chat timelines contain user messages and agent messages. Queued or pending user messages appear in the same timeline with a non-completed status.',
   'When you send a drone chat message and need the result, call wait_for_agent_chats_idle on the target chat before reading the transcript again. This blocks server-side and avoids repeated LLM polling.',
   'Do not load more chat pages than needed. Start with the latest page.',
@@ -1128,6 +1136,7 @@ export class HubAssistantService {
   async deleteThread(threadId: string): Promise<AssistantSnapshot> {
     await this.ensureLoaded();
     if (this.activeThreadRunId === threadId) this.activeAgent?.abort?.();
+    await deleteAssistantArtifactsForThread(threadId);
     this.threads = this.threads.filter((thread) => thread.id !== threadId);
     if (this.threads.length === 0) {
       this.threads = [this.makeThread()];
@@ -1143,6 +1152,24 @@ export class HubAssistantService {
     await this.ensureLoaded();
     if (this.activeThreadRunId === threadId) this.activeAgent?.abort?.();
     return await this.snapshot();
+  }
+
+  async listArtifactFiles(threadId: string) {
+    await this.ensureLoaded();
+    this.requireThread(threadId);
+    return await listAssistantArtifactFiles(threadId);
+  }
+
+  async readArtifactFile(threadId: string, artifactPath: unknown) {
+    await this.ensureLoaded();
+    this.requireThread(threadId);
+    return await readAssistantArtifactFile(threadId, artifactPath);
+  }
+
+  async runArtifactAction(threadId: string, input: AssistantArtifactActionInput) {
+    await this.ensureLoaded();
+    this.requireThread(threadId);
+    return await runAssistantArtifactAction(threadId, input);
   }
 
   async cancelQueuedPrompt(threadId: string, queuedPromptId: string): Promise<AssistantSnapshot> {
@@ -1494,6 +1521,43 @@ export class HubAssistantService {
           return {
             content: [{ type: 'text', text: JSON.stringify(context, null, 2) }],
             details: context,
+          };
+        },
+      },
+      {
+        name: 'assistant_files',
+        label: 'Assistant files',
+        description:
+          'Maintain private Markdown or text artifacts for this assistant thread. Drones cannot read or write these files. Use action=list/read/write/append/patch/delete. Patch applies exact oldText to newText replacements and can include baseRevision from read.',
+        parameters: Type.Object({
+          action: Type.String({ description: 'One of: list, read, write, append, patch, delete.' }),
+          path: Type.Optional(Type.String({ description: 'Thread-local artifact path, such as status.md or notes/architecture.md.' })),
+          content: Type.Optional(Type.String({ description: 'File content for write or text to append for append.' })),
+          baseRevision: Type.Optional(Type.String({ description: 'Optional revision from read/list. When provided, stale writes or patches are rejected.' })),
+          patches: Type.Optional(
+            Type.Array(
+              Type.Object({
+                oldText: Type.String({ description: 'Exact text to replace. Must occur exactly once.' }),
+                newText: Type.String({ description: 'Replacement text.' }),
+              }),
+            ),
+          ),
+        }),
+        execute: async (_toolCallId: string, params: any) => {
+          const result = await runAssistantArtifactAction(threadId, params ?? {});
+          const action = String(params?.action ?? '').trim().toLowerCase();
+          const file = (result as any)?.file;
+          const files = Array.isArray((result as any)?.files) ? (result as any).files : null;
+          const summary = files
+            ? `${files.length} assistant artifact file${files.length === 1 ? '' : 's'}.`
+            : file
+              ? `${action || 'Updated'} ${file.path} (${file.size} bytes, revision ${file.revision}).`
+              : action === 'delete'
+                ? `${(result as any)?.deleted ? 'Deleted' : 'No existing file at'} ${(result as any)?.path ?? params?.path ?? ''}.`
+                : 'Assistant artifact action completed.';
+          return {
+            content: [{ type: 'text', text: summary }],
+            details: result,
           };
         },
       },

@@ -10239,6 +10239,27 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             return;
           }
 
+          if (assistantParts.length === 5 && assistantParts[4] === 'artifacts' && method === 'GET') {
+            try {
+              json(res, 200, { ok: true, threadId, files: await assistantService.listArtifactFiles(threadId) });
+            } catch (e: any) {
+              const statusCode = Number(e?.statusCode ?? 0) || (/unknown assistant thread/i.test(String(e?.message ?? e)) ? 404 : 400);
+              json(res, statusCode, { ok: false, error: e?.message ?? String(e) });
+            }
+            return;
+          }
+
+          if (assistantParts.length === 6 && assistantParts[4] === 'artifacts' && assistantParts[5] === 'file' && method === 'GET') {
+            try {
+              const artifactPath = u.searchParams.get('path') ?? '';
+              json(res, 200, { ok: true, threadId, file: await assistantService.readArtifactFile(threadId, artifactPath) });
+            } catch (e: any) {
+              const statusCode = Number(e?.statusCode ?? 0) || (/unknown assistant thread/i.test(String(e?.message ?? e)) ? 404 : 400);
+              json(res, statusCode, { ok: false, error: e?.message ?? String(e) });
+            }
+            return;
+          }
+
           if (assistantParts.length === 6 && assistantParts[4] === 'queued' && method === 'DELETE') {
             const queuedPromptId = decodeURIComponent(assistantParts[5] ?? '');
             try {
