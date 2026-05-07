@@ -630,7 +630,6 @@ export function ChatInput({
               onPaste={(e) => {
                 const files = imageFilesFromClipboardData(e.clipboardData);
                 if (attachmentsOn && !attachmentControlsLocked && files.length > 0) {
-                  e.preventDefault();
                   addFiles(files);
                 }
                 const pastedText = String(e.clipboardData?.getData('text/plain') ?? '');
