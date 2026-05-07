@@ -3,12 +3,14 @@ import { useDndMonitor, useDroppable } from '@dnd-kit/core';
 import { requestJson } from '../http';
 import { MarkdownMessage } from '../chat/MarkdownMessage';
 import { parseDroneHubDragData } from '../app/drone-hub-dnd';
-import { IconChatThread, IconPlus, IconSidebarCollapse, IconSidebarExpand, IconTrash } from '../app/icons';
+import { IconChatThread, IconDrone, IconPlus, IconSidebarCollapse, IconSidebarExpand, IconSpinner, IconTrash } from '../app/icons';
 import { useDroneHubUiStore } from '../app/use-drone-hub-ui-store';
 
 const ASSISTANT_AUTO_APPROVE_STORAGE_KEY = 'droneHub.assistant.autoApprove';
 const ASSISTANT_SCOPE_STORAGE_KEY = 'droneHub.assistant.scope';
 const ASSISTANT_THREAD_SIDEBAR_OPEN_STORAGE_KEY = 'droneHub.assistant.threadSidebarOpen';
+const TOOL_ROW_MESSAGE_PREVIEW_MAX = 72;
+const TOOL_ROW_TARGET_PREVIEW_MAX = 3;
 
 type AssistantThreadStatus = 'idle' | 'running' | 'waiting_for_approval' | 'error';
 
@@ -115,6 +117,8 @@ function assistantScopeSyncKey(readMode: AssistantScopeMode, writeMode: Assistan
 }
 
 type AssistantToolCall = { id: string; name: string; args: any };
+type AssistantDroneNameMap = Record<string, string>;
+type AssistantWaitTargetLabel = { key: string; droneLabel: string; chatName: string };
 
 type AssistantRenderItem =
   | { type: 'message'; key: string; message: AssistantMessage; showToolCalls?: boolean }
@@ -165,6 +169,86 @@ function toolLabel(name: string | undefined): string {
   const key = String(name ?? '').trim();
   if (!key) return 'Tool';
   return TOOL_LABELS[key] ?? key.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function normalizeAssistantWaitTargets(args: any, droneNameById: AssistantDroneNameMap): AssistantWaitTargetLabel[] {
+  const rawTargets = Array.isArray(args?.targets) ? args.targets : [];
+  const seen = new Set<string>();
+  const targets: AssistantWaitTargetLabel[] = [];
+  for (const rawTarget of rawTargets) {
+    const droneId = String(rawTarget?.droneId ?? rawTarget?.id ?? rawTarget?.drone ?? '').trim();
+    const explicitName = String(rawTarget?.droneName ?? rawTarget?.name ?? rawTarget?.displayName ?? '').trim();
+    const chatName = String(rawTarget?.chatName ?? rawTarget?.chat ?? 'default').trim() || 'default';
+    const key = `${droneId || explicitName}\u0000${chatName}`;
+    if ((!droneId && !explicitName) || seen.has(key)) continue;
+    seen.add(key);
+    targets.push({
+      key,
+      droneLabel: explicitName || droneNameById[droneId] || droneId,
+      chatName,
+    });
+  }
+  return targets;
+}
+
+function compactPreview(raw: unknown, maxLength = TOOL_ROW_MESSAGE_PREVIEW_MAX): string {
+  const text = String(raw ?? '').replace(/\s+/g, ' ').trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function summarizeWaitTargets(targets: AssistantWaitTargetLabel[]): string {
+  if (targets.length === 0) return '';
+  const labels = targets.map((target) => target.droneLabel).filter(Boolean);
+  const visible = labels.slice(0, TOOL_ROW_TARGET_PREVIEW_MAX);
+  const remainder = labels.length - visible.length;
+  return remainder > 0 ? `${visible.join(', ')} +${remainder}` : visible.join(', ');
+}
+
+function messageDroneSummary(args: any, droneNameById: AssistantDroneNameMap): string {
+  const resolved = args?.resolved ?? args ?? {};
+  const droneId = String(resolved?.droneId ?? resolved?.id ?? args?.droneId ?? '').trim();
+  const droneLabel = String(resolved?.droneName ?? resolved?.name ?? '').trim() || droneNameById[droneId] || droneId;
+  const message = compactPreview(resolved?.message ?? resolved?.prompt ?? args?.message ?? args?.prompt);
+  if (droneLabel && message) return `${droneLabel}: ${message}`;
+  return droneLabel || message;
+}
+
+function toolActivityTitle(call: AssistantToolCall | undefined, result: AssistantMessage | undefined, droneNameById: AssistantDroneNameMap): string {
+  const baseTitle = toolLabel(call?.name || result?.toolName);
+  if (!call) return baseTitle;
+  if (call.name === 'wait_for_agent_chats_idle') {
+    const summary = summarizeWaitTargets(normalizeAssistantWaitTargets(call.args, droneNameById));
+    return summary ? `${baseTitle}: ${summary}` : baseTitle;
+  }
+  if (call.name === 'message_drone') {
+    const summary = messageDroneSummary(call.args, droneNameById);
+    return summary ? `${baseTitle}: ${summary}` : baseTitle;
+  }
+  return baseTitle;
+}
+
+function toolDroneLookupKey(items: AssistantRenderItem[]): string {
+  const keys: string[] = [];
+  for (const item of items) {
+    if (item.type !== 'tool' || !item.call) continue;
+    if (item.call.name === 'wait_for_agent_chats_idle') {
+      const targets = Array.isArray(item.call.args?.targets) ? item.call.args.targets : [];
+      for (const target of targets) {
+        const droneId = String(target?.droneId ?? target?.id ?? target?.drone ?? '').trim();
+        if (!droneId) continue;
+        const chatName = String(target?.chatName ?? target?.chat ?? 'default').trim() || 'default';
+        keys.push(`${droneId}:${chatName}`);
+      }
+      continue;
+    }
+    if (item.call.name === 'message_drone') {
+      const droneId = String(item.call.args?.resolved?.droneId ?? item.call.args?.droneId ?? '').trim();
+      if (!droneId) continue;
+      keys.push(droneId);
+    }
+  }
+  return keys.join('|');
 }
 
 function renderItemsFromMessages(messages: AssistantMessage[]): AssistantRenderItem[] {
@@ -295,8 +379,64 @@ function AssistantThinkingRow() {
   );
 }
 
-function ToolActivityRow({ call, result }: { call?: AssistantToolCall; result?: AssistantMessage }) {
-  const title = toolLabel(call?.name || result?.toolName);
+function WaitForChatsIdleActivityRow({ call, droneNameById }: { call: AssistantToolCall; droneNameById: AssistantDroneNameMap }) {
+  const targets = normalizeAssistantWaitTargets(call.args, droneNameById);
+  const targetSummary = summarizeWaitTargets(targets);
+  return (
+    <div className="mx-3 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.025)]">
+      <div className="flex items-center gap-2 border-b border-[var(--border-subtle)] px-2.5 py-2">
+        <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded border border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]">
+          <IconSpinner className="h-3.5 w-3.5" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+            Waiting for chats idle
+          </div>
+          <div className="mt-0.5 truncate text-[12px] text-[var(--fg-secondary)]">
+            {targetSummary || 'Resolving target drones'}
+          </div>
+        </div>
+      </div>
+      <div className="grid gap-1.5 p-2">
+        {targets.length > 0 ? (
+          targets.map((target) => (
+            <div
+              key={target.key}
+              className="flex min-h-8 min-w-0 items-center gap-2 rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.12)] px-2"
+            >
+              <IconDrone className="h-3.5 w-3.5 flex-shrink-0 text-[var(--muted)]" />
+              <div className="min-w-0 flex-1 truncate text-[12px] font-medium text-[var(--fg-secondary)]">{target.droneLabel}</div>
+              {target.chatName && target.chatName !== 'default' ? (
+                <div className="max-w-[42%] truncate rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.03)] px-1.5 py-0.5 text-[10px] text-[var(--muted)]">
+                  {target.chatName}
+                </div>
+              ) : null}
+            </div>
+          ))
+        ) : (
+          <div className="rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.12)] px-2 py-2 text-[11px] text-[var(--muted-dim)]">
+            Waiting for result...
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ToolActivityRow({
+  call,
+  result,
+  droneNameById = {},
+}: {
+  call?: AssistantToolCall;
+  result?: AssistantMessage;
+  droneNameById?: AssistantDroneNameMap;
+}) {
+  if (call?.name === 'wait_for_agent_chats_idle' && !result) {
+    return <WaitForChatsIdleActivityRow call={call} droneNameById={droneNameById} />;
+  }
+
+  const title = toolActivityTitle(call, result, droneNameById);
   const resultText = result ? messageText(result) : '';
   return (
     <div className="mx-3">
@@ -721,6 +861,7 @@ export function AssistantDock() {
   const [scopeWriteMode, setScopeWriteMode] = React.useState<AssistantScopeMode>(() => initialScope.writeMode);
   const [scopeDrones, setScopeDrones] = React.useState<AssistantScopeDrone[]>(() => initialScope.drones);
   const [scopeSyncReady, setScopeSyncReady] = React.useState(false);
+  const [droneNameById, setDroneNameById] = React.useState<AssistantDroneNameMap>({});
   const [approvalBusyId, setApprovalBusyId] = React.useState<string | null>(null);
   const [queuedCancelBusyId, setQueuedCancelBusyId] = React.useState<string | null>(null);
   const selectedDrone = useDroneHubUiStore((state) => state.selectedDrone);
@@ -763,6 +904,7 @@ export function AssistantDock() {
     return items;
   }, [activeThread?.queuedPrompts, visibleMessages]);
   const showThinking = running && activePendingApprovals.length === 0 && !messageText(snapshot?.streamingMessage ?? { role: 'assistant' }).trim();
+  const toolDroneKey = React.useMemo(() => toolDroneLookupKey(visibleItems), [visibleItems]);
 
   const refresh = React.useCallback(async () => {
     setLoading(true);
@@ -779,6 +921,28 @@ export function AssistantDock() {
   React.useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  React.useEffect(() => {
+    if (!toolDroneKey) return;
+    let cancelled = false;
+    void requestJson<{ ok: true; drones?: Array<{ id?: string; name?: string }> }>('/api/drones')
+      .then((data) => {
+        if (cancelled) return;
+        const next: AssistantDroneNameMap = {};
+        for (const drone of Array.isArray(data?.drones) ? data.drones : []) {
+          const id = String(drone?.id ?? '').trim();
+          const name = String(drone?.name ?? '').trim();
+          if (id && name) next[id] = name;
+        }
+        setDroneNameById(next);
+      })
+      .catch(() => {
+        // Tool rows can still show the tool-provided target labels.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [toolDroneKey]);
 
   React.useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -1210,7 +1374,7 @@ export function AssistantDock() {
             item.type === 'message' ? (
               <AssistantMessageRow key={item.key} message={item.message} showToolCalls={item.showToolCalls} />
             ) : item.type === 'tool' ? (
-              <ToolActivityRow key={item.key} call={item.call} result={item.result} />
+              <ToolActivityRow key={item.key} call={item.call} result={item.result} droneNameById={droneNameById} />
             ) : (
               <QueuedPromptRow
                 key={item.key}
