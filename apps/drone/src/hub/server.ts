@@ -175,6 +175,7 @@ import {
 import {
   buildChatAttachmentsDirectory,
   buildChatImageAttachmentRefs,
+  codexImageAttachmentFlags,
   copyChatAttachmentsToContainer,
   normalizeChatImageAttachments,
   promptWithImageAttachments,
@@ -4158,6 +4159,7 @@ async function sendPromptToChat(opts: {
             storageRoot: attachmentsStorageRoot,
           });
     const effectivePrompt = promptWithImageAttachments(opts.prompt, attachmentsForPrompt);
+    const codexImageArgs = codexImageAttachmentFlags(attachmentsForPrompt);
     const promptWithHistory =
       agent.kind === 'builtin'
         ? maybeBootstrapPromptFromTranscript({
@@ -4211,7 +4213,7 @@ async function sendPromptToChat(opts: {
           ...managedEnvLines,
           `mkdir -p ${bashQuote(cwd)} 2>/dev/null || true`,
           cdCommand,
-          `codex --ask-for-approval never exec${modelArg} --skip-git-repo-check --sandbox danger-full-access --json --color never ${bashQuote(promptWithHistory)}`,
+          `codex --ask-for-approval never exec${modelArg} --skip-git-repo-check --sandbox danger-full-access --json --color never${codexImageArgs} ${bashQuote(promptWithHistory)}`,
         ].join('\n');
         await enqueueTranscriptPrompt({ id: opts.id, drone: d, waitForDaemonMs: opts.waitForDaemonMs, kind: 'codex', script });
         return { ok: true as const, agent, mode: 'transcript' as const, chat: normalizedChat, codexThreadId: null, turnOk: true as const };
@@ -4223,7 +4225,7 @@ async function sendPromptToChat(opts: {
         ...managedEnvLines,
         `mkdir -p ${bashQuote(cwd)} 2>/dev/null || true`,
         cdCommand,
-        `codex --ask-for-approval never exec${modelArg} --skip-git-repo-check --sandbox danger-full-access --json --color never resume ${bashQuote(existingThreadId)} ${bashQuote(promptWithHistory)}`,
+        `codex --ask-for-approval never exec${modelArg} --skip-git-repo-check --sandbox danger-full-access --json --color never resume${codexImageArgs} ${bashQuote(existingThreadId)} ${bashQuote(promptWithHistory)}`,
       ].join('\n');
       await enqueueTranscriptPrompt({ id: opts.id, drone: d, waitForDaemonMs: opts.waitForDaemonMs, kind: 'codex', script });
       return {

@@ -201,6 +201,15 @@ export function promptWithImageAttachments(
   return prompt ? `${prompt}\n\n${block}` : block;
 }
 
+export function codexImageAttachmentFlags(files: Array<{ mime: string; path: string }>): string {
+  const paths = (Array.isArray(files) ? files : [])
+    .filter((item) => isImageAttachmentMime(item?.mime))
+    .map((item) => normalizeContainerPath(String(item?.path ?? '').trim()))
+    .filter((item) => item && item !== '/');
+  if (paths.length === 0) return '';
+  return paths.map((filePath) => ` --image ${bashQuote(filePath)}`).join('');
+}
+
 export function buildChatAttachmentsDirectory(opts: {
   cwd: string;
   chatName: string;

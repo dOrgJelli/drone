@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   buildChatAttachmentsDirectory,
   buildChatImageAttachmentRefs,
+  codexImageAttachmentFlags,
   normalizeChatImageAttachments,
   promptWithImageAttachments,
   type ChatImageAttachment,
@@ -89,6 +90,23 @@ describe('promptWithImageAttachments', () => {
     expect(text).toContain('Text attachment:');
     expect(text).toContain('Read the text attachment file');
     expect(text).toContain('attachments/default/prompt-123/pasted-text.txt');
+  });
+});
+
+describe('codexImageAttachmentFlags', () => {
+  test('builds Codex image flags for image attachments only', () => {
+    const flags = codexImageAttachmentFlags([
+      {
+        mime: 'image/png',
+        path: '/work/repo/.drone-hub/attachments/default/prompt-123/screenshot one.png',
+      },
+      {
+        mime: 'text/plain',
+        path: '/work/repo/.drone-hub/attachments/default/prompt-123/pasted-text.txt',
+      },
+    ]);
+
+    expect(flags).toBe(" --image '/work/repo/.drone-hub/attachments/default/prompt-123/screenshot one.png'");
   });
 });
 
