@@ -20,6 +20,7 @@ type LlmSettingsLike =
       provider?: { selected?: string };
       openai?: { hasKey?: boolean };
       gemini?: { hasKey?: boolean };
+      codex?: { hasKey?: boolean };
     }
   | null
   | undefined;
