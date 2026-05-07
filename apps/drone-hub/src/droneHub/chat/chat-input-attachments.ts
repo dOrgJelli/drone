@@ -36,6 +36,34 @@ export function isLikelyImageFile(f: File): boolean {
   return /\.(png|jpe?g|gif|webp|bmp|svg|avif|tiff?)$/.test(name);
 }
 
+function fileIdentity(file: File): string {
+  return [
+    String((file as any)?.name ?? ''),
+    String((file as any)?.type ?? ''),
+    String((file as any)?.size ?? ''),
+    String((file as any)?.lastModified ?? ''),
+  ].join('\0');
+}
+
+export function imageFilesFromClipboardData(data: Pick<DataTransfer, 'files' | 'items'> | null | undefined): File[] {
+  const out: File[] = [];
+  const seen = new Set<string>();
+  const add = (file: File | null | undefined) => {
+    if (!file || !isLikelyImageFile(file)) return;
+    const key = fileIdentity(file);
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(file);
+  };
+
+  for (const file of Array.from(data?.files ?? [])) add(file);
+  for (const item of Array.from(data?.items ?? [])) {
+    if (!item || item.kind !== 'file') continue;
+    add(item.getAsFile());
+  }
+  return out;
+}
+
 export function formatBytes(n: number): string {
   const num = Number(n);
   if (!Number.isFinite(num) || num <= 0) return '0 B';
