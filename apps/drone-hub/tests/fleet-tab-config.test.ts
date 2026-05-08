@@ -7,8 +7,9 @@ describe('fleet tab config', () => {
     expect(RIGHT_PANEL_TAB_LABELS.fleet).toBe('Fleet');
   });
 
-  test('exposes assistant artifacts in the right panel tab set', () => {
-    expect(RIGHT_PANEL_TABS).toContain('artifacts');
-    expect(RIGHT_PANEL_TAB_LABELS.artifacts).toBe('Artifacts');
+  test('keeps assistant files inside the assistant tab', () => {
+    expect(RIGHT_PANEL_TABS).toContain('assistant');
+    expect(RIGHT_PANEL_TABS).not.toContain('artifacts');
+    expect(RIGHT_PANEL_TAB_LABELS.assistant).toBe('Assistant');
   });
 });

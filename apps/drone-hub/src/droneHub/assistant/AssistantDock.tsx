@@ -6,11 +6,13 @@ import { parseDroneHubDragData } from '../app/drone-hub-dnd';
 import { IconChatThread, IconPencil, IconPlus, IconSidebarCollapse, IconSidebarExpand, IconTrash } from '../app/icons';
 import { useDroneHubUiStore } from '../app/use-drone-hub-ui-store';
 import { UiMenuSelect, type UiMenuSelectEntry } from '../../ui/menuSelect';
+import { IconFile, iconForFilePath } from '../icons';
 
 const ASSISTANT_AUTO_APPROVE_STORAGE_KEY = 'droneHub.assistant.autoApprove';
 const ASSISTANT_SCOPE_STORAGE_KEY = 'droneHub.assistant.scope';
 const ASSISTANT_THREAD_SIDEBAR_OPEN_STORAGE_KEY = 'droneHub.assistant.threadSidebarOpen';
 const ASSISTANT_PROMPT_DELIVERY_MODE_STORAGE_KEY = 'droneHub.assistant.promptDeliveryMode';
+const ASSISTANT_FILES_OPEN_STORAGE_KEY = 'droneHub.assistant.filesOpen';
 const TOOL_ROW_MESSAGE_PREVIEW_MAX = 72;
 const TOOL_ROW_TARGET_PREVIEW_MAX = 3;
 
@@ -106,6 +108,17 @@ type AssistantSystemPromptSettings = {
   };
 };
 
+type AssistantArtifactSummary = {
+  path: string;
+  size: number;
+  updatedAt: string;
+  revision: string;
+};
+
+type AssistantArtifactFile = AssistantArtifactSummary & {
+  content: string;
+};
+
 type AssistantScopeDrone = { id: string; name: string };
 type AssistantScopeMode = 'all' | 'selected';
 
@@ -128,6 +141,11 @@ function readInitialThreadSidebarOpen(): boolean {
 function readInitialPromptDeliveryMode(): AssistantPromptDeliveryMode {
   if (typeof window === 'undefined') return 'queue';
   return window.localStorage.getItem(ASSISTANT_PROMPT_DELIVERY_MODE_STORAGE_KEY) === 'asap' ? 'asap' : 'queue';
+}
+
+function readInitialFilesOpen(): boolean {
+  if (typeof window === 'undefined') return false;
+  return window.localStorage.getItem(ASSISTANT_FILES_OPEN_STORAGE_KEY) === '1';
 }
 
 function readInitialScope(): { readMode: AssistantScopeMode; writeMode: AssistantScopeMode; drones: AssistantScopeDrone[] } {
@@ -350,6 +368,25 @@ function formatUpdatedAt(raw: string): string {
   if (delta < 60 * 60_000) return `${Math.max(1, Math.floor(delta / 60_000))}m`;
   if (delta < 24 * 60 * 60_000) return `${Math.max(1, Math.floor(delta / (60 * 60_000)))}h`;
   return new Date(ms).toLocaleDateString();
+}
+
+function formatArtifactSize(bytesRaw: number): string {
+  const bytes = Number(bytesRaw);
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  if (bytes < 1024) return `${Math.floor(bytes)} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function fileNameFromPath(pathRaw: string): string {
+  const path = String(pathRaw ?? '').trim();
+  return path.split('/').filter(Boolean).pop() || path || 'file';
+}
+
+function selectDefaultArtifactPath(files: AssistantArtifactSummary[]): string | null {
+  if (files.length === 0) return null;
+  const preferred = files.find((file) => file.path === 'status.md') ?? files.find((file) => file.path.endsWith('/status.md'));
+  return preferred?.path ?? files[0]?.path ?? null;
 }
 
 function modelSelectionKey(selection: Pick<AssistantRunModel, 'provider' | 'model' | 'thinkingLevel'>): string {
@@ -910,6 +947,133 @@ function ApprovalCard({
   );
 }
 
+function AssistantThreadFilesView({
+  threadId,
+  files,
+  selectedPath,
+  selectedFile,
+  loading,
+  error,
+  onSelectPath,
+  onRefresh,
+  onClose,
+}: {
+  threadId: string;
+  files: AssistantArtifactSummary[];
+  selectedPath: string | null;
+  selectedFile: AssistantArtifactFile | null;
+  loading: boolean;
+  error: string | null;
+  onSelectPath: (path: string) => void;
+  onRefresh: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col bg-[rgba(0,0,0,.08)]">
+      <div className="flex h-10 flex-shrink-0 items-center justify-between gap-3 border-b border-[var(--border)] px-3">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <IconFile className="h-4 w-4 flex-shrink-0 text-[var(--muted)]" />
+          <div className="min-w-0">
+            <div className="min-w-0 truncate text-[12px] font-semibold text-[var(--fg-secondary)]">Thread files</div>
+            <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] text-[var(--muted-dim)]">
+              <span>{files.length} file{files.length === 1 ? '' : 's'}</span>
+              <span aria-hidden="true">·</span>
+              <span className="inline-flex items-center gap-1">
+                <span className="h-1.5 w-1.5 rounded-full bg-[var(--green)]" aria-hidden="true" />
+                Live refresh
+              </span>
+            </div>
+          </div>
+        </div>
+        <div className="flex flex-shrink-0 items-center gap-1.5">
+          <button
+            type="button"
+            onClick={onRefresh}
+            disabled={!threadId || loading}
+            className="h-7 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)] hover:text-[var(--fg-secondary)] disabled:opacity-45"
+            style={{ fontFamily: 'var(--display)' }}
+          >
+            {loading ? 'Loading' : 'Refresh'}
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="h-7 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)] hover:text-[var(--fg-secondary)]"
+            style={{ fontFamily: 'var(--display)' }}
+          >
+            Chat
+          </button>
+        </div>
+      </div>
+      {error ? (
+        <div className="mx-3 mt-3 rounded border border-[rgba(255,90,90,.35)] bg-[rgba(255,90,90,.08)] px-2.5 py-2 text-[11px] text-[var(--red)]">
+          {error}
+        </div>
+      ) : null}
+      <div className="flex min-h-0 flex-1">
+        <aside className="w-[190px] flex-shrink-0 overflow-y-auto border-r border-[var(--border-subtle)] p-2">
+          {files.length === 0 ? (
+            <div className="px-2 py-3 text-[11px] text-[var(--muted-dim)]">
+              {loading ? 'Loading files...' : 'No thread files.'}
+            </div>
+          ) : (
+            <div className="space-y-1">
+              {files.map((file) => {
+                const Icon = iconForFilePath(file.path) ?? IconFile;
+                const selected = file.path === selectedPath;
+                return (
+                  <button
+                    key={file.path}
+                    type="button"
+                    onClick={() => onSelectPath(file.path)}
+                    title={file.path}
+                    className={`w-full min-w-0 rounded border px-2 py-1.5 text-left transition-colors ${
+                      selected
+                        ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--fg)]'
+                        : 'border-transparent text-[var(--muted)] hover:border-[var(--border-subtle)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]'
+                    }`}
+                  >
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <Icon className="h-3.5 w-3.5 flex-shrink-0" />
+                      <span className="min-w-0 truncate text-[12px] font-medium">{fileNameFromPath(file.path)}</span>
+                    </div>
+                    <div className="mt-1 truncate text-[10px] text-[var(--muted-dim)]">
+                      {formatUpdatedAt(file.updatedAt)} · {formatArtifactSize(file.size)}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </aside>
+        <main className="min-w-0 flex-1 overflow-hidden">
+          {selectedFile ? (
+            <div className="flex h-full min-h-0 flex-col">
+              <div className="flex-shrink-0 border-b border-[var(--border-subtle)] px-4 py-2">
+                <div className="truncate text-[13px] font-medium text-[var(--fg-secondary)]">{selectedFile.path}</div>
+                <div className="mt-0.5 truncate text-[11px] text-[var(--muted-dim)]">
+                  {formatArtifactSize(selectedFile.size)} · {formatUpdatedAt(selectedFile.updatedAt)} · {selectedFile.revision}
+                </div>
+              </div>
+              <div className="min-h-0 flex-1 overflow-auto px-5 py-4">
+                {selectedFile.content.trim() ? (
+                  <MarkdownMessage text={selectedFile.content} className="dh-markdown text-[13px]" />
+                ) : (
+                  <div className="text-[12px] text-[var(--muted-dim)]">Empty file</div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="flex h-full items-center justify-center px-4 text-center text-[12px] text-[var(--muted-dim)]">
+              {loading ? 'Loading selected file...' : 'No file selected'}
+            </div>
+          )}
+        </main>
+      </div>
+    </div>
+  );
+}
+
 function AssistantThreadSidebar({
   threads,
   activeThreadId,
@@ -1185,6 +1349,12 @@ export function AssistantDock() {
   const [draft, setDraft] = React.useState('');
   const [threadSidebarOpen, setThreadSidebarOpen] = React.useState(readInitialThreadSidebarOpen);
   const [promptDeliveryMode, setPromptDeliveryMode] = React.useState<AssistantPromptDeliveryMode>(readInitialPromptDeliveryMode);
+  const [filesOpen, setFilesOpen] = React.useState(readInitialFilesOpen);
+  const [artifactFiles, setArtifactFiles] = React.useState<AssistantArtifactSummary[]>([]);
+  const [selectedArtifactPath, setSelectedArtifactPath] = React.useState<string | null>(null);
+  const [selectedArtifactFile, setSelectedArtifactFile] = React.useState<AssistantArtifactFile | null>(null);
+  const [artifactsLoading, setArtifactsLoading] = React.useState(false);
+  const [artifactsError, setArtifactsError] = React.useState<string | null>(null);
   const [autoApprove, setAutoApprove] = React.useState(readInitialAutoApprove);
   const initialScope = React.useMemo(readInitialScope, []);
   const [scopeReadMode, setScopeReadMode] = React.useState<AssistantScopeMode>(() => initialScope.readMode);
@@ -1212,6 +1382,7 @@ export function AssistantDock() {
   const inputRef = React.useRef<HTMLTextAreaElement | null>(null);
   const refocusInputWhenIdleRef = React.useRef(false);
   const autoApprovingIdsRef = React.useRef<Set<string>>(new Set());
+  const activeThreadIdRef = React.useRef('');
   const lastSyncedScopeKeyRef = React.useRef('');
   const updateThreadRequestRef = React.useRef(0);
   const { isOver: scopeDropIsOver, setNodeRef: setScopeDropNodeRef } = useDroppable({
@@ -1223,6 +1394,8 @@ export function AssistantDock() {
     if (!snapshot) return null;
     return snapshot.threads.find((thread) => thread.id === snapshot.activeThreadId) ?? snapshot.threads[0] ?? null;
   }, [snapshot]);
+  const activeThreadId = activeThread?.id ?? '';
+  activeThreadIdRef.current = activeThreadId;
   const activeAccessScope: AssistantAccessScope | null = activeThread?.accessScope ?? snapshot?.accessScope ?? null;
   const activeAccessScopeDroneIdsKey = activeAccessScope?.droneIds?.join('\u0000') ?? '';
   const activePendingApprovals = React.useMemo(
@@ -1682,6 +1855,94 @@ export function AssistantDock() {
   const activeRunningModelLabel = activeRunningModel ? modelSelectionLabel(activeRunningModel, modelOptions) : '';
   const selectedScopeDisabled = scopeDrones.length === 0;
 
+  const loadArtifactFiles = React.useCallback(async (options: { silent?: boolean } = {}) => {
+    const threadId = activeThreadId;
+    if (!threadId) {
+      setArtifactFiles([]);
+      setSelectedArtifactPath(null);
+      setSelectedArtifactFile(null);
+      return;
+    }
+    if (!options.silent) setArtifactsLoading(true);
+    setArtifactsError(null);
+    try {
+      const data = await requestJson<{ ok: true; threadId: string; files: AssistantArtifactSummary[] }>(
+        `/api/assistant/threads/${encodeURIComponent(threadId)}/artifacts`,
+      );
+      if (activeThreadIdRef.current !== threadId) return;
+      setArtifactFiles(Array.isArray(data.files) ? data.files : []);
+    } catch (err: any) {
+      if (activeThreadIdRef.current !== threadId) return;
+      setArtifactsError(err?.message ?? String(err));
+    } finally {
+      if (!options.silent && activeThreadIdRef.current === threadId) setArtifactsLoading(false);
+    }
+  }, [activeThreadId]);
+
+  const loadSelectedArtifactFile = React.useCallback(async (options: { silent?: boolean } = {}) => {
+    const threadId = activeThreadId;
+    if (!threadId || !selectedArtifactPath) {
+      setSelectedArtifactFile(null);
+      return;
+    }
+    if (!options.silent) setArtifactsLoading(true);
+    setArtifactsError(null);
+    try {
+      const data = await requestJson<{ ok: true; threadId: string; file: AssistantArtifactFile }>(
+        `/api/assistant/threads/${encodeURIComponent(threadId)}/artifacts/file?path=${encodeURIComponent(selectedArtifactPath)}`,
+      );
+      if (activeThreadIdRef.current !== threadId) return;
+      setSelectedArtifactFile(data.file ?? null);
+    } catch (err: any) {
+      if (activeThreadIdRef.current !== threadId) return;
+      setSelectedArtifactFile(null);
+      setArtifactsError(err?.message ?? String(err));
+    } finally {
+      if (!options.silent && activeThreadIdRef.current === threadId) setArtifactsLoading(false);
+    }
+  }, [activeThreadId, selectedArtifactPath]);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(ASSISTANT_FILES_OPEN_STORAGE_KEY, filesOpen ? '1' : '0');
+  }, [filesOpen]);
+
+  React.useEffect(() => {
+    activeThreadIdRef.current = activeThreadId;
+    setArtifactFiles([]);
+    setSelectedArtifactPath(null);
+    setSelectedArtifactFile(null);
+    setArtifactsError(null);
+  }, [activeThreadId]);
+
+  React.useEffect(() => {
+    if (!filesOpen || !activeThreadId) return;
+    void loadArtifactFiles();
+    const timer = window.setInterval(() => {
+      void loadArtifactFiles({ silent: true });
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [activeThreadId, filesOpen, loadArtifactFiles]);
+
+  React.useEffect(() => {
+    if (!filesOpen) return;
+    if (artifactFiles.length === 0) {
+      setSelectedArtifactPath(null);
+      setSelectedArtifactFile(null);
+      return;
+    }
+    setSelectedArtifactPath((prev) => (prev && artifactFiles.some((file) => file.path === prev) ? prev : selectDefaultArtifactPath(artifactFiles)));
+  }, [artifactFiles, filesOpen]);
+
+  React.useEffect(() => {
+    if (!filesOpen || !selectedArtifactPath) return;
+    void loadSelectedArtifactFile();
+    const timer = window.setInterval(() => {
+      void loadSelectedArtifactFile({ silent: true });
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [filesOpen, loadSelectedArtifactFile, selectedArtifactPath]);
+
   return (
     <div className="flex h-full min-h-0 bg-[var(--panel-alt)]">
       {threadSidebarOpen ? (
@@ -1728,6 +1989,25 @@ export function AssistantDock() {
               <IconPlus className="h-3.5 w-3.5" />
             </button>
           ) : null}
+          <button
+            type="button"
+            onClick={() => setFilesOpen((value) => !value)}
+            aria-pressed={filesOpen}
+            className={`relative flex h-8 w-8 flex-shrink-0 items-center justify-center rounded border text-[var(--muted)] hover:text-[var(--fg)] ${
+              filesOpen
+                ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
+                : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)]'
+            }`}
+            title={filesOpen ? 'Hide thread files' : 'Show thread files'}
+            aria-label={filesOpen ? 'Hide thread files' : 'Show thread files'}
+          >
+            <IconFile className="h-3.5 w-3.5" />
+            {artifactFiles.length > 0 ? (
+              <span className="absolute -right-1 -top-1 min-w-4 rounded-full border border-[var(--panel-alt)] bg-[var(--accent)] px-1 text-center text-[9px] font-semibold leading-4 text-[var(--accent-fg)]">
+                {artifactFiles.length > 9 ? '9+' : artifactFiles.length}
+              </span>
+            ) : null}
+          </button>
           <button
             type="button"
             onClick={openSystemPromptEditor}
@@ -1805,6 +2085,23 @@ export function AssistantDock() {
         </div>
       </div>
 
+      {filesOpen ? (
+        <AssistantThreadFilesView
+          threadId={activeThread?.id ?? ''}
+          files={artifactFiles}
+          selectedPath={selectedArtifactPath}
+          selectedFile={selectedArtifactFile}
+          loading={artifactsLoading}
+          error={artifactsError}
+          onSelectPath={setSelectedArtifactPath}
+          onRefresh={() => {
+            void loadArtifactFiles();
+            void loadSelectedArtifactFile();
+          }}
+          onClose={() => setFilesOpen(false)}
+        />
+      ) : (
+        <>
       <div ref={scrollRef} className="flex-1 min-h-0 space-y-2 overflow-y-auto py-3">
         {loading && !snapshot ? (
           <div className="px-3 text-[12px] text-[var(--muted)]">Loading assistant...</div>
@@ -1979,6 +2276,8 @@ export function AssistantDock() {
           </div>
         </div>
       </div>
+        </>
+      )}
       </div>
       {systemPromptOpen ? (
         <AssistantSystemPromptModal
