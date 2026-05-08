@@ -1,7 +1,8 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { describe, expect, test } from 'bun:test';
 
 import { HubAssistantService } from '../src/hub/assistant';
-import { loadRegistry } from '../src/host/registry';
 import { withTempDroneDataDir } from './test-helpers';
 
 function makeAssistantService(): HubAssistantService {
@@ -20,8 +21,8 @@ function makeAssistantService(): HubAssistantService {
 }
 
 describe('assistant system prompt settings', () => {
-  test('persists the editable default and snapshots it onto new threads', async () => {
-    await withTempDroneDataDir('assistant-system-prompt-', async () => {
+  test('persists the editable default to assistant state and snapshots it onto new threads', async () => {
+    await withTempDroneDataDir('assistant-system-prompt-', async (droneDataDir) => {
       const service = makeAssistantService();
       const initial = await service.snapshot();
       const initialThread = initial.threads[0] as any;
@@ -36,8 +37,8 @@ describe('assistant system prompt settings', () => {
       expect(newThread.systemPrompt).toBe('Custom DroneHub assistant prompt.');
       expect(oldThread.systemPrompt).toBe(initialThread.systemPrompt);
 
-      const regAny: any = await loadRegistry();
-      expect(regAny.settings.assistant.systemPrompt).toBe('Custom DroneHub assistant prompt.');
+      const assistantState = JSON.parse(await fs.readFile(path.join(droneDataDir, 'assistant.json'), 'utf8'));
+      expect(assistantState.systemPrompt).toBe('Custom DroneHub assistant prompt.');
     });
   });
 });

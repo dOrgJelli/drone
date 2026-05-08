@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { HubAssistantService } from '../src/hub/assistant';
 import { withTempDroneDataDir } from './test-helpers';
@@ -97,6 +99,53 @@ function makeService(): HubAssistantService {
 }
 
 describe('assistant thread isolation', () => {
+  test('defaults new assistant threads to OpenAI when Codex is not connected', async () => {
+    await withTempDroneDataDir('assistant-default-openai-', async (droneDataDir) => {
+      const previousCodexAuthFile = process.env.DRONE_HUB_CODEX_AUTH_FILE;
+      process.env.DRONE_HUB_CODEX_AUTH_FILE = path.join(droneDataDir, 'missing-codex-auth.json');
+      try {
+        const service = makeService();
+        installFakeRuntime(service, {});
+
+        const snapshot = await service.createThread({ title: 'default provider' });
+        const thread = snapshot.threads.find((item) => item.id === snapshot.activeThreadId) as any;
+
+        expect(thread.provider).toBe('openai');
+        expect(thread.model).toBe('gpt-5.5');
+        expect(thread.thinkingLevel).toBe('off');
+      } finally {
+        if (previousCodexAuthFile == null) delete process.env.DRONE_HUB_CODEX_AUTH_FILE;
+        else process.env.DRONE_HUB_CODEX_AUTH_FILE = previousCodexAuthFile;
+      }
+    });
+  });
+
+  test('defaults new assistant threads to Codex GPT-5.5 instant when Codex is connected', async () => {
+    await withTempDroneDataDir('assistant-default-codex-', async (droneDataDir) => {
+      const previousCodexAuthFile = process.env.DRONE_HUB_CODEX_AUTH_FILE;
+      const authPath = path.join(droneDataDir, 'codex-auth.json');
+      fs.writeFileSync(
+        authPath,
+        JSON.stringify({ tokens: { access_token: 'test-access-token', refresh_token: 'test-refresh-token' }, last_refresh: '2026-05-08T00:00:00.000Z' }),
+      );
+      process.env.DRONE_HUB_CODEX_AUTH_FILE = authPath;
+      try {
+        const service = makeService();
+        installFakeRuntime(service, {});
+
+        const snapshot = await service.createThread({ title: 'default provider' });
+        const thread = snapshot.threads.find((item) => item.id === snapshot.activeThreadId) as any;
+
+        expect(thread.provider).toBe('codex');
+        expect(thread.model).toBe('gpt-5.5');
+        expect(thread.thinkingLevel).toBe('off');
+      } finally {
+        if (previousCodexAuthFile == null) delete process.env.DRONE_HUB_CODEX_AUTH_FILE;
+        else process.env.DRONE_HUB_CODEX_AUTH_FILE = previousCodexAuthFile;
+      }
+    });
+  });
+
   test('redacts current app drone context outside the thread read scope', async () => {
     await withTempDroneDataDir('assistant-thread-scope-context-', async () => {
       const service = makeService();
@@ -215,6 +264,25 @@ describe('assistant thread isolation', () => {
         if (previousKey == null) delete process.env.OPENAI_API_KEY;
         else process.env.OPENAI_API_KEY = previousKey;
       }
+    });
+  });
+
+  test('offers the same GPT-5.5 assistant model choices for Codex as OpenAI', async () => {
+    await withTempDroneDataDir('assistant-codex-model-options-', async () => {
+      const service = makeService();
+      installFakeRuntime(service, {});
+
+      const snapshot = await service.createThread({ provider: 'codex', title: 'codex models' });
+      const thread = snapshot.threads.find((item) => item.id === snapshot.activeThreadId) as any;
+      const codexOptions = snapshot.models.filter((option) => option.provider === 'codex');
+
+      expect(thread.model).toBe('gpt-5.5');
+      expect(thread.thinkingLevel).toBe('off');
+      expect(codexOptions.map((option) => `${option.id}:${option.thinkingLevel}`)).toEqual([
+        'gpt-5.5:off',
+        'gpt-5.5:medium',
+        'gpt-5.5:high',
+      ]);
     });
   });
 });

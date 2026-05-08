@@ -1,9 +1,11 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 
-import { loadRegistry, updateRegistry } from '../host/registry';
+import { droneRootPath } from '../host/paths';
+import { loadRegistry, withRegistryLock } from '../host/registry';
 import {
   providerDisplayName,
-  resolveEffectiveLlmProvider,
   resolveEffectiveProviderApiKeySettings,
   type LlmProviderId,
 } from './hub-settings';
@@ -229,6 +231,7 @@ export type AssistantSystemPromptSettings = {
 
 const ASSISTANT_THREAD_MESSAGE_LIMIT = 80;
 const ASSISTANT_REGISTRY_MAX_THREADS = 24;
+const ASSISTANT_STATE_FILE_NAME = 'assistant.json';
 const ASSISTANT_SYSTEM_PROMPT_MAX_CHARS = 20_000;
 const CHAT_MESSAGE_DEFAULT_LIMIT = 10;
 const CHAT_MESSAGE_MAX_LIMIT = 50;
@@ -240,7 +243,7 @@ const CHAT_IDLE_DEFAULT_IDLE_FOR_MS = 1000;
 const CHAT_IDLE_MAX_TARGETS = 20;
 const DEFAULT_OPENAI_MODEL = 'gpt-5.5';
 const DEFAULT_GEMINI_MODEL = 'gemini-3-flash-preview';
-const DEFAULT_CODEX_MODEL = 'gpt-5.3-codex';
+const DEFAULT_CODEX_MODEL = 'gpt-5.5';
 const DEFAULT_THREAD_TITLE = 'New thread';
 const ASSISTANT_SYSTEM_PROMPT_RUNTIME_APPENDIX =
   'Current access scope is appended at run time. The assistant must not claim read or write access outside that scope.';
@@ -260,6 +263,7 @@ const ASSISTANT_SYSTEM_PROMPT_DEFAULT = [
   'Do not claim a drone completed work unless the drone transcript or user says so.',
   'Keep responses practical and short.',
 ].join('\n');
+let assistantStateWriteQueue: Promise<void> = Promise.resolve();
 const ASSISTANT_MODEL_OPTIONS: Array<{
   provider: LlmProviderId;
   id: string;
@@ -269,9 +273,9 @@ const ASSISTANT_MODEL_OPTIONS: Array<{
   { provider: 'openai', id: 'gpt-5.5', name: 'GPT-5.5 Instant', thinkingLevel: 'off' },
   { provider: 'openai', id: 'gpt-5.5', name: 'GPT-5.5 Medium', thinkingLevel: 'medium' },
   { provider: 'openai', id: 'gpt-5.5', name: 'GPT-5.5 High', thinkingLevel: 'high' },
-  { provider: 'codex', id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex Medium', thinkingLevel: 'medium' },
-  { provider: 'codex', id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex High', thinkingLevel: 'high' },
-  { provider: 'codex', id: 'gpt-5.3-codex-spark', name: 'GPT-5.3 Codex Spark', thinkingLevel: 'high' },
+  { provider: 'codex', id: 'gpt-5.5', name: 'GPT-5.5 Instant', thinkingLevel: 'off' },
+  { provider: 'codex', id: 'gpt-5.5', name: 'GPT-5.5 Medium', thinkingLevel: 'medium' },
+  { provider: 'codex', id: 'gpt-5.5', name: 'GPT-5.5 High', thinkingLevel: 'high' },
   { provider: 'gemini', id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash', thinkingLevel: 'medium' },
 ];
 
@@ -297,6 +301,11 @@ function providerToPiProvider(provider: LlmProviderId): 'openai' | 'google' | 'o
   return provider === 'gemini' ? 'google' : 'openai';
 }
 
+async function defaultAssistantProvider(): Promise<LlmProviderId> {
+  const codex = await resolveEffectiveProviderApiKeySettings('codex');
+  return codex.apiKey ? 'codex' : 'openai';
+}
+
 function defaultModelForProvider(provider: LlmProviderId): string {
   if (provider === 'codex') return DEFAULT_CODEX_MODEL;
   return provider === 'gemini' ? DEFAULT_GEMINI_MODEL : DEFAULT_OPENAI_MODEL;
@@ -311,13 +320,9 @@ function allowedModelForProvider(provider: LlmProviderId, raw: unknown): string 
 
 function allowedThinkingLevelForModel(provider: LlmProviderId, model: string, raw: unknown): AssistantThinkingLevel {
   const requested = normalizeThinkingLevel(raw);
-  if (provider === 'openai' && model === DEFAULT_OPENAI_MODEL && (requested === 'off' || requested === 'medium' || requested === 'high')) {
+  if (ASSISTANT_MODEL_OPTIONS.some((option) => option.provider === provider && option.id === model && option.thinkingLevel === requested)) {
     return requested;
   }
-  if (provider === 'codex' && model === DEFAULT_CODEX_MODEL && (requested === 'medium' || requested === 'high' || requested === 'xhigh')) {
-    return requested;
-  }
-  if (provider === 'gemini' && model === DEFAULT_GEMINI_MODEL) return 'medium';
   return ASSISTANT_MODEL_OPTIONS.find((option) => option.provider === provider && option.id === model)?.thinkingLevel ?? 'off';
 }
 
@@ -967,6 +972,41 @@ function serializeState(input: {
   };
 }
 
+function assistantStatePath(): string {
+  return droneRootPath(ASSISTANT_STATE_FILE_NAME);
+}
+
+async function readAssistantStateFile(): Promise<StoredAssistantState | null> {
+  try {
+    const parsed = JSON.parse(await fs.readFile(assistantStatePath(), 'utf8'));
+    return parsed && typeof parsed === 'object' ? (parsed as StoredAssistantState) : null;
+  } catch (error: any) {
+    if (String(error?.code ?? '') === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+async function writeAssistantStateFile(state: StoredAssistantState): Promise<void> {
+  const filePath = assistantStatePath();
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const tmpPath = path.join(path.dirname(filePath), `.assistant.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`);
+  try {
+    await fs.writeFile(tmpPath, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+    await fs.chmod(tmpPath, 0o600).catch(() => {});
+    await fs.rename(tmpPath, filePath);
+    await fs.chmod(filePath, 0o600).catch(() => {});
+  } catch (error) {
+    await fs.rm(tmpPath, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+async function enqueueWriteAssistantStateFile(state: StoredAssistantState): Promise<void> {
+  const write = assistantStateWriteQueue.catch(() => {}).then(() => withRegistryLock(() => writeAssistantStateFile(state)));
+  assistantStateWriteQueue = write;
+  await write;
+}
+
 function firstThread(threads: AssistantThread[], id: string): AssistantThread {
   const found = threads.find((thread) => thread.id === id) ?? threads[0];
   if (!found) throw new Error('assistant has no threads');
@@ -1143,7 +1183,8 @@ export class HubAssistantService {
 
   async createThread(input?: { title?: unknown; model?: unknown; provider?: unknown; activeDroneId?: unknown; activeChatName?: unknown }): Promise<AssistantSnapshot> {
     await this.ensureLoaded();
-    const provider = normalizeProvider(input?.provider ?? (await resolveEffectiveLlmProvider()).provider);
+    const explicitProvider = String(input?.provider ?? '').trim();
+    const provider = explicitProvider ? normalizeProvider(explicitProvider) : await defaultAssistantProvider();
     const thread = this.makeThread({
       provider,
       model: String(input?.model ?? '').trim() || defaultModelForProvider(provider),
@@ -1196,7 +1237,8 @@ export class HubAssistantService {
     await deleteAssistantArtifactsForThread(threadId);
     this.threads = this.threads.filter((thread) => thread.id !== threadId);
     if (this.threads.length === 0) {
-      this.threads = [this.makeThread()];
+      const provider = await defaultAssistantProvider();
+      this.threads = [this.makeThread({ provider, model: defaultModelForProvider(provider) })];
     }
     if (!this.threads.some((thread) => thread.id === this.activeThreadId)) {
       this.activeThreadId = this.threads[0].id;
@@ -1489,24 +1531,27 @@ export class HubAssistantService {
 
   private async ensureLoaded(): Promise<void> {
     if (this.loaded) return;
-    const { provider } = await resolveEffectiveLlmProvider();
-    const regAny: any = await loadRegistry();
-    const stored = regAny?.settings?.assistant as StoredAssistantState | undefined;
+    const stored = await readAssistantStateFile() ?? undefined;
     const storedSystemPrompt = normalizeAssistantSystemPrompt(stored?.systemPrompt);
     this.defaultSystemPrompt = storedSystemPrompt || ASSISTANT_SYSTEM_PROMPT_DEFAULT;
     this.defaultSystemPromptUpdatedAt =
       storedSystemPrompt && typeof stored?.systemPromptUpdatedAt === 'string' && stored.systemPromptUpdatedAt.trim()
         ? stored.systemPromptUpdatedAt.trim()
         : null;
-    const fallback = {
-      provider,
-      model: defaultModelForProvider(provider),
+    const storedThreads = Array.isArray(stored?.threads) ? stored.threads : [];
+    const storedFallbackProvider = normalizeProvider(storedThreads.find((thread: any) => thread && typeof thread === 'object')?.provider);
+    const storedFallback = {
+      provider: storedFallbackProvider,
+      model: defaultModelForProvider(storedFallbackProvider),
       systemPrompt: ASSISTANT_SYSTEM_PROMPT_DEFAULT,
     };
-    const threads = Array.isArray(stored?.threads)
-      ? stored.threads.map((thread) => normalizeThread(thread, fallback)).filter(Boolean) as AssistantThread[]
-      : [];
-    this.threads = threads.length > 0 ? threads : [this.makeThread({ ...fallback, systemPrompt: this.defaultSystemPrompt })];
+    const threads = storedThreads.map((thread) => normalizeThread(thread, storedFallback)).filter(Boolean) as AssistantThread[];
+    if (threads.length > 0) {
+      this.threads = threads;
+    } else {
+      const provider = await defaultAssistantProvider();
+      this.threads = [this.makeThread({ provider, model: defaultModelForProvider(provider), systemPrompt: this.defaultSystemPrompt })];
+    }
     const activeThreadId = String(stored?.activeThreadId ?? '').trim();
     this.activeThreadId = this.threads.some((thread) => thread.id === activeThreadId) ? activeThreadId : this.threads[0].id;
     this.loaded = true;
@@ -1556,10 +1601,7 @@ export class HubAssistantService {
       systemPrompt: this.defaultSystemPrompt,
       systemPromptUpdatedAt: this.defaultSystemPromptUpdatedAt,
     });
-    await updateRegistry((regAny: any) => {
-      regAny.settings = regAny.settings ?? {};
-      regAny.settings.assistant = state;
-    });
+    await enqueueWriteAssistantStateFile(state);
   }
 
   private async runtime(): Promise<AssistantRuntime> {
@@ -1599,14 +1641,14 @@ export class HubAssistantService {
         };
       });
     } catch {
-      const { provider } = await resolveEffectiveLlmProvider();
+      const provider = await defaultAssistantProvider();
       return [
         {
           provider,
           id: defaultModelForProvider(provider),
           name: defaultModelForProvider(provider),
           reasoning: false,
-          thinkingLevel: provider === 'gemini' || provider === 'codex' ? 'medium' : 'off',
+          thinkingLevel: ASSISTANT_MODEL_OPTIONS.find((option) => option.provider === provider && option.id === defaultModelForProvider(provider))?.thinkingLevel ?? 'off',
         },
       ];
     }

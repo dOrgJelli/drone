@@ -3,8 +3,9 @@ import { useDndMonitor, useDroppable } from '@dnd-kit/core';
 import { requestJson } from '../http';
 import { MarkdownMessage } from '../chat/MarkdownMessage';
 import { parseDroneHubDragData } from '../app/drone-hub-dnd';
-import { IconChatThread, IconDrone, IconPencil, IconPlus, IconSidebarCollapse, IconSidebarExpand, IconSpinner, IconTrash } from '../app/icons';
+import { IconChatThread, IconPencil, IconPlus, IconSidebarCollapse, IconSidebarExpand, IconTrash } from '../app/icons';
 import { useDroneHubUiStore } from '../app/use-drone-hub-ui-store';
+import { UiMenuSelect, type UiMenuSelectEntry } from '../../ui/menuSelect';
 
 const ASSISTANT_AUTO_APPROVE_STORAGE_KEY = 'droneHub.assistant.autoApprove';
 const ASSISTANT_SCOPE_STORAGE_KEY = 'droneHub.assistant.scope';
@@ -158,6 +159,7 @@ function assistantScopeSyncKey(readMode: AssistantScopeMode, writeMode: Assistan
 type AssistantToolCall = { id: string; name: string; args: any };
 type AssistantDroneNameMap = Record<string, string>;
 type AssistantWaitTargetLabel = { key: string; droneLabel: string; chatName: string };
+type AssistantMessageDroneSummary = { droneLabel: string; chatName: string; message: string };
 
 type AssistantRenderItem =
   | { type: 'message'; key: string; message: AssistantMessage; showToolCalls?: boolean }
@@ -252,6 +254,15 @@ function messageDroneSummary(args: any, droneNameById: AssistantDroneNameMap): s
   const message = compactPreview(resolved?.message ?? resolved?.prompt ?? args?.message ?? args?.prompt);
   if (droneLabel && message) return `${droneLabel}: ${message}`;
   return droneLabel || message;
+}
+
+function messageDroneDetails(args: any, droneNameById: AssistantDroneNameMap): AssistantMessageDroneSummary {
+  const resolved = args?.resolved ?? args ?? {};
+  const droneId = String(resolved?.droneId ?? resolved?.id ?? args?.droneId ?? '').trim();
+  const droneLabel = String(resolved?.droneName ?? resolved?.name ?? '').trim() || droneNameById[droneId] || droneId;
+  const chatName = String(resolved?.chatName ?? args?.chatName ?? '').trim();
+  const message = String(resolved?.message ?? resolved?.prompt ?? args?.message ?? args?.prompt ?? '').trim();
+  return { droneLabel, chatName, message };
 }
 
 function toolActivityTitle(call: AssistantToolCall | undefined, result: AssistantMessage | undefined, droneNameById: AssistantDroneNameMap): string {
@@ -357,6 +368,10 @@ function modelSelectionLabel(
   return `${selection.provider}/${selection.model}${selection.thinkingLevel !== 'off' ? ` ${selection.thinkingLevel}` : ''}`;
 }
 
+function compactModelSelectionLabel(label: string): string {
+  return label.replace(/^GPT-/, '').replace(/\bMedium\b/, 'Med');
+}
+
 function assistantThreadStatusTone(status: AssistantThreadStatus): string {
   if (status === 'running') return 'bg-[var(--green)]';
   if (status === 'waiting_for_approval') return 'bg-[var(--accent)]';
@@ -411,12 +426,27 @@ function ToolDisclosure({
         className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)] hover:bg-[rgba(255,255,255,.025)] hover:text-[var(--fg-secondary)]"
         style={{ fontFamily: 'var(--display)' }}
       >
-        <span className="w-3 text-center text-[11px] text-[var(--muted-dim)]">{open ? '-' : '+'}</span>
-        {status ? <span className={`h-1.5 w-1.5 rounded-full ${status === 'error' ? 'bg-[var(--red)]' : 'bg-[var(--green)]'}`} /> : null}
+        {status ? (
+          <span
+            className={`inline-flex h-3 w-3 flex-shrink-0 items-center justify-center rounded-full ${
+              status === 'error' ? 'bg-[var(--red)] text-[var(--bg)]' : 'bg-[var(--green)] text-[var(--bg)]'
+            }`}
+          >
+            {status === 'error' ? <span className="h-1.5 w-1.5 rounded-full bg-current" /> : <ToolCheckIcon className="h-2.5 w-2.5" />}
+          </span>
+        ) : null}
         <span className="min-w-0 flex-1 truncate">{title}</span>
       </button>
       {open ? <div className="border-t border-[var(--border-subtle)] px-2 py-1.5">{children}</div> : null}
     </div>
+  );
+}
+
+function ToolCheckIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M2 5.2l2 2 4-4.4" />
+    </svg>
   );
 }
 
@@ -435,20 +465,132 @@ function AssistantThinkingRow() {
   );
 }
 
-function WaitForChatsIdleActivityRow({ call, droneNameById }: { call: AssistantToolCall; droneNameById: AssistantDroneNameMap }) {
+function ToolStatusIndicator({ result }: { result?: AssistantMessage }) {
+  const dotClass = !result ? 'bg-[var(--accent)]' : result.isError ? 'bg-[var(--red)]' : 'bg-[var(--green)]';
+  if (!result || result.isError) return <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${dotClass}`} />;
+  return (
+    <span className={`inline-flex h-3 w-3 flex-shrink-0 items-center justify-center rounded-full ${dotClass} text-[var(--bg)]`}>
+      <ToolCheckIcon className="h-2.5 w-2.5" />
+    </span>
+  );
+}
+
+function ToolDetailsButton({ open, onClick }: { open: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="ml-auto flex h-5 flex-shrink-0 items-center rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.14)] px-1.5 text-[9px] font-semibold uppercase tracking-wide text-[var(--muted)] hover:text-[var(--fg-secondary)]"
+      style={{ fontFamily: 'var(--display)' }}
+    >
+      {open ? 'Hide details' : 'Details'}
+    </button>
+  );
+}
+
+function ToolPayloadDetails({ call, result }: { call?: AssistantToolCall; result?: AssistantMessage }) {
+  const resultText = result ? messageText(result) : '';
+  return (
+    <div className="grid gap-2 border-t border-[var(--border-subtle)] px-2.5 py-2">
+      {call ? (
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+            Arguments
+          </div>
+          <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-words text-[10px] text-[var(--muted-dim)]">
+            {JSON.stringify(call.args, null, 2)}
+          </pre>
+        </div>
+      ) : null}
+      {result ? (
+        <div className={call ? 'border-t border-[var(--border-subtle)] pt-2' : ''}>
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+            Result
+          </div>
+          {resultText ? (
+            <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-words text-[11px] text-[var(--fg-secondary)]">{resultText}</pre>
+          ) : (
+            <div className="mt-1 text-[11px] text-[var(--muted-dim)]">No result payload.</div>
+          )}
+        </div>
+      ) : (
+        <div className="text-[11px] text-[var(--muted-dim)]">Waiting for result...</div>
+      )}
+    </div>
+  );
+}
+
+function MessageDroneActivityRow({
+  call,
+  result,
+  droneNameById,
+}: {
+  call: AssistantToolCall;
+  result?: AssistantMessage;
+  droneNameById: AssistantDroneNameMap;
+}) {
+  const [detailsOpen, setDetailsOpen] = React.useState(false);
+  const summary = messageDroneDetails(call.args, droneNameById);
+  const preview = compactPreview(summary.message, 220);
+  return (
+    <div className="mx-3 overflow-hidden rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.025)]">
+      <div className="px-2.5 py-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+            <ToolStatusIndicator result={result} />
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+              Send user message
+            </div>
+            <ToolDetailsButton open={detailsOpen} onClick={() => setDetailsOpen((value) => !value)} />
+          </div>
+          <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5">
+            <span className="inline-flex max-w-full items-center gap-1 rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.14)] px-1.5 py-0.5 text-[11px] text-[var(--fg-secondary)]">
+              <span className="truncate">{summary.droneLabel || 'Target drone'}</span>
+            </span>
+            {summary.chatName && summary.chatName !== 'default' ? (
+              <span className="inline-flex max-w-full items-center gap-1 rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.14)] px-1.5 py-0.5 text-[11px] text-[var(--muted)]">
+                <span className="truncate">{summary.chatName}</span>
+              </span>
+            ) : null}
+          </div>
+          {preview ? (
+            <div className="mt-2 rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.16)] px-2 py-1.5 text-[12px] leading-5 text-[var(--fg-secondary)]">
+              {preview}
+            </div>
+          ) : (
+            <div className="mt-2 text-[11px] text-[var(--muted-dim)]">No message preview available.</div>
+          )}
+        </div>
+      </div>
+      {detailsOpen ? <ToolPayloadDetails call={call} result={result} /> : null}
+    </div>
+  );
+}
+
+function WaitForChatsIdleActivityRow({
+  call,
+  result,
+  droneNameById,
+}: {
+  call: AssistantToolCall;
+  result?: AssistantMessage;
+  droneNameById: AssistantDroneNameMap;
+}) {
+  const [detailsOpen, setDetailsOpen] = React.useState(false);
   const targets = normalizeAssistantWaitTargets(call.args, droneNameById);
   const targetSummary = summarizeWaitTargets(targets);
   return (
-    <div className="mx-3 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.025)]">
-      <div className="flex items-center gap-2 border-b border-[var(--border-subtle)] px-2.5 py-2">
-        <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded border border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]">
-          <IconSpinner className="h-3.5 w-3.5" />
-        </div>
+    <div className="mx-3 overflow-hidden rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.025)]">
+      <div className="border-b border-[var(--border-subtle)] px-2.5 py-2">
         <div className="min-w-0 flex-1">
-          <div className="text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
-            Waiting for chats idle
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+            <ToolStatusIndicator result={result} />
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+              Wait for chats idle
+            </div>
+            <ToolDetailsButton open={detailsOpen} onClick={() => setDetailsOpen((value) => !value)} />
           </div>
-          <div className="mt-0.5 truncate text-[12px] text-[var(--fg-secondary)]">
+          <div className="mt-1 text-[12px] text-[var(--fg-secondary)]">
             {targetSummary || 'Resolving target drones'}
           </div>
         </div>
@@ -460,7 +602,6 @@ function WaitForChatsIdleActivityRow({ call, droneNameById }: { call: AssistantT
               key={target.key}
               className="flex min-h-8 min-w-0 items-center gap-2 rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.12)] px-2"
             >
-              <IconDrone className="h-3.5 w-3.5 flex-shrink-0 text-[var(--muted)]" />
               <div className="min-w-0 flex-1 truncate text-[12px] font-medium text-[var(--fg-secondary)]">{target.droneLabel}</div>
               {target.chatName && target.chatName !== 'default' ? (
                 <div className="max-w-[42%] truncate rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.03)] px-1.5 py-0.5 text-[10px] text-[var(--muted)]">
@@ -475,6 +616,7 @@ function WaitForChatsIdleActivityRow({ call, droneNameById }: { call: AssistantT
           </div>
         )}
       </div>
+      {detailsOpen ? <ToolPayloadDetails call={call} result={result} /> : null}
     </div>
   );
 }
@@ -488,8 +630,12 @@ function ToolActivityRow({
   result?: AssistantMessage;
   droneNameById?: AssistantDroneNameMap;
 }) {
-  if (call?.name === 'wait_for_agent_chats_idle' && !result) {
-    return <WaitForChatsIdleActivityRow call={call} droneNameById={droneNameById} />;
+  if (call?.name === 'message_drone') {
+    return <MessageDroneActivityRow call={call} result={result} droneNameById={droneNameById} />;
+  }
+
+  if (call?.name === 'wait_for_agent_chats_idle') {
+    return <WaitForChatsIdleActivityRow call={call} result={result} droneNameById={droneNameById} />;
   }
 
   const title = toolActivityTitle(call, result, droneNameById);
@@ -1067,6 +1213,7 @@ export function AssistantDock() {
   const refocusInputWhenIdleRef = React.useRef(false);
   const autoApprovingIdsRef = React.useRef<Set<string>>(new Set());
   const lastSyncedScopeKeyRef = React.useRef('');
+  const updateThreadRequestRef = React.useRef(0);
   const { isOver: scopeDropIsOver, setNodeRef: setScopeDropNodeRef } = useDroppable({
     id: 'assistant-drone-scope-drop',
     data: { type: 'assistant-drone-scope-drop' },
@@ -1343,6 +1490,7 @@ export function AssistantDock() {
   );
 
   const createThread = React.useCallback(async () => {
+    updateThreadRequestRef.current += 1;
     try {
       const activeDroneId = selectedDroneChatOpen ? String(selectedDrone ?? '').trim() : '';
       const next = await requestJson<AssistantSnapshot>('/api/assistant/threads', {
@@ -1361,6 +1509,7 @@ export function AssistantDock() {
   }, [selectedChat, selectedDrone, selectedDroneChatOpen]);
 
   const selectThread = React.useCallback(async (thread: AssistantThread) => {
+    updateThreadRequestRef.current += 1;
     try {
       const next = await requestJson<AssistantSnapshot>(`/api/assistant/threads/${encodeURIComponent(thread.id)}`, {
         method: 'PATCH',
@@ -1375,6 +1524,7 @@ export function AssistantDock() {
   }, []);
 
   const deleteThread = React.useCallback(async (thread: AssistantThread) => {
+    updateThreadRequestRef.current += 1;
     try {
       setSnapshot(await requestJson<AssistantSnapshot>(`/api/assistant/threads/${encodeURIComponent(thread.id)}`, { method: 'DELETE' }));
     } catch (err: any) {
@@ -1384,16 +1534,17 @@ export function AssistantDock() {
 
   const updateThread = React.useCallback(async (patch: Partial<Pick<AssistantThread, 'model' | 'provider' | 'thinkingLevel'>>) => {
     if (!activeThread) return;
+    const requestId = updateThreadRequestRef.current + 1;
+    updateThreadRequestRef.current = requestId;
     try {
-      setSnapshot(
-        await requestJson<AssistantSnapshot>(`/api/assistant/threads/${encodeURIComponent(activeThread.id)}`, {
-          method: 'PATCH',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(patch),
-        }),
-      );
+      const next = await requestJson<AssistantSnapshot>(`/api/assistant/threads/${encodeURIComponent(activeThread.id)}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      if (updateThreadRequestRef.current === requestId) setSnapshot(next);
     } catch (err: any) {
-      setError(err?.message ?? String(err));
+      if (updateThreadRequestRef.current === requestId) setError(err?.message ?? String(err));
     }
   }, [activeThread]);
 
@@ -1513,6 +1664,20 @@ export function AssistantDock() {
     ];
   }, [activeProviderOptions, activeThread]);
   const selectedModelKey = activeThread ? modelSelectionKey({ provider: activeThread.provider, model: activeThread.model, thinkingLevel: activeThread.thinkingLevel }) : '';
+  const modelMenuEntries = React.useMemo<UiMenuSelectEntry[]>(
+    () =>
+      displayedModelOptions.map((model) => ({
+        value: `${model.provider}:${model.id}:${model.thinkingLevel}`,
+        label: model.name,
+        title: `${model.provider}/${model.id}${model.thinkingLevel !== 'off' ? ` ${model.thinkingLevel}` : ''}`,
+        searchText: `${model.name} ${model.id} ${model.thinkingLevel}`,
+      })),
+    [displayedModelOptions],
+  );
+  const selectedModelLabel = React.useMemo(() => {
+    if (!activeThread) return '';
+    return modelSelectionLabel({ provider: activeThread.provider, model: activeThread.model, thinkingLevel: activeThread.thinkingLevel }, modelOptions);
+  }, [activeThread, modelOptions]);
   const activeProviderMeta = providerOptions.find((provider) => provider.id === activeProvider) ?? ASSISTANT_PROVIDERS[0];
   const activeRunningModelLabel = activeRunningModel ? modelSelectionLabel(activeRunningModel, modelOptions) : '';
   const selectedScopeDisabled = scopeDrones.length === 0;
@@ -1686,7 +1851,7 @@ export function AssistantDock() {
           >
             Provider
           </div>
-          <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto no-scrollbar">
+          <div className="flex min-w-0 items-center gap-1 overflow-x-auto no-scrollbar">
             {providerOptions.map((provider) => {
               const selected = provider.id === activeProvider;
               const disabled = !activeThread || provider.models.length === 0;
@@ -1716,56 +1881,27 @@ export function AssistantDock() {
               );
             })}
           </div>
-          <div
-            className="inline-flex h-7 max-w-full items-center gap-1.5 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-2 text-[10px] text-[var(--muted)]"
-            title={activeProviderMeta.title}
-          >
-            <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${activeProvider === 'codex' ? 'bg-[var(--green)]' : 'bg-[var(--muted-dim)]'}`} />
-            <span className="truncate">{activeProviderMeta.authLabel}</span>
-          </div>
-        </div>
-        <textarea
-          ref={inputRef}
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey) {
-              event.preventDefault();
-              void sendPrompt();
-            }
-          }}
-          disabled={!activeThread}
-          placeholder={running ? (promptDeliveryMode === 'asap' ? 'Send at next turn' : 'Queue a message') : 'Ask the assistant'}
-          className="h-20 w-full resize-none rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.03)] px-3 py-2 text-[12px] text-[var(--fg)] placeholder:text-[var(--muted-dim)] focus:border-[var(--accent-muted)] focus:outline-none disabled:opacity-50"
-        />
-        <div className="mt-2 flex items-center gap-2">
-          <select
+          <UiMenuSelect
             value={selectedModelKey}
             disabled={!activeThread}
-            onChange={(event) => {
-              const [provider, model, thinkingLevel] = event.target.value.split(':');
+            onValueChange={(value) => {
+              const [provider, model, thinkingLevel] = value.split(':');
               void updateThread({ provider: provider as AssistantThread['provider'], model, thinkingLevel });
             }}
-            className="min-w-0 flex-1 rounded border border-[var(--border-subtle)] bg-[var(--panel)] px-2 py-1 text-[11px] text-[var(--fg-secondary)] focus:outline-none disabled:opacity-50"
-            aria-label="Next assistant model"
-          >
-            {displayedModelOptions.map((model) => (
-              <option key={`${model.provider}:${model.id}:${model.thinkingLevel}`} value={`${model.provider}:${model.id}:${model.thinkingLevel}`}>
-                {model.name}
-              </option>
-            ))}
-          </select>
-          {activeRunningModel ? (
-            <span
-              className="max-w-[180px] truncate rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.025)] px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]"
-              title={`Running model: ${activeRunningModelLabel}`}
-              style={{ fontFamily: 'var(--display)' }}
-            >
-              Running {activeRunningModelLabel}
-            </span>
-          ) : null}
+            entries={modelMenuEntries}
+            variant="toolbar"
+            role="listbox"
+            itemRole="option"
+            title="Next assistant model"
+            triggerLabel={compactModelSelectionLabel(selectedModelLabel)}
+            triggerClassName="h-7 w-[112px] justify-between border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-2 text-[10px] uppercase tracking-wide text-[var(--muted)] hover:text-[var(--fg-secondary)]"
+            triggerLabelClassName="font-semibold"
+            panelClassName="bottom-full mb-1.5 w-[190px]"
+            menuClassName="max-h-56 overflow-y-auto"
+            header="Model"
+          />
           <div
-            className="grid h-8 flex-shrink-0 grid-cols-2 overflow-hidden rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)]"
+            className="grid h-7 flex-shrink-0 grid-cols-2 overflow-hidden rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)]"
             role="group"
             aria-label="Assistant message delivery"
           >
@@ -1788,25 +1924,59 @@ export function AssistantDock() {
               </button>
             ))}
           </div>
-          {running ? (
-            <button
-              type="button"
-              onClick={stop}
-              className="h-8 rounded border border-[rgba(255,90,90,.35)] bg-[rgba(255,90,90,.08)] px-3 text-[10px] font-semibold uppercase tracking-wide text-[var(--red)]"
+          <div
+            className="inline-flex h-7 max-w-[130px] flex-shrink-0 items-center gap-1.5 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-2 text-[10px] text-[var(--muted)]"
+            title={activeProviderMeta.title}
+          >
+            <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${activeProvider === 'codex' ? 'bg-[var(--green)]' : 'bg-[var(--muted-dim)]'}`} />
+            <span className="truncate">{activeProviderMeta.authLabel}</span>
+          </div>
+        </div>
+        <div className="relative rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.03)] focus-within:border-[var(--accent-muted)]">
+          <textarea
+            ref={inputRef}
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                void sendPrompt();
+              }
+            }}
+            disabled={!activeThread}
+            placeholder={running ? (promptDeliveryMode === 'asap' ? 'Send at next turn' : 'Queue a message') : 'Ask the assistant'}
+            className="h-24 w-full resize-none border-0 bg-transparent px-3 pb-10 pt-2 text-[12px] text-[var(--fg)] placeholder:text-[var(--muted-dim)] focus:outline-none disabled:opacity-50"
+          />
+          {activeRunningModel ? (
+            <span
+              className="absolute bottom-2 left-2 max-w-[calc(100%-150px)] truncate rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.18)] px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]"
+              title={`Running model: ${activeRunningModelLabel}`}
               style={{ fontFamily: 'var(--display)' }}
             >
-              Stop
-            </button>
+              Running {activeRunningModelLabel}
+            </span>
           ) : null}
-          <button
-            type="button"
-            onClick={() => void sendPrompt()}
-            disabled={!draft.trim() || !activeThread}
-            className="h-8 rounded border border-[var(--accent-muted)] bg-[var(--accent-subtle)] px-3 text-[10px] font-semibold uppercase tracking-wide text-[var(--accent)] disabled:opacity-40"
-            style={{ fontFamily: 'var(--display)' }}
-          >
-            Send
-          </button>
+          <div className="absolute bottom-2 right-2 flex items-center gap-1.5">
+            {running ? (
+              <button
+                type="button"
+                onClick={stop}
+                className="h-7 rounded border border-[rgba(255,90,90,.35)] bg-[rgba(255,90,90,.08)] px-2.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--red)]"
+                style={{ fontFamily: 'var(--display)' }}
+              >
+                Stop
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => void sendPrompt()}
+              disabled={!draft.trim() || !activeThread}
+              className="h-7 rounded border border-[var(--accent-muted)] bg-[var(--accent-subtle)] px-2.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--accent)] disabled:opacity-40"
+              style={{ fontFamily: 'var(--display)' }}
+            >
+              Send
+            </button>
+          </div>
         </div>
       </div>
       </div>
