@@ -120,6 +120,24 @@ describe('assistant thread isolation', () => {
     });
   });
 
+  test('stores assistant controls on the backend thread', async () => {
+    await withTempDroneDataDir('assistant-thread-controls-', async () => {
+      const service = makeService();
+      installFakeRuntime(service, {});
+
+      const created = await service.createThread({ title: 'controls' });
+      const threadId = created.activeThreadId;
+      let thread = created.threads.find((item) => item.id === threadId) as any;
+      expect(thread.autoApprove).toBe(false);
+      expect(thread.promptDeliveryMode).toBe('queue');
+
+      const updated = await service.updateThread(threadId, { autoApprove: true, promptDeliveryMode: 'asap' });
+      thread = updated.threads.find((item) => item.id === threadId) as any;
+      expect(thread.autoApprove).toBe(true);
+      expect(thread.promptDeliveryMode).toBe('asap');
+    });
+  });
+
   test('defaults new assistant threads to Codex GPT-5.5 instant when Codex is connected', async () => {
     await withTempDroneDataDir('assistant-default-codex-', async (droneDataDir) => {
       const previousCodexAuthFile = process.env.DRONE_HUB_CODEX_AUTH_FILE;

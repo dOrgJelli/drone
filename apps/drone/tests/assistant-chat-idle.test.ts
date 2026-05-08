@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  HubAssistantService,
   summarizeAssistantChatIdle,
   waitForAssistantChatIdle,
 } from '../src/hub/assistant';
@@ -153,6 +154,50 @@ describe('assistant chat idle wait', () => {
           signal: controller.signal,
         }),
       ).rejects.toThrow('aborted');
+    });
+  });
+
+  test('subscribes to chat idle without blocking the assistant thread', async () => {
+    await withTempDroneDataDir('assistant-chat-idle-subscribe-', async () => {
+      await updateRegistry((reg: any) => {
+        seedChat(reg, [
+          {
+            id: 'prompt-4',
+            at: new Date().toISOString(),
+            prompt: 'keep working',
+            state: 'sent',
+          },
+        ]);
+      });
+
+      const service = new HubAssistantService({
+        listDrones: async () => [],
+        createDrone: async () => {
+          throw new Error('not implemented');
+        },
+        setDroneGroup: async () => {
+          throw new Error('not implemented');
+        },
+        messageDrone: async () => {
+          throw new Error('not implemented');
+        },
+      });
+      const snapshot = await service.createThread({ title: 'Subscription test', provider: 'openai', model: 'gpt-5.5' });
+      const threadId = snapshot.activeThreadId;
+      const subscription = await service.subscribeToChatsIdle({
+        threadId,
+        toolCallId: 'tool-call-1',
+        targets: [{ droneId: 'drone-a', chatName: 'default' }],
+        idleForMs: 1000,
+      });
+
+      expect(subscription.status).toBe('active');
+      expect(subscription.targets).toEqual([{ droneId: 'drone-a', chatName: 'default' }]);
+
+      const subscribedSnapshot = await service.snapshot();
+      const thread = subscribedSnapshot.threads.find((item) => item.id === threadId);
+      expect(thread?.status).toBe('waiting_for_chats_idle');
+      expect(subscribedSnapshot.chatIdleSubscriptions.some((item) => item.id === subscription.id && item.status === 'active')).toBe(true);
     });
   });
 });
