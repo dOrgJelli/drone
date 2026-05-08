@@ -11,7 +11,7 @@ import {
   normalizePendingPromptState,
   reconcileOptimisticPendingPrompt,
 } from './optimistic-pending-prompts';
-import { fetchDroneChatTranscript, sendDroneChatPrompt } from './chat-api';
+import { fetchDroneChatTranscriptCached, sameTranscriptItems, sendDroneChatPrompt } from './chat-api';
 import { droneChatQueueKey, isDroneStartingOrSeeding, parseDroneChatQueueKey } from './helpers';
 import { fetchJson, isNotFoundError, resolvePollIntervalMs, usePoll } from './hooks';
 import { beginRecordBusyKey, removeRecordKey } from './keyed-record-state';
@@ -105,6 +105,7 @@ export function useChatRuntimeOrchestration({
   const [cliTyping, setCliTyping] = React.useState(false);
   const cliTypingTimerRef = React.useRef<any>(null);
   const sessionOffsetRef = React.useRef<number | null>(null);
+  const transcriptEtagRef = React.useRef<string | null>(null);
   const screenLoadedRef = React.useRef(false);
   const transcriptsRef = React.useRef<TranscriptItem[] | null>(transcripts);
   const transcriptErrorRef = React.useRef<string | null>(transcriptError);
@@ -226,6 +227,7 @@ export function useChatRuntimeOrchestration({
     const shouldPrimeTranscriptLoading = chatUiMode === 'transcript' && Boolean(selectedDrone && selectedChat);
     const shouldPrimeSessionLoading = chatUiMode === 'cli' && Boolean(selectedDrone && selectedChat);
     resetSessionOutputState();
+    transcriptEtagRef.current = null;
     setLoadingTranscript(shouldPrimeTranscriptLoading);
     setTranscripts(null);
     setTranscriptError(null);
@@ -630,22 +632,30 @@ export function useChatRuntimeOrchestration({
       const initial = transcriptsRef.current === null && !transcriptErrorRef.current;
       if (initial && mounted) setLoadingTranscript(true);
       try {
-        const data = await fetchDroneChatTranscript(requestJson, {
+        const data = await fetchDroneChatTranscriptCached({
           droneId: selectedDrone,
           chatName: selectedChat,
           turn: 'all',
+          etag: transcriptEtagRef.current,
         });
         if (!mounted) return;
-        setTranscripts(data);
+        if (data.notModified) {
+          setTranscriptError(null);
+          return;
+        }
+        transcriptEtagRef.current = data.etag;
+        setTranscripts((prev) => (sameTranscriptItems(prev, data.transcripts) ? prev : data.transcripts));
         setTranscriptError(null);
       } catch (e: any) {
         if (!mounted) return;
         if (isNotFoundError(e)) {
           // Treat 404 as "no transcript yet" to avoid a scary error state for brand new chats.
-          setTranscripts([]);
+          transcriptEtagRef.current = null;
+          setTranscripts((prev) => (Array.isArray(prev) && prev.length === 0 ? prev : []));
           setTranscriptError(null);
         } else if (isTransientDroneStartupError(e)) {
           keepLoading = true;
+          transcriptEtagRef.current = null;
           setTranscripts(null);
           setTranscriptError(null);
         } else {

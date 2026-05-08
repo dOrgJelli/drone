@@ -94,20 +94,13 @@ export function DroneCard({
           : actionCount === 1
             ? 'min-w-[20px]'
             : '';
-  const actionReserveHoverWidthClass =
-    actionCount >= 5
-      ? 'group-hover/drone:min-w-[116px]'
-      : actionCount === 4
-        ? 'group-hover/drone:min-w-[92px]'
-      : actionCount === 3
-        ? 'group-hover/drone:min-w-[68px]'
-        : actionCount === 2
-          ? 'group-hover/drone:min-w-[44px]'
-          : actionCount === 1
-            ? 'group-hover/drone:min-w-[20px]'
-            : '';
   const showRespondingAsStatus = Boolean(busy) && Boolean(drone.statusOk) && drone.hubPhase !== 'error';
   const isStarting = drone.hubPhase === 'creating' || drone.hubPhase === 'starting' || drone.hubPhase === 'seeding';
+  const showsTrailingStatus =
+    showRespondingAsStatus ||
+    isStarting ||
+    drone.hubPhase === 'error' ||
+    !drone.statusOk;
   const showUnreadIndicator =
     Boolean(unreadAgentMessage) && !isStarting && !showRespondingAsStatus;
   const showActiveIndicator = Boolean(active) && !showUnreadIndicator;
@@ -148,7 +141,7 @@ export function DroneCard({
           onClick();
         }
       }}
-      className={`w-full text-left ${rowDensityClass} flex items-center rounded-md border transition-all duration-150 group/drone relative ${
+      className={`w-full text-left ${rowDensityClass} flex items-center rounded-md border transition-colors duration-150 group/drone relative ${
         selected
           ? selectedTone === 'muted'
             ? 'bg-[rgba(255,255,255,.045)] border-[rgba(255,255,255,.08)]'
@@ -218,8 +211,8 @@ export function DroneCard({
           )
         ) : null}
         <div
-          className={`relative flex items-center justify-end transition-[min-width] duration-150 ${
-            hasActions ? (pinActionsVisible ? actionReserveWidthClass : actionReserveHoverWidthClass) : ''
+          className={`relative flex items-center justify-end ${
+            pinActionsVisible ? actionReserveWidthClass : hasActions && !showsTrailingStatus ? 'w-0' : ''
           }`}
         >
           <div
@@ -240,11 +233,11 @@ export function DroneCard({
           {hasActions && (
             <div
               data-onboarding-id="sidebar.droneCard.actions"
-              className={`absolute right-0 flex items-center gap-1 transition-all ${
+              className={`absolute right-0 z-10 flex items-center gap-1 rounded-md py-0.5 pl-3 transition-opacity duration-150 before:absolute before:inset-y-0 before:-left-5 before:w-5 before:bg-gradient-to-l before:from-[var(--panel)] before:to-transparent ${
                 pinActionsVisible
                   ? 'opacity-100 pointer-events-auto'
                   : 'opacity-0 pointer-events-none group-hover/drone:opacity-100 group-hover/drone:pointer-events-auto'
-              }`}
+              } ${selected ? 'bg-[var(--selected)] before:from-[var(--selected)]' : 'bg-[var(--panel)] group-hover/drone:bg-[rgb(19,25,34)] group-hover/drone:before:from-[rgb(19,25,34)]'}`}
             >
               {canCreateChat && (
                 <button

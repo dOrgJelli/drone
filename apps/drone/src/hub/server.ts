@@ -516,6 +516,25 @@ function json(res: http.ServerResponse, status: number, body: any) {
   res.end(data);
 }
 
+function jsonWithEtag(req: http.IncomingMessage, res: http.ServerResponse, status: number, body: any) {
+  const data = JSON.stringify(body, null, 2);
+  const etag = `"sha256-${crypto.createHash('sha256').update(data).digest('base64url')}"`;
+  res.setHeader('etag', etag);
+  res.setHeader('cache-control', 'no-store');
+  if (status === 200) {
+    const ifNoneMatch = String(req.headers['if-none-match'] ?? '');
+    const requestedEtags = ifNoneMatch.split(',').map((item) => item.trim());
+    if (requestedEtags.includes(etag) || requestedEtags.includes('*')) {
+      res.statusCode = 304;
+      res.end();
+      return;
+    }
+  }
+  res.statusCode = status;
+  res.setHeader('content-type', 'application/json; charset=utf-8');
+  res.end(data);
+}
+
 async function readManagedHubStateAtRoot(rootDir: string): Promise<ManagedHubState> {
   const statePath = path.join(rootDir, 'hub.json');
   const raw = await fs.readFile(statePath, 'utf8');
@@ -20614,7 +20633,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           if (resolved.kind === 'pending') {
             const droneName = String(resolved.pending?.name ?? droneRef).trim() || droneRef;
             const sel = u.searchParams.get('turn') ?? 'last';
-            json(res, 200, { ok: true, id: resolved.id, name: droneName, chat: chatName, selection: sel, transcripts: [] });
+            jsonWithEtag(req, res, 200, { ok: true, id: resolved.id, name: droneName, chat: chatName, selection: sel, transcripts: [] });
             return;
           }
           const droneId = resolved.id;
@@ -20697,7 +20716,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             });
           }
 
-          json(res, 200, { ok: true, id: droneId, name: droneName, chat: chatName, selection: sel, transcripts, agent });
+          jsonWithEtag(req, res, 200, { ok: true, id: droneId, name: droneName, chat: chatName, selection: sel, transcripts, agent });
           return;
         } catch (e: any) {
           json(res, 500, { ok: false, error: e?.message ?? String(e) });

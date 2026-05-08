@@ -7,6 +7,14 @@ import type { DroneSummary } from '../types';
 
 const PENDING_SELECTED_CHAT_GRACE_MS = 5_000;
 
+function sameStringArray(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) return false;
+  for (let i = 0; i < left.length; i++) {
+    if (left[i] !== right[i]) return false;
+  }
+  return true;
+}
+
 type UseDroneSelectionStateArgs = {
   orderedDroneIds: string[];
   selectedDrone: string | null;
@@ -121,9 +129,24 @@ export function useDroneSelectionState({
       const id = String(droneIdRaw ?? '').trim();
       if (!id) return;
       const nextChat = resolveChatForDrone(id);
+      const alreadySelectedSingle =
+        !opts?.toggle &&
+        !opts?.range &&
+        selectedDrone === id &&
+        selectedDroneIds.length === 1 &&
+        selectedDroneIds[0] === id &&
+        (String(selectedChat ?? '').trim() || 'default') === nextChat &&
+        !fleetDashboardOpen &&
+        !kanbanBoardOpen &&
+        !playbookRunsOpen &&
+        !draftChat;
       // Manual card selection should always override any temporary preferred auto-selection.
       preferredSelectedDroneRef.current = null;
       preferredSelectedDroneHoldUntilRef.current = 0;
+      if (alreadySelectedSingle) {
+        selectionAnchorRef.current = id;
+        return;
+      }
       setAppView('workspace');
       setFleetDashboardOpen(false);
       setSelectedGroupMultiChat(null);
@@ -143,7 +166,8 @@ export function useDroneSelectionState({
         if (anchorIdx >= 0 && selectedIdx >= 0) {
           const start = Math.min(anchorIdx, selectedIdx);
           const end = Math.max(anchorIdx, selectedIdx);
-          setSelectedDroneIds(orderedDroneIds.slice(start, end + 1));
+          const nextSelectedIds = orderedDroneIds.slice(start, end + 1);
+          setSelectedDroneIds((prev) => (sameStringArray(prev, nextSelectedIds) ? prev : nextSelectedIds));
           setSelectedDrone(id);
           selectionAnchorRef.current = anchor;
           setSelectedChat(nextChat);
@@ -159,7 +183,7 @@ export function useDroneSelectionState({
         scrollChatToBottom();
         return;
       }
-      setSelectedDroneIds([id]);
+      setSelectedDroneIds((prev) => (prev.length === 1 && prev[0] === id ? prev : [id]));
       setSelectedDrone(id);
       selectionAnchorRef.current = id;
       setSelectedChat(nextChat);
@@ -167,11 +191,17 @@ export function useDroneSelectionState({
     },
     [
       orderedDroneIds,
+      draftChat,
+      fleetDashboardOpen,
+      kanbanBoardOpen,
+      playbookRunsOpen,
       preferredSelectedDroneHoldUntilRef,
       preferredSelectedDroneRef,
       resolveChatForDrone,
       scrollChatToBottom,
+      selectedChat,
       selectedDrone,
+      selectedDroneIds,
       selectionAnchorRef,
       setAppView,
       setFleetDashboardOpen,

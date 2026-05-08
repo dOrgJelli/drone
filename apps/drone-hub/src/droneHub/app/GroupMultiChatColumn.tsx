@@ -37,7 +37,7 @@ import {
 import { parseIsoDateMs, type GroupMultiChatColumnRuntimeState } from './group-multi-chat-sort';
 import { openDroneTabFromLastPreview, resolveDroneOpenTabUrl } from './quick-actions';
 import { useDroneHubUiStore } from './use-drone-hub-ui-store';
-import { fetchDroneChatTranscript, sendDroneChatPrompt } from './chat-api';
+import { fetchDroneChatTranscriptCached, sameTranscriptItems, sendDroneChatPrompt } from './chat-api';
 
 export type GroupMultiChatColumnProps = {
   drone: DroneSummary;
@@ -85,6 +85,7 @@ export function GroupMultiChatColumn({
   const [quickActionError, setQuickActionError] = React.useState<string | null>(null);
   const [dirtyDroneApplyModal, setDirtyDroneApplyModal] = React.useState<DirtyDroneApplyModalState | null>(null);
   const columnScrollRef = React.useRef<HTMLDivElement | null>(null);
+  const transcriptEtagRef = React.useRef<string | null>(null);
   const draftKey = React.useMemo(() => chatInputDraftKeyForDroneChat(drone.id, chatName), [drone.id, chatName]);
   const draftValue = useDroneHubUiStore((s) => s.chatInputDrafts[draftKey] ?? '');
   const setChatInputDraft = useDroneHubUiStore((s) => s.setChatInputDraft);
@@ -111,6 +112,7 @@ export function GroupMultiChatColumn({
     };
 
     setTranscripts(null);
+    transcriptEtagRef.current = null;
     setError(null);
     setLoading(true);
 
@@ -119,7 +121,7 @@ export function GroupMultiChatColumn({
       const isStarting = isDroneStartingOrSeeding(drone.hubPhase);
       if (isStarting) {
         if (mounted) {
-          setTranscripts([]);
+          setTranscripts((prev) => (Array.isArray(prev) && prev.length === 0 ? prev : []));
           setError(null);
           setLoading(false);
         }
@@ -127,18 +129,25 @@ export function GroupMultiChatColumn({
       }
       busy = true;
       try {
-        const data = await fetchDroneChatTranscript(requestJson, {
+        const data = await fetchDroneChatTranscriptCached({
           droneId: drone.id,
           chatName,
           turn: 'all',
+          etag: transcriptEtagRef.current,
         });
         if (!mounted) return;
-        setTranscripts(data);
+        if (data.notModified) {
+          setError(null);
+          return;
+        }
+        transcriptEtagRef.current = data.etag;
+        setTranscripts((prev) => (sameTranscriptItems(prev, data.transcripts) ? prev : data.transcripts));
         setError(null);
       } catch (err: any) {
         if (!mounted) return;
         if (isNotFoundError(err)) {
-          setTranscripts([]);
+          transcriptEtagRef.current = null;
+          setTranscripts((prev) => (Array.isArray(prev) && prev.length === 0 ? prev : []));
           setError(null);
         } else {
           setError(err?.message ?? String(err));

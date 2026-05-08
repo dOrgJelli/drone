@@ -16,6 +16,118 @@ type UseDroneHubRegistryDataArgs = {
   setChatHeaderRepoPath: Setter<string>;
 };
 
+function sameStringArray(leftRaw: unknown, rightRaw: unknown): boolean {
+  const left = Array.isArray(leftRaw) ? leftRaw : [];
+  const right = Array.isArray(rightRaw) ? rightRaw : [];
+  if (left.length !== right.length) return false;
+  for (let i = 0; i < left.length; i++) {
+    if (String(left[i] ?? '') !== String(right[i] ?? '')) return false;
+  }
+  return true;
+}
+
+function sameOptionalText(left: unknown, right: unknown): boolean {
+  return String(left ?? '') === String(right ?? '');
+}
+
+function samePlaybook(left: DroneSummary['playbook'], right: DroneSummary['playbook']): boolean {
+  if (!left && !right) return true;
+  if (!left || !right) return false;
+  if (left.id !== right.id) return false;
+  if (left.label !== right.label) return false;
+  if (left.messageCount !== right.messageCount) return false;
+  if (!sameOptionalText(left.chatName, right.chatName)) return false;
+  if (!sameStringArray(left.artifacts, right.artifacts)) return false;
+  const leftActions = Array.isArray(left.actions) ? left.actions : [];
+  const rightActions = Array.isArray(right.actions) ? right.actions : [];
+  if (leftActions.length !== rightActions.length) return false;
+  for (let i = 0; i < leftActions.length; i++) {
+    const a = leftActions[i];
+    const b = rightActions[i];
+    if (!a || !b) return false;
+    if (a.id !== b.id || a.label !== b.label) return false;
+    if (!sameStringArray(a.messages, b.messages)) return false;
+  }
+  return true;
+}
+
+function sameDroneSummary(left: DroneSummary, right: DroneSummary): boolean {
+  return (
+    left.id === right.id &&
+    left.name === right.name &&
+    sameOptionalText(left.group, right.group) &&
+    sameOptionalText(left.kind, right.kind) &&
+    sameOptionalText(left.visibility, right.visibility) &&
+    left.createdAt === right.createdAt &&
+    sameOptionalText(left.fleetParentId, right.fleetParentId) &&
+    sameStringArray(left.fleetAssignedIds, right.fleetAssignedIds) &&
+    sameOptionalText(left.runtime, right.runtime) &&
+    left.repoAttached === right.repoAttached &&
+    left.repoPath === right.repoPath &&
+    sameOptionalText(left.repoBranch, right.repoBranch) &&
+    sameOptionalText(left.cwd, right.cwd) &&
+    left.containerPort === right.containerPort &&
+    left.hostPort === right.hostPort &&
+    left.statusOk === right.statusOk &&
+    sameOptionalText(left.statusError, right.statusError) &&
+    sameStringArray(left.chats, right.chats) &&
+    sameStringArray(left.busyChats, right.busyChats) &&
+    sameOptionalText(left.hubPhase, right.hubPhase) &&
+    sameOptionalText(left.hubMessage, right.hubMessage) &&
+    left.busy === right.busy &&
+    samePlaybook(left.playbook, right.playbook)
+  );
+}
+
+function sameDroneResponse(
+  left: { ok: true; drones: DroneSummary[] },
+  right: { ok: true; drones: DroneSummary[] },
+): boolean {
+  const leftDrones = Array.isArray(left?.drones) ? left.drones : [];
+  const rightDrones = Array.isArray(right?.drones) ? right.drones : [];
+  if (leftDrones.length !== rightDrones.length) return false;
+  for (let i = 0; i < leftDrones.length; i++) {
+    const a = leftDrones[i];
+    const b = rightDrones[i];
+    if (!a || !b || !sameDroneSummary(a, b)) return false;
+  }
+  return true;
+}
+
+function sameRepoResponse(
+  left: { ok: true; repos: RepoSummary[] },
+  right: { ok: true; repos: RepoSummary[] },
+): boolean {
+  const leftRepos = Array.isArray(left?.repos) ? left.repos : [];
+  const rightRepos = Array.isArray(right?.repos) ? right.repos : [];
+  if (leftRepos.length !== rightRepos.length) return false;
+  for (let i = 0; i < leftRepos.length; i++) {
+    const a = leftRepos[i];
+    const b = rightRepos[i];
+    if (!a || !b) return false;
+    if (a.path !== b.path) return false;
+    if (!sameOptionalText(a.addedAt, b.addedAt)) return false;
+    if (!sameOptionalText(a.remoteUrl, b.remoteUrl)) return false;
+    if (!a.github && !b.github) continue;
+    if (!a.github || !b.github) return false;
+    if (a.github.owner !== b.github.owner || a.github.repo !== b.github.repo) return false;
+  }
+  return true;
+}
+
+function sameGroupsResponse(
+  left: { ok: true; groups: Array<{ name: string }> },
+  right: { ok: true; groups: Array<{ name: string }> },
+): boolean {
+  const leftGroups = Array.isArray(left?.groups) ? left.groups : [];
+  const rightGroups = Array.isArray(right?.groups) ? right.groups : [];
+  if (leftGroups.length !== rightGroups.length) return false;
+  for (let i = 0; i < leftGroups.length; i++) {
+    if (String(leftGroups[i]?.name ?? '') !== String(rightGroups[i]?.name ?? '')) return false;
+  }
+  return true;
+}
+
 export function useDroneHubRegistryData({
   activeRepoPath,
   optimisticallyDeletedDrones,
@@ -27,6 +139,7 @@ export function useDroneHubRegistryData({
     () => fetchJson('/api/drones'),
     2000,
     [],
+    { isEqual: sameDroneResponse },
   );
   const dronesErrorUi = dronesResp ? null : dronesError;
   const polledDrones = dronesResp?.drones ?? [];
@@ -58,6 +171,7 @@ export function useDroneHubRegistryData({
     () => fetchJson('/api/repos'),
     5000,
     [],
+    { isEqual: sameRepoResponse },
   );
   const repos = reposResp?.repos ?? [];
   const registeredRepoPaths = React.useMemo(
@@ -74,6 +188,7 @@ export function useDroneHubRegistryData({
     () => fetchJson('/api/groups'),
     5000,
     [],
+    { isEqual: sameGroupsResponse },
   );
   const registryGroupNames = React.useMemo(() => {
     const out = new Set<string>();
