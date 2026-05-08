@@ -8,15 +8,12 @@ import { useDroneHubUiStore } from '../app/use-drone-hub-ui-store';
 import { UiMenuSelect, type UiMenuSelectEntry } from '../../ui/menuSelect';
 import { IconFile, iconForFilePath } from '../icons';
 
-const ASSISTANT_AUTO_APPROVE_STORAGE_KEY = 'droneHub.assistant.autoApprove';
-const ASSISTANT_SCOPE_STORAGE_KEY = 'droneHub.assistant.scope';
 const ASSISTANT_THREAD_SIDEBAR_OPEN_STORAGE_KEY = 'droneHub.assistant.threadSidebarOpen';
-const ASSISTANT_PROMPT_DELIVERY_MODE_STORAGE_KEY = 'droneHub.assistant.promptDeliveryMode';
 const ASSISTANT_FILES_OPEN_STORAGE_KEY = 'droneHub.assistant.filesOpen';
 const TOOL_ROW_MESSAGE_PREVIEW_MAX = 72;
 const TOOL_ROW_TARGET_PREVIEW_MAX = 3;
 
-type AssistantThreadStatus = 'idle' | 'running' | 'waiting_for_approval' | 'error';
+type AssistantThreadStatus = 'idle' | 'running' | 'waiting_for_approval' | 'waiting_for_chats_idle' | 'error';
 
 type AssistantMessage = {
   role: 'user' | 'assistant' | 'toolResult';
@@ -47,6 +44,15 @@ type AssistantRunModel = {
   startedAt: string;
 };
 
+type AssistantChatIdleSubscription = {
+  id: string;
+  threadId: string;
+  targets: Array<{ droneId: string; chatName: string }>;
+  createdAt: string;
+  expiresAt: string;
+  status: 'active' | 'fired' | 'cancelled' | 'expired';
+};
+
 type AssistantThread = {
   id: string;
   title: string;
@@ -56,6 +62,8 @@ type AssistantThread = {
   provider: AssistantProviderId;
   thinkingLevel: string;
   accessScope: AssistantAccessScope;
+  autoApprove: boolean;
+  promptDeliveryMode: AssistantPromptDeliveryMode;
   messages: AssistantMessage[];
   queuedPrompts?: AssistantQueuedPrompt[];
   status: AssistantThreadStatus;
@@ -90,6 +98,7 @@ type AssistantSnapshot = {
   activeThreadId: string;
   threads: AssistantThread[];
   pendingApprovals: AssistantApproval[];
+  chatIdleSubscriptions?: AssistantChatIdleSubscription[];
   models: AssistantModelOption[];
   accessScope?: AssistantAccessScope;
   runningModels?: Record<string, AssistantRunModel>;
@@ -128,46 +137,14 @@ const ASSISTANT_PROVIDERS: Array<{ id: AssistantProviderId; label: string; authL
   { id: 'gemini', label: 'Gemini', authLabel: 'API key', title: 'Use the configured Gemini API key for Gemini models.' },
 ];
 
-function readInitialAutoApprove(): boolean {
-  if (typeof window === 'undefined') return false;
-  return window.localStorage.getItem(ASSISTANT_AUTO_APPROVE_STORAGE_KEY) === '1';
-}
-
 function readInitialThreadSidebarOpen(): boolean {
   if (typeof window === 'undefined') return true;
   return window.localStorage.getItem(ASSISTANT_THREAD_SIDEBAR_OPEN_STORAGE_KEY) !== '0';
 }
 
-function readInitialPromptDeliveryMode(): AssistantPromptDeliveryMode {
-  if (typeof window === 'undefined') return 'queue';
-  return window.localStorage.getItem(ASSISTANT_PROMPT_DELIVERY_MODE_STORAGE_KEY) === 'asap' ? 'asap' : 'queue';
-}
-
 function readInitialFilesOpen(): boolean {
   if (typeof window === 'undefined') return false;
   return window.localStorage.getItem(ASSISTANT_FILES_OPEN_STORAGE_KEY) === '1';
-}
-
-function readInitialScope(): { readMode: AssistantScopeMode; writeMode: AssistantScopeMode; drones: AssistantScopeDrone[] } {
-  if (typeof window === 'undefined') return { readMode: 'all', writeMode: 'all', drones: [] };
-  try {
-    const raw = JSON.parse(window.localStorage.getItem(ASSISTANT_SCOPE_STORAGE_KEY) || 'null');
-    const readMode: AssistantScopeMode = (raw?.readMode ?? raw?.mode) === 'selected' ? 'selected' : 'all';
-    const writeMode: AssistantScopeMode = (raw?.writeMode ?? raw?.mode) === 'selected' ? 'selected' : 'all';
-    const drones = Array.isArray(raw?.drones)
-      ? raw.drones
-          .map((item: any) => ({
-            id: String(item?.id ?? '').trim(),
-            name: String(item?.name ?? item?.id ?? '').trim(),
-          }))
-          .filter((item: AssistantScopeDrone) => item.id)
-      : [];
-    return drones.length > 0
-      ? { readMode, writeMode, drones }
-      : { readMode: 'all', writeMode: 'all', drones: [] };
-  } catch {
-    return { readMode: 'all', writeMode: 'all', drones: [] };
-  }
 }
 
 function assistantScopeSyncKey(readMode: AssistantScopeMode, writeMode: AssistantScopeMode, droneIds: string[]): string {
@@ -222,6 +199,7 @@ const TOOL_LABELS: Record<string, string> = {
   read_chat_messages: 'Read chat messages',
   search_chat_messages: 'Search chat messages',
   set_drone_group: 'Set drone group',
+  subscribe_to_chats_idle: 'Subscribe to chats idle',
   wait_for_agent_chats_idle: 'Wait for chats idle',
 };
 
@@ -286,7 +264,7 @@ function messageDroneDetails(args: any, droneNameById: AssistantDroneNameMap): A
 function toolActivityTitle(call: AssistantToolCall | undefined, result: AssistantMessage | undefined, droneNameById: AssistantDroneNameMap): string {
   const baseTitle = toolLabel(call?.name || result?.toolName);
   if (!call) return baseTitle;
-  if (call.name === 'wait_for_agent_chats_idle') {
+  if (call.name === 'wait_for_agent_chats_idle' || call.name === 'subscribe_to_chats_idle') {
     const summary = summarizeWaitTargets(normalizeAssistantWaitTargets(call.args, droneNameById));
     return summary ? `${baseTitle}: ${summary}` : baseTitle;
   }
@@ -301,7 +279,7 @@ function toolDroneLookupKey(items: AssistantRenderItem[]): string {
   const keys: string[] = [];
   for (const item of items) {
     if (item.type !== 'tool' || !item.call) continue;
-    if (item.call.name === 'wait_for_agent_chats_idle') {
+    if (item.call.name === 'wait_for_agent_chats_idle' || item.call.name === 'subscribe_to_chats_idle') {
       const targets = Array.isArray(item.call.args?.targets) ? item.call.args.targets : [];
       for (const target of targets) {
         const droneId = String(target?.droneId ?? target?.id ?? target?.drone ?? '').trim();
@@ -412,8 +390,15 @@ function compactModelSelectionLabel(label: string): string {
 function assistantThreadStatusTone(status: AssistantThreadStatus): string {
   if (status === 'running') return 'bg-[var(--green)]';
   if (status === 'waiting_for_approval') return 'bg-[var(--accent)]';
+  if (status === 'waiting_for_chats_idle') return 'bg-[var(--yellow)]';
   if (status === 'error') return 'bg-[var(--red)]';
   return 'bg-[var(--muted-dim)]';
+}
+
+function assistantThreadStatusLabel(status: AssistantThreadStatus | undefined, fallback: string): string {
+  if (!status) return fallback;
+  if (status === 'waiting_for_chats_idle') return 'subscribed to chats idle';
+  return status.replace(/_/g, ' ');
 }
 
 async function readNdjson(response: Response, onEvent: (event: any) => void): Promise<void> {
@@ -604,7 +589,7 @@ function MessageDroneActivityRow({
   );
 }
 
-function WaitForChatsIdleActivityRow({
+function ChatsIdleActivityRow({
   call,
   result,
   droneNameById,
@@ -623,7 +608,7 @@ function WaitForChatsIdleActivityRow({
           <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
             <ToolStatusIndicator result={result} />
             <div className="text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
-              Wait for chats idle
+              {call.name === 'subscribe_to_chats_idle' ? 'Subscribe to chats idle' : 'Wait for chats idle'}
             </div>
             <ToolDetailsButton open={detailsOpen} onClick={() => setDetailsOpen((value) => !value)} />
           </div>
@@ -671,8 +656,8 @@ function ToolActivityRow({
     return <MessageDroneActivityRow call={call} result={result} droneNameById={droneNameById} />;
   }
 
-  if (call?.name === 'wait_for_agent_chats_idle') {
-    return <WaitForChatsIdleActivityRow call={call} result={result} droneNameById={droneNameById} />;
+  if (call?.name === 'wait_for_agent_chats_idle' || call?.name === 'subscribe_to_chats_idle') {
+    return <ChatsIdleActivityRow call={call} result={result} droneNameById={droneNameById} />;
   }
 
   const title = toolActivityTitle(call, result, droneNameById);
@@ -1152,7 +1137,7 @@ function AssistantThreadSidebar({
                       </span>
                     </div>
                     <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[10px] text-[var(--muted-dim)]">
-                      <span className="truncate">{thread.status.replace(/_/g, ' ')}</span>
+                      <span className="truncate">{assistantThreadStatusLabel(thread.status, 'idle')}</span>
                       <span aria-hidden="true">·</span>
                       <span>{formatUpdatedAt(thread.updatedAt)}</span>
                       {messageCount > 0 ? (
@@ -1348,19 +1333,17 @@ export function AssistantDock() {
   const [error, setError] = React.useState<string | null>(null);
   const [draft, setDraft] = React.useState('');
   const [threadSidebarOpen, setThreadSidebarOpen] = React.useState(readInitialThreadSidebarOpen);
-  const [promptDeliveryMode, setPromptDeliveryMode] = React.useState<AssistantPromptDeliveryMode>(readInitialPromptDeliveryMode);
   const [filesOpen, setFilesOpen] = React.useState(readInitialFilesOpen);
   const [artifactFiles, setArtifactFiles] = React.useState<AssistantArtifactSummary[]>([]);
   const [selectedArtifactPath, setSelectedArtifactPath] = React.useState<string | null>(null);
   const [selectedArtifactFile, setSelectedArtifactFile] = React.useState<AssistantArtifactFile | null>(null);
   const [artifactsLoading, setArtifactsLoading] = React.useState(false);
   const [artifactsError, setArtifactsError] = React.useState<string | null>(null);
-  const [autoApprove, setAutoApprove] = React.useState(readInitialAutoApprove);
-  const initialScope = React.useMemo(readInitialScope, []);
-  const [scopeReadMode, setScopeReadMode] = React.useState<AssistantScopeMode>(() => initialScope.readMode);
-  const [scopeWriteMode, setScopeWriteMode] = React.useState<AssistantScopeMode>(() => initialScope.writeMode);
-  const [scopeDrones, setScopeDrones] = React.useState<AssistantScopeDrone[]>(() => initialScope.drones);
+  const [scopeReadMode, setScopeReadMode] = React.useState<AssistantScopeMode>('all');
+  const [scopeWriteMode, setScopeWriteMode] = React.useState<AssistantScopeMode>('all');
+  const [scopeDrones, setScopeDrones] = React.useState<AssistantScopeDrone[]>([]);
   const [scopeSyncReady, setScopeSyncReady] = React.useState(false);
+  const [scopeSyncBusy, setScopeSyncBusy] = React.useState(false);
   const [droneNameById, setDroneNameById] = React.useState<AssistantDroneNameMap>({});
   const [approvalBusyId, setApprovalBusyId] = React.useState<string | null>(null);
   const [queuedCancelBusyId, setQueuedCancelBusyId] = React.useState<string | null>(null);
@@ -1381,9 +1364,9 @@ export function AssistantDock() {
   const scrollRef = React.useRef<HTMLDivElement | null>(null);
   const inputRef = React.useRef<HTMLTextAreaElement | null>(null);
   const refocusInputWhenIdleRef = React.useRef(false);
-  const autoApprovingIdsRef = React.useRef<Set<string>>(new Set());
   const activeThreadIdRef = React.useRef('');
   const lastSyncedScopeKeyRef = React.useRef('');
+  const scopeSyncPromiseRef = React.useRef<{ key: string; promise: Promise<boolean> } | null>(null);
   const updateThreadRequestRef = React.useRef(0);
   const { isOver: scopeDropIsOver, setNodeRef: setScopeDropNodeRef } = useDroppable({
     id: 'assistant-drone-scope-drop',
@@ -1396,6 +1379,8 @@ export function AssistantDock() {
   }, [snapshot]);
   const activeThreadId = activeThread?.id ?? '';
   activeThreadIdRef.current = activeThreadId;
+  const autoApprove = Boolean(activeThread?.autoApprove);
+  const promptDeliveryMode: AssistantPromptDeliveryMode = activeThread?.promptDeliveryMode === 'asap' ? 'asap' : 'queue';
   const activeAccessScope: AssistantAccessScope | null = activeThread?.accessScope ?? snapshot?.accessScope ?? null;
   const activeAccessScopeDroneIdsKey = activeAccessScope?.droneIds?.join('\u0000') ?? '';
   const activePendingApprovals = React.useMemo(
@@ -1476,6 +1461,18 @@ export function AssistantDock() {
   }, [refresh]);
 
   React.useEffect(() => {
+    const hasAssistantBackgroundActivity =
+      Object.keys(snapshot?.runningModels ?? {}).length > 0 ||
+      (snapshot?.threads ?? []).some((thread) => thread.status === 'waiting_for_chats_idle') ||
+      (snapshot?.chatIdleSubscriptions ?? []).some((subscription) => subscription.status === 'active');
+    if (!hasAssistantBackgroundActivity) return;
+    const timer = window.setInterval(() => {
+      void refresh();
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [refresh, snapshot?.chatIdleSubscriptions, snapshot?.runningModels, snapshot?.threads]);
+
+  React.useEffect(() => {
     if (!toolDroneKey) return;
     let cancelled = false;
     void requestJson<{ ok: true; drones?: Array<{ id?: string; name?: string }> }>('/api/drones')
@@ -1499,18 +1496,8 @@ export function AssistantDock() {
 
   React.useEffect(() => {
     if (typeof window === 'undefined') return;
-    window.localStorage.setItem(ASSISTANT_AUTO_APPROVE_STORAGE_KEY, autoApprove ? '1' : '0');
-  }, [autoApprove]);
-
-  React.useEffect(() => {
-    if (typeof window === 'undefined') return;
     window.localStorage.setItem(ASSISTANT_THREAD_SIDEBAR_OPEN_STORAGE_KEY, threadSidebarOpen ? '1' : '0');
   }, [threadSidebarOpen]);
-
-  React.useEffect(() => {
-    if (typeof window === 'undefined') return;
-    window.localStorage.setItem(ASSISTANT_PROMPT_DELIVERY_MODE_STORAGE_KEY, promptDeliveryMode);
-  }, [promptDeliveryMode]);
 
   const resolveScopeDroneNames = React.useCallback(async (ids: string[], fallbackLabel?: string): Promise<AssistantScopeDrone[]> => {
     const cleanIds = Array.from(new Set(ids.map((id) => String(id ?? '').trim()).filter(Boolean)));
@@ -1586,23 +1573,15 @@ export function AssistantDock() {
     });
   }, []);
 
-  React.useEffect(() => {
-    if (!scopeSyncReady || !activeThread) return;
+  const syncScopeToBackend = React.useCallback(async (): Promise<boolean> => {
+    if (!scopeSyncReady || !activeThread) return true;
     const selectedDroneIds = scopeDrones.map((drone) => drone.id);
     const scopedDroneIds = scopeReadMode === 'selected' || scopeWriteMode === 'selected' ? selectedDroneIds : [];
     const syncKey = assistantScopeSyncKey(scopeReadMode, scopeWriteMode, scopedDroneIds);
-    if (typeof window !== 'undefined') {
-      window.localStorage.setItem(
-        ASSISTANT_SCOPE_STORAGE_KEY,
-        JSON.stringify({
-          readMode: scopeReadMode,
-          writeMode: scopeWriteMode,
-          drones: scopeDrones,
-        }),
-      );
-    }
-    if (lastSyncedScopeKeyRef.current === syncKey) return;
-    void fetch('/api/assistant/scope', {
+    if (lastSyncedScopeKeyRef.current === syncKey) return true;
+    if (scopeSyncPromiseRef.current?.key === syncKey) return await scopeSyncPromiseRef.current.promise;
+    setScopeSyncBusy(true);
+    const promise = fetch('/api/assistant/scope', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -1612,13 +1591,37 @@ export function AssistantDock() {
         droneIds: scopedDroneIds,
       }),
     })
-      .then((response) => {
-        if (response.ok) lastSyncedScopeKeyRef.current = syncKey;
+      .then(async (response) => {
+        if (!response.ok) {
+          let message = 'Failed to update assistant scope.';
+          try {
+            const data = await response.json();
+            message = String(data?.error ?? message);
+          } catch {
+            // keep fallback message
+          }
+          throw new Error(message);
+        }
+        lastSyncedScopeKeyRef.current = syncKey;
+        return true;
       })
-      .catch(() => {
-        // Scope reporting is best effort; the next change will retry.
+      .catch((err: any) => {
+        setError(err?.message ?? String(err));
+        return false;
+      })
+      .finally(() => {
+        if (scopeSyncPromiseRef.current?.key === syncKey) {
+          scopeSyncPromiseRef.current = null;
+          setScopeSyncBusy(false);
+        }
       });
-  }, [activeThread?.id, scopeDrones, scopeReadMode, scopeSyncReady, scopeWriteMode]);
+    scopeSyncPromiseRef.current = { key: syncKey, promise };
+    return await promise;
+  }, [activeThread, scopeDrones, scopeReadMode, scopeSyncReady, scopeWriteMode]);
+
+  React.useEffect(() => {
+    void syncScopeToBackend();
+  }, [syncScopeToBackend]);
 
   useDndMonitor({
     onDragEnd: (event) => {
@@ -1705,7 +1708,7 @@ export function AssistantDock() {
     }
   }, []);
 
-  const updateThread = React.useCallback(async (patch: Partial<Pick<AssistantThread, 'model' | 'provider' | 'thinkingLevel'>>) => {
+  const updateThread = React.useCallback(async (patch: Partial<Pick<AssistantThread, 'model' | 'provider' | 'thinkingLevel' | 'autoApprove' | 'promptDeliveryMode'>>) => {
     if (!activeThread) return;
     const requestId = updateThreadRequestRef.current + 1;
     updateThreadRequestRef.current = requestId;
@@ -1725,8 +1728,9 @@ export function AssistantDock() {
     if (!activeThread) return;
     const prompt = draft.trim();
     if (!prompt) return;
-    setDraft('');
     setError(null);
+    if (!(await syncScopeToBackend())) return;
+    setDraft('');
     refocusInputWhenIdleRef.current = true;
     const response = await fetch(`/api/assistant/threads/${encodeURIComponent(activeThread.id)}/prompt`, {
       method: 'POST',
@@ -1736,7 +1740,6 @@ export function AssistantDock() {
         provider: activeThread.provider,
         model: activeThread.model,
         thinkingLevel: activeThread.thinkingLevel,
-        deliveryMode: promptDeliveryMode,
       }),
     });
     try {
@@ -1751,7 +1754,7 @@ export function AssistantDock() {
     } finally {
       void refresh();
     }
-  }, [activeThread, draft, promptDeliveryMode, refresh]);
+  }, [activeThread, draft, refresh, syncScopeToBackend]);
 
   const stop = React.useCallback(async () => {
     if (!activeThread) return;
@@ -1795,16 +1798,6 @@ export function AssistantDock() {
       setApprovalBusyId(null);
     }
   }, [activeThread]);
-
-  React.useEffect(() => {
-    if (!autoApprove || approvalBusyId) return;
-    const approval = activePendingApprovals.find((item) => !autoApprovingIdsRef.current.has(item.id));
-    if (!approval) return;
-    autoApprovingIdsRef.current.add(approval.id);
-    void resolveApproval(approval, true).finally(() => {
-      autoApprovingIdsRef.current.delete(approval.id);
-    });
-  }, [activePendingApprovals, approvalBusyId, autoApprove, resolveApproval]);
 
   const modelOptions = snapshot?.models ?? [];
   const activeRunningModel = activeThread ? snapshot?.runningModels?.[activeThread.id] ?? null : null;
@@ -1975,7 +1968,7 @@ export function AssistantDock() {
             <div className="truncate text-[12px] font-semibold text-[var(--fg)]">{activeThread?.title ?? 'Assistant'}</div>
             <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
               {activeThread ? <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${assistantThreadStatusTone(activeThread.status)}`} /> : null}
-              <span className="truncate">{activeThread?.status?.replace(/_/g, ' ') ?? (loading ? 'loading' : 'idle')}</span>
+              <span className="truncate">{assistantThreadStatusLabel(activeThread?.status, loading ? 'loading' : 'idle')}</span>
             </div>
           </div>
           {!threadSidebarOpen ? (
@@ -2019,11 +2012,12 @@ export function AssistantDock() {
           </button>
           <button
             type="button"
-            onClick={() => setAutoApprove((value) => !value)}
+            onClick={() => void updateThread({ autoApprove: !autoApprove })}
+            disabled={!activeThread}
             aria-pressed={autoApprove}
             aria-label="Toggle auto-approve proposals"
             title={autoApprove ? 'Auto-approve proposals is on' : 'Auto-approve proposals is off'}
-            className={`h-8 w-8 flex-shrink-0 rounded border text-[var(--muted)] hover:text-[var(--fg)] ${
+            className={`h-8 w-8 flex-shrink-0 rounded border text-[var(--muted)] hover:text-[var(--fg)] disabled:cursor-not-allowed disabled:opacity-45 ${
               autoApprove
                 ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
                 : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)]'
@@ -2207,7 +2201,7 @@ export function AssistantDock() {
                 key={mode}
                 type="button"
                 disabled={!activeThread}
-                onClick={() => setPromptDeliveryMode(mode)}
+                onClick={() => void updateThread({ promptDeliveryMode: mode })}
                 aria-pressed={promptDeliveryMode === mode}
                 title={mode === 'queue' ? 'Queue after the assistant finishes' : 'Inject after the current turn before the next assistant response'}
                 className={`min-w-[42px] px-2 text-[10px] font-semibold uppercase tracking-wide disabled:opacity-40 ${
@@ -2267,7 +2261,7 @@ export function AssistantDock() {
             <button
               type="button"
               onClick={() => void sendPrompt()}
-              disabled={!draft.trim() || !activeThread}
+              disabled={!draft.trim() || !activeThread || scopeSyncBusy}
               className="h-7 rounded border border-[var(--accent-muted)] bg-[var(--accent-subtle)] px-2.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--accent)] disabled:opacity-40"
               style={{ fontFamily: 'var(--display)' }}
             >

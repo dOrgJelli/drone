@@ -17,7 +17,7 @@ import {
   type AssistantArtifactActionInput,
 } from './assistant-artifacts';
 
-type AssistantThreadStatus = 'idle' | 'running' | 'waiting_for_approval' | 'error';
+type AssistantThreadStatus = 'idle' | 'running' | 'waiting_for_approval' | 'waiting_for_chats_idle' | 'error';
 type AssistantThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 
 export type AssistantDroneSummary = {
@@ -61,6 +61,8 @@ type AssistantThread = {
   thinkingLevel: AssistantThinkingLevel;
   systemPrompt: string;
   accessScope: AssistantAccessScope;
+  autoApprove: boolean;
+  promptDeliveryMode: AssistantPromptDeliveryMode;
   messages: any[];
   queuedPrompts: AssistantQueuedPrompt[];
   status: AssistantThreadStatus;
@@ -78,6 +80,24 @@ type AssistantQueuedPrompt = {
 };
 
 type AssistantPromptDeliveryMode = 'queue' | 'asap';
+
+type AssistantChatIdleSubscriptionStatus = 'active' | 'fired' | 'cancelled' | 'expired';
+
+export type AssistantChatIdleSubscription = {
+  id: string;
+  threadId: string;
+  toolCallId: string | null;
+  targets: AssistantChatIdleTarget[];
+  createdAt: string;
+  expiresAt: string;
+  idleForMs: number;
+  status: AssistantChatIdleSubscriptionStatus;
+  idleSince: string | null;
+  firedAt: string | null;
+  cancelledAt: string | null;
+  expiredAt: string | null;
+  lastResult: AssistantChatIdleWaitResult | null;
+};
 
 type AssistantRunModel = {
   provider: LlmProviderId;
@@ -101,6 +121,7 @@ type AssistantApproval = {
 type StoredAssistantState = {
   activeThreadId?: string | null;
   threads?: AssistantThread[];
+  chatIdleSubscriptions?: AssistantChatIdleSubscription[];
   systemPrompt?: string;
   systemPromptUpdatedAt?: string;
   updatedAt?: string;
@@ -202,6 +223,7 @@ export type AssistantSnapshot = {
   ok: true;
   activeThreadId: string;
   threads: AssistantThread[];
+  chatIdleSubscriptions: AssistantChatIdleSubscription[];
   pendingApprovals: AssistantApproval[];
   models: AssistantModelOption[];
   accessScope: AssistantAccessScope;
@@ -240,6 +262,8 @@ const CHAT_IDLE_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 const CHAT_IDLE_MAX_TIMEOUT_MS = 30 * 60 * 1000;
 const CHAT_IDLE_DEFAULT_POLL_INTERVAL_MS = 1000;
 const CHAT_IDLE_DEFAULT_IDLE_FOR_MS = 1000;
+const CHAT_IDLE_SUBSCRIPTION_EXPIRES_AFTER_MS = 24 * 60 * 60 * 1000;
+const CHAT_IDLE_MAX_SUBSCRIPTIONS = 200;
 const CHAT_IDLE_MAX_TARGETS = 20;
 const DEFAULT_OPENAI_MODEL = 'gpt-5.5';
 const DEFAULT_GEMINI_MODEL = 'gemini-3-flash-preview';
@@ -255,7 +279,7 @@ const ASSISTANT_SYSTEM_PROMPT_DEFAULT = [
   'Use get_chat_overview before reading chat details, then read_chat_messages in pages when you need conversation context.',
   'Use assistant_files to maintain private, thread-scoped Markdown notes when tracking work, decisions, plans, questions, or handoff details. These files are for the user-facing Artifacts UI and are not visible to drones.',
   'Chat timelines contain user messages and agent messages. Queued or pending user messages appear in the same timeline with a non-completed status.',
-  'When you send a drone chat message and need the result, call wait_for_agent_chats_idle on the target chat before reading the transcript again. This blocks server-side and avoids repeated LLM polling.',
+  'When you send a drone chat message and need the result later, call subscribe_to_chats_idle on the target chat. This returns immediately so you can continue other work. If there is nothing else to do, end your turn; the system will resume this thread when the subscribed chats become idle.',
   'Do not load more chat pages than needed. Start with the latest page.',
   'Creating drones, changing drone groups, and sending a user message to a drone are actions that require user approval; explain briefly what you intend to do.',
   'If one of those write tools returns successfully, the user already approved that action. Do not ask for the same approval again.',
@@ -335,6 +359,10 @@ function normalizeThinkingLevel(raw: unknown): AssistantThinkingLevel {
 function normalizeAssistantPromptDeliveryMode(raw: unknown): AssistantPromptDeliveryMode {
   const value = String(raw ?? '').trim().toLowerCase();
   return value === 'asap' || value === 'steer' || value === 'steering' ? 'asap' : 'queue';
+}
+
+function normalizeAssistantAutoApprove(raw: unknown): boolean {
+  return raw === true || raw === 1 || String(raw ?? '').trim().toLowerCase() === 'true' || String(raw ?? '').trim() === '1';
 }
 
 function makeAssistantUserMessage(prompt: string): any {
@@ -911,6 +939,59 @@ function normalizeQueuedPrompt(raw: any, fallback: { provider: LlmProviderId; mo
   };
 }
 
+function normalizeChatIdleSubscriptionStatus(raw: unknown): AssistantChatIdleSubscriptionStatus {
+  const value = String(raw ?? '').trim().toLowerCase();
+  if (value === 'fired' || value === 'cancelled' || value === 'expired') return value;
+  return 'active';
+}
+
+function normalizeChatIdleSubscription(raw: any): AssistantChatIdleSubscription | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const id = cleanOptionalString(raw.id);
+  const threadId = cleanOptionalString(raw.threadId);
+  if (!id || !threadId) return null;
+  const targets = Array.isArray(raw.targets)
+    ? raw.targets
+        .map((target: any) => ({
+          droneId: cleanOptionalString(target?.droneId),
+          chatName: normalizeChatNameForAssistant(target?.chatName),
+        }))
+        .filter((target: AssistantChatIdleTarget) => target.droneId)
+        .slice(0, CHAT_IDLE_MAX_TARGETS)
+    : [];
+  if (targets.length === 0) return null;
+  const createdAt = cleanOptionalString(raw.createdAt) || nowIso();
+  const createdMs = Date.parse(createdAt);
+  const expiresAt =
+    cleanOptionalString(raw.expiresAt) ||
+    new Date((Number.isFinite(createdMs) ? createdMs : Date.now()) + CHAT_IDLE_SUBSCRIPTION_EXPIRES_AFTER_MS).toISOString();
+  const idleForMs = clampChatIdleForMs(raw.idleForMs);
+  const lastResult = raw.lastResult && typeof raw.lastResult === 'object' ? sanitizeMessage(raw.lastResult) as AssistantChatIdleWaitResult : null;
+  return {
+    id,
+    threadId,
+    toolCallId: cleanOptionalString(raw.toolCallId) || null,
+    targets,
+    createdAt,
+    expiresAt,
+    idleForMs,
+    status: normalizeChatIdleSubscriptionStatus(raw.status),
+    idleSince: cleanOptionalString(raw.idleSince) || null,
+    firedAt: cleanOptionalString(raw.firedAt) || null,
+    cancelledAt: cleanOptionalString(raw.cancelledAt) || null,
+    expiredAt: cleanOptionalString(raw.expiredAt) || null,
+    lastResult,
+  };
+}
+
+function sanitizeChatIdleSubscription(subscription: AssistantChatIdleSubscription): AssistantChatIdleSubscription {
+  return {
+    ...subscription,
+    targets: subscription.targets.map((target) => ({ droneId: target.droneId, chatName: normalizeChatNameForAssistant(target.chatName) })),
+    lastResult: subscription.lastResult ? sanitizeMessage(subscription.lastResult) : null,
+  };
+}
+
 function sanitizeThread(thread: AssistantThread): AssistantThread {
   return {
     ...thread,
@@ -945,6 +1026,8 @@ function normalizeThread(raw: any, fallback: { provider: LlmProviderId; model: s
     thinkingLevel,
     systemPrompt: normalizeAssistantSystemPrompt(raw.systemPrompt) || fallback.systemPrompt || ASSISTANT_SYSTEM_PROMPT_DEFAULT,
     accessScope: makeAssistantAccessScope(raw.accessScope),
+    autoApprove: normalizeAssistantAutoApprove(raw.autoApprove),
+    promptDeliveryMode: normalizeAssistantPromptDeliveryMode(raw.promptDeliveryMode),
     messages,
     queuedPrompts,
     status: raw.status === 'error' ? 'error' : 'idle',
@@ -955,13 +1038,18 @@ function normalizeThread(raw: any, fallback: { provider: LlmProviderId; model: s
 function serializeState(input: {
   activeThreadId: string;
   threads: AssistantThread[];
+  chatIdleSubscriptions: AssistantChatIdleSubscription[];
   systemPrompt: string;
   systemPromptUpdatedAt: string | null;
 }): StoredAssistantState {
   const systemPrompt = normalizeAssistantSystemPrompt(input.systemPrompt) || ASSISTANT_SYSTEM_PROMPT_DEFAULT;
+  const chatIdleSubscriptions = input.chatIdleSubscriptions
+    .slice(-CHAT_IDLE_MAX_SUBSCRIPTIONS)
+    .map(sanitizeChatIdleSubscription);
   return {
     activeThreadId: input.activeThreadId,
     threads: input.threads.slice(0, ASSISTANT_REGISTRY_MAX_THREADS).map(sanitizeThread),
+    ...(chatIdleSubscriptions.length > 0 ? { chatIdleSubscriptions } : {}),
     ...(systemPrompt !== ASSISTANT_SYSTEM_PROMPT_DEFAULT
       ? {
           systemPrompt,
@@ -1022,6 +1110,9 @@ export class HubAssistantService {
   private queuePumpPromises = new Map<string, Promise<void>>();
   private streamingMessages = new Map<string, any>();
   private runningModels = new Map<string, AssistantRunModel>();
+  private chatIdleSubscriptions: AssistantChatIdleSubscription[] = [];
+  private chatIdleSubscriptionTimer: ReturnType<typeof setInterval> | null = null;
+  private chatIdleSubscriptionCheck: Promise<void> | null = null;
   private defaultSystemPrompt = ASSISTANT_SYSTEM_PROMPT_DEFAULT;
   private defaultSystemPromptUpdatedAt: string | null = null;
   private appContext: AssistantAppContext = {
@@ -1039,6 +1130,143 @@ export class HubAssistantService {
   >();
 
   constructor(private readonly tools: AssistantToolCallbacks) {}
+
+  private activeChatIdleSubscriptions(threadId?: string): AssistantChatIdleSubscription[] {
+    const id = cleanOptionalString(threadId);
+    return this.chatIdleSubscriptions.filter((subscription) => {
+      if (subscription.status !== 'active') return false;
+      if (id && subscription.threadId !== id) return false;
+      return this.threads.some((thread) => thread.id === subscription.threadId);
+    });
+  }
+
+  private updateWaitingThreadStatuses(): void {
+    const activeByThread = new Set(this.activeChatIdleSubscriptions().map((subscription) => subscription.threadId));
+    for (const thread of this.threads) {
+      if (thread.status === 'running' || thread.status === 'waiting_for_approval' || thread.status === 'error') continue;
+      thread.status = activeByThread.has(thread.id) ? 'waiting_for_chats_idle' : 'idle';
+    }
+  }
+
+  private ensureChatIdleSubscriptionMonitor(): void {
+    if (this.chatIdleSubscriptionTimer || this.activeChatIdleSubscriptions().length === 0) return;
+    this.chatIdleSubscriptionTimer = setInterval(() => {
+      void this.checkChatIdleSubscriptions();
+    }, CHAT_IDLE_DEFAULT_POLL_INTERVAL_MS);
+    (this.chatIdleSubscriptionTimer as any).unref?.();
+  }
+
+  private stopChatIdleSubscriptionMonitorIfIdle(): void {
+    if (!this.chatIdleSubscriptionTimer || this.activeChatIdleSubscriptions().length > 0) return;
+    clearInterval(this.chatIdleSubscriptionTimer);
+    this.chatIdleSubscriptionTimer = null;
+  }
+
+  private makeChatIdleSubscriptionPrompt(subscription: AssistantChatIdleSubscription, result: AssistantChatIdleWaitResult): string {
+    const targets = result.targets
+      .map((target) => `${target.droneId}/${target.chatName}: ${target.reason}`)
+      .join('\n');
+    return [
+      `Subscription ${subscription.id} fired: all subscribed chats are idle.`,
+      `Subscribed at: ${subscription.createdAt}`,
+      `Fired at: ${subscription.firedAt ?? nowIso()}`,
+      'Targets:',
+      targets || '(none)',
+      '',
+      'Continue from this event. Read the relevant chat messages if you need details before reporting results.',
+    ].join('\n');
+  }
+
+  private enqueueChatIdleSubscriptionContinuation(subscription: AssistantChatIdleSubscription, result: AssistantChatIdleWaitResult): void {
+    const thread = this.threads.find((item) => item.id === subscription.threadId);
+    if (!thread || thread.status === 'error') return;
+    const prompt = this.makeChatIdleSubscriptionPrompt(subscription, result);
+    thread.queuedPrompts.push({
+      id: makeAssistantId('queued'),
+      prompt,
+      createdAt: nowIso(),
+      provider: thread.provider,
+      model: thread.model,
+      thinkingLevel: thread.thinkingLevel,
+      deliveryMode: 'queue',
+    });
+    thread.updatedAt = nowIso();
+    if (this.activeAgents.has(thread.id) || this.queuePumpPromises.has(thread.id)) return;
+    const pump = this.drainQueuedPrompts(thread.id).finally(() => {
+      this.queuePumpPromises.delete(thread.id);
+    });
+    this.queuePumpPromises.set(thread.id, pump);
+  }
+
+  private async checkChatIdleSubscriptions(): Promise<void> {
+    if (this.chatIdleSubscriptionCheck) return await this.chatIdleSubscriptionCheck;
+    this.chatIdleSubscriptionCheck = (async () => {
+      await this.ensureLoaded();
+      const active = this.activeChatIdleSubscriptions();
+      if (active.length === 0) {
+        this.stopChatIdleSubscriptionMonitorIfIdle();
+        return;
+      }
+      const now = Date.now();
+      const nowIsoValue = new Date(now).toISOString();
+      let regAny: any | null = null;
+      let changed = false;
+      for (const subscription of active) {
+        const expiresMs = Date.parse(subscription.expiresAt);
+        if (Number.isFinite(expiresMs) && now >= expiresMs) {
+          subscription.status = 'expired';
+          subscription.expiredAt = nowIsoValue;
+          subscription.idleSince = null;
+          changed = true;
+          continue;
+        }
+        regAny ??= await loadRegistry();
+        let statuses: AssistantChatIdleStatus[];
+        try {
+          statuses = subscription.targets.map((target) => summarizeAssistantChatIdle(regAny, target, { requireChat: true }));
+        } catch {
+          subscription.idleSince = null;
+          changed = true;
+          continue;
+        }
+        const allIdle = statuses.every((status) => status.idle);
+        if (!allIdle) {
+          if (subscription.idleSince) {
+            subscription.idleSince = null;
+            changed = true;
+          }
+          continue;
+        }
+        const idleSinceMs = subscription.idleSince ? Date.parse(subscription.idleSince) : now;
+        if (!subscription.idleSince || !Number.isFinite(idleSinceMs)) {
+          subscription.idleSince = nowIsoValue;
+          changed = true;
+          if (subscription.idleForMs > 0) continue;
+        }
+        const effectiveIdleSinceMs = Number.isFinite(idleSinceMs) ? idleSinceMs : now;
+        if (now - effectiveIdleSinceMs < subscription.idleForMs) continue;
+        const result: AssistantChatIdleWaitResult = {
+          ok: true,
+          timedOut: false,
+          elapsedMs: now - (Date.parse(subscription.createdAt) || now),
+          timeoutMs: CHAT_IDLE_SUBSCRIPTION_EXPIRES_AFTER_MS,
+          idleForMs: subscription.idleForMs,
+          targets: statuses,
+        };
+        subscription.status = 'fired';
+        subscription.firedAt = nowIsoValue;
+        subscription.lastResult = result;
+        changed = true;
+        this.enqueueChatIdleSubscriptionContinuation(subscription, result);
+      }
+      this.updateWaitingThreadStatuses();
+      this.stopChatIdleSubscriptionMonitorIfIdle();
+      if (changed) await this.persist();
+    })().finally(() => {
+      this.chatIdleSubscriptionCheck = null;
+    });
+    return await this.chatIdleSubscriptionCheck;
+  }
 
   updateAppContext(input: {
     activeDroneId?: unknown;
@@ -1168,11 +1396,14 @@ export class HubAssistantService {
 
   async snapshot(): Promise<AssistantSnapshot> {
     await this.ensureLoaded();
+    this.updateWaitingThreadStatuses();
+    this.ensureChatIdleSubscriptionMonitor();
     const streamingMessage = this.streamingMessages.get(this.activeThreadId);
     return {
       ok: true,
       activeThreadId: this.activeThreadId,
       threads: this.threads.map((thread) => ({ ...thread, messages: thread.messages.map(sanitizeMessage) })),
+      chatIdleSubscriptions: this.chatIdleSubscriptions.map(sanitizeChatIdleSubscription),
       pendingApprovals: this.pendingApprovals(),
       models: await this.modelOptions(),
       accessScope: sanitizeMessage(this.activeAccessScope()),
@@ -1212,7 +1443,7 @@ export class HubAssistantService {
     return this.systemPromptSettingsSync();
   }
 
-  async updateThread(threadId: string, patch: { title?: unknown; model?: unknown; provider?: unknown; thinkingLevel?: unknown }): Promise<AssistantSnapshot> {
+  async updateThread(threadId: string, patch: { title?: unknown; model?: unknown; provider?: unknown; thinkingLevel?: unknown; autoApprove?: unknown; promptDeliveryMode?: unknown }): Promise<AssistantSnapshot> {
     await this.ensureLoaded();
     const thread = this.getThread(threadId);
     this.activeThreadId = thread.id;
@@ -1223,6 +1454,11 @@ export class HubAssistantService {
     if (patch.thinkingLevel != null || patch.model != null || patch.provider != null) {
       thread.thinkingLevel = allowedThinkingLevelForModel(thread.provider, thread.model, patch.thinkingLevel ?? thread.thinkingLevel);
     }
+    if (patch.autoApprove != null) {
+      thread.autoApprove = normalizeAssistantAutoApprove(patch.autoApprove);
+      if (thread.autoApprove) this.resolvePendingApprovalsForThread(thread.id, true);
+    }
+    if (patch.promptDeliveryMode != null) thread.promptDeliveryMode = normalizeAssistantPromptDeliveryMode(patch.promptDeliveryMode);
     thread.updatedAt = nowIso();
     await this.persist();
     return await this.snapshot();
@@ -1234,6 +1470,7 @@ export class HubAssistantService {
     this.activeAgents.delete(threadId);
     this.queuePumpPromises.delete(threadId);
     this.streamingMessages.delete(threadId);
+    this.chatIdleSubscriptions = this.chatIdleSubscriptions.filter((subscription) => subscription.threadId !== threadId);
     await deleteAssistantArtifactsForThread(threadId);
     this.threads = this.threads.filter((thread) => thread.id !== threadId);
     if (this.threads.length === 0) {
@@ -1244,12 +1481,23 @@ export class HubAssistantService {
       this.activeThreadId = this.threads[0].id;
     }
     await this.persist();
+    this.stopChatIdleSubscriptionMonitorIfIdle();
     return await this.snapshot();
   }
 
   async stopThread(threadId: string): Promise<AssistantSnapshot> {
     await this.ensureLoaded();
     this.activeAgents.get(threadId)?.abort?.();
+    const now = nowIso();
+    for (const subscription of this.chatIdleSubscriptions) {
+      if (subscription.threadId !== threadId || subscription.status !== 'active') continue;
+      subscription.status = 'cancelled';
+      subscription.cancelledAt = now;
+      subscription.idleSince = null;
+    }
+    this.updateWaitingThreadStatuses();
+    await this.persist();
+    this.stopChatIdleSubscriptionMonitorIfIdle();
     return await this.snapshot();
   }
 
@@ -1269,6 +1517,54 @@ export class HubAssistantService {
     await this.ensureLoaded();
     this.getThread(threadId);
     return await runAssistantArtifactAction(threadId, input);
+  }
+
+  async subscribeToChatsIdle(input: {
+    threadId: string;
+    toolCallId?: unknown;
+    targets: AssistantChatIdleTarget[];
+    idleForMs?: unknown;
+  }): Promise<AssistantChatIdleSubscription> {
+    await this.ensureLoaded();
+    const thread = this.getThread(input.threadId);
+    const targets = input.targets
+      .map((target) => ({
+        droneId: cleanOptionalString(target?.droneId),
+        chatName: normalizeChatNameForAssistant(target?.chatName),
+      }))
+      .filter((target) => target.droneId)
+      .slice(0, CHAT_IDLE_MAX_TARGETS);
+    if (targets.length === 0) throw new Error('missing chat targets');
+    const regAny: any = await loadRegistry();
+    for (const target of targets) {
+      summarizeAssistantChatIdle(regAny, target, { requireChat: true });
+    }
+    const now = Date.now();
+    const subscription: AssistantChatIdleSubscription = {
+      id: makeAssistantId('chat_idle_sub'),
+      threadId: thread.id,
+      toolCallId: cleanOptionalString(input.toolCallId) || null,
+      targets,
+      createdAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + CHAT_IDLE_SUBSCRIPTION_EXPIRES_AFTER_MS).toISOString(),
+      idleForMs: clampChatIdleForMs(input.idleForMs),
+      status: 'active',
+      idleSince: null,
+      firedAt: null,
+      cancelledAt: null,
+      expiredAt: null,
+      lastResult: null,
+    };
+    this.chatIdleSubscriptions.push(subscription);
+    this.chatIdleSubscriptions = this.chatIdleSubscriptions.slice(-CHAT_IDLE_MAX_SUBSCRIPTIONS);
+    if (thread.status !== 'running' && thread.status !== 'waiting_for_approval' && thread.status !== 'error') {
+      thread.status = 'waiting_for_chats_idle';
+    }
+    thread.updatedAt = nowIso();
+    await this.persist();
+    this.ensureChatIdleSubscriptionMonitor();
+    void this.checkChatIdleSubscriptions();
+    return sanitizeChatIdleSubscription(subscription);
   }
 
   async cancelQueuedPrompt(threadId: string, queuedPromptId: string): Promise<AssistantSnapshot> {
@@ -1295,6 +1591,15 @@ export class HubAssistantService {
     return await this.snapshot();
   }
 
+  private resolvePendingApprovalsForThread(threadId: string, approved: boolean): void {
+    for (const [id, approval] of [...this.approvals]) {
+      if (approval.threadId !== threadId || approval.status !== 'pending') continue;
+      approval.status = approved ? 'approved' : 'denied';
+      this.approvals.delete(id);
+      approval.resolve(approved);
+    }
+  }
+
   async promptThread(
     threadId: string,
     input: { prompt?: unknown; model?: unknown; provider?: unknown; thinkingLevel?: unknown; deliveryMode?: unknown },
@@ -1303,7 +1608,7 @@ export class HubAssistantService {
     await this.ensureLoaded();
     const thread = this.getThread(threadId);
     this.activeThreadId = thread.id;
-    const queuedPrompt = this.makeQueuedPrompt(thread, input);
+    const queuedPrompt = this.makeQueuedPrompt(thread, { ...input, deliveryMode: input.deliveryMode ?? thread.promptDeliveryMode });
     const activeAgent = this.activeAgents.get(thread.id);
     const runningModel = this.runningModels.get(thread.id);
     const canSteerActiveThread = Boolean(activeAgent);
@@ -1507,7 +1812,9 @@ export class HubAssistantService {
       });
 
       await agent.prompt(queuedPrompt.prompt);
-      if ((thread.status as AssistantThreadStatus) !== 'error') thread.status = 'idle';
+      if ((thread.status as AssistantThreadStatus) !== 'error') {
+        thread.status = this.activeChatIdleSubscriptions(thread.id).length > 0 ? 'waiting_for_chats_idle' : 'idle';
+      }
     } catch (e: any) {
       thread.status = 'error';
       thread.error = e?.message ?? String(e);
@@ -1552,9 +1859,16 @@ export class HubAssistantService {
       const provider = await defaultAssistantProvider();
       this.threads = [this.makeThread({ provider, model: defaultModelForProvider(provider), systemPrompt: this.defaultSystemPrompt })];
     }
+    const threadIds = new Set(this.threads.map((thread) => thread.id));
+    this.chatIdleSubscriptions = (Array.isArray(stored?.chatIdleSubscriptions) ? stored.chatIdleSubscriptions : [])
+      .map(normalizeChatIdleSubscription)
+      .filter((subscription): subscription is AssistantChatIdleSubscription => subscription !== null && threadIds.has(subscription.threadId))
+      .slice(-CHAT_IDLE_MAX_SUBSCRIPTIONS);
     const activeThreadId = String(stored?.activeThreadId ?? '').trim();
     this.activeThreadId = this.threads.some((thread) => thread.id === activeThreadId) ? activeThreadId : this.threads[0].id;
     this.loaded = true;
+    this.updateWaitingThreadStatuses();
+    this.ensureChatIdleSubscriptionMonitor();
   }
 
   private defaultAccessScopeForNewThread(input?: { activeDroneId?: unknown; activeChatName?: unknown }): AssistantAccessScope {
@@ -1579,6 +1893,8 @@ export class HubAssistantService {
       thinkingLevel: allowedThinkingLevelForModel(provider, allowedModelForProvider(provider, input?.model), 'off'),
       systemPrompt: normalizeAssistantSystemPrompt(input?.systemPrompt) || this.defaultSystemPrompt,
       accessScope: input?.accessScope ?? makeAssistantAccessScope(),
+      autoApprove: false,
+      promptDeliveryMode: 'queue',
       messages: [],
       queuedPrompts: [],
       status: 'idle',
@@ -1598,6 +1914,7 @@ export class HubAssistantService {
     const state = serializeState({
       activeThreadId: activeThread.id,
       threads: this.threads,
+      chatIdleSubscriptions: this.chatIdleSubscriptions,
       systemPrompt: this.defaultSystemPrompt,
       systemPromptUpdatedAt: this.defaultSystemPromptUpdatedAt,
     });
@@ -1808,10 +2125,10 @@ export class HubAssistantService {
         },
       },
       {
-        name: 'wait_for_agent_chats_idle',
-        label: 'Wait for agent chats to go idle',
+        name: 'subscribe_to_chats_idle',
+        label: 'Subscribe to chats idle',
         description:
-          'Block until one or more drone chats stop processing queued or running user messages. A chat is idle when there are no queued/sending/sent user messages and the latest timeline item is either an agent message or a failed user message.',
+          'Subscribe to one or more drone chats becoming idle. This returns immediately so you can continue other work; if you end your turn, the system will resume this assistant thread when all targets are idle.',
         parameters: Type.Object({
           targets: Type.Array(
             Type.Object({
@@ -1820,11 +2137,9 @@ export class HubAssistantService {
             }),
             { minItems: 1, maxItems: CHAT_IDLE_MAX_TARGETS },
           ),
-          timeoutMs: Type.Optional(Type.Number({ description: `Maximum wait time in milliseconds. Defaults to ${CHAT_IDLE_DEFAULT_TIMEOUT_MS}.` })),
-          pollIntervalMs: Type.Optional(Type.Number({ description: `Registry polling interval in milliseconds. Defaults to ${CHAT_IDLE_DEFAULT_POLL_INTERVAL_MS}.` })),
           idleForMs: Type.Optional(Type.Number({ description: `Require all targets to remain idle for this long before returning. Defaults to ${CHAT_IDLE_DEFAULT_IDLE_FOR_MS}.` })),
         }),
-        execute: async (_toolCallId: string, params: any, signal?: AbortSignal) => {
+        execute: async (toolCallId: string, params: any) => {
           const rawTargets = Array.isArray(params?.targets) ? params.targets : [];
           if (rawTargets.length === 0) throw new Error('missing targets');
           const targets: AssistantChatIdleTarget[] = [];
@@ -1838,24 +2153,20 @@ export class HubAssistantService {
             targets.push({ droneId, chatName });
           }
           if (targets.length === 0) throw new Error('missing targets');
-          const result = await waitForAssistantChatIdle({
+          const subscription = await this.subscribeToChatsIdle({
+            threadId,
+            toolCallId,
             targets,
-            timeoutMs: params?.timeoutMs,
-            pollIntervalMs: params?.pollIntervalMs,
             idleForMs: params?.idleForMs,
-            signal,
           });
-          const idleCount = result.targets.filter((target) => target.idle).length;
           return {
             content: [
               {
                 type: 'text',
-                text: result.ok
-                  ? `All ${idleCount} target chat${idleCount === 1 ? '' : 's'} are idle after ${result.elapsedMs}ms.`
-                  : `Timed out after ${result.elapsedMs}ms waiting for ${result.targets.length - idleCount} of ${result.targets.length} target chat${result.targets.length === 1 ? '' : 's'} to go idle.`,
+                text: `Subscribed to ${subscription.targets.length} chat${subscription.targets.length === 1 ? '' : 's'} becoming idle. Subscription ${subscription.id} expires at ${subscription.expiresAt}.`,
               },
             ],
-            details: result,
+            details: { ok: true, subscription },
           };
         },
       },
@@ -1958,6 +2269,7 @@ export class HubAssistantService {
   ): Promise<{ block?: boolean; reason?: string } | undefined> {
     const toolName = String(ctx?.toolCall?.name ?? '').trim();
     if (toolName !== 'message_drone' && toolName !== 'create_drone' && toolName !== 'set_drone_group') return undefined;
+    if (this.getThread(threadId).autoApprove) return undefined;
     const label =
       toolName === 'create_drone'
         ? 'Create drone'
@@ -2078,6 +2390,7 @@ export class HubAssistantService {
       ok: true,
       activeThreadId: this.activeThreadId,
       threads: this.threads.map((thread) => ({ ...thread, messages: thread.messages.map(sanitizeMessage) })),
+      chatIdleSubscriptions: this.chatIdleSubscriptions.map(sanitizeChatIdleSubscription),
       pendingApprovals: this.pendingApprovals(),
       models: [],
       accessScope: sanitizeMessage(this.activeAccessScope()),
