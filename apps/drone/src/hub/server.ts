@@ -7514,7 +7514,12 @@ function chatHasReconcilablePendingPrompts(entry: any): boolean {
   const doneIds = new Set(turns.map((t: any) => String(t?.id ?? '').trim()).filter(Boolean));
   for (const p of pending) {
     const st = String(p?.state ?? '');
-    if (st === 'failed') continue;
+    if (st === 'failed') {
+      const error = String(p?.error ?? '').trim().toLowerCase();
+      if (!error.includes('finished but no') || !error.includes('message was parsed')) continue;
+      const failedAtMs = Date.parse(String(p?.updatedAt ?? p?.at ?? ''));
+      if (Number.isFinite(failedAtMs) && Date.now() - failedAtMs > 10 * 60_000) continue;
+    }
     // `queued` entries haven't been enqueued into the daemon yet, so there's nothing
     // to reconcile from daemon → transcript for them.
     if (st === 'queued') continue;
@@ -7586,7 +7591,7 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
       }
       continue;
     }
-    if (state === 'failed' && agent.id !== 'codex') continue;
+    if (state === 'failed' && agent.id !== 'codex' && agent.id !== 'pi') continue;
 
     let jobResp: any = null;
     try {
@@ -7666,15 +7671,15 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
         const parsed = parseCodexJsonl(stdout || '');
         const threadId = parsed.threadId;
         const msg = parsed.message;
-        if (threadId) {
-          entry.codexThreadId = threadId;
-          changed = true;
-        }
         const output = String(msg ?? '').trimEnd();
         if (!output) {
           pendingList[i] = { ...p, state: 'failed', error: 'codex finished but no message was parsed', updatedAt: nowIso() };
           changed = true;
           continue;
+        }
+        if (threadId) {
+          entry.codexThreadId = threadId;
+          changed = true;
         }
         // Record transcript turn (success).
         turns.push({
@@ -7773,13 +7778,13 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
           jobStartedAt: job?.startedAt,
           finishedAt,
         });
-        if (parsed.threadId) {
-          entry.codexThreadId = parsed.threadId;
-          changed = true;
-        }
         // Self-heal false failed states (daemon finalized too early) by trusting
         // completed Codex output when it is present in the persisted job payload.
         if (output) {
+          if (parsed.threadId) {
+            entry.codexThreadId = parsed.threadId;
+            changed = true;
+          }
           turns.push({
             at: promptAt,
             promptAt,
