@@ -166,11 +166,13 @@ type AssistantToolCallbacks = {
   findDroneFiles?: (opts: { droneId: string; path?: string; pattern?: string; limit?: number }) => Promise<AssistantDroneFileFindResult>;
   statDronePath?: (opts: { droneId: string; path: string }) => Promise<AssistantDronePathStatResult>;
   runDroneBash?: (opts: { droneId: string; command: string; cwd?: string; timeoutMs?: number }) => Promise<AssistantDroneBashResult>;
+  listDroneChangedFiles?: (opts: { droneId: string }) => Promise<AssistantDroneChangedFilesResult>;
 };
 
 type AssistantDroneFileEntry = {
   name: string;
   path: string;
+  relativePath?: string | null;
   kind: 'directory' | 'file' | 'other';
   size?: number | null;
   mtimeMs?: number | null;
@@ -179,12 +181,14 @@ type AssistantDroneFileEntry = {
 type AssistantDroneFileListResult = {
   droneId: string;
   path: string;
+  relativePath?: string | null;
   entries: AssistantDroneFileEntry[];
 };
 
 type AssistantDroneFileReadResult = {
   droneId: string;
   path: string;
+  relativePath?: string | null;
   kind: 'text';
   content: string;
   size?: number | null;
@@ -200,6 +204,7 @@ type AssistantDroneFileReadResult = {
 type AssistantDroneFileWriteResult = {
   droneId: string;
   path: string;
+  relativePath?: string | null;
   size?: number | null;
   mtimeMs?: number | null;
 };
@@ -222,6 +227,7 @@ type AssistantDronePathStatResult = {
 
 type AssistantDroneFileSearchMatch = {
   path: string;
+  relativePath?: string | null;
   line?: number | null;
   text: string;
   context?: AssistantDroneFileSearchContextLine[];
@@ -241,14 +247,53 @@ type AssistantDroneFileSearchResult = {
   limit: number;
   contextBefore?: number;
   contextAfter?: number;
+  caps?: {
+    limit: number;
+    maxContextBefore: number;
+    maxContextAfter: number;
+  };
+  truncated?: boolean;
 };
 
 type AssistantDroneFileFindResult = {
   droneId: string;
   path: string;
+  relativePath?: string | null;
   pattern: string;
   matches: AssistantDroneFileEntry[];
   limit: number;
+  truncated?: boolean;
+};
+
+type AssistantDroneChangedFile = {
+  path: string;
+  relativePath: string;
+  originalPath?: string | null;
+  originalRelativePath?: string | null;
+  status: string;
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
+  conflicted: boolean;
+  stagedStatus?: string | null;
+  unstagedStatus?: string | null;
+  stagedChar?: string;
+  unstagedChar?: string;
+};
+
+type AssistantDroneChangedFilesResult = {
+  droneId: string;
+  repoRoot: string;
+  files: AssistantDroneChangedFile[];
+  counts: {
+    changed: number;
+    staged: number;
+    unstaged: number;
+    untracked: number;
+    conflicted: number;
+  };
+  limit: number;
+  truncated: boolean;
 };
 
 type AssistantPatchOperation =
@@ -405,6 +450,7 @@ const CHAT_IDLE_MAX_TARGETS = 20;
 const ASSISTANT_BASH_DEFAULT_TIMEOUT_MS = 30_000;
 const ASSISTANT_BASH_MAX_TIMEOUT_MS = 120_000;
 const ASSISTANT_SEARCH_MAX_CONTEXT_LINES = 10;
+const ASSISTANT_CHANGED_FILES_LIMIT = 200;
 const DEFAULT_OPENAI_MODEL = 'gpt-5.5';
 const DEFAULT_GEMINI_MODEL = 'gemini-3-flash-preview';
 const DEFAULT_CODEX_MODEL = 'gpt-5.5';
@@ -419,6 +465,8 @@ const ASSISTANT_SYSTEM_PROMPT_DEFAULT = [
   'Use get_chat_overview before reading chat details, then read_chat_messages in pages when you need conversation context.',
   'Use assistant_files to maintain private, thread-scoped Markdown notes when tracking work, decisions, plans, questions, or handoff details. These files are for the user-facing Artifacts UI and are not visible to drones.',
   'Use list_files, find_files, search_files, read_file, write_file, and apply_patch to inspect and modify files in drones you can access. Prefer apply_patch for coordinated code edits.',
+  'File results keep path as the runtime path and include relativePath when the path can be expressed relative to the drone workspace or repo root.',
+  'Use list_changed_files as a read-only review helper to inspect repo working tree status before reviewing or editing; it only works for repo-attached drones.',
   'Use read_file line ranges and search_files context when you only need a focused section of a file.',
   'Use bash only when a command is the right tool for inspection, tests, builds, or small scripted checks in an accessible container drone. Bash is approval-gated, non-interactive, and not for background processes.',
   'File paths are interpreted by drone id plus path. Relative paths resolve inside the target drone workspace, usually the repo root for repo-backed drones.',
@@ -2514,7 +2562,8 @@ export class HubAssistantService {
       {
         name: 'list_files',
         label: 'List files',
-        description: 'List files and folders in one drone. Requires assistant read access to that drone.',
+        description:
+          'List files and folders in one drone. Entries include path and relativePath when available. Requires assistant read access to that drone.',
         parameters: Type.Object({
           droneId: Type.String({ description: 'Drone id or visible name.' }),
           path: Type.Optional(Type.String({ description: 'Directory path. Relative paths resolve inside the drone workspace.' })),
@@ -2524,6 +2573,24 @@ export class HubAssistantService {
           const listFiles = this.requireFileCallback('listDroneFiles');
           const rawPath = cleanOptionalString(params?.path);
           const result = await listFiles({ droneId, path: rawPath ? normalizeAssistantDroneFilePath(rawPath) : undefined });
+          return {
+            content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+            details: result,
+          };
+        },
+      },
+      {
+        name: 'list_changed_files',
+        label: 'List changed files',
+        description:
+          `List changed files in one repo-attached drone for review. Returns repoRoot, counts, truncated, and up to ${ASSISTANT_CHANGED_FILES_LIMIT} file records with path, relativePath, status, staged/unstaged/untracked/conflicted flags, and rename source when available. Read-only, rejects non-repo drones, and requires assistant read access to that drone.`,
+        parameters: Type.Object({
+          droneId: Type.String({ description: 'Drone id or visible name.' }),
+        }),
+        execute: async (_toolCallId: string, params: any) => {
+          const droneId = await this.requireDroneInScope(params?.droneId, 'read', threadId);
+          const listChangedFiles = this.requireFileCallback('listDroneChangedFiles');
+          const result = await listChangedFiles({ droneId });
           return {
             content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
             details: result,
@@ -2559,7 +2626,7 @@ export class HubAssistantService {
         name: 'search_files',
         label: 'Search files',
         description:
-          'Search text files in one drone without reading whole files. Optionally include structured surrounding context lines. Requires assistant read access to that drone.',
+          'Search text files in one drone without reading whole files. Results include path, relativePath when available, limit/cap metadata, and truncated when more matches exist. Optionally include structured surrounding context lines. Requires assistant read access to that drone.',
         parameters: Type.Object({
           droneId: Type.String({ description: 'Drone id or visible name.' }),
           query: Type.String({ description: 'Text to search for.' }),
@@ -2596,7 +2663,7 @@ export class HubAssistantService {
         name: 'find_files',
         label: 'Find files',
         description:
-          'Find file and directory paths in one drone by glob-like pattern or substring. Requires assistant read access to that drone.',
+          'Find file and directory paths in one drone by glob-like pattern or substring. Results include path, relativePath when available, and truncated when the match cap is hit. Requires assistant read access to that drone.',
         parameters: Type.Object({
           droneId: Type.String({ description: 'Drone id or visible name.' }),
           pattern: Type.Optional(Type.String({ description: 'Glob-like pattern or substring, such as *.ts, src/**/*.tsx, or package.json. Defaults to *.' })),
