@@ -2183,6 +2183,10 @@ const VIDEO_FILE_EXTENSIONS = new Set(['mp4', 'webm', 'mov', 'm4v', 'ogv', 'ogg'
 const FS_THUMB_MAX_BYTES = 8 * 1024 * 1024;
 const FS_MEDIA_MAX_BYTES = 96 * 1024 * 1024;
 const FS_EDITOR_MAX_BYTES = 512 * 1024;
+const ASSISTANT_BASH_DEFAULT_TIMEOUT_MS = 30_000;
+const ASSISTANT_BASH_MAX_TIMEOUT_MS = 120_000;
+const ASSISTANT_BASH_MAX_OUTPUT_BYTES = 64 * 1024;
+const ASSISTANT_BASH_MAX_COMMAND_BYTES = 20 * 1024;
 
 type ContainerFsEntry = {
   name: string;
@@ -2455,6 +2459,515 @@ async function readHostFileBytes(opts: {
     size,
     mtimeMs: Number.isFinite(st.mtimeMs) ? Math.max(0, Math.floor(st.mtimeMs)) : null,
     mime,
+  };
+}
+
+function normalizeAssistantFsPathForRuntime(drone: any, raw: unknown, opts?: { fallbackToHome?: boolean }): string {
+  const text = typeof raw === 'string' ? String(raw).trim() : '';
+  if (!text && opts?.fallbackToHome === false) return '';
+  const runtime = droneRuntime(drone);
+  if (runtime === 'host') return normalizeDroneCwdForRuntime(drone, text || null);
+  const fallback = defaultDroneHomeCwd(drone);
+  if (!text) return normalizeContainerPath(fallback || NON_REPO_HOME_CWD);
+  if (text.startsWith('/')) return normalizeContainerPath(text);
+  return normalizeContainerPath(path.posix.join(fallback || NON_REPO_HOME_CWD, text));
+}
+
+async function resolveAssistantDroneFsTarget(opts: {
+  droneId: string;
+  path?: unknown;
+  fallbackToHome?: boolean;
+}): Promise<{ id: string; drone: any; name: string; runtime: DroneRuntime; targetPath: string }> {
+  const ref = String(opts.droneId ?? '').trim();
+  if (!ref) throw new Error('missing droneId');
+  let resolvedError = '';
+  const resolved = await resolveDroneFromRegistryRef(ref, {
+    onStillStarting: () => {
+      resolvedError = `drone "${ref}" is still starting`;
+    },
+    onUnknown: () => {
+      resolvedError = `unknown drone: ${ref}`;
+    },
+  });
+  if (!resolved) throw new Error(resolvedError || `unknown drone: ${ref}`);
+  const targetPath = normalizeAssistantFsPathForRuntime(resolved.drone, opts.path ?? '', { fallbackToHome: opts.fallbackToHome });
+  const name = String(resolved.drone?.name ?? resolved.id).trim() || resolved.id;
+  return { id: resolved.id, drone: resolved.drone, name, runtime: droneRuntime(resolved.drone), targetPath };
+}
+
+function ensureAssistantTextFile(pathRaw: string, buf: Buffer, mimeRaw: string | null): void {
+  const mime = String(mimeRaw ?? '').trim().toLowerCase();
+  if (!isLikelyTextMimeType(mime) || bufferLooksBinary(buf)) {
+    throw new Error(`file is not text: ${pathRaw}`);
+  }
+}
+
+function clampAssistantBashTimeoutMs(raw: unknown): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return ASSISTANT_BASH_DEFAULT_TIMEOUT_MS;
+  return Math.min(ASSISTANT_BASH_MAX_TIMEOUT_MS, Math.max(1000, Math.floor(n)));
+}
+
+function truncateUtf8Bytes(textRaw: unknown, maxBytes: number): { text: string; truncated: boolean } {
+  const text = String(textRaw ?? '');
+  const buf = Buffer.from(text, 'utf8');
+  if (buf.length <= maxBytes) return { text, truncated: false };
+  return {
+    text: `${buf.subarray(0, maxBytes).toString('utf8')}\n[truncated to ${maxBytes} bytes]`,
+    truncated: true,
+  };
+}
+
+async function assistantStatDronePath(opts: { droneId: string; path: string }): Promise<any> {
+  const target = await resolveAssistantDroneFsTarget({ droneId: opts.droneId, path: opts.path, fallbackToHome: false });
+  if (!target.targetPath || target.targetPath === '/') throw new Error('missing path');
+  if (target.runtime === 'host') {
+    const resolvedPath = path.resolve(target.targetPath);
+    try {
+      const st = await fs.lstat(resolvedPath);
+      return {
+        droneId: target.id,
+        path: resolvedPath,
+        exists: true,
+        kind: st.isDirectory() ? 'directory' : st.isFile() ? 'file' : 'other',
+        size: Number.isFinite(st.size) ? Math.max(0, Math.floor(st.size)) : null,
+        mtimeMs: Number.isFinite(st.mtimeMs) ? Math.max(0, Math.floor(st.mtimeMs)) : null,
+      };
+    } catch (e: any) {
+      const code = String(e?.code ?? '').trim().toUpperCase();
+      if (code === 'ENOENT' || code === 'ENOTDIR') return { droneId: target.id, path: resolvedPath, exists: false };
+      throw e;
+    }
+  }
+
+  const script = [
+    'set -euo pipefail',
+    `target=${bashQuote(target.targetPath)}`,
+    'if [ ! -e "$target" ]; then echo "__MISSING__"; exit 0; fi',
+    'kind=o',
+    'if [ -d "$target" ]; then kind=d; elif [ -f "$target" ]; then kind=f; fi',
+    'size=$(stat -c %s -- "$target" 2>/dev/null || echo 0)',
+    'mtime=$(stat -c %Y -- "$target" 2>/dev/null || echo 0)',
+    'printf "__META__\t%s\t%s\t%s\n" "$kind" "$size" "$mtime"',
+  ].join('\n');
+  const r = await withLockedDroneContainer({ requestedDroneName: target.name, droneEntry: target.drone }, async ({ containerName }) => {
+    return await dvmExec(containerName, 'bash', ['-lc', script]);
+  });
+  if (r.code !== 0) throw new Error((r.stderr || r.stdout || 'failed reading path metadata').trim());
+  const stdout = String(r.stdout ?? '').trim();
+  if (stdout === '__MISSING__') return { droneId: target.id, path: target.targetPath, exists: false };
+  const meta = stdout.split('\t');
+  if (meta.length < 4 || meta[0] !== '__META__') throw new Error('path metadata missing');
+  const sizeNum = Number(meta[2] ?? 0);
+  const mtimeSec = Number(meta[3] ?? 0);
+  return {
+    droneId: target.id,
+    path: target.targetPath,
+    exists: true,
+    kind: meta[1] === 'd' ? 'directory' : meta[1] === 'f' ? 'file' : 'other',
+    size: Number.isFinite(sizeNum) ? Math.max(0, Math.floor(sizeNum)) : null,
+    mtimeMs: Number.isFinite(mtimeSec) ? Math.max(0, Math.floor(mtimeSec * 1000)) : null,
+  };
+}
+
+async function assistantListDroneFiles(opts: { droneId: string; path?: string }): Promise<any> {
+  const target = await resolveAssistantDroneFsTarget({ droneId: opts.droneId, path: opts.path, fallbackToHome: true });
+  if (target.runtime === 'host') {
+    const parsed = await listHostFsDirectory(target.targetPath);
+    return { droneId: target.id, path: parsed.resolvedPath, entries: parsed.entries };
+  }
+
+  const script = [
+    'set -euo pipefail',
+    `target=${bashQuote(target.targetPath)}`,
+    `if [ "$target" = ${bashQuote(NON_REPO_HOME_CWD)} ]; then mkdir -p ${bashQuote(NON_REPO_HOME_CWD)} 2>/dev/null || true; fi`,
+    'if [ ! -d "$target" ]; then echo "__ERR__\tnot-dir"; exit 3; fi',
+    'cd "$target"',
+    'resolved=$(pwd -P)',
+    'printf "__PATH__\t%s\n" "$resolved"',
+    'shopt -s dotglob nullglob',
+    'for p in ./*; do',
+    '  [ -e "$p" ] || continue',
+    '  name=$(basename -- "$p")',
+    '  kind=o',
+    '  if [ -d "$p" ]; then kind=d; elif [ -f "$p" ]; then kind=f; fi',
+    '  size=$(stat -c %s -- "$p" 2>/dev/null || echo 0)',
+    '  mtime=$(stat -c %Y -- "$p" 2>/dev/null || echo 0)',
+    '  printf "%s\t%s\t%s\t%s\n" "$name" "$kind" "$size" "$mtime"',
+    'done',
+  ].join('\n');
+  const r = await withLockedDroneContainer({ requestedDroneName: target.name, droneEntry: target.drone }, async ({ containerName }) => {
+    return await dvmExec(containerName, 'bash', ['-lc', script]);
+  });
+  if (r.code !== 0) {
+    const out = `${r.stdout || ''}\n${r.stderr || ''}`;
+    if (/\bnot-dir\b/i.test(out)) throw new Error(`path is not a directory: ${target.targetPath}`);
+    throw new Error((r.stderr || r.stdout || 'failed to list files').trim());
+  }
+  const parsed = parseContainerFsListOutput(r.stdout || '');
+  return { droneId: target.id, path: parsed.resolvedPath, entries: parsed.entries };
+}
+
+async function assistantReadDroneFile(opts: { droneId: string; path: string }): Promise<any> {
+  const target = await resolveAssistantDroneFsTarget({ droneId: opts.droneId, path: opts.path, fallbackToHome: false });
+  if (!target.targetPath || target.targetPath === '/') throw new Error('missing file path');
+  if (target.runtime === 'host') {
+    const read = await readHostFileBytes({ targetPath: target.targetPath, maxBytes: FS_EDITOR_MAX_BYTES });
+    ensureAssistantTextFile(target.targetPath, read.buf, read.mime);
+    return {
+      droneId: target.id,
+      path: path.resolve(target.targetPath),
+      kind: 'text',
+      content: read.buf.toString('utf8'),
+      size: read.size,
+      mtimeMs: read.mtimeMs,
+    };
+  }
+
+  const script = [
+    'set -euo pipefail',
+    `target=${bashQuote(target.targetPath)}`,
+    `max=${String(FS_EDITOR_MAX_BYTES)}`,
+    'if [ ! -f "$target" ]; then echo "__ERR__\tnot-file"; exit 3; fi',
+    'size=$(wc -c < "$target" | tr -d "[:space:]")',
+    'if [ -z "$size" ]; then size=0; fi',
+    'if [ "$size" -gt "$max" ]; then printf "__ERR__\ttoo-large\t%s\n" "$size"; exit 4; fi',
+    'mtime=$(stat -c %Y -- "$target" 2>/dev/null || echo 0)',
+    'mime=""',
+    'if command -v file >/dev/null 2>&1; then mime=$(file -Lb --mime-type -- "$target" 2>/dev/null || true); fi',
+    'printf "__META__\t%s\t%s\t%s\n" "$mime" "$size" "$mtime"',
+    'base64 < "$target" | tr -d "\\n"',
+  ].join('\n');
+  const r = await withLockedDroneContainer({ requestedDroneName: target.name, droneEntry: target.drone }, async ({ containerName }) => {
+    return await dvmExec(containerName, 'bash', ['-lc', script]);
+  });
+  const out = `${String(r.stdout ?? '')}\n${String(r.stderr ?? '')}`;
+  if (r.code !== 0) {
+    if (/__ERR__\s+not-file\b/i.test(out)) throw new Error(`file not found: ${target.targetPath}`);
+    const large = out.match(/__ERR__\s+too-large\s+(\d+)/i);
+    if (large) throw new Error(`file too large (${large[1]} bytes, max ${FS_EDITOR_MAX_BYTES})`);
+    throw new Error((r.stderr || r.stdout || 'failed reading file').trim());
+  }
+  const stdout = String(r.stdout ?? '');
+  const firstNl = stdout.indexOf('\n');
+  if (firstNl < 0) throw new Error('file response malformed');
+  const meta = stdout.slice(0, firstNl).split('\t');
+  if (meta.length < 4 || meta[0] !== '__META__') throw new Error('file metadata missing');
+  const buf = Buffer.from(stdout.slice(firstNl + 1).trim(), 'base64');
+  ensureAssistantTextFile(target.targetPath, buf, String(meta[1] ?? ''));
+  const sizeNum = Number(meta[2] ?? 0);
+  const mtimeSec = Number(meta[3] ?? 0);
+  return {
+    droneId: target.id,
+    path: target.targetPath,
+    kind: 'text',
+    content: buf.toString('utf8'),
+    size: Number.isFinite(sizeNum) ? Math.max(0, Math.floor(sizeNum)) : 0,
+    mtimeMs: Number.isFinite(mtimeSec) ? Math.max(0, Math.floor(mtimeSec * 1000)) : null,
+  };
+}
+
+async function assistantWriteDroneFile(opts: { droneId: string; path: string; content: string }): Promise<any> {
+  const target = await resolveAssistantDroneFsTarget({ droneId: opts.droneId, path: opts.path, fallbackToHome: false });
+  if (!target.targetPath || target.targetPath === '/') throw new Error('missing file path');
+  const content = String(opts.content ?? '');
+  const nextBytes = Buffer.byteLength(content, 'utf8');
+  if (nextBytes > FS_EDITOR_MAX_BYTES) throw new Error(`file too large (${nextBytes} bytes, max ${FS_EDITOR_MAX_BYTES})`);
+
+  if (target.runtime === 'host') {
+    const resolvedPath = path.resolve(target.targetPath);
+    await fs.mkdir(path.dirname(resolvedPath), { recursive: true });
+    await fs.writeFile(resolvedPath, content, 'utf8');
+    const after = await fs.stat(resolvedPath);
+    return {
+      droneId: target.id,
+      path: resolvedPath,
+      size: Number.isFinite(after.size) ? Math.max(0, Math.floor(after.size)) : 0,
+      mtimeMs: Number.isFinite(after.mtimeMs) ? Math.max(0, Math.floor(after.mtimeMs)) : null,
+    };
+  }
+
+  const contentBase64 = Buffer.from(content, 'utf8').toString('base64');
+  const script = [
+    'set -euo pipefail',
+    `target=${bashQuote(target.targetPath)}`,
+    `data=${bashQuote(contentBase64)}`,
+    'mkdir -p "$(dirname -- "$target")"',
+    'printf "%s" "$data" | base64 -d > "$target"',
+    'size=$(stat -c %s -- "$target" 2>/dev/null || echo 0)',
+    'mtime=$(stat -c %Y -- "$target" 2>/dev/null || echo 0)',
+    'printf "__META__\t%s\t%s\n" "$size" "$mtime"',
+  ].join('\n');
+  const r = await withLockedDroneContainer({ requestedDroneName: target.name, droneEntry: target.drone }, async ({ containerName }) => {
+    return await dvmExec(containerName, 'bash', ['-lc', script]);
+  });
+  if (r.code !== 0) throw new Error((r.stderr || r.stdout || 'failed writing file').trim());
+  const meta = String(r.stdout ?? '').trim().split('\t');
+  const sizeNum = Number(meta[1] ?? 0);
+  const mtimeSec = Number(meta[2] ?? 0);
+  return {
+    droneId: target.id,
+    path: target.targetPath,
+    size: Number.isFinite(sizeNum) ? Math.max(0, Math.floor(sizeNum)) : nextBytes,
+    mtimeMs: Number.isFinite(mtimeSec) ? Math.max(0, Math.floor(mtimeSec * 1000)) : null,
+  };
+}
+
+async function assistantDeleteDroneFile(opts: { droneId: string; path: string }): Promise<any> {
+  const target = await resolveAssistantDroneFsTarget({ droneId: opts.droneId, path: opts.path, fallbackToHome: false });
+  if (!target.targetPath || target.targetPath === '/') throw new Error('missing file path');
+  if (target.runtime === 'host') {
+    const resolvedPath = path.resolve(target.targetPath);
+    const st = await fs.stat(resolvedPath);
+    if (!st.isFile()) throw new Error(`file not found: ${resolvedPath}`);
+    await fs.rm(resolvedPath);
+    return { droneId: target.id, path: resolvedPath, deleted: true };
+  }
+  const script = [
+    'set -euo pipefail',
+    `target=${bashQuote(target.targetPath)}`,
+    'if [ ! -f "$target" ]; then echo "__ERR__\tnot-file"; exit 3; fi',
+    'rm -- "$target"',
+  ].join('\n');
+  const r = await withLockedDroneContainer({ requestedDroneName: target.name, droneEntry: target.drone }, async ({ containerName }) => {
+    return await dvmExec(containerName, 'bash', ['-lc', script]);
+  });
+  if (r.code !== 0) {
+    const out = `${r.stdout || ''}\n${r.stderr || ''}`;
+    if (/__ERR__\s+not-file\b/i.test(out)) throw new Error(`file not found: ${target.targetPath}`);
+    throw new Error((r.stderr || r.stdout || 'failed deleting file').trim());
+  }
+  return { droneId: target.id, path: target.targetPath, deleted: true };
+}
+
+async function assistantMoveDroneFile(opts: { droneId: string; fromPath: string; toPath: string }): Promise<any> {
+  const from = await resolveAssistantDroneFsTarget({ droneId: opts.droneId, path: opts.fromPath, fallbackToHome: false });
+  const to = await resolveAssistantDroneFsTarget({ droneId: opts.droneId, path: opts.toPath, fallbackToHome: false });
+  if (!from.targetPath || from.targetPath === '/' || !to.targetPath || to.targetPath === '/') throw new Error('missing file path');
+  if (from.runtime === 'host') {
+    const fromPath = path.resolve(from.targetPath);
+    const toPath = path.resolve(to.targetPath);
+    await fs.mkdir(path.dirname(toPath), { recursive: true });
+    await fs.rename(fromPath, toPath);
+    return { droneId: from.id, path: fromPath, movedTo: toPath };
+  }
+  const script = [
+    'set -euo pipefail',
+    `from_path=${bashQuote(from.targetPath)}`,
+    `to_path=${bashQuote(to.targetPath)}`,
+    'if [ ! -f "$from_path" ]; then echo "__ERR__\tnot-file"; exit 3; fi',
+    'mkdir -p "$(dirname -- "$to_path")"',
+    'mv -- "$from_path" "$to_path"',
+  ].join('\n');
+  const r = await withLockedDroneContainer({ requestedDroneName: from.name, droneEntry: from.drone }, async ({ containerName }) => {
+    return await dvmExec(containerName, 'bash', ['-lc', script]);
+  });
+  if (r.code !== 0) {
+    const out = `${r.stdout || ''}\n${r.stderr || ''}`;
+    if (/__ERR__\s+not-file\b/i.test(out)) throw new Error(`file not found: ${from.targetPath}`);
+    throw new Error((r.stderr || r.stdout || 'failed moving file').trim());
+  }
+  return { droneId: from.id, path: from.targetPath, movedTo: to.targetPath };
+}
+
+function parseAssistantSearchOutput(text: string, limit: number): Array<{ path: string; line: number | null; text: string }> {
+  return String(text ?? '')
+    .split('\n')
+    .map((line) => line.replace(/\r$/, ''))
+    .filter(Boolean)
+    .slice(0, limit)
+    .flatMap((line) => {
+      const match = /^(.+?):(\d+):(.*)$/.exec(line);
+      if (!match) return [];
+      return [{ path: match[1] ?? '', line: Number(match[2] ?? NaN) || null, text: match[3] ?? '' }];
+    });
+}
+
+function parseAssistantFindOutput(text: string, limit: number): ContainerFsEntry[] {
+  const entries: ContainerFsEntry[] = [];
+  for (const line of String(text ?? '').split('\n')) {
+    if (!line.trim()) continue;
+    const parts = line.replace(/\r$/, '').split('\t');
+    if (parts.length < 4) continue;
+    const pathText = parts[0] ?? '';
+    const kindRaw = parts[1] ?? '';
+    const sizeRaw = parts[2] ?? '';
+    const mtimeRaw = parts[3] ?? '';
+    const kind: ContainerFsEntry['kind'] = kindRaw === 'd' ? 'directory' : kindRaw === 'f' ? 'file' : 'other';
+    const sizeNum = Number(sizeRaw);
+    const mtimeSec = Number(mtimeRaw);
+    const name = path.basename(pathText) || pathText;
+    entries.push({
+      name,
+      path: pathText,
+      kind,
+      size: Number.isFinite(sizeNum) ? Math.max(0, Math.floor(sizeNum)) : null,
+      mtimeMs: Number.isFinite(mtimeSec) ? Math.max(0, Math.floor(mtimeSec * 1000)) : null,
+      ext: kind === 'file' ? extensionLower(name) || null : null,
+      isImage: kind === 'file' ? isLikelyImagePath(name) : false,
+      isVideo: kind === 'file' ? isLikelyVideoPath(name) : false,
+    });
+    if (entries.length >= limit) break;
+  }
+  sortFsEntries(entries);
+  return entries;
+}
+
+async function assistantSearchDroneFiles(opts: { droneId: string; path?: string; query: string; limit?: number }): Promise<any> {
+  const query = String(opts.query ?? '').trim();
+  if (!query) throw new Error('missing query');
+  const limit = Number.isFinite(Number(opts.limit)) ? Math.max(1, Math.min(100, Math.floor(Number(opts.limit)))) : 20;
+  const target = await resolveAssistantDroneFsTarget({ droneId: opts.droneId, path: opts.path, fallbackToHome: true });
+  const script = [
+    'set -euo pipefail',
+    `root=${bashQuote(target.targetPath)}`,
+    `query=${bashQuote(query)}`,
+    `limit=${String(limit)}`,
+    'if [ ! -e "$root" ]; then echo "__ERR__\tnot-found"; exit 3; fi',
+    'if command -v rg >/dev/null 2>&1; then',
+    '  rg -n -I --hidden --glob "!node_modules/**" --glob "!.git/**" -- "$query" "$root" | head -n "$limit" || true',
+    'else',
+    '  grep -RInI --exclude-dir=.git --exclude-dir=node_modules -- "$query" "$root" 2>/dev/null | head -n "$limit" || true',
+    'fi',
+  ].join('\n');
+  const r =
+    target.runtime === 'host'
+      ? await runHostCommand('bash', ['-lc', script], { timeoutMs: 10_000 })
+      : await withLockedDroneContainer({ requestedDroneName: target.name, droneEntry: target.drone }, async ({ containerName }) => {
+          return await dvmExec(containerName, 'bash', ['-lc', script]);
+        });
+  if (r.code !== 0) {
+    const out = `${r.stdout || ''}\n${r.stderr || ''}`;
+    if (/__ERR__\s+not-found\b/i.test(out)) throw new Error(`path not found: ${target.targetPath}`);
+    throw new Error((r.stderr || r.stdout || 'failed searching files').trim());
+  }
+  return {
+    droneId: target.id,
+    path: target.targetPath,
+    query,
+    limit,
+    matches: parseAssistantSearchOutput(r.stdout || '', limit),
+  };
+}
+
+async function assistantFindDroneFiles(opts: { droneId: string; path?: string; pattern?: string; limit?: number }): Promise<any> {
+  const pattern = String(opts.pattern ?? '*').trim() || '*';
+  const limit = Number.isFinite(Number(opts.limit)) ? Math.max(1, Math.min(500, Math.floor(Number(opts.limit)))) : 100;
+  const target = await resolveAssistantDroneFsTarget({ droneId: opts.droneId, path: opts.path, fallbackToHome: true });
+  const script = [
+    'set -euo pipefail',
+    `root=${bashQuote(target.targetPath)}`,
+    `pattern=${bashQuote(pattern)}`,
+    `limit=${String(limit)}`,
+    'if [ ! -d "$root" ]; then echo "__ERR__\tnot-dir"; exit 3; fi',
+    'case "$pattern" in',
+    '  *"*"*|*"?"*|*"["*) effective="$pattern" ;;',
+    '  *) effective="*$pattern*" ;;',
+    'esac',
+    'if [ "$pattern" = "*" ]; then effective="*"; fi',
+    'find "$root" \\( -path "*/.git" -o -path "*/node_modules" \\) -prune -o \\( -name "$effective" -o -path "$root/$effective" \\) -print | head -n "$limit" | while IFS= read -r p; do',
+    '  [ -e "$p" ] || continue',
+    '  kind=o',
+    '  if [ -d "$p" ]; then kind=d; elif [ -f "$p" ]; then kind=f; fi',
+    '  size=$(stat -c %s -- "$p" 2>/dev/null || echo 0)',
+    '  mtime=$(stat -c %Y -- "$p" 2>/dev/null || echo 0)',
+    '  printf "%s\t%s\t%s\t%s\n" "$p" "$kind" "$size" "$mtime"',
+    'done',
+  ].join('\n');
+  const r =
+    target.runtime === 'host'
+      ? await runHostCommand('bash', ['-lc', script], { timeoutMs: 10_000 })
+      : await withLockedDroneContainer({ requestedDroneName: target.name, droneEntry: target.drone }, async ({ containerName }) => {
+          return await dvmExec(containerName, 'bash', ['-lc', script]);
+        });
+  if (r.code !== 0) {
+    const out = `${r.stdout || ''}\n${r.stderr || ''}`;
+    if (/__ERR__\s+not-dir\b/i.test(out)) throw new Error(`path is not a directory: ${target.targetPath}`);
+    throw new Error((r.stderr || r.stdout || 'failed finding files').trim());
+  }
+  return {
+    droneId: target.id,
+    path: target.targetPath,
+    pattern,
+    limit,
+    matches: parseAssistantFindOutput(r.stdout || '', limit),
+  };
+}
+
+async function assistantRunDroneBash(opts: { droneId: string; command: string; cwd?: string; timeoutMs?: number }): Promise<any> {
+  const command = String(opts.command ?? '');
+  if (!command.trim()) throw new Error('missing command');
+  const commandBytes = Buffer.byteLength(command, 'utf8');
+  if (commandBytes > ASSISTANT_BASH_MAX_COMMAND_BYTES) {
+    throw new Error(`command too large (${commandBytes} bytes, max ${ASSISTANT_BASH_MAX_COMMAND_BYTES})`);
+  }
+  const timeoutMs = clampAssistantBashTimeoutMs(opts.timeoutMs);
+  const target = await resolveAssistantDroneFsTarget({ droneId: opts.droneId, path: opts.cwd, fallbackToHome: true });
+  if (target.runtime !== 'container') throw new Error('bash is only supported for container drones');
+
+  const script = [
+    'set -uo pipefail',
+    `cwd=${bashQuote(target.targetPath)}`,
+    `cmd=${bashQuote(command)}`,
+    `max=${String(ASSISTANT_BASH_MAX_OUTPUT_BYTES)}`,
+    `timeout_s=${String(Math.max(1, Math.ceil(timeoutMs / 1000)))}`,
+    'if [ ! -d "$cwd" ]; then echo "__ERR__\tnot-dir"; exit 3; fi',
+    'cd "$cwd" || exit 3',
+    'resolved=$(pwd -P)',
+    'tmp=$(mktemp -d "${TMPDIR:-/tmp}/assistant-bash.XXXXXX")',
+    'cleanup() { rm -rf "$tmp"; }',
+    'trap cleanup EXIT',
+    'stdout_file="$tmp/stdout"',
+    'stderr_file="$tmp/stderr"',
+    'if command -v timeout >/dev/null 2>&1; then',
+    '  timeout -k 2s "${timeout_s}s" bash -lc "$cmd" >"$stdout_file" 2>"$stderr_file"',
+    '  code=$?',
+    'else',
+    '  bash -lc "$cmd" >"$stdout_file" 2>"$stderr_file"',
+    '  code=$?',
+    'fi',
+    'stdout_size=$(wc -c < "$stdout_file" | tr -d "[:space:]")',
+    'stderr_size=$(wc -c < "$stderr_file" | tr -d "[:space:]")',
+    'cwd_b64=$(printf "%s" "$resolved" | base64 | tr -d "\\n")',
+    'stdout_b64=$(head -c "$max" "$stdout_file" | base64 | tr -d "\\n")',
+    'stderr_b64=$(head -c "$max" "$stderr_file" | base64 | tr -d "\\n")',
+    'printf "__META__\t%s\t%s\t%s\t%s\n" "$cwd_b64" "$code" "${stdout_size:-0}" "${stderr_size:-0}"',
+    'printf "__STDOUT_B64__\t%s\n" "$stdout_b64"',
+    'printf "__STDERR_B64__\t%s\n" "$stderr_b64"',
+    'exit 0',
+  ].join('\n');
+  const r = await withLockedDroneContainer({ requestedDroneName: target.name, droneEntry: target.drone }, async ({ containerName }) => {
+    return await dvmExec(containerName, 'bash', ['-lc', script], { timeoutMs: timeoutMs + 5000 });
+  });
+  const stdoutRaw = String(r.stdout ?? '');
+  const combinedOut = `${stdoutRaw}\n${String(r.stderr ?? '')}`;
+  if (r.code === 3 && /__ERR__\s+not-dir\b/i.test(combinedOut)) throw new Error(`cwd is not a directory: ${target.targetPath}`);
+  const lines = stdoutRaw.split('\n');
+  const meta = (lines.find((line) => line.startsWith('__META__\t')) ?? '').split('\t');
+  const stdoutB64 = (lines.find((line) => line.startsWith('__STDOUT_B64__\t')) ?? '').slice('__STDOUT_B64__\t'.length);
+  const stderrB64 = (lines.find((line) => line.startsWith('__STDERR_B64__\t')) ?? '').slice('__STDERR_B64__\t'.length);
+  const hasStructuredOutput = meta.length >= 5 && meta[0] === '__META__';
+  const cwd = hasStructuredOutput ? Buffer.from(meta[1] ?? '', 'base64').toString('utf8') || target.targetPath : target.targetPath;
+  const code = hasStructuredOutput ? Number(meta[2] ?? 1) : r.code;
+  const stdoutSize = hasStructuredOutput ? Number(meta[3] ?? 0) : Buffer.byteLength(stdoutRaw, 'utf8');
+  const stderrSize = hasStructuredOutput ? Number(meta[4] ?? 0) : Buffer.byteLength(String(r.stderr ?? ''), 'utf8');
+  const structuredStdout = hasStructuredOutput ? Buffer.from(stdoutB64, 'base64').toString('utf8') : stdoutRaw;
+  const structuredStderr = hasStructuredOutput ? Buffer.from(stderrB64, 'base64').toString('utf8') : String(r.stderr ?? '');
+  const stdout = truncateUtf8Bytes(structuredStdout, ASSISTANT_BASH_MAX_OUTPUT_BYTES);
+  const stderr = truncateUtf8Bytes(structuredStderr, ASSISTANT_BASH_MAX_OUTPUT_BYTES);
+  const timedOut = code === 124 || code === 137 || r.code === 124 || /Timed out after/i.test(String(r.stderr ?? ''));
+  return {
+    ok: true,
+    droneId: target.id,
+    cwd,
+    command,
+    code: Number.isFinite(code) ? Math.floor(code) : r.code,
+    stdout: stdout.text,
+    stderr: stderr.text,
+    timeoutMs,
+    timedOut,
+    stdoutTruncated: stdout.truncated || stdoutSize > ASSISTANT_BASH_MAX_OUTPUT_BYTES,
+    stderrTruncated: stderr.truncated || stderrSize > ASSISTANT_BASH_MAX_OUTPUT_BYTES,
   };
 }
 
@@ -10211,6 +10724,15 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
       if (r.kind === 'error') throw new Error(r.error);
       return { promptId: r.id, pendingState: r.pendingState, blockedByAutomation: r.blockedByAutomation };
     },
+    listDroneFiles: async ({ droneId, path }) => await assistantListDroneFiles({ droneId, path }),
+    readDroneFile: async ({ droneId, path }) => await assistantReadDroneFile({ droneId, path }),
+    writeDroneFile: async ({ droneId, path, content }) => await assistantWriteDroneFile({ droneId, path, content }),
+    deleteDroneFile: async ({ droneId, path }) => await assistantDeleteDroneFile({ droneId, path }),
+    moveDroneFile: async ({ droneId, fromPath, toPath }) => await assistantMoveDroneFile({ droneId, fromPath, toPath }),
+    searchDroneFiles: async ({ droneId, path, query, limit }) => await assistantSearchDroneFiles({ droneId, path, query, limit }),
+    findDroneFiles: async ({ droneId, path, pattern, limit }) => await assistantFindDroneFiles({ droneId, path, pattern, limit }),
+    statDronePath: async ({ droneId, path }) => await assistantStatDronePath({ droneId, path }),
+    runDroneBash: async ({ droneId, command, cwd, timeoutMs }) => await assistantRunDroneBash({ droneId, command, cwd, timeoutMs }),
   });
 
   const server = http.createServer(async (req, res) => {
