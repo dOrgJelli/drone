@@ -12,6 +12,8 @@ const ASSISTANT_THREAD_SIDEBAR_OPEN_STORAGE_KEY = 'droneHub.assistant.threadSide
 const ASSISTANT_FILES_OPEN_STORAGE_KEY = 'droneHub.assistant.filesOpen';
 const TOOL_ROW_MESSAGE_PREVIEW_MAX = 72;
 const TOOL_ROW_TARGET_PREVIEW_MAX = 3;
+/** Distance from bottom (px) below which we treat the assistant transcript as "pinned" for auto-scroll. */
+const ASSISTANT_SCROLL_BOTTOM_THRESHOLD_PX = 48;
 
 type AssistantThreadStatus = 'idle' | 'running' | 'waiting_for_approval' | 'waiting_for_chats_idle' | 'error';
 
@@ -305,7 +307,12 @@ function renderItemsFromMessages(messages: AssistantMessage[]): AssistantRenderI
     const message = messages[index];
     if (message.role === 'toolResult') {
       if (consumedToolResults.has(index)) continue;
-      items.push({ type: 'tool', key: `tool-result:${index}:${message.toolCallId ?? ''}`, result: message });
+      const resultKey = String(message.toolCallId ?? '').trim();
+      items.push({
+        type: 'tool',
+        key: resultKey ? `tool-result:${resultKey}` : `tool-result:idx-${index}`,
+        result: message,
+      });
       continue;
     }
 
@@ -332,7 +339,7 @@ function renderItemsFromMessages(messages: AssistantMessage[]): AssistantRenderI
       }
       const result = resultIndex >= 0 ? messages[resultIndex] : undefined;
       if (resultIndex >= 0) consumedToolResults.add(resultIndex);
-      items.push({ type: 'tool', key: `tool-call:${index}:${call.id}`, call, result });
+      items.push({ type: 'tool', key: `tool-call:${call.id}`, call, result });
     }
   }
   return items;
@@ -482,6 +489,85 @@ function AssistantThinkingRow() {
         <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--muted)]" />
         <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--muted)]" style={{ animationDelay: '120ms' }} />
         <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--muted)]" style={{ animationDelay: '240ms' }} />
+      </div>
+    </div>
+  );
+}
+
+function summarizeChatIdleBannerTargets(subscriptions: AssistantChatIdleSubscription[], droneNameById: AssistantDroneNameMap): string {
+  const parts: string[] = [];
+  const seen = new Set<string>();
+  for (const sub of subscriptions) {
+    for (const target of sub.targets) {
+      const droneId = String(target.droneId ?? '').trim();
+      const chatName = String(target.chatName ?? '').trim() || 'default';
+      const droneLabel = (droneId && droneNameById[droneId]) || droneId || 'drone';
+      const label = chatName !== 'default' ? `${droneLabel} / ${chatName}` : droneLabel;
+      if (!label.trim() || seen.has(label)) continue;
+      seen.add(label);
+      parts.push(label);
+    }
+  }
+  if (parts.length === 0) return '';
+  const visible = parts.slice(0, 4);
+  const extra = parts.length - visible.length;
+  return extra > 0 ? `${visible.join(' · ')} +${extra}` : visible.join(' · ');
+}
+
+function formatChatIdleExpiryHint(expiresAtIso: string): string {
+  const ms = Date.parse(expiresAtIso);
+  if (!Number.isFinite(ms)) return '';
+  const delta = ms - Date.now();
+  if (delta <= 0) return 'Subscription expires soon';
+  if (delta < 60_000) return 'Expires in under a minute';
+  if (delta < 60 * 60_000) return `Expires in ${Math.ceil(delta / 60_000)}m`;
+  return `Expires ${new Date(ms).toLocaleString()}`;
+}
+
+function earliestChatIdleExpiryIso(subscriptions: AssistantChatIdleSubscription[]): string | null {
+  let best: number | null = null;
+  for (const sub of subscriptions) {
+    const ms = Date.parse(sub.expiresAt);
+    if (!Number.isFinite(ms)) continue;
+    if (best === null || ms < best) best = ms;
+  }
+  return best === null ? null : new Date(best).toISOString();
+}
+
+function AssistantChatIdleFooterBanner({
+  subscriptions,
+  droneNameById,
+}: {
+  subscriptions: AssistantChatIdleSubscription[];
+  droneNameById: AssistantDroneNameMap;
+}) {
+  const targetLine = React.useMemo(() => summarizeChatIdleBannerTargets(subscriptions, droneNameById), [subscriptions, droneNameById]);
+  const expiryHint = React.useMemo(() => {
+    const iso = earliestChatIdleExpiryIso(subscriptions);
+    return iso ? formatChatIdleExpiryHint(iso) : '';
+  }, [subscriptions]);
+
+  return (
+    <div
+      className="flex-shrink-0 border-t border-[rgba(255,200,80,.28)] bg-[rgba(255,200,80,.08)] px-3 py-2"
+      role="status"
+      aria-live="polite"
+    >
+      <div className="flex items-start gap-2">
+        <span className="mt-1 h-2 w-2 flex-shrink-0 animate-pulse rounded-full bg-[var(--yellow)]" aria-hidden="true" />
+        <div className="min-w-0 flex-1">
+          <div className="text-[11px] font-semibold text-[var(--fg-secondary)]">Subscribed — waiting for chats to go idle</div>
+          {targetLine ? (
+            <div className="mt-0.5 truncate text-[10px] text-[var(--muted)]" title={targetLine}>
+              Watching {targetLine}
+            </div>
+          ) : (
+            <div className="mt-0.5 text-[10px] text-[var(--muted)]">
+              The assistant resumes this thread automatically when monitored chats become idle. Use Stop below to cancel.
+            </div>
+          )}
+          {expiryHint ? <div className="mt-1 text-[10px] text-[var(--muted-dim)]">{expiryHint}</div> : null}
+        </div>
       </div>
     </div>
   );
@@ -1347,6 +1433,7 @@ export function AssistantDock() {
   const [droneNameById, setDroneNameById] = React.useState<AssistantDroneNameMap>({});
   const [approvalBusyId, setApprovalBusyId] = React.useState<string | null>(null);
   const [queuedCancelBusyId, setQueuedCancelBusyId] = React.useState<string | null>(null);
+  const [assistantStopBusy, setAssistantStopBusy] = React.useState(false);
   const [systemPromptOpen, setSystemPromptOpen] = React.useState(false);
   const [systemPromptSettings, setSystemPromptSettings] = React.useState<AssistantSystemPromptSettings | null>(null);
   const [systemPromptDraft, setSystemPromptDraft] = React.useState('');
@@ -1362,6 +1449,8 @@ export function AssistantDock() {
   const playbookRunsOpen = useDroneHubUiStore((state) => state.playbookRunsOpen);
   const selectedGroupMultiChat = useDroneHubUiStore((state) => state.selectedGroupMultiChat);
   const scrollRef = React.useRef<HTMLDivElement | null>(null);
+  /** When false, new transcript content must not force scroll position (user scrolled up). */
+  const assistantStickToBottomRef = React.useRef(true);
   const inputRef = React.useRef<HTMLTextAreaElement | null>(null);
   const refocusInputWhenIdleRef = React.useRef(false);
   const activeThreadIdRef = React.useRef('');
@@ -1388,6 +1477,14 @@ export function AssistantDock() {
     [activeThread?.id, snapshot?.pendingApprovals],
   );
   const running = activeThread?.status === 'running' || activeThread?.status === 'waiting_for_approval';
+  const activeChatIdleSubscriptionsForThread = React.useMemo(
+    () =>
+      (snapshot?.chatIdleSubscriptions ?? []).filter((sub) => sub.threadId === activeThreadId && sub.status === 'active'),
+    [snapshot?.chatIdleSubscriptions, activeThreadId],
+  );
+  const assistantChatIdleHold =
+    Boolean(activeThread) &&
+    (activeThread?.status === 'waiting_for_chats_idle' || activeChatIdleSubscriptionsForThread.length > 0);
   const visibleMessages = React.useMemo(() => {
     const messages = activeThread?.messages ?? [];
     const streaming = snapshot?.streamingMessage;
@@ -1645,10 +1742,26 @@ export function AssistantDock() {
   });
 
   React.useEffect(() => {
+    assistantStickToBottomRef.current = true;
+  }, [activeThreadId]);
+
+  React.useEffect(() => {
     const node = scrollRef.current;
     if (!node) return;
+    const onScroll = () => {
+      const gap = node.scrollHeight - node.scrollTop - node.clientHeight;
+      assistantStickToBottomRef.current = gap <= ASSISTANT_SCROLL_BOTTOM_THRESHOLD_PX;
+    };
+    node.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+    return () => node.removeEventListener('scroll', onScroll);
+  }, [activeThreadId, loading]);
+
+  React.useEffect(() => {
+    const node = scrollRef.current;
+    if (!node || !assistantStickToBottomRef.current) return;
     node.scrollTop = node.scrollHeight;
-  }, [visibleItems.length, activePendingApprovals.length, snapshot?.streamingMessage, showThinking]);
+  }, [visibleItems, activePendingApprovals.length, snapshot?.streamingMessage, showThinking]);
 
   React.useEffect(() => {
     if (running || !refocusInputWhenIdleRef.current) return;
@@ -1758,10 +1871,13 @@ export function AssistantDock() {
 
   const stop = React.useCallback(async () => {
     if (!activeThread) return;
+    setAssistantStopBusy(true);
     try {
       setSnapshot(await requestJson<AssistantSnapshot>(`/api/assistant/threads/${encodeURIComponent(activeThread.id)}/stop`, { method: 'POST' }));
     } catch (err: any) {
       setError(err?.message ?? String(err));
+    } finally {
+      setAssistantStopBusy(false);
     }
   }, [activeThread]);
 
@@ -2134,6 +2250,10 @@ export function AssistantDock() {
         {error ? <div className="mx-3 rounded border border-[rgba(255,90,90,.35)] bg-[rgba(255,90,90,.08)] px-3 py-2 text-[11px] text-[var(--red)]">{error}</div> : null}
       </div>
 
+      {assistantChatIdleHold ? (
+        <AssistantChatIdleFooterBanner subscriptions={activeChatIdleSubscriptionsForThread} droneNameById={droneNameById} />
+      ) : null}
+
       <div className="flex-shrink-0 border-t border-[var(--border)] bg-[rgba(0,0,0,.12)] p-2">
         <div className="mb-2 flex min-w-0 flex-wrap items-center gap-1.5">
           <div
@@ -2231,11 +2351,19 @@ export function AssistantDock() {
             onKeyDown={(event) => {
               if (event.key === 'Enter' && !event.shiftKey) {
                 event.preventDefault();
-                void sendPrompt();
+                if (!assistantChatIdleHold) void sendPrompt();
               }
             }}
             disabled={!activeThread}
-            placeholder={running ? (promptDeliveryMode === 'asap' ? 'Send at next turn' : 'Queue a message') : 'Ask the assistant'}
+            placeholder={
+              assistantChatIdleHold
+                ? 'Stop subscription below to send a message'
+                : running
+                  ? promptDeliveryMode === 'asap'
+                    ? 'Send at next turn'
+                    : 'Queue a message'
+                  : 'Ask the assistant'
+            }
             className="h-24 w-full resize-none border-0 bg-transparent px-3 pb-10 pt-2 text-[12px] text-[var(--fg)] placeholder:text-[var(--muted-dim)] focus:outline-none disabled:opacity-50"
           />
           {activeRunningModel ? (
@@ -2248,25 +2376,30 @@ export function AssistantDock() {
             </span>
           ) : null}
           <div className="absolute bottom-2 right-2 flex items-center gap-1.5">
-            {running ? (
+            {running || assistantChatIdleHold ? (
               <button
                 type="button"
-                onClick={stop}
-                className="h-7 rounded border border-[rgba(255,90,90,.35)] bg-[rgba(255,90,90,.08)] px-2.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--red)]"
+                onClick={() => void stop()}
+                disabled={assistantStopBusy}
+                title={assistantChatIdleHold && !running ? 'Cancel chat idle subscription' : 'Stop the assistant run'}
+                aria-busy={assistantStopBusy}
+                className="h-7 rounded border border-[rgba(255,90,90,.35)] bg-[rgba(255,90,90,.08)] px-2.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--red)] disabled:opacity-40"
                 style={{ fontFamily: 'var(--display)' }}
               >
-                Stop
+                {assistantStopBusy ? 'Stopping…' : 'Stop'}
               </button>
             ) : null}
-            <button
-              type="button"
-              onClick={() => void sendPrompt()}
-              disabled={!draft.trim() || !activeThread || scopeSyncBusy}
-              className="h-7 rounded border border-[var(--accent-muted)] bg-[var(--accent-subtle)] px-2.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--accent)] disabled:opacity-40"
-              style={{ fontFamily: 'var(--display)' }}
-            >
-              Send
-            </button>
+            {!assistantChatIdleHold ? (
+              <button
+                type="button"
+                onClick={() => void sendPrompt()}
+                disabled={!draft.trim() || !activeThread || scopeSyncBusy}
+                className="h-7 rounded border border-[var(--accent-muted)] bg-[var(--accent-subtle)] px-2.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--accent)] disabled:opacity-40"
+                style={{ fontFamily: 'var(--display)' }}
+              >
+                Send
+              </button>
+            ) : null}
           </div>
         </div>
       </div>
