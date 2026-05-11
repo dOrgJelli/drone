@@ -1844,6 +1844,11 @@ export function DroneChangesDock({
   const pullDroneCurrentBranch = normalizeRef(pullChanges?.branchContext?.droneCurrent);
   const pullDroneConfiguredBranch = normalizeRef(pullChanges?.branchContext?.droneConfigured);
   const pullDroneFromRef = normalizeRef(pullChanges?.branchContext?.droneFromRef);
+  const pullApplyPreviewCount = pullChanges?.applyPreview?.counts.changed ?? null;
+  const pullApplyPreviewDiffers =
+    dataMode === 'pull-preview' &&
+    typeof pullApplyPreviewCount === 'number' &&
+    pullApplyPreviewCount !== (pullChanges?.counts.changed ?? 0);
   const pullDroneBranch = pullDroneCurrentBranch ?? pullDroneConfiguredBranch;
   const pullDroneBranchTitle =
     pullDroneCurrentBranch && pullDroneConfiguredBranch && pullDroneCurrentBranch !== pullDroneConfiguredBranch
@@ -2723,6 +2728,13 @@ export function DroneChangesDock({
                   {pullChanges?.repoRoot || repoPath || '-'}
                 </span>
                 <MetaChip label="files" value={pullChanges?.counts.changed ?? 0} />
+                {pullApplyPreviewDiffers ? (
+                  <MetaChip
+                    label="impact"
+                    value={pullApplyPreviewCount}
+                    title="Host merge preview file count. The file list shows the drone-authored commit range."
+                  />
+                ) : null}
                 <MetaChip label="host" value={shortRefName(pullHostBranch)} title={pullHostBranch ?? ''} mono />
                 <MetaChip label="drone" value={shortRefName(pullDroneBranch)} title={pullDroneBranchTitle} mono />
                 {pullDroneFromRef ? <MetaChip label="from" value={shortRefName(pullDroneFromRef)} title={pullDroneFromRef} mono /> : null}

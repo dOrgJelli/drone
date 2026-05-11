@@ -15500,8 +15500,13 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             ]),
             baseSha: summary.baseSha,
             headSha: summary.headSha,
-            counts: { changed: entriesForPreview.length },
-            entries: attachReviewMetadataToPullEntries(entriesForPreview),
+            counts: { changed: summary.entries.length },
+            entries: attachReviewMetadataToPullEntries(summary.entries),
+            applyPreview: {
+              mode: repoPathRaw ? 'host-merge' : 'drone-range',
+              counts: { changed: entriesForPreview.length },
+              entries: attachReviewMetadataToPullEntries(entriesForPreview),
+            },
             branchContext: {
               hostCurrent: hostBranchHead,
               droneCurrent: summary.branchHead,
