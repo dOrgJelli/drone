@@ -72,6 +72,7 @@ function makeFileService(files: Map<string, Map<string, string>>): HubAssistantS
     readDroneFile: async ({ droneId, path }) => {
       const content = droneFiles(droneId).get(path);
       if (content == null) throw new Error(`file not found: ${path}`);
+      if (path.endsWith('.bin')) throw new Error(`file is not text: ${path}`);
       return { droneId, path, kind: 'text' as const, content, size: Buffer.byteLength(content, 'utf8') };
     },
     writeDroneFile: async ({ droneId, path, content }) => {
@@ -112,6 +113,13 @@ function makeFileService(files: Map<string, Map<string, string>>): HubAssistantS
           .slice(0, limit)
           .map((filePath) => ({ name: filePath.split('/').pop() || filePath, path: filePath, kind: 'file' as const })),
       };
+    },
+    statDronePath: async ({ droneId, path }) => {
+      if (path === 'dir') return { droneId, path, exists: true, kind: 'directory' as const };
+      const content = droneFiles(droneId).get(path);
+      return content == null
+        ? { droneId, path, exists: false }
+        : { droneId, path, exists: true, kind: 'file' as const, size: Buffer.byteLength(content, 'utf8') };
     },
   });
 }
@@ -225,6 +233,178 @@ describe('assistant drone file tools', () => {
       ).rejects.toThrow('ambiguous');
 
       expect(files.get('drone-a')?.get('dupe.txt')).toBe('x\nx\n');
+    });
+  });
+
+  test('does not partially apply a patch when a later operation fails', async () => {
+    await withTempDroneDataDir('assistant-drone-file-atomic-patch-', async () => {
+      await seedDrones();
+      const files = new Map<string, Map<string, string>>([
+        [
+          'drone-a',
+          new Map([
+            ['ok.txt', 'one\n'],
+            ['dupe.txt', 'x\nx\n'],
+          ]),
+        ],
+      ]);
+      const service = makeFileService(files);
+      const { tools } = await buildAssistantFileTools(service);
+      const applyPatch = tools.find((tool) => tool.name === 'apply_patch');
+
+      await expect(
+        applyPatch.execute('patch-partial', {
+          droneId: 'drone-a',
+          patch: [
+            '*** Begin Patch',
+            '*** Update File: ok.txt',
+            '@@',
+            '-one',
+            '+two',
+            '*** Update File: dupe.txt',
+            '@@',
+            '-x',
+            '+y',
+            '*** End Patch',
+          ].join('\n'),
+        }),
+      ).rejects.toThrow('ambiguous');
+
+      expect(files.get('drone-a')?.get('ok.txt')).toBe('one\n');
+      expect(files.get('drone-a')?.get('dupe.txt')).toBe('x\nx\n');
+    });
+  });
+
+  test('rejects add and move targets that already exist', async () => {
+    await withTempDroneDataDir('assistant-drone-file-collision-patch-', async () => {
+      await seedDrones();
+      const files = new Map<string, Map<string, string>>([
+        [
+          'drone-a',
+          new Map([
+            ['existing.txt', 'keep\n'],
+            ['source.txt', 'source\n'],
+          ]),
+        ],
+      ]);
+      const service = makeFileService(files);
+      const { tools } = await buildAssistantFileTools(service);
+      const applyPatch = tools.find((tool) => tool.name === 'apply_patch');
+
+      await expect(
+        applyPatch.execute('patch-add-existing', {
+          droneId: 'drone-a',
+          patch: ['*** Begin Patch', '*** Add File: existing.txt', '+replace', '*** End Patch'].join('\n'),
+        }),
+      ).rejects.toThrow('already exists');
+      await expect(
+        applyPatch.execute('patch-move-existing', {
+          droneId: 'drone-a',
+          patch: [
+            '*** Begin Patch',
+            '*** Update File: source.txt',
+            '*** Move to: existing.txt',
+            '@@',
+            '-source',
+            '+moved',
+            '*** End Patch',
+          ].join('\n'),
+        }),
+      ).rejects.toThrow('already exists');
+
+      expect(files.get('drone-a')?.get('existing.txt')).toBe('keep\n');
+      expect(files.get('drone-a')?.get('source.txt')).toBe('source\n');
+    });
+  });
+
+  test('deletes and move-only patches do not require reading file text', async () => {
+    await withTempDroneDataDir('assistant-drone-file-binary-patch-', async () => {
+      await seedDrones();
+      const files = new Map<string, Map<string, string>>([
+        [
+          'drone-a',
+          new Map([
+            ['delete.bin', '\0delete'],
+            ['move.bin', '\0move'],
+          ]),
+        ],
+      ]);
+      const service = makeFileService(files);
+      const { tools } = await buildAssistantFileTools(service);
+      const applyPatch = tools.find((tool) => tool.name === 'apply_patch');
+
+      await applyPatch.execute('patch-binary-delete-move', {
+        droneId: 'drone-a',
+        patch: [
+          '*** Begin Patch',
+          '*** Delete File: delete.bin',
+          '*** Update File: move.bin',
+          '*** Move to: moved.bin',
+          '*** End Patch',
+        ].join('\n'),
+      });
+
+      expect(files.get('drone-a')?.has('delete.bin')).toBe(false);
+      expect(files.get('drone-a')?.has('move.bin')).toBe(false);
+      expect(files.get('drone-a')?.get('moved.bin')).toBe('\0move');
+    });
+  });
+
+  test('moves original file before writing a replacement at the source path', async () => {
+    await withTempDroneDataDir('assistant-drone-file-move-readd-patch-', async () => {
+      await seedDrones();
+      const files = new Map<string, Map<string, string>>([['drone-a', new Map([['source.bin', '\0original']])]]);
+      const service = makeFileService(files);
+      const { tools } = await buildAssistantFileTools(service);
+      const applyPatch = tools.find((tool) => tool.name === 'apply_patch');
+
+      await applyPatch.execute('patch-move-readd', {
+        droneId: 'drone-a',
+        patch: [
+          '*** Begin Patch',
+          '*** Update File: source.bin',
+          '*** Move to: moved.bin',
+          '*** Add File: source.bin',
+          '+replacement',
+          '*** End Patch',
+        ].join('\n'),
+      });
+
+      expect(files.get('drone-a')?.get('moved.bin')).toBe('\0original');
+      expect(files.get('drone-a')?.get('source.bin')).toBe('replacement\n');
+    });
+  });
+
+  test('rejects directory delete or move during preflight without partial writes', async () => {
+    await withTempDroneDataDir('assistant-drone-file-directory-patch-', async () => {
+      await seedDrones();
+      const files = new Map<string, Map<string, string>>([['drone-a', new Map([['ok.txt', 'one\n']])]]);
+      const service = makeFileService(files);
+      const { tools } = await buildAssistantFileTools(service);
+      const applyPatch = tools.find((tool) => tool.name === 'apply_patch');
+
+      await expect(
+        applyPatch.execute('patch-delete-dir', {
+          droneId: 'drone-a',
+          patch: [
+            '*** Begin Patch',
+            '*** Update File: ok.txt',
+            '@@',
+            '-one',
+            '+two',
+            '*** Delete File: dir',
+            '*** End Patch',
+          ].join('\n'),
+        }),
+      ).rejects.toThrow('directory');
+      await expect(
+        applyPatch.execute('patch-move-dir', {
+          droneId: 'drone-a',
+          patch: ['*** Begin Patch', '*** Update File: dir', '*** Move to: moved-dir', '*** End Patch'].join('\n'),
+        }),
+      ).rejects.toThrow('directory');
+
+      expect(files.get('drone-a')?.get('ok.txt')).toBe('one\n');
     });
   });
 });

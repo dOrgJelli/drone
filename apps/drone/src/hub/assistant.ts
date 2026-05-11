@@ -157,6 +157,7 @@ type AssistantToolCallbacks = {
   moveDroneFile?: (opts: { droneId: string; fromPath: string; toPath: string }) => Promise<AssistantDroneFileMutationResult>;
   searchDroneFiles?: (opts: { droneId: string; path?: string; query: string; limit?: number }) => Promise<AssistantDroneFileSearchResult>;
   findDroneFiles?: (opts: { droneId: string; path?: string; pattern?: string; limit?: number }) => Promise<AssistantDroneFileFindResult>;
+  statDronePath?: (opts: { droneId: string; path: string }) => Promise<AssistantDronePathStatResult>;
 };
 
 type AssistantDroneFileEntry = {
@@ -196,6 +197,15 @@ type AssistantDroneFileMutationResult = {
   movedTo?: string;
 };
 
+type AssistantDronePathStatResult = {
+  droneId: string;
+  path: string;
+  exists: boolean;
+  kind?: 'directory' | 'file' | 'other';
+  size?: number | null;
+  mtimeMs?: number | null;
+};
+
 type AssistantDroneFileSearchMatch = {
   path: string;
   line?: number | null;
@@ -232,6 +242,14 @@ type AssistantApplyPatchResult = {
   ok: true;
   droneId: string;
   operations: Array<{ kind: AssistantPatchOperation['kind']; path: string; movedTo?: string; size?: number | null }>;
+};
+
+type AssistantPatchStagedFile = {
+  path: string;
+  existsBefore: boolean;
+  content: string | null;
+  deleted: boolean;
+  moveFrom?: string;
 };
 
 type AssistantAppContext = {
@@ -1566,36 +1584,133 @@ export class HubAssistantService {
     const writeFile = this.requireFileCallback('writeDroneFile');
     const deleteFile = this.requireFileCallback('deleteDroneFile');
     const moveFile = this.requireFileCallback('moveDroneFile');
+    const statPath = this.requireFileCallback('statDronePath');
+    const staged = new Map<string, AssistantPatchStagedFile>();
     const applied: AssistantApplyPatchResult['operations'] = [];
+
+    const getStaged = async (filePath: string): Promise<AssistantPatchStagedFile> => {
+      const existing = staged.get(filePath);
+      if (existing) return existing;
+      const read = await readFile({ droneId, path: filePath });
+      const next: AssistantPatchStagedFile = {
+        path: filePath,
+        existsBefore: true,
+        content: read.content,
+        deleted: false,
+      };
+      staged.set(filePath, next);
+      return next;
+    };
+
+    const pathExists = async (filePath: string): Promise<boolean> => {
+      const existing = staged.get(filePath);
+      if (existing) return !existing.deleted && (existing.content != null || Boolean(existing.moveFrom));
+      const stat = await statPath({ droneId, path: filePath });
+      return Boolean(stat.exists);
+    };
 
     for (const operation of operations) {
       if (operation.kind === 'add') {
-        const written = await writeFile({ droneId, path: operation.path, content: operation.content });
-        applied.push({ kind: 'add', path: written.path, size: written.size ?? null });
+        if (await pathExists(operation.path)) throw new Error(`file already exists: ${operation.path}`);
+        staged.set(operation.path, {
+          path: operation.path,
+          existsBefore: false,
+          content: operation.content,
+          deleted: false,
+        });
+        applied.push({ kind: 'add', path: operation.path, size: Buffer.byteLength(operation.content, 'utf8') });
         continue;
       }
 
       if (operation.kind === 'delete') {
-        const deleted = await deleteFile({ droneId, path: operation.path });
-        applied.push({ kind: 'delete', path: deleted.path });
+        const current = staged.get(operation.path);
+        if (current) {
+          current.content = null;
+          current.deleted = true;
+          delete current.moveFrom;
+        } else {
+          const stat = await statPath({ droneId, path: operation.path });
+          if (!stat.exists) throw new Error(`file not found: ${operation.path}`);
+          if (stat.kind === 'directory') throw new Error(`path is a directory: ${operation.path}`);
+          staged.set(operation.path, {
+            path: operation.path,
+            existsBefore: true,
+            content: null,
+            deleted: true,
+          });
+        }
+        applied.push({ kind: 'delete', path: operation.path });
         continue;
       }
 
-      const read = await readFile({ droneId, path: operation.path });
-      let content = read.content;
-      for (const hunk of operation.hunks) {
-        content = replaceTextOnce(content, hunk.oldText, hunk.newText, operation.path);
+      let current = staged.get(operation.path);
+      if (operation.moveTo && operation.hunks.length === 0 && !current) {
+        const stat = await statPath({ droneId, path: operation.path });
+        if (!stat.exists) throw new Error(`file not found: ${operation.path}`);
+        if (stat.kind === 'directory') throw new Error(`path is a directory: ${operation.path}`);
+        current = {
+          path: operation.path,
+          existsBefore: true,
+          content: null,
+          deleted: false,
+        };
+        staged.set(operation.path, current);
+      } else {
+        current = await getStaged(operation.path);
+      }
+      if (current.deleted) throw new Error(`file not found: ${operation.path}`);
+      let content = current.content;
+      if (current.moveFrom && content == null && operation.hunks.length > 0) {
+        const read = await readFile({ droneId, path: current.moveFrom });
+        content = read.content;
+        current.content = content;
+        delete current.moveFrom;
+      }
+      if (operation.hunks.length > 0) {
+        if (content == null) throw new Error(`file not found: ${operation.path}`);
+        for (const hunk of operation.hunks) {
+          content = replaceTextOnce(content, hunk.oldText, hunk.newText, operation.path);
+        }
       }
       if (operation.moveTo) {
-        if (operation.hunks.length > 0) {
-          await writeFile({ droneId, path: operation.path, content });
-        }
-        const moved = await moveFile({ droneId, fromPath: operation.path, toPath: operation.moveTo });
-        applied.push({ kind: 'update', path: operation.path, movedTo: moved.movedTo ?? operation.moveTo });
+        if (operation.moveTo === operation.path) throw new Error(`move target matches source: ${operation.path}`);
+        if (await pathExists(operation.moveTo)) throw new Error(`move target already exists: ${operation.moveTo}`);
+        current.content = null;
+        current.deleted = true;
+        delete current.moveFrom;
+        staged.set(operation.moveTo, {
+          path: operation.moveTo,
+          existsBefore: false,
+          content,
+          deleted: false,
+          ...(content == null ? { moveFrom: operation.path } : {}),
+        });
+        applied.push({ kind: 'update', path: operation.path, movedTo: operation.moveTo });
         continue;
       }
-      const written = await writeFile({ droneId, path: operation.path, content });
-      applied.push({ kind: 'update', path: written.path, size: written.size ?? null });
+      if (content == null) throw new Error(`file not found: ${operation.path}`);
+      current.content = content;
+      current.deleted = false;
+      delete current.moveFrom;
+      applied.push({ kind: 'update', path: operation.path, size: Buffer.byteLength(content, 'utf8') });
+    }
+
+    const movedSources = new Set<string>();
+    for (const file of staged.values()) {
+      if (!file.deleted && file.moveFrom) {
+        await moveFile({ droneId, fromPath: file.moveFrom, toPath: file.path });
+        movedSources.add(file.moveFrom);
+      }
+    }
+    for (const file of staged.values()) {
+      if (!file.deleted && file.content != null) {
+        await writeFile({ droneId, path: file.path, content: file.content });
+      }
+    }
+    for (const file of staged.values()) {
+      if (!file.deleted || !file.existsBefore) continue;
+      if (movedSources.has(file.path)) continue;
+      await deleteFile({ droneId, path: file.path });
     }
 
     return { ok: true, droneId, operations: applied };

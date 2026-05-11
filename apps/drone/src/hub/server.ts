@@ -2498,6 +2498,58 @@ function ensureAssistantTextFile(pathRaw: string, buf: Buffer, mimeRaw: string |
   }
 }
 
+async function assistantStatDronePath(opts: { droneId: string; path: string }): Promise<any> {
+  const target = await resolveAssistantDroneFsTarget({ droneId: opts.droneId, path: opts.path, fallbackToHome: false });
+  if (!target.targetPath || target.targetPath === '/') throw new Error('missing path');
+  if (target.runtime === 'host') {
+    const resolvedPath = path.resolve(target.targetPath);
+    try {
+      const st = await fs.lstat(resolvedPath);
+      return {
+        droneId: target.id,
+        path: resolvedPath,
+        exists: true,
+        kind: st.isDirectory() ? 'directory' : st.isFile() ? 'file' : 'other',
+        size: Number.isFinite(st.size) ? Math.max(0, Math.floor(st.size)) : null,
+        mtimeMs: Number.isFinite(st.mtimeMs) ? Math.max(0, Math.floor(st.mtimeMs)) : null,
+      };
+    } catch (e: any) {
+      const code = String(e?.code ?? '').trim().toUpperCase();
+      if (code === 'ENOENT' || code === 'ENOTDIR') return { droneId: target.id, path: resolvedPath, exists: false };
+      throw e;
+    }
+  }
+
+  const script = [
+    'set -euo pipefail',
+    `target=${bashQuote(target.targetPath)}`,
+    'if [ ! -e "$target" ]; then echo "__MISSING__"; exit 0; fi',
+    'kind=o',
+    'if [ -d "$target" ]; then kind=d; elif [ -f "$target" ]; then kind=f; fi',
+    'size=$(stat -c %s -- "$target" 2>/dev/null || echo 0)',
+    'mtime=$(stat -c %Y -- "$target" 2>/dev/null || echo 0)',
+    'printf "__META__\t%s\t%s\t%s\n" "$kind" "$size" "$mtime"',
+  ].join('\n');
+  const r = await withLockedDroneContainer({ requestedDroneName: target.name, droneEntry: target.drone }, async ({ containerName }) => {
+    return await dvmExec(containerName, 'bash', ['-lc', script]);
+  });
+  if (r.code !== 0) throw new Error((r.stderr || r.stdout || 'failed reading path metadata').trim());
+  const stdout = String(r.stdout ?? '').trim();
+  if (stdout === '__MISSING__') return { droneId: target.id, path: target.targetPath, exists: false };
+  const meta = stdout.split('\t');
+  if (meta.length < 4 || meta[0] !== '__META__') throw new Error('path metadata missing');
+  const sizeNum = Number(meta[2] ?? 0);
+  const mtimeSec = Number(meta[3] ?? 0);
+  return {
+    droneId: target.id,
+    path: target.targetPath,
+    exists: true,
+    kind: meta[1] === 'd' ? 'directory' : meta[1] === 'f' ? 'file' : 'other',
+    size: Number.isFinite(sizeNum) ? Math.max(0, Math.floor(sizeNum)) : null,
+    mtimeMs: Number.isFinite(mtimeSec) ? Math.max(0, Math.floor(mtimeSec * 1000)) : null,
+  };
+}
+
 async function assistantListDroneFiles(opts: { droneId: string; path?: string }): Promise<any> {
   const target = await resolveAssistantDroneFsTarget({ droneId: opts.droneId, path: opts.path, fallbackToHome: true });
   if (target.runtime === 'host') {
@@ -10582,6 +10634,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
     moveDroneFile: async ({ droneId, fromPath, toPath }) => await assistantMoveDroneFile({ droneId, fromPath, toPath }),
     searchDroneFiles: async ({ droneId, path, query, limit }) => await assistantSearchDroneFiles({ droneId, path, query, limit }),
     findDroneFiles: async ({ droneId, path, pattern, limit }) => await assistantFindDroneFiles({ droneId, path, pattern, limit }),
+    statDronePath: async ({ droneId, path }) => await assistantStatDronePath({ droneId, path }),
   });
 
   const server = http.createServer(async (req, res) => {
