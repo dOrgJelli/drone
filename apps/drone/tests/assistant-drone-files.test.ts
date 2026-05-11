@@ -48,7 +48,7 @@ function makeFileService(files: Map<string, Map<string, string>>): HubAssistantS
 
   return new HubAssistantService({
     listDrones: async () => [
-      { id: 'drone-a', name: 'Drone A', group: null, runtime: 'host', repoPath: '/tmp/drone-a', status: 'ready', chats: ['default'] },
+      { id: 'drone-a', name: 'Drone A', group: null, runtime: 'container', repoPath: '/tmp/drone-a', status: 'ready', chats: ['default'] },
       { id: 'drone-b', name: 'Drone B', group: null, runtime: 'host', repoPath: '/tmp/drone-b', status: 'ready', chats: ['default'] },
     ],
     createDrone: async () => {
@@ -121,6 +121,17 @@ function makeFileService(files: Map<string, Map<string, string>>): HubAssistantS
         ? { droneId, path, exists: false }
         : { droneId, path, exists: true, kind: 'file' as const, size: Buffer.byteLength(content, 'utf8') };
     },
+    runDroneBash: async ({ droneId, command, cwd, timeoutMs }) => ({
+      ok: true as const,
+      droneId,
+      cwd: cwd || '.',
+      command,
+      code: command.includes('fail') ? 1 : 0,
+      stdout: `ran: ${command}\n`,
+      stderr: '',
+      timeoutMs: timeoutMs ?? 30_000,
+      timedOut: false,
+    }),
   });
 }
 
@@ -152,6 +163,7 @@ describe('assistant drone file tools', () => {
       const readFile = tools.find((tool) => tool.name === 'read_file');
       const findFiles = tools.find((tool) => tool.name === 'find_files');
       const applyPatch = tools.find((tool) => tool.name === 'apply_patch');
+      const bash = tools.find((tool) => tool.name === 'bash');
 
       await expect(readFile.execute('read-b', { droneId: 'drone-b', path: 'README.md' })).rejects.toThrow(
         'assistant scope does not include drone',
@@ -165,8 +177,115 @@ describe('assistant drone file tools', () => {
           patch: ['*** Begin Patch', '*** Update File: README.md', '@@', '-blocked', '+changed', '*** End Patch'].join('\n'),
         }),
       ).rejects.toThrow('assistant scope does not include drone');
+      await expect(bash.execute('bash-b', { droneId: 'drone-b', command: 'pwd' })).rejects.toThrow(
+        'assistant scope does not include drone',
+      );
 
       expect(files.get('drone-b')?.get('README.md')).toBe('blocked\n');
+    });
+  });
+
+  test('runs bash through the drone bash callback with write scope', async () => {
+    await withTempDroneDataDir('assistant-drone-bash-', async () => {
+      await seedDrones();
+      const service = makeFileService(new Map());
+      const { threadId, tools } = await buildAssistantFileTools(service);
+      await service.updateAccessScope({
+        threadId,
+        readMode: 'all',
+        writeMode: 'selected',
+        droneIds: ['drone-a'],
+      });
+
+      const bash = tools.find((tool) => tool.name === 'bash');
+      const result = await bash.execute('bash-a', {
+        droneId: 'drone-a',
+        command: 'bun test',
+        cwd: 'apps/drone',
+        timeoutMs: 999_999,
+      });
+
+      expect(result.details).toMatchObject({
+        ok: true,
+        droneId: 'drone-a',
+        cwd: 'apps/drone',
+        command: 'bun test',
+        code: 0,
+        stdout: 'ran: bun test\n',
+        timeoutMs: 120_000,
+        timedOut: false,
+      });
+    });
+  });
+
+  test('requests approval before running bash', async () => {
+    await withTempDroneDataDir('assistant-drone-bash-approval-', async () => {
+      await seedDrones();
+      const service = makeFileService(new Map());
+      const snapshot = await service.createThread({ title: 'bash approval', provider: 'openai', model: 'gpt-5.5' });
+      const threadId = snapshot.activeThreadId;
+      const approvals: any[] = [];
+
+      const beforeToolCall = (service as any).beforeToolCall(
+        threadId,
+        {
+          toolCall: { id: 'call-bash', name: 'bash' },
+          args: { droneId: 'drone-a', command: 'bun test', cwd: 'apps/drone', timeoutMs: 999_999 },
+        },
+        async (event: any) => {
+          if (event.type !== 'approval_pending') return;
+          approvals.push(event.approval);
+          await service.approve(event.approval.id, true);
+        },
+      );
+
+      await expect(beforeToolCall).resolves.toBeUndefined();
+      expect(approvals).toHaveLength(1);
+      expect(approvals[0]).toMatchObject({
+        threadId,
+        toolCallId: 'call-bash',
+        toolName: 'bash',
+        label: 'Run bash in drone',
+        args: {
+          resolved: {
+            droneId: 'drone-a',
+            droneName: 'Drone A',
+            command: 'bun test',
+            cwd: 'apps/drone',
+            timeoutMs: 120_000,
+          },
+        },
+      });
+    });
+  });
+
+  test('blocks host-runtime bash before requesting approval', async () => {
+    await withTempDroneDataDir('assistant-drone-bash-host-block-', async () => {
+      await seedDrones();
+      const service = makeFileService(new Map());
+      const snapshot = await service.createThread({ title: 'bash host block', provider: 'openai', model: 'gpt-5.5' });
+      const threadId = snapshot.activeThreadId;
+      await service.updateAccessScope({
+        threadId,
+        readMode: 'all',
+        writeMode: 'selected',
+        droneIds: ['drone-b'],
+      });
+      const approvals: any[] = [];
+
+      const result = await (service as any).beforeToolCall(
+        threadId,
+        {
+          toolCall: { id: 'call-bash-host', name: 'bash' },
+          args: { droneId: 'drone-b', command: 'pwd' },
+        },
+        async (event: any) => {
+          if (event.type === 'approval_pending') approvals.push(event.approval);
+        },
+      );
+
+      expect(result).toEqual({ block: true, reason: 'bash is only supported for container drones: Drone B' });
+      expect(approvals).toHaveLength(0);
     });
   });
 

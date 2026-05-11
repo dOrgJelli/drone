@@ -2183,6 +2183,10 @@ const VIDEO_FILE_EXTENSIONS = new Set(['mp4', 'webm', 'mov', 'm4v', 'ogv', 'ogg'
 const FS_THUMB_MAX_BYTES = 8 * 1024 * 1024;
 const FS_MEDIA_MAX_BYTES = 96 * 1024 * 1024;
 const FS_EDITOR_MAX_BYTES = 512 * 1024;
+const ASSISTANT_BASH_DEFAULT_TIMEOUT_MS = 30_000;
+const ASSISTANT_BASH_MAX_TIMEOUT_MS = 120_000;
+const ASSISTANT_BASH_MAX_OUTPUT_BYTES = 64 * 1024;
+const ASSISTANT_BASH_MAX_COMMAND_BYTES = 20 * 1024;
 
 type ContainerFsEntry = {
   name: string;
@@ -2496,6 +2500,22 @@ function ensureAssistantTextFile(pathRaw: string, buf: Buffer, mimeRaw: string |
   if (!isLikelyTextMimeType(mime) || bufferLooksBinary(buf)) {
     throw new Error(`file is not text: ${pathRaw}`);
   }
+}
+
+function clampAssistantBashTimeoutMs(raw: unknown): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return ASSISTANT_BASH_DEFAULT_TIMEOUT_MS;
+  return Math.min(ASSISTANT_BASH_MAX_TIMEOUT_MS, Math.max(1000, Math.floor(n)));
+}
+
+function truncateUtf8Bytes(textRaw: unknown, maxBytes: number): { text: string; truncated: boolean } {
+  const text = String(textRaw ?? '');
+  const buf = Buffer.from(text, 'utf8');
+  if (buf.length <= maxBytes) return { text, truncated: false };
+  return {
+    text: `${buf.subarray(0, maxBytes).toString('utf8')}\n[truncated to ${maxBytes} bytes]`,
+    truncated: true,
+  };
 }
 
 async function assistantStatDronePath(opts: { droneId: string; path: string }): Promise<any> {
@@ -2871,6 +2891,83 @@ async function assistantFindDroneFiles(opts: { droneId: string; path?: string; p
     pattern,
     limit,
     matches: parseAssistantFindOutput(r.stdout || '', limit),
+  };
+}
+
+async function assistantRunDroneBash(opts: { droneId: string; command: string; cwd?: string; timeoutMs?: number }): Promise<any> {
+  const command = String(opts.command ?? '');
+  if (!command.trim()) throw new Error('missing command');
+  const commandBytes = Buffer.byteLength(command, 'utf8');
+  if (commandBytes > ASSISTANT_BASH_MAX_COMMAND_BYTES) {
+    throw new Error(`command too large (${commandBytes} bytes, max ${ASSISTANT_BASH_MAX_COMMAND_BYTES})`);
+  }
+  const timeoutMs = clampAssistantBashTimeoutMs(opts.timeoutMs);
+  const target = await resolveAssistantDroneFsTarget({ droneId: opts.droneId, path: opts.cwd, fallbackToHome: true });
+  if (target.runtime !== 'container') throw new Error('bash is only supported for container drones');
+
+  const script = [
+    'set -uo pipefail',
+    `cwd=${bashQuote(target.targetPath)}`,
+    `cmd=${bashQuote(command)}`,
+    `max=${String(ASSISTANT_BASH_MAX_OUTPUT_BYTES)}`,
+    `timeout_s=${String(Math.max(1, Math.ceil(timeoutMs / 1000)))}`,
+    'if [ ! -d "$cwd" ]; then echo "__ERR__\tnot-dir"; exit 3; fi',
+    'cd "$cwd" || exit 3',
+    'resolved=$(pwd -P)',
+    'tmp=$(mktemp -d "${TMPDIR:-/tmp}/assistant-bash.XXXXXX")',
+    'cleanup() { rm -rf "$tmp"; }',
+    'trap cleanup EXIT',
+    'stdout_file="$tmp/stdout"',
+    'stderr_file="$tmp/stderr"',
+    'if command -v timeout >/dev/null 2>&1; then',
+    '  timeout -k 2s "${timeout_s}s" bash -lc "$cmd" >"$stdout_file" 2>"$stderr_file"',
+    '  code=$?',
+    'else',
+    '  bash -lc "$cmd" >"$stdout_file" 2>"$stderr_file"',
+    '  code=$?',
+    'fi',
+    'stdout_size=$(wc -c < "$stdout_file" | tr -d "[:space:]")',
+    'stderr_size=$(wc -c < "$stderr_file" | tr -d "[:space:]")',
+    'cwd_b64=$(printf "%s" "$resolved" | base64 | tr -d "\\n")',
+    'stdout_b64=$(head -c "$max" "$stdout_file" | base64 | tr -d "\\n")',
+    'stderr_b64=$(head -c "$max" "$stderr_file" | base64 | tr -d "\\n")',
+    'printf "__META__\t%s\t%s\t%s\t%s\n" "$cwd_b64" "$code" "${stdout_size:-0}" "${stderr_size:-0}"',
+    'printf "__STDOUT_B64__\t%s\n" "$stdout_b64"',
+    'printf "__STDERR_B64__\t%s\n" "$stderr_b64"',
+    'exit 0',
+  ].join('\n');
+  const r = await withLockedDroneContainer({ requestedDroneName: target.name, droneEntry: target.drone }, async ({ containerName }) => {
+    return await dvmExec(containerName, 'bash', ['-lc', script], { timeoutMs: timeoutMs + 5000 });
+  });
+  const stdoutRaw = String(r.stdout ?? '');
+  const combinedOut = `${stdoutRaw}\n${String(r.stderr ?? '')}`;
+  if (r.code === 3 && /__ERR__\s+not-dir\b/i.test(combinedOut)) throw new Error(`cwd is not a directory: ${target.targetPath}`);
+  const lines = stdoutRaw.split('\n');
+  const meta = (lines.find((line) => line.startsWith('__META__\t')) ?? '').split('\t');
+  const stdoutB64 = (lines.find((line) => line.startsWith('__STDOUT_B64__\t')) ?? '').slice('__STDOUT_B64__\t'.length);
+  const stderrB64 = (lines.find((line) => line.startsWith('__STDERR_B64__\t')) ?? '').slice('__STDERR_B64__\t'.length);
+  const hasStructuredOutput = meta.length >= 5 && meta[0] === '__META__';
+  const cwd = hasStructuredOutput ? Buffer.from(meta[1] ?? '', 'base64').toString('utf8') || target.targetPath : target.targetPath;
+  const code = hasStructuredOutput ? Number(meta[2] ?? 1) : r.code;
+  const stdoutSize = hasStructuredOutput ? Number(meta[3] ?? 0) : Buffer.byteLength(stdoutRaw, 'utf8');
+  const stderrSize = hasStructuredOutput ? Number(meta[4] ?? 0) : Buffer.byteLength(String(r.stderr ?? ''), 'utf8');
+  const structuredStdout = hasStructuredOutput ? Buffer.from(stdoutB64, 'base64').toString('utf8') : stdoutRaw;
+  const structuredStderr = hasStructuredOutput ? Buffer.from(stderrB64, 'base64').toString('utf8') : String(r.stderr ?? '');
+  const stdout = truncateUtf8Bytes(structuredStdout, ASSISTANT_BASH_MAX_OUTPUT_BYTES);
+  const stderr = truncateUtf8Bytes(structuredStderr, ASSISTANT_BASH_MAX_OUTPUT_BYTES);
+  const timedOut = code === 124 || code === 137 || r.code === 124 || /Timed out after/i.test(String(r.stderr ?? ''));
+  return {
+    ok: true,
+    droneId: target.id,
+    cwd,
+    command,
+    code: Number.isFinite(code) ? Math.floor(code) : r.code,
+    stdout: stdout.text,
+    stderr: stderr.text,
+    timeoutMs,
+    timedOut,
+    stdoutTruncated: stdout.truncated || stdoutSize > ASSISTANT_BASH_MAX_OUTPUT_BYTES,
+    stderrTruncated: stderr.truncated || stderrSize > ASSISTANT_BASH_MAX_OUTPUT_BYTES,
   };
 }
 
@@ -10635,6 +10732,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
     searchDroneFiles: async ({ droneId, path, query, limit }) => await assistantSearchDroneFiles({ droneId, path, query, limit }),
     findDroneFiles: async ({ droneId, path, pattern, limit }) => await assistantFindDroneFiles({ droneId, path, pattern, limit }),
     statDronePath: async ({ droneId, path }) => await assistantStatDronePath({ droneId, path }),
+    runDroneBash: async ({ droneId, command, cwd, timeoutMs }) => await assistantRunDroneBash({ droneId, command, cwd, timeoutMs }),
   });
 
   const server = http.createServer(async (req, res) => {

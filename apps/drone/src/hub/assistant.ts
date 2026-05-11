@@ -158,6 +158,7 @@ type AssistantToolCallbacks = {
   searchDroneFiles?: (opts: { droneId: string; path?: string; query: string; limit?: number }) => Promise<AssistantDroneFileSearchResult>;
   findDroneFiles?: (opts: { droneId: string; path?: string; pattern?: string; limit?: number }) => Promise<AssistantDroneFileFindResult>;
   statDronePath?: (opts: { droneId: string; path: string }) => Promise<AssistantDronePathStatResult>;
+  runDroneBash?: (opts: { droneId: string; command: string; cwd?: string; timeoutMs?: number }) => Promise<AssistantDroneBashResult>;
 };
 
 type AssistantDroneFileEntry = {
@@ -242,6 +243,20 @@ type AssistantApplyPatchResult = {
   ok: true;
   droneId: string;
   operations: Array<{ kind: AssistantPatchOperation['kind']; path: string; movedTo?: string; size?: number | null }>;
+};
+
+type AssistantDroneBashResult = {
+  ok: true;
+  droneId: string;
+  cwd: string;
+  command: string;
+  code: number;
+  stdout: string;
+  stderr: string;
+  timeoutMs: number;
+  timedOut: boolean;
+  stdoutTruncated?: boolean;
+  stderrTruncated?: boolean;
 };
 
 type AssistantPatchStagedFile = {
@@ -365,6 +380,8 @@ const CHAT_IDLE_DEFAULT_IDLE_FOR_MS = 1000;
 const CHAT_IDLE_SUBSCRIPTION_EXPIRES_AFTER_MS = 24 * 60 * 60 * 1000;
 const CHAT_IDLE_MAX_SUBSCRIPTIONS = 200;
 const CHAT_IDLE_MAX_TARGETS = 20;
+const ASSISTANT_BASH_DEFAULT_TIMEOUT_MS = 30_000;
+const ASSISTANT_BASH_MAX_TIMEOUT_MS = 120_000;
 const DEFAULT_OPENAI_MODEL = 'gpt-5.5';
 const DEFAULT_GEMINI_MODEL = 'gemini-3-flash-preview';
 const DEFAULT_CODEX_MODEL = 'gpt-5.5';
@@ -379,11 +396,12 @@ const ASSISTANT_SYSTEM_PROMPT_DEFAULT = [
   'Use get_chat_overview before reading chat details, then read_chat_messages in pages when you need conversation context.',
   'Use assistant_files to maintain private, thread-scoped Markdown notes when tracking work, decisions, plans, questions, or handoff details. These files are for the user-facing Artifacts UI and are not visible to drones.',
   'Use list_files, find_files, search_files, read_file, write_file, and apply_patch to inspect and modify files in drones you can access. Prefer apply_patch for coordinated code edits.',
+  'Use bash only when a command is the right tool for inspection, tests, builds, or small scripted checks in an accessible container drone. Bash is approval-gated, non-interactive, and not for background processes.',
   'File paths are interpreted by drone id plus path. Relative paths resolve inside the target drone workspace, usually the repo root for repo-backed drones.',
   'Chat timelines contain user messages and agent messages. Queued or pending user messages appear in the same timeline with a non-completed status.',
   'When you send a drone chat message and need the result later, call subscribe_to_chats_idle on the target chat. This returns immediately so you can continue other work. If there is nothing else to do, end your turn; the system will resume this thread when the subscribed chats become idle.',
   'Do not load more chat pages than needed. Start with the latest page.',
-  'Creating drones, changing drone groups, and sending a user message to a drone are actions that require user approval; explain briefly what you intend to do.',
+  'Creating drones, changing drone groups, sending a user message to a drone, and running bash in a drone are actions that require user approval; explain briefly what you intend to do.',
   'File write tools require write access to the target drone and should be used carefully for concrete code or content edits.',
   'If an approval-gated write tool returns successfully, the user already approved that action. Do not ask for the same approval again.',
   'When creating a drone, omit fields you want inherited from the current open drone. Only set repoBranchSource=remote when the user asked for a remote branch and you have a remoteBranch value.',
@@ -527,6 +545,12 @@ function clampChatMessageLimit(raw: unknown): number {
   const n = Number(raw);
   if (!Number.isFinite(n)) return CHAT_MESSAGE_DEFAULT_LIMIT;
   return Math.min(CHAT_MESSAGE_MAX_LIMIT, Math.max(1, Math.floor(n)));
+}
+
+function clampAssistantBashTimeout(raw: unknown): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return ASSISTANT_BASH_DEFAULT_TIMEOUT_MS;
+  return Math.min(ASSISTANT_BASH_MAX_TIMEOUT_MS, Math.max(1000, Math.floor(n)));
 }
 
 function normalizeChatNameForAssistant(raw: unknown): string {
@@ -2569,6 +2593,36 @@ export class HubAssistantService {
         },
       },
       {
+        name: 'bash',
+        label: 'Run bash',
+        description:
+          'Run a non-interactive bash command in one container drone. Requires assistant write access and user approval. Use for tests, builds, and command-line inspection.',
+        parameters: Type.Object({
+          droneId: Type.String({ description: 'Drone id or visible name.' }),
+          command: Type.String({ description: 'Bash command to run. Do not use for interactive or background processes.' }),
+          cwd: Type.Optional(Type.String({ description: 'Working directory. Relative paths resolve inside the drone workspace.' })),
+          timeoutMs: Type.Optional(Type.Number({ description: `Timeout in milliseconds. Defaults to ${ASSISTANT_BASH_DEFAULT_TIMEOUT_MS}, max ${ASSISTANT_BASH_MAX_TIMEOUT_MS}.` })),
+        }),
+        executionMode: 'sequential',
+        execute: async (_toolCallId: string, params: any) => {
+          const droneId = await this.requireDroneInScope(params?.droneId, 'write', threadId);
+          const command = String(params?.command ?? '');
+          if (!command.trim()) throw new Error('missing command');
+          const rawCwd = cleanOptionalString(params?.cwd);
+          const runBash = this.requireFileCallback('runDroneBash');
+          const result = await runBash({
+            droneId,
+            command,
+            cwd: rawCwd ? normalizeAssistantDroneFilePath(rawCwd) : undefined,
+            timeoutMs: clampAssistantBashTimeout(params?.timeoutMs),
+          });
+          return {
+            content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+            details: result,
+          };
+        },
+      },
+      {
         name: 'apply_patch',
         label: 'Apply patch',
         description:
@@ -2792,60 +2846,86 @@ export class HubAssistantService {
     signal?: AbortSignal,
   ): Promise<{ block?: boolean; reason?: string } | undefined> {
     const toolName = String(ctx?.toolCall?.name ?? '').trim();
-    if (toolName !== 'message_drone' && toolName !== 'create_drone' && toolName !== 'set_drone_group') return undefined;
+    if (toolName !== 'message_drone' && toolName !== 'create_drone' && toolName !== 'set_drone_group' && toolName !== 'bash') return undefined;
     if (this.getThread(threadId).autoApprove) return undefined;
     const label =
       toolName === 'create_drone'
         ? 'Create drone'
         : toolName === 'set_drone_group'
           ? 'Set drone group'
-          : 'Send message to drone';
+          : toolName === 'bash'
+            ? 'Run bash in drone'
+            : 'Send message to drone';
     let approvalArgs = ctx?.args ?? {};
-    try {
-      if (toolName === 'create_drone') {
-        approvalArgs = {
-          requested: ctx?.args ?? {},
-          resolvedRequest: await this.buildCreateDroneRequest(ctx?.args ?? {}, threadId),
-        };
-      } else if (toolName === 'set_drone_group') {
-        const regAny: any = await loadRegistry();
-        const rawList = Array.isArray(ctx?.args?.droneIds) ? ctx.args.droneIds : [];
-        const drones = await this.tools.listDrones();
-        const droneNameById = new Map(drones.map((drone) => [drone.id, drone.name]));
-        const droneIds: string[] = Array.from(new Set(rawList.map((item: any) => droneIdByAssistantRef(regAny, item))));
-        const allowed = this.allowedDroneIdSet('write', threadId);
-        if (allowed) {
-          const denied = droneIds.filter((id) => !allowed.has(id));
-          if (denied.length > 0) throw new Error(`assistant scope does not include drone: ${denied.join(', ')}`);
-        }
-        approvalArgs = {
-          requested: ctx?.args ?? {},
-          resolved: {
-            drones: droneIds.map((id) => ({ id, name: droneNameById.get(id) ?? id })),
-            group: cleanOptionalString(ctx?.args?.group) || null,
-          },
-        };
-      } else if (toolName === 'message_drone') {
-        const drones = await this.tools.listDrones();
-        const rawDroneId = cleanOptionalString(ctx?.args?.droneId);
-        const scopedDroneId = await this.requireDroneInScope(rawDroneId, 'write', threadId);
-        const drone =
-          drones.find((item) => item.id === scopedDroneId) ??
-          drones.find((item) => item.name === rawDroneId) ??
-          null;
-        const droneId = drone?.id ?? scopedDroneId;
-        approvalArgs = {
-          requested: ctx?.args ?? {},
-          resolved: {
-            droneId,
-            droneName: drone?.name ?? droneId,
-            chatName: normalizeChatNameForAssistant(ctx?.args?.chatName),
-            message: cleanOptionalString(ctx?.args?.message ?? ctx?.args?.prompt),
-          },
-        };
+    if (toolName === 'bash') {
+      const drones = await this.tools.listDrones();
+      const rawDroneId = cleanOptionalString(ctx?.args?.droneId);
+      const scopedDroneId = await this.requireDroneInScope(rawDroneId, 'write', threadId);
+      const drone =
+        drones.find((item) => item.id === scopedDroneId) ??
+        drones.find((item) => item.name === rawDroneId) ??
+        null;
+      if (drone && String(drone.runtime ?? '').trim() !== 'container') {
+        return { block: true, reason: `bash is only supported for container drones: ${drone.name}` };
       }
-    } catch {
-      approvalArgs = ctx?.args ?? {};
+      const cwd = cleanOptionalString(ctx?.args?.cwd);
+      approvalArgs = {
+        requested: ctx?.args ?? {},
+        resolved: {
+          droneId: drone?.id ?? scopedDroneId,
+          droneName: drone?.name ?? scopedDroneId,
+          command: String(ctx?.args?.command ?? ''),
+          ...(cwd ? { cwd: normalizeAssistantDroneFilePath(cwd) } : {}),
+          timeoutMs: clampAssistantBashTimeout(ctx?.args?.timeoutMs),
+        },
+      };
+    } else {
+      try {
+        if (toolName === 'create_drone') {
+          approvalArgs = {
+            requested: ctx?.args ?? {},
+            resolvedRequest: await this.buildCreateDroneRequest(ctx?.args ?? {}, threadId),
+          };
+        } else if (toolName === 'set_drone_group') {
+          const regAny: any = await loadRegistry();
+          const rawList = Array.isArray(ctx?.args?.droneIds) ? ctx.args.droneIds : [];
+          const drones = await this.tools.listDrones();
+          const droneNameById = new Map(drones.map((drone) => [drone.id, drone.name]));
+          const droneIds: string[] = Array.from(new Set(rawList.map((item: any) => droneIdByAssistantRef(regAny, item))));
+          const allowed = this.allowedDroneIdSet('write', threadId);
+          if (allowed) {
+            const denied = droneIds.filter((id) => !allowed.has(id));
+            if (denied.length > 0) throw new Error(`assistant scope does not include drone: ${denied.join(', ')}`);
+          }
+          approvalArgs = {
+            requested: ctx?.args ?? {},
+            resolved: {
+              drones: droneIds.map((id) => ({ id, name: droneNameById.get(id) ?? id })),
+              group: cleanOptionalString(ctx?.args?.group) || null,
+            },
+          };
+        } else if (toolName === 'message_drone') {
+          const drones = await this.tools.listDrones();
+          const rawDroneId = cleanOptionalString(ctx?.args?.droneId);
+          const scopedDroneId = await this.requireDroneInScope(rawDroneId, 'write', threadId);
+          const drone =
+            drones.find((item) => item.id === scopedDroneId) ??
+            drones.find((item) => item.name === rawDroneId) ??
+            null;
+          const droneId = drone?.id ?? scopedDroneId;
+          approvalArgs = {
+            requested: ctx?.args ?? {},
+            resolved: {
+              droneId,
+              droneName: drone?.name ?? droneId,
+              chatName: normalizeChatNameForAssistant(ctx?.args?.chatName),
+              message: cleanOptionalString(ctx?.args?.message ?? ctx?.args?.prompt),
+            },
+          };
+        }
+      } catch {
+        approvalArgs = ctx?.args ?? {};
+      }
     }
     const approval = await this.requestApproval({
       threadId,
