@@ -13,6 +13,22 @@ const Type = {
   Array: (value: unknown) => value,
 };
 
+function sliceLines(content: string, startLine?: number, endLine?: number): { content: string; lineRange?: any } {
+  if (startLine == null && endLine == null) return { content };
+  const parts = content.split('\n');
+  const lineCount = content ? (content.endsWith('\n') ? parts.length - 1 : parts.length) : 0;
+  const lines = Array.from({ length: lineCount }, (_, index) => `${parts[index] ?? ''}${index < parts.length - 1 ? '\n' : ''}`);
+  const start = startLine ?? 1;
+  const end = Math.min(endLine ?? lines.length, lines.length);
+  if (start > (endLine ?? lines.length)) throw new Error('startLine must be less than or equal to endLine');
+  if (start > lines.length) throw new Error(`startLine exceeds file line count (${lines.length})`);
+  const selected = lines.slice(start - 1, end);
+  return {
+    content: selected.join(''),
+    lineRange: { startLine: start, endLine: end, totalLines: lines.length, returnedLines: selected.length },
+  };
+}
+
 function seedDrones(): Promise<void> {
   const now = new Date().toISOString();
   return updateRegistry((reg: any) => {
@@ -69,11 +85,12 @@ function makeFileService(files: Map<string, Map<string, string>>): HubAssistantS
         kind: 'file' as const,
       })),
     }),
-    readDroneFile: async ({ droneId, path }) => {
+    readDroneFile: async ({ droneId, path, startLine, endLine }) => {
       const content = droneFiles(droneId).get(path);
       if (content == null) throw new Error(`file not found: ${path}`);
       if (path.endsWith('.bin')) throw new Error(`file is not text: ${path}`);
-      return { droneId, path, kind: 'text' as const, content, size: Buffer.byteLength(content, 'utf8') };
+      const ranged = sliceLines(content, startLine, endLine);
+      return { droneId, path, kind: 'text' as const, content: ranged.content, size: Buffer.byteLength(content, 'utf8'), ...(ranged.lineRange ? { lineRange: ranged.lineRange } : {}) };
     },
     writeDroneFile: async ({ droneId, path, content }) => {
       droneFiles(droneId).set(path, content);
@@ -91,16 +108,40 @@ function makeFileService(files: Map<string, Map<string, string>>): HubAssistantS
       perDrone.set(toPath, content);
       return { droneId, path: fromPath, movedTo: toPath };
     },
-    searchDroneFiles: async ({ droneId, query, limit = 20 }) => ({
-      droneId,
-      path: '.',
-      query,
-      limit,
-      matches: [...droneFiles(droneId).entries()]
-        .filter(([, content]) => content.includes(query))
+    searchDroneFiles: async ({ droneId, query, limit = 20, contextBefore = 0, contextAfter = 0 }) => {
+      const matches = [...droneFiles(droneId).entries()]
+        .flatMap(([path, content]) =>
+          content.split('\n').flatMap((line, index) => (line.includes(query) ? [{ path, line: index + 1, text: line, content }] : [])),
+        )
         .slice(0, limit)
-        .map(([path, content]) => ({ path, line: 1, text: content.split('\n')[0] ?? '' })),
-    }),
+        .map(({ path, line, text, content }) => {
+          if (!contextBefore && !contextAfter) return { path, line, text };
+          const lines = content.split('\n');
+          const start = Math.max(1, line - contextBefore);
+          const end = Math.min(lines.length, line + contextAfter);
+          return {
+            path,
+            line,
+            text,
+            context: Array.from({ length: end - start + 1 }, (_, index) => {
+              const current = start + index;
+              return {
+                line: current,
+                kind: current < line ? 'before' as const : current > line ? 'after' as const : 'match' as const,
+                text: lines[current - 1] ?? '',
+              };
+            }),
+          };
+        });
+      return {
+        droneId,
+        path: '.',
+        query,
+        limit,
+        ...(contextBefore || contextAfter ? { contextBefore, contextAfter } : {}),
+        matches,
+      };
+    },
     findDroneFiles: async ({ droneId, pattern = '*', limit = 100 }) => {
       const needle = pattern.replace(/\*/g, '');
       return {
@@ -214,6 +255,104 @@ describe('assistant drone file tools', () => {
         stdout: 'ran: bun test\n',
         timeoutMs: 120_000,
         timedOut: false,
+      });
+    });
+  });
+
+  test('reads an inclusive line range from a drone file', async () => {
+    await withTempDroneDataDir('assistant-drone-file-range-', async () => {
+      await seedDrones();
+      const files = new Map<string, Map<string, string>>([
+        ['drone-a', new Map([['src/example.ts', ['one', 'two', 'three', 'four'].join('\n')]])],
+      ]);
+      const service = makeFileService(files);
+      const { tools } = await buildAssistantFileTools(service);
+      const readFile = tools.find((tool) => tool.name === 'read_file');
+
+      const result = await readFile.execute('read-range', {
+        droneId: 'drone-a',
+        path: 'src/example.ts',
+        startLine: 2,
+        endLine: 3,
+      });
+
+      expect(result.content[0].text).toBe('two\nthree\n');
+      expect(result.details).toMatchObject({
+        droneId: 'drone-a',
+        path: 'src/example.ts',
+        content: 'two\nthree\n',
+        lineRange: {
+          startLine: 2,
+          endLine: 3,
+          totalLines: 4,
+          returnedLines: 2,
+        },
+      });
+    });
+  });
+
+  test('rejects invalid read line ranges', async () => {
+    await withTempDroneDataDir('assistant-drone-file-invalid-range-', async () => {
+      await seedDrones();
+      const files = new Map<string, Map<string, string>>([['drone-a', new Map([['src/example.ts', 'one\ntwo\n']])]]);
+      const service = makeFileService(files);
+      const { tools } = await buildAssistantFileTools(service);
+      const readFile = tools.find((tool) => tool.name === 'read_file');
+
+      await expect(
+        readFile.execute('read-invalid-range', {
+          droneId: 'drone-a',
+          path: 'src/example.ts',
+          startLine: 3,
+          endLine: 2,
+        }),
+      ).rejects.toThrow('startLine must be less than or equal to endLine');
+      await expect(
+        readFile.execute('read-invalid-range-negative', {
+          droneId: 'drone-a',
+          path: 'src/example.ts',
+          startLine: 0,
+        }),
+      ).rejects.toThrow('startLine must be a positive integer');
+    });
+  });
+
+  test('returns structured search context lines when requested', async () => {
+    await withTempDroneDataDir('assistant-drone-search-context-', async () => {
+      await seedDrones();
+      const files = new Map<string, Map<string, string>>([
+        ['drone-a', new Map([['src/example.ts', ['before', 'target match', 'after', 'later target'].join('\n')]])],
+      ]);
+      const service = makeFileService(files);
+      const { tools } = await buildAssistantFileTools(service);
+      const searchFiles = tools.find((tool) => tool.name === 'search_files');
+
+      const result = await searchFiles.execute('search-context', {
+        droneId: 'drone-a',
+        query: 'target',
+        contextBefore: 1,
+        contextAfter: 1,
+        limit: 1,
+      });
+
+      expect(result.details).toMatchObject({
+        droneId: 'drone-a',
+        query: 'target',
+        limit: 1,
+        contextBefore: 1,
+        contextAfter: 1,
+        matches: [
+          {
+            path: 'src/example.ts',
+            line: 2,
+            text: 'target match',
+            context: [
+              { line: 1, kind: 'before', text: 'before' },
+              { line: 2, kind: 'match', text: 'target match' },
+              { line: 3, kind: 'after', text: 'after' },
+            ],
+          },
+        ],
       });
     });
   });

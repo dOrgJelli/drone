@@ -151,11 +151,18 @@ type AssistantToolCallbacks = {
     prompt: string;
   }) => Promise<AssistantMessageDroneResult>;
   listDroneFiles?: (opts: { droneId: string; path?: string }) => Promise<AssistantDroneFileListResult>;
-  readDroneFile?: (opts: { droneId: string; path: string }) => Promise<AssistantDroneFileReadResult>;
+  readDroneFile?: (opts: { droneId: string; path: string; startLine?: number; endLine?: number }) => Promise<AssistantDroneFileReadResult>;
   writeDroneFile?: (opts: { droneId: string; path: string; content: string }) => Promise<AssistantDroneFileWriteResult>;
   deleteDroneFile?: (opts: { droneId: string; path: string }) => Promise<AssistantDroneFileMutationResult>;
   moveDroneFile?: (opts: { droneId: string; fromPath: string; toPath: string }) => Promise<AssistantDroneFileMutationResult>;
-  searchDroneFiles?: (opts: { droneId: string; path?: string; query: string; limit?: number }) => Promise<AssistantDroneFileSearchResult>;
+  searchDroneFiles?: (opts: {
+    droneId: string;
+    path?: string;
+    query: string;
+    limit?: number;
+    contextBefore?: number;
+    contextAfter?: number;
+  }) => Promise<AssistantDroneFileSearchResult>;
   findDroneFiles?: (opts: { droneId: string; path?: string; pattern?: string; limit?: number }) => Promise<AssistantDroneFileFindResult>;
   statDronePath?: (opts: { droneId: string; path: string }) => Promise<AssistantDronePathStatResult>;
   runDroneBash?: (opts: { droneId: string; command: string; cwd?: string; timeoutMs?: number }) => Promise<AssistantDroneBashResult>;
@@ -182,6 +189,12 @@ type AssistantDroneFileReadResult = {
   content: string;
   size?: number | null;
   mtimeMs?: number | null;
+  lineRange?: {
+    startLine: number;
+    endLine: number;
+    totalLines: number;
+    returnedLines: number;
+  };
 };
 
 type AssistantDroneFileWriteResult = {
@@ -211,6 +224,13 @@ type AssistantDroneFileSearchMatch = {
   path: string;
   line?: number | null;
   text: string;
+  context?: AssistantDroneFileSearchContextLine[];
+};
+
+type AssistantDroneFileSearchContextLine = {
+  line: number;
+  kind: 'before' | 'match' | 'after';
+  text: string;
 };
 
 type AssistantDroneFileSearchResult = {
@@ -219,6 +239,8 @@ type AssistantDroneFileSearchResult = {
   query: string;
   matches: AssistantDroneFileSearchMatch[];
   limit: number;
+  contextBefore?: number;
+  contextAfter?: number;
 };
 
 type AssistantDroneFileFindResult = {
@@ -382,6 +404,7 @@ const CHAT_IDLE_MAX_SUBSCRIPTIONS = 200;
 const CHAT_IDLE_MAX_TARGETS = 20;
 const ASSISTANT_BASH_DEFAULT_TIMEOUT_MS = 30_000;
 const ASSISTANT_BASH_MAX_TIMEOUT_MS = 120_000;
+const ASSISTANT_SEARCH_MAX_CONTEXT_LINES = 10;
 const DEFAULT_OPENAI_MODEL = 'gpt-5.5';
 const DEFAULT_GEMINI_MODEL = 'gemini-3-flash-preview';
 const DEFAULT_CODEX_MODEL = 'gpt-5.5';
@@ -396,6 +419,7 @@ const ASSISTANT_SYSTEM_PROMPT_DEFAULT = [
   'Use get_chat_overview before reading chat details, then read_chat_messages in pages when you need conversation context.',
   'Use assistant_files to maintain private, thread-scoped Markdown notes when tracking work, decisions, plans, questions, or handoff details. These files are for the user-facing Artifacts UI and are not visible to drones.',
   'Use list_files, find_files, search_files, read_file, write_file, and apply_patch to inspect and modify files in drones you can access. Prefer apply_patch for coordinated code edits.',
+  'Use read_file line ranges and search_files context when you only need a focused section of a file.',
   'Use bash only when a command is the right tool for inspection, tests, builds, or small scripted checks in an accessible container drone. Bash is approval-gated, non-interactive, and not for background processes.',
   'File paths are interpreted by drone id plus path. Relative paths resolve inside the target drone workspace, usually the repo root for repo-backed drones.',
   'Chat timelines contain user messages and agent messages. Queued or pending user messages appear in the same timeline with a non-completed status.',
@@ -551,6 +575,20 @@ function clampAssistantBashTimeout(raw: unknown): number {
   const n = Number(raw);
   if (!Number.isFinite(n)) return ASSISTANT_BASH_DEFAULT_TIMEOUT_MS;
   return Math.min(ASSISTANT_BASH_MAX_TIMEOUT_MS, Math.max(1000, Math.floor(n)));
+}
+
+function normalizeOptionalPositiveLine(raw: unknown, label: string): number | undefined {
+  if (raw == null || raw === '') return undefined;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) throw new Error(`${label} must be a positive integer`);
+  return n;
+}
+
+function normalizeSearchContextLines(raw: unknown, label: string): number {
+  if (raw == null || raw === '') return 0;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0) throw new Error(`${label} must be a non-negative integer`);
+  return Math.min(ASSISTANT_SEARCH_MAX_CONTEXT_LINES, n);
 }
 
 function normalizeChatNameForAssistant(raw: unknown): string {
@@ -2495,16 +2533,22 @@ export class HubAssistantService {
       {
         name: 'read_file',
         label: 'Read file',
-        description: 'Read a UTF-8 text file from one drone. Requires assistant read access to that drone.',
+        description:
+          'Read a UTF-8 text file from one drone. Optionally read a 1-based inclusive line range. Requires assistant read access to that drone.',
         parameters: Type.Object({
           droneId: Type.String({ description: 'Drone id or visible name.' }),
           path: Type.String({ description: 'File path. Relative paths resolve inside the drone workspace.' }),
+          startLine: Type.Optional(Type.Number({ description: 'Optional 1-based first line to read.' })),
+          endLine: Type.Optional(Type.Number({ description: 'Optional 1-based last line to read, inclusive.' })),
         }),
         execute: async (_toolCallId: string, params: any) => {
           const droneId = await this.requireDroneInScope(params?.droneId, 'read', threadId);
           const filePath = normalizeAssistantDroneFilePath(params?.path);
+          const startLine = normalizeOptionalPositiveLine(params?.startLine, 'startLine');
+          const endLine = normalizeOptionalPositiveLine(params?.endLine, 'endLine');
+          if (startLine != null && endLine != null && startLine > endLine) throw new Error('startLine must be less than or equal to endLine');
           const readFile = this.requireFileCallback('readDroneFile');
-          const result = await readFile({ droneId, path: filePath });
+          const result = await readFile({ droneId, path: filePath, startLine, endLine });
           return {
             content: [{ type: 'text', text: result.content }],
             details: result,
@@ -2514,12 +2558,15 @@ export class HubAssistantService {
       {
         name: 'search_files',
         label: 'Search files',
-        description: 'Search text files in one drone without reading whole files. Requires assistant read access to that drone.',
+        description:
+          'Search text files in one drone without reading whole files. Optionally include structured surrounding context lines. Requires assistant read access to that drone.',
         parameters: Type.Object({
           droneId: Type.String({ description: 'Drone id or visible name.' }),
           query: Type.String({ description: 'Text to search for.' }),
           path: Type.Optional(Type.String({ description: 'Directory path to search. Relative paths resolve inside the drone workspace.' })),
           limit: Type.Optional(Type.Number({ description: 'Maximum matches. Defaults to 20, max 100.' })),
+          contextBefore: Type.Optional(Type.Number({ description: `Context lines before each match. Defaults to 0, max ${ASSISTANT_SEARCH_MAX_CONTEXT_LINES}.` })),
+          contextAfter: Type.Optional(Type.Number({ description: `Context lines after each match. Defaults to 0, max ${ASSISTANT_SEARCH_MAX_CONTEXT_LINES}.` })),
         }),
         execute: async (_toolCallId: string, params: any) => {
           const droneId = await this.requireDroneInScope(params?.droneId, 'read', threadId);
@@ -2528,12 +2575,16 @@ export class HubAssistantService {
           const searchFiles = this.requireFileCallback('searchDroneFiles');
           const limitRaw = Number(params?.limit);
           const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(100, Math.floor(limitRaw))) : 20;
+          const contextBefore = normalizeSearchContextLines(params?.contextBefore, 'contextBefore');
+          const contextAfter = normalizeSearchContextLines(params?.contextAfter, 'contextAfter');
           const rawPath = cleanOptionalString(params?.path);
           const result = await searchFiles({
             droneId,
             query,
             path: rawPath ? normalizeAssistantDroneFilePath(rawPath) : undefined,
             limit,
+            contextBefore,
+            contextAfter,
           });
           return {
             content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
