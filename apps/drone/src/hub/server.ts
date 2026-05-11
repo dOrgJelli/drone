@@ -2187,10 +2187,13 @@ const ASSISTANT_BASH_DEFAULT_TIMEOUT_MS = 30_000;
 const ASSISTANT_BASH_MAX_TIMEOUT_MS = 120_000;
 const ASSISTANT_BASH_MAX_OUTPUT_BYTES = 64 * 1024;
 const ASSISTANT_BASH_MAX_COMMAND_BYTES = 20 * 1024;
+const ASSISTANT_SEARCH_MAX_CONTEXT_LINES = 10;
+const ASSISTANT_CHANGED_FILES_LIMIT = 200;
 
 type ContainerFsEntry = {
   name: string;
   path: string;
+  relativePath?: string | null;
   kind: 'directory' | 'file' | 'other';
   size: number | null;
   mtimeMs: number | null;
@@ -2473,6 +2476,32 @@ function normalizeAssistantFsPathForRuntime(drone: any, raw: unknown, opts?: { f
   return normalizeContainerPath(path.posix.join(fallback || NON_REPO_HOME_CWD, text));
 }
 
+function assistantRelativePathForDrone(drone: any, targetPathRaw: unknown, rootPathRaw?: unknown): string | null {
+  const runtime = droneRuntime(drone);
+  if (runtime === 'host') {
+    const root = path.resolve(String(rootPathRaw ?? '').trim() || defaultDroneHomeCwd(drone));
+    const target = path.resolve(String(targetPathRaw ?? '').trim());
+    const rel = path.relative(root, target);
+    if (!rel) return '.';
+    if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return null;
+    return rel.split(path.sep).join('/');
+  }
+
+  const root = normalizeContainerPath(String(rootPathRaw ?? '').trim() || defaultDroneHomeCwd(drone));
+  const target = normalizeContainerPath(String(targetPathRaw ?? '').trim());
+  const rel = path.posix.relative(root, target);
+  if (!rel) return '.';
+  if (rel === '..' || rel.startsWith('../') || path.posix.isAbsolute(rel)) return null;
+  return rel;
+}
+
+function withAssistantRelativePath<T extends { path: string }>(drone: any, item: T, rootPath?: unknown): T & { relativePath: string | null } {
+  return {
+    ...item,
+    relativePath: assistantRelativePathForDrone(drone, item.path, rootPath),
+  };
+}
+
 async function resolveAssistantDroneFsTarget(opts: {
   droneId: string;
   path?: unknown;
@@ -2500,6 +2529,63 @@ function ensureAssistantTextFile(pathRaw: string, buf: Buffer, mimeRaw: string |
   if (!isLikelyTextMimeType(mime) || bufferLooksBinary(buf)) {
     throw new Error(`file is not text: ${pathRaw}`);
   }
+}
+
+function normalizeOptionalPositiveLineNumber(raw: unknown, label: string): number | undefined {
+  if (raw == null || raw === '') return undefined;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) throw new Error(`${label} must be a positive integer`);
+  return n;
+}
+
+function normalizeAssistantSearchContext(raw: unknown, label: string): number {
+  if (raw == null || raw === '') return 0;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0) throw new Error(`${label} must be a non-negative integer`);
+  return Math.min(ASSISTANT_SEARCH_MAX_CONTEXT_LINES, n);
+}
+
+function splitTextLinesPreserveEndings(content: string): string[] {
+  if (!content) return [];
+  const parts = content.split('\n');
+  const lineCount = content.endsWith('\n') ? parts.length - 1 : parts.length;
+  const lines: string[] = [];
+  for (let index = 0; index < lineCount; index += 1) {
+    lines.push(`${parts[index] ?? ''}${index < parts.length - 1 ? '\n' : ''}`);
+  }
+  return lines;
+}
+
+function applyAssistantReadLineRange(
+  content: string,
+  opts: { startLine?: unknown; endLine?: unknown },
+): { content: string; lineRange?: { startLine: number; endLine: number; totalLines: number; returnedLines: number } } {
+  const requested = opts.startLine != null || opts.endLine != null;
+  if (!requested) return { content };
+  const startLine = normalizeOptionalPositiveLineNumber(opts.startLine, 'startLine') ?? 1;
+  const requestedEndLine = normalizeOptionalPositiveLineNumber(opts.endLine, 'endLine');
+  if (requestedEndLine != null && startLine > requestedEndLine) throw new Error('startLine must be less than or equal to endLine');
+
+  const lines = splitTextLinesPreserveEndings(content);
+  const totalLines = lines.length;
+  if (totalLines === 0) {
+    return {
+      content: '',
+      lineRange: { startLine: 1, endLine: 0, totalLines: 0, returnedLines: 0 },
+    };
+  }
+  if (startLine > totalLines) throw new Error(`startLine exceeds file line count (${totalLines})`);
+  const endLine = Math.min(requestedEndLine ?? totalLines, totalLines);
+  const selected = lines.slice(startLine - 1, endLine);
+  return {
+    content: selected.join(''),
+    lineRange: {
+      startLine,
+      endLine,
+      totalLines,
+      returnedLines: selected.length,
+    },
+  };
 }
 
 function clampAssistantBashTimeoutMs(raw: unknown): number {
@@ -2574,7 +2660,12 @@ async function assistantListDroneFiles(opts: { droneId: string; path?: string })
   const target = await resolveAssistantDroneFsTarget({ droneId: opts.droneId, path: opts.path, fallbackToHome: true });
   if (target.runtime === 'host') {
     const parsed = await listHostFsDirectory(target.targetPath);
-    return { droneId: target.id, path: parsed.resolvedPath, entries: parsed.entries };
+    return {
+      droneId: target.id,
+      path: parsed.resolvedPath,
+      relativePath: assistantRelativePathForDrone(target.drone, parsed.resolvedPath),
+      entries: parsed.entries.map((entry) => withAssistantRelativePath(target.drone, entry)),
+    };
   }
 
   const script = [
@@ -2605,22 +2696,30 @@ async function assistantListDroneFiles(opts: { droneId: string; path?: string })
     throw new Error((r.stderr || r.stdout || 'failed to list files').trim());
   }
   const parsed = parseContainerFsListOutput(r.stdout || '');
-  return { droneId: target.id, path: parsed.resolvedPath, entries: parsed.entries };
+  return {
+    droneId: target.id,
+    path: parsed.resolvedPath,
+    relativePath: assistantRelativePathForDrone(target.drone, parsed.resolvedPath),
+    entries: parsed.entries.map((entry) => withAssistantRelativePath(target.drone, entry)),
+  };
 }
 
-async function assistantReadDroneFile(opts: { droneId: string; path: string }): Promise<any> {
+async function assistantReadDroneFile(opts: { droneId: string; path: string; startLine?: number; endLine?: number }): Promise<any> {
   const target = await resolveAssistantDroneFsTarget({ droneId: opts.droneId, path: opts.path, fallbackToHome: false });
   if (!target.targetPath || target.targetPath === '/') throw new Error('missing file path');
   if (target.runtime === 'host') {
     const read = await readHostFileBytes({ targetPath: target.targetPath, maxBytes: FS_EDITOR_MAX_BYTES });
     ensureAssistantTextFile(target.targetPath, read.buf, read.mime);
+    const ranged = applyAssistantReadLineRange(read.buf.toString('utf8'), opts);
     return {
       droneId: target.id,
       path: path.resolve(target.targetPath),
+      relativePath: assistantRelativePathForDrone(target.drone, target.targetPath),
       kind: 'text',
-      content: read.buf.toString('utf8'),
+      content: ranged.content,
       size: read.size,
       mtimeMs: read.mtimeMs,
+      ...(ranged.lineRange ? { lineRange: ranged.lineRange } : {}),
     };
   }
 
@@ -2657,13 +2756,16 @@ async function assistantReadDroneFile(opts: { droneId: string; path: string }): 
   ensureAssistantTextFile(target.targetPath, buf, String(meta[1] ?? ''));
   const sizeNum = Number(meta[2] ?? 0);
   const mtimeSec = Number(meta[3] ?? 0);
+  const ranged = applyAssistantReadLineRange(buf.toString('utf8'), opts);
   return {
     droneId: target.id,
     path: target.targetPath,
+    relativePath: assistantRelativePathForDrone(target.drone, target.targetPath),
     kind: 'text',
-    content: buf.toString('utf8'),
+    content: ranged.content,
     size: Number.isFinite(sizeNum) ? Math.max(0, Math.floor(sizeNum)) : 0,
     mtimeMs: Number.isFinite(mtimeSec) ? Math.max(0, Math.floor(mtimeSec * 1000)) : null,
+    ...(ranged.lineRange ? { lineRange: ranged.lineRange } : {}),
   };
 }
 
@@ -2682,6 +2784,7 @@ async function assistantWriteDroneFile(opts: { droneId: string; path: string; co
     return {
       droneId: target.id,
       path: resolvedPath,
+      relativePath: assistantRelativePathForDrone(target.drone, resolvedPath),
       size: Number.isFinite(after.size) ? Math.max(0, Math.floor(after.size)) : 0,
       mtimeMs: Number.isFinite(after.mtimeMs) ? Math.max(0, Math.floor(after.mtimeMs)) : null,
     };
@@ -2708,6 +2811,7 @@ async function assistantWriteDroneFile(opts: { droneId: string; path: string; co
   return {
     droneId: target.id,
     path: target.targetPath,
+    relativePath: assistantRelativePathForDrone(target.drone, target.targetPath),
     size: Number.isFinite(sizeNum) ? Math.max(0, Math.floor(sizeNum)) : nextBytes,
     mtimeMs: Number.isFinite(mtimeSec) ? Math.max(0, Math.floor(mtimeSec * 1000)) : null,
   };
@@ -2783,6 +2887,52 @@ function parseAssistantSearchOutput(text: string, limit: number): Array<{ path: 
     });
 }
 
+function parseAssistantSearchContextOutput(
+  text: string,
+  limit: number,
+): Array<{ path: string; line: number | null; text: string; context: Array<{ line: number; kind: 'before' | 'match' | 'after'; text: string }> }> {
+  const matches: Array<{
+    path: string;
+    line: number | null;
+    text: string;
+    context: Array<{ line: number; kind: 'before' | 'match' | 'after'; text: string }>;
+  }> = [];
+  const byId = new Map<string, (typeof matches)[number]>();
+  for (const rawLine of String(text ?? '').split('\n')) {
+    const line = rawLine.replace(/\r$/, '');
+    if (!line) continue;
+    const parts = line.split('\t');
+    if (parts[0] === '__MATCH__' && parts.length >= 5) {
+      if (matches.length >= limit) continue;
+      const id = String(parts[1] ?? '');
+      const filePath = Buffer.from(parts[2] ?? '', 'base64').toString('utf8');
+      const lineNumber = Number(parts[3] ?? NaN);
+      const match = {
+        path: filePath,
+        line: Number.isFinite(lineNumber) ? Math.floor(lineNumber) : null,
+        text: Buffer.from(parts[4] ?? '', 'base64').toString('utf8'),
+        context: [],
+      };
+      matches.push(match);
+      byId.set(id, match);
+      continue;
+    }
+    if (parts[0] !== '__CONTEXT__' || parts.length < 6) continue;
+    const match = byId.get(String(parts[1] ?? ''));
+    if (!match) continue;
+    const contextLine = Number(parts[3] ?? NaN);
+    const kindRaw = parts[4] ?? '';
+    const kind = kindRaw === 'before' || kindRaw === 'after' || kindRaw === 'match' ? kindRaw : null;
+    if (!Number.isFinite(contextLine) || !kind) continue;
+    match.context.push({
+      line: Math.floor(contextLine),
+      kind,
+      text: Buffer.from(parts[5] ?? '', 'base64').toString('utf8'),
+    });
+  }
+  return matches;
+}
+
 function parseAssistantFindOutput(text: string, limit: number): ContainerFsEntry[] {
   const entries: ContainerFsEntry[] = [];
   for (const line of String(text ?? '').split('\n')) {
@@ -2813,23 +2963,75 @@ function parseAssistantFindOutput(text: string, limit: number): ContainerFsEntry
   return entries;
 }
 
-async function assistantSearchDroneFiles(opts: { droneId: string; path?: string; query: string; limit?: number }): Promise<any> {
+async function assistantSearchDroneFiles(opts: {
+  droneId: string;
+  path?: string;
+  query: string;
+  limit?: number;
+  contextBefore?: number;
+  contextAfter?: number;
+}): Promise<any> {
   const query = String(opts.query ?? '').trim();
   if (!query) throw new Error('missing query');
   const limit = Number.isFinite(Number(opts.limit)) ? Math.max(1, Math.min(100, Math.floor(Number(opts.limit)))) : 20;
+  const contextBefore = normalizeAssistantSearchContext(opts.contextBefore, 'contextBefore');
+  const contextAfter = normalizeAssistantSearchContext(opts.contextAfter, 'contextAfter');
+  const scanLimit = limit + 1;
   const target = await resolveAssistantDroneFsTarget({ droneId: opts.droneId, path: opts.path, fallbackToHome: true });
-  const script = [
-    'set -euo pipefail',
-    `root=${bashQuote(target.targetPath)}`,
-    `query=${bashQuote(query)}`,
-    `limit=${String(limit)}`,
-    'if [ ! -e "$root" ]; then echo "__ERR__\tnot-found"; exit 3; fi',
-    'if command -v rg >/dev/null 2>&1; then',
-    '  rg -n -I --hidden --glob "!node_modules/**" --glob "!.git/**" -- "$query" "$root" | head -n "$limit" || true',
-    'else',
-    '  grep -RInI --exclude-dir=.git --exclude-dir=node_modules -- "$query" "$root" 2>/dev/null | head -n "$limit" || true',
-    'fi',
-  ].join('\n');
+  const script =
+    contextBefore > 0 || contextAfter > 0
+      ? [
+          'set -euo pipefail',
+          `root=${bashQuote(target.targetPath)}`,
+          `query=${bashQuote(query)}`,
+          `limit=${String(scanLimit)}`,
+          `before=${String(contextBefore)}`,
+          `after=${String(contextAfter)}`,
+          'if [ ! -e "$root" ]; then echo "__ERR__\tnot-found"; exit 3; fi',
+          'if command -v rg >/dev/null 2>&1; then',
+          '  search_cmd() { rg -n -I --hidden --glob "!node_modules/**" --glob "!.git/**" -- "$query" "$root" || true; }',
+          'else',
+          '  search_cmd() { grep -RInI --exclude-dir=.git --exclude-dir=node_modules -- "$query" "$root" 2>/dev/null || true; }',
+          'fi',
+          'match_id=0',
+          'search_cmd | head -n "$limit" | while IFS= read -r hit; do',
+          '  [ -n "$hit" ] || continue',
+          '  file=${hit%%:*}',
+          '  rest=${hit#*:}',
+          '  line_no=${rest%%:*}',
+          '  match_text=${rest#*:}',
+          '  case "$line_no" in ""|*[!0-9]*) continue ;; esac',
+          '  [ -f "$file" ] || continue',
+          '  start=$((line_no - before))',
+          '  if [ "$start" -lt 1 ]; then start=1; fi',
+          '  end=$((line_no + after))',
+          '  file_b64=$(printf "%s" "$file" | base64 | tr -d "\\n")',
+          '  match_b64=$(printf "%s" "$match_text" | base64 | tr -d "\\n")',
+          '  match_id=$((match_id + 1))',
+          '  printf "__MATCH__\\t%s\\t%s\\t%s\\t%s\\n" "$match_id" "$file_b64" "$line_no" "$match_b64"',
+          '  current=$start',
+          '  sed -n "${start},${end}p" "$file" | while IFS= read -r context_text || [ -n "$context_text" ]; do',
+          '    kind=match',
+          '    if [ "$current" -lt "$line_no" ]; then kind=before; fi',
+          '    if [ "$current" -gt "$line_no" ]; then kind=after; fi',
+          '    context_b64=$(printf "%s" "$context_text" | base64 | tr -d "\\n")',
+          '    printf "__CONTEXT__\\t%s\\t%s\\t%s\\t%s\\t%s\\n" "$match_id" "$file_b64" "$current" "$kind" "$context_b64"',
+          '    current=$((current + 1))',
+          '  done',
+          'done',
+        ].join('\n')
+      : [
+          'set -euo pipefail',
+          `root=${bashQuote(target.targetPath)}`,
+          `query=${bashQuote(query)}`,
+          `limit=${String(scanLimit)}`,
+          'if [ ! -e "$root" ]; then echo "__ERR__\tnot-found"; exit 3; fi',
+          'if command -v rg >/dev/null 2>&1; then',
+          '  rg -n -I --hidden --glob "!node_modules/**" --glob "!.git/**" -- "$query" "$root" | head -n "$limit" || true',
+          'else',
+          '  grep -RInI --exclude-dir=.git --exclude-dir=node_modules -- "$query" "$root" 2>/dev/null | head -n "$limit" || true',
+          'fi',
+        ].join('\n');
   const r =
     target.runtime === 'host'
       ? await runHostCommand('bash', ['-lc', script], { timeoutMs: 10_000 })
@@ -2841,24 +3043,42 @@ async function assistantSearchDroneFiles(opts: { droneId: string; path?: string;
     if (/__ERR__\s+not-found\b/i.test(out)) throw new Error(`path not found: ${target.targetPath}`);
     throw new Error((r.stderr || r.stdout || 'failed searching files').trim());
   }
+  const parsedMatches =
+    contextBefore > 0 || contextAfter > 0
+      ? parseAssistantSearchContextOutput(r.stdout || '', limit)
+      : parseAssistantSearchOutput(r.stdout || '', limit);
+  const rawMatchCount =
+    contextBefore > 0 || contextAfter > 0
+      ? String(r.stdout || '').split('\n').filter((line) => line.startsWith('__MATCH__\t')).length
+      : String(r.stdout || '').split('\n').filter(Boolean).length;
+  const matches = parsedMatches.map((match) => withAssistantRelativePath(target.drone, match));
   return {
     droneId: target.id,
     path: target.targetPath,
+    relativePath: assistantRelativePathForDrone(target.drone, target.targetPath),
     query,
     limit,
-    matches: parseAssistantSearchOutput(r.stdout || '', limit),
+    ...(contextBefore > 0 || contextAfter > 0 ? { contextBefore, contextAfter } : {}),
+    caps: {
+      limit,
+      maxContextBefore: ASSISTANT_SEARCH_MAX_CONTEXT_LINES,
+      maxContextAfter: ASSISTANT_SEARCH_MAX_CONTEXT_LINES,
+    },
+    truncated: rawMatchCount > limit,
+    matches,
   };
 }
 
 async function assistantFindDroneFiles(opts: { droneId: string; path?: string; pattern?: string; limit?: number }): Promise<any> {
   const pattern = String(opts.pattern ?? '*').trim() || '*';
   const limit = Number.isFinite(Number(opts.limit)) ? Math.max(1, Math.min(500, Math.floor(Number(opts.limit)))) : 100;
+  const scanLimit = limit + 1;
   const target = await resolveAssistantDroneFsTarget({ droneId: opts.droneId, path: opts.path, fallbackToHome: true });
   const script = [
     'set -euo pipefail',
     `root=${bashQuote(target.targetPath)}`,
     `pattern=${bashQuote(pattern)}`,
-    `limit=${String(limit)}`,
+    `limit=${String(scanLimit)}`,
     'if [ ! -d "$root" ]; then echo "__ERR__\tnot-dir"; exit 3; fi',
     'case "$pattern" in',
     '  *"*"*|*"?"*|*"["*) effective="$pattern" ;;',
@@ -2888,10 +3108,85 @@ async function assistantFindDroneFiles(opts: { droneId: string; path?: string; p
   return {
     droneId: target.id,
     path: target.targetPath,
+    relativePath: assistantRelativePathForDrone(target.drone, target.targetPath),
     pattern,
     limit,
-    matches: parseAssistantFindOutput(r.stdout || '', limit),
+    truncated: String(r.stdout || '').split('\n').filter(Boolean).length > limit,
+    matches: parseAssistantFindOutput(r.stdout || '', limit).map((entry) => withAssistantRelativePath(target.drone, entry)),
   };
+}
+
+function assistantChangedFileStatus(entry: any): string {
+  if (entry?.isConflicted) return 'conflicted';
+  if (entry?.isUntracked) return 'untracked';
+  const status = entry?.stagedType ?? entry?.unstagedType;
+  return status == null ? 'unknown' : String(status);
+}
+
+function assistantChangedFilePathForRuntime(drone: any, repoRoot: string, relativePath: string): string {
+  if (droneRuntime(drone) === 'host') return path.resolve(repoRoot, relativePath);
+  return normalizeContainerPath(path.posix.join(repoRoot, relativePath));
+}
+
+function formatAssistantChangedFilesResult(opts: { droneId: string; drone: any; repoRoot: string; summary: any }): any {
+  const entries = Array.isArray(opts.summary?.entries) ? opts.summary.entries : [];
+  const allFiles = entries.map((entry: any) => {
+    const relativePath = String(entry?.path ?? '').trim();
+    const originalRelativePath = String(entry?.originalPath ?? '').trim() || null;
+    return {
+      path: assistantChangedFilePathForRuntime(opts.drone, opts.repoRoot, relativePath),
+      relativePath,
+      ...(originalRelativePath
+        ? {
+            originalPath: assistantChangedFilePathForRuntime(opts.drone, opts.repoRoot, originalRelativePath),
+            originalRelativePath,
+          }
+        : {}),
+      status: assistantChangedFileStatus(entry),
+      staged: Boolean(entry?.stagedChar && entry.stagedChar !== '.' && entry.stagedChar !== '?' && entry.stagedChar !== '!'),
+      unstaged: Boolean(entry?.unstagedChar && entry.unstagedChar !== '.' && entry.unstagedChar !== '!'),
+      untracked: Boolean(entry?.isUntracked),
+      conflicted: Boolean(entry?.isConflicted),
+      stagedStatus: entry?.stagedType ?? null,
+      unstagedStatus: entry?.unstagedType ?? null,
+      stagedChar: String(entry?.stagedChar ?? '.'),
+      unstagedChar: String(entry?.unstagedChar ?? '.'),
+    };
+  });
+  const files = allFiles.slice(0, ASSISTANT_CHANGED_FILES_LIMIT);
+  return {
+    droneId: opts.droneId,
+    repoRoot: opts.repoRoot,
+    files,
+    counts: opts.summary?.counts ?? {
+      changed: entries.length,
+      staged: allFiles.filter((file: any) => file.staged).length,
+      unstaged: allFiles.filter((file: any) => file.unstaged).length,
+      untracked: allFiles.filter((file: any) => file.untracked).length,
+      conflicted: allFiles.filter((file: any) => file.conflicted).length,
+    },
+    limit: ASSISTANT_CHANGED_FILES_LIMIT,
+    truncated: entries.length > ASSISTANT_CHANGED_FILES_LIMIT,
+  };
+}
+
+async function assistantListDroneChangedFiles(opts: { droneId: string }): Promise<any> {
+  const target = await resolveAssistantDroneFsTarget({ droneId: opts.droneId, fallbackToHome: true });
+  if (!isRepoAttachedDrone(target.drone)) throw new Error(`drone is not repo-attached: ${target.name}`);
+
+  if (target.runtime === 'host') {
+    const repoPathRaw = String(target.drone?.repoPath ?? '').trim();
+    if (!repoPathRaw) throw new Error(`drone has no host repo path: ${target.name}`);
+    const repoRoot = await gitTopLevel(repoPathRaw);
+    const summary = await gitRepoChangesSummary(repoRoot);
+    return formatAssistantChangedFilesResult({ droneId: target.id, drone: target.drone, repoRoot, summary });
+  }
+
+  const repoPathInContainer = droneRepoPathInContainer(target.drone);
+  const result = await withLockedDroneContainer({ requestedDroneName: target.name, droneEntry: target.drone }, async ({ containerName }) => {
+    return await droneRepoChangesSummary({ container: containerName, repoPathInContainer });
+  });
+  return formatAssistantChangedFilesResult({ droneId: target.id, drone: target.drone, repoRoot: result.repoRoot, summary: result.summary });
 }
 
 async function assistantRunDroneBash(opts: { droneId: string; command: string; cwd?: string; timeoutMs?: number }): Promise<any> {
@@ -10730,14 +11025,16 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
       return { promptId: r.id, pendingState: r.pendingState, blockedByAutomation: r.blockedByAutomation };
     },
     listDroneFiles: async ({ droneId, path }) => await assistantListDroneFiles({ droneId, path }),
-    readDroneFile: async ({ droneId, path }) => await assistantReadDroneFile({ droneId, path }),
+    readDroneFile: async ({ droneId, path, startLine, endLine }) => await assistantReadDroneFile({ droneId, path, startLine, endLine }),
     writeDroneFile: async ({ droneId, path, content }) => await assistantWriteDroneFile({ droneId, path, content }),
     deleteDroneFile: async ({ droneId, path }) => await assistantDeleteDroneFile({ droneId, path }),
     moveDroneFile: async ({ droneId, fromPath, toPath }) => await assistantMoveDroneFile({ droneId, fromPath, toPath }),
-    searchDroneFiles: async ({ droneId, path, query, limit }) => await assistantSearchDroneFiles({ droneId, path, query, limit }),
+    searchDroneFiles: async ({ droneId, path, query, limit, contextBefore, contextAfter }) =>
+      await assistantSearchDroneFiles({ droneId, path, query, limit, contextBefore, contextAfter }),
     findDroneFiles: async ({ droneId, path, pattern, limit }) => await assistantFindDroneFiles({ droneId, path, pattern, limit }),
     statDronePath: async ({ droneId, path }) => await assistantStatDronePath({ droneId, path }),
     runDroneBash: async ({ droneId, command, cwd, timeoutMs }) => await assistantRunDroneBash({ droneId, command, cwd, timeoutMs }),
+    listDroneChangedFiles: async ({ droneId }) => await assistantListDroneChangedFiles({ droneId }),
   });
 
   const server = http.createServer(async (req, res) => {
