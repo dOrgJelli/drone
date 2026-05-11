@@ -157,7 +157,7 @@ type AssistantWaitTargetLabel = { key: string; droneLabel: string; chatName: str
 type AssistantMessageDroneSummary = { droneLabel: string; chatName: string; message: string };
 
 type AssistantRenderItem =
-  | { type: 'message'; key: string; message: AssistantMessage; showToolCalls?: boolean }
+  | { type: 'message'; key: string; message: AssistantMessage; showToolCalls?: boolean; sourceMessageIndex: number }
   | { type: 'tool'; key: string; call?: AssistantToolCall; result?: AssistantMessage }
   | { type: 'queued'; key: string; prompt: AssistantQueuedPrompt };
 
@@ -173,6 +173,18 @@ function messageText(message: AssistantMessage): string {
     })
     .filter(Boolean)
     .join('\n');
+}
+
+function lastAssistantContentBlock(message: AssistantMessage): { type: string } | null {
+  const content = message.content;
+  if (!Array.isArray(content) || content.length === 0) return null;
+  for (let i = content.length - 1; i >= 0; i -= 1) {
+    const part = content[i];
+    if (!part || typeof part !== 'object') continue;
+    const t = String((part as { type?: string }).type ?? '');
+    if (t === 'text' || t === 'thinking' || t === 'toolCall') return { type: t };
+  }
+  return null;
 }
 
 function toolCalls(message: AssistantMessage): AssistantToolCall[] {
@@ -311,12 +323,12 @@ function renderItemsFromMessages(messages: AssistantMessage[]): AssistantRenderI
 
     const calls = toolCalls(message);
     if (message.role !== 'assistant' || calls.length === 0) {
-      items.push({ type: 'message', key: `message:${index}:${message.role}`, message });
+      items.push({ type: 'message', key: `message:${index}:${message.role}`, message, sourceMessageIndex: index });
       continue;
     }
 
     if (messageText(message).trim() || message.errorMessage) {
-      items.push({ type: 'message', key: `message:${index}:${message.role}`, message, showToolCalls: false });
+      items.push({ type: 'message', key: `message:${index}:${message.role}`, message, showToolCalls: false, sourceMessageIndex: index });
     }
 
     for (const call of calls) {
@@ -472,17 +484,63 @@ function ToolCheckIcon({ className }: { className?: string }) {
   );
 }
 
+function ThinkingPulseDots() {
+  return (
+    <span className="inline-flex h-6 flex-shrink-0 items-center gap-1 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-2" aria-hidden="true">
+      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--muted)]" />
+      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--muted)]" style={{ animationDelay: '120ms' }} />
+      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--muted)]" style={{ animationDelay: '240ms' }} />
+    </span>
+  );
+}
+
 function AssistantThinkingRow() {
   return (
     <div className="px-3 py-2">
       <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
         Assistant
       </div>
-      <div className="inline-flex h-7 items-center gap-1 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.025)] px-2.5">
-        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--muted)]" />
-        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--muted)]" style={{ animationDelay: '120ms' }} />
-        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--muted)]" style={{ animationDelay: '240ms' }} />
-      </div>
+      <ThinkingPulseDots />
+    </div>
+  );
+}
+
+function ReasoningBlock({ text, headerPulse }: { text: string; headerPulse: boolean }) {
+  const [open, setOpen] = React.useState(false);
+  const trimmed = text.trim();
+  if (!trimmed && !headerPulse) return null;
+
+  return (
+    <div className="mb-2 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.015)]">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        className="flex w-full min-w-0 items-center gap-2 px-2.5 py-1.5 text-left hover:bg-[rgba(255,255,255,.04)]"
+      >
+        <span className="flex-shrink-0 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+          Reasoning
+        </span>
+        {headerPulse ? <ThinkingPulseDots /> : null}
+        <span className="ml-auto flex-shrink-0 text-[10px] text-[var(--muted)]">{open ? 'Hide' : 'Show'}</span>
+      </button>
+      {trimmed ? (
+        open ? (
+          <div className="border-t border-[var(--border-subtle)] px-2.5 py-2">
+            <div className="max-h-[min(70vh,28rem)] overflow-auto whitespace-pre-wrap break-words text-[11px] leading-relaxed text-[var(--muted)]">
+              {trimmed}
+            </div>
+          </div>
+        ) : (
+          <div className="border-t border-[var(--border-subtle)] px-2.5 pb-2 pt-1">
+            <div className="line-clamp-3 whitespace-pre-wrap break-words text-[11px] leading-relaxed text-[var(--muted-dim)]">
+              {trimmed}
+            </div>
+          </div>
+        )
+      ) : headerPulse ? (
+        <div className="border-t border-[var(--border-subtle)] px-2.5 py-2 text-[11px] text-[var(--muted-dim)]">…</div>
+      ) : null}
     </div>
   );
 }
@@ -696,12 +754,58 @@ function ToolActivityRow({
   );
 }
 
-function AssistantMessageRow({ message, showToolCalls = true }: { message: AssistantMessage; showToolCalls?: boolean }) {
-  const text = messageText(message);
+function AssistantMessageRow({
+  message,
+  showToolCalls = true,
+  isStreamingAssistant = false,
+}: {
+  message: AssistantMessage;
+  showToolCalls?: boolean;
+  isStreamingAssistant?: boolean;
+}) {
   const calls = showToolCalls ? toolCalls(message) : [];
+  const content = message.content;
+  const structuredAssistant =
+    message.role === 'assistant' &&
+    Array.isArray(content) &&
+    content.some((part) => part?.type === 'thinking' || part?.type === 'text' || part?.type === 'toolCall');
 
   if (message.role === 'toolResult') {
     return <ToolActivityRow result={message} />;
+  }
+
+  let body: React.ReactNode = null;
+  if (message.role === 'assistant' && structuredAssistant) {
+    const blocks: React.ReactNode[] = [];
+    let lastThinkingPartIndex = -1;
+    for (let i = 0; i < content.length; i += 1) {
+      if (content[i]?.type === 'thinking') lastThinkingPartIndex = i;
+    }
+    const lastBlock = lastAssistantContentBlock(message);
+    for (let i = 0; i < content.length; i += 1) {
+      const part = content[i];
+      if (!part || typeof part !== 'object') continue;
+      if (part.type === 'thinking') {
+        const thinkingText = String(part.thinking ?? '');
+        const headerPulse = Boolean(isStreamingAssistant && lastBlock?.type === 'thinking' && i === lastThinkingPartIndex);
+        if (thinkingText.trim() || headerPulse) {
+          blocks.push(<ReasoningBlock key={`th:${i}`} text={thinkingText} headerPulse={headerPulse} />);
+        }
+      } else if (part.type === 'text') {
+        const t = String(part.text ?? '').trim();
+        if (t) blocks.push(<MarkdownMessage key={`tx:${i}`} text={t} className="dh-markdown text-[12px]" />);
+      }
+    }
+    body = blocks.length > 0 ? <div className="space-y-1">{blocks}</div> : null;
+  } else {
+    const text = messageText(message);
+    body = text ? (
+      message.role === 'assistant' ? (
+        <MarkdownMessage text={text} className="dh-markdown text-[12px]" />
+      ) : (
+        <div className="whitespace-pre-wrap break-words text-[12px] text-[var(--fg-secondary)]">{text}</div>
+      )
+    ) : null;
   }
 
   return (
@@ -709,15 +813,8 @@ function AssistantMessageRow({ message, showToolCalls = true }: { message: Assis
       <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
         {message.role === 'user' ? 'You' : 'Assistant'}
       </div>
-      {text ? (
-        message.role === 'assistant' ? (
-          <MarkdownMessage text={text} className="dh-markdown text-[12px]" />
-        ) : (
-          <div className="whitespace-pre-wrap break-words text-[12px] text-[var(--fg-secondary)]">{text}</div>
-        )
-      ) : message.errorMessage ? (
-        <div className="text-[12px] text-[var(--red)]">{message.errorMessage}</div>
-      ) : null}
+      {body}
+      {!body && message.errorMessage ? <div className="text-[12px] text-[var(--red)]">{message.errorMessage}</div> : null}
       {calls.length > 0 ? (
         <div className="mt-2 space-y-1.5">
           {calls.map((call) => (
@@ -1401,6 +1498,11 @@ export function AssistantDock() {
     }
     return items;
   }, [activeThread?.queuedPrompts, visibleMessages]);
+  const streamingAssistantSourceIndex = React.useMemo(() => {
+    const streaming = snapshot?.streamingMessage;
+    if (!streaming || streaming.role !== 'assistant' || activeThread?.status === 'idle') return -1;
+    return visibleMessages.length - 1;
+  }, [activeThread?.status, snapshot?.streamingMessage, visibleMessages]);
   const showThinking = running && activePendingApprovals.length === 0 && !messageText(snapshot?.streamingMessage ?? { role: 'assistant' }).trim();
   const toolDroneKey = React.useMemo(() => toolDroneLookupKey(visibleItems), [visibleItems]);
 
@@ -2107,7 +2209,14 @@ export function AssistantDock() {
         ) : (
           visibleItems.map((item) =>
             item.type === 'message' ? (
-              <AssistantMessageRow key={item.key} message={item.message} showToolCalls={item.showToolCalls} />
+              <AssistantMessageRow
+                key={item.key}
+                message={item.message}
+                showToolCalls={item.showToolCalls}
+                isStreamingAssistant={
+                  item.message.role === 'assistant' && item.sourceMessageIndex === streamingAssistantSourceIndex
+                }
+              />
             ) : item.type === 'tool' ? (
               <ToolActivityRow key={item.key} call={item.call} result={item.result} droneNameById={droneNameById} />
             ) : (
