@@ -201,6 +201,19 @@ type AssistantDroneFileReadResult = {
   };
 };
 
+function formatAssistantReadFileToolText(result: AssistantDroneFileReadResult): string {
+  const lineRange = result.lineRange;
+  if (!lineRange) return result.content;
+
+  const displayPath = result.relativePath || result.path;
+  const lineLabel =
+    lineRange.returnedLines === 1
+      ? `line ${lineRange.startLine}`
+      : `lines ${lineRange.startLine}-${lineRange.endLine}`;
+  const header = `# ${displayPath} ${lineLabel} of ${lineRange.totalLines} (${lineRange.returnedLines} returned)`;
+  return result.content ? `${header}\n\n${result.content}` : header;
+}
+
 type AssistantDroneFileWriteResult = {
   droneId: string;
   path: string;
@@ -2617,7 +2630,7 @@ export class HubAssistantService {
           const readFile = this.requireFileCallback('readDroneFile');
           const result = await readFile({ droneId, path: filePath, startLine, endLine });
           return {
-            content: [{ type: 'text', text: result.content }],
+            content: [{ type: 'text', text: formatAssistantReadFileToolText(result) }],
             details: result,
           };
         },

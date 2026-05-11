@@ -368,7 +368,7 @@ describe('assistant drone file tools', () => {
         endLine: 3,
       });
 
-      expect(result.content[0].text).toBe('two\nthree\n');
+      expect(result.content[0].text).toBe('# src/example.ts lines 2-3 of 4 (2 returned)\n\ntwo\nthree\n');
       expect(result.details).toMatchObject({
         droneId: 'drone-a',
         path: 'src/example.ts',
