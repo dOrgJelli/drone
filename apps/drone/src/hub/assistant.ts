@@ -150,6 +150,88 @@ type AssistantToolCallbacks = {
     chatName: string;
     prompt: string;
   }) => Promise<AssistantMessageDroneResult>;
+  listDroneFiles?: (opts: { droneId: string; path?: string }) => Promise<AssistantDroneFileListResult>;
+  readDroneFile?: (opts: { droneId: string; path: string }) => Promise<AssistantDroneFileReadResult>;
+  writeDroneFile?: (opts: { droneId: string; path: string; content: string }) => Promise<AssistantDroneFileWriteResult>;
+  deleteDroneFile?: (opts: { droneId: string; path: string }) => Promise<AssistantDroneFileMutationResult>;
+  moveDroneFile?: (opts: { droneId: string; fromPath: string; toPath: string }) => Promise<AssistantDroneFileMutationResult>;
+  searchDroneFiles?: (opts: { droneId: string; path?: string; query: string; limit?: number }) => Promise<AssistantDroneFileSearchResult>;
+  findDroneFiles?: (opts: { droneId: string; path?: string; pattern?: string; limit?: number }) => Promise<AssistantDroneFileFindResult>;
+};
+
+type AssistantDroneFileEntry = {
+  name: string;
+  path: string;
+  kind: 'directory' | 'file' | 'other';
+  size?: number | null;
+  mtimeMs?: number | null;
+};
+
+type AssistantDroneFileListResult = {
+  droneId: string;
+  path: string;
+  entries: AssistantDroneFileEntry[];
+};
+
+type AssistantDroneFileReadResult = {
+  droneId: string;
+  path: string;
+  kind: 'text';
+  content: string;
+  size?: number | null;
+  mtimeMs?: number | null;
+};
+
+type AssistantDroneFileWriteResult = {
+  droneId: string;
+  path: string;
+  size?: number | null;
+  mtimeMs?: number | null;
+};
+
+type AssistantDroneFileMutationResult = {
+  droneId: string;
+  path: string;
+  deleted?: boolean;
+  movedTo?: string;
+};
+
+type AssistantDroneFileSearchMatch = {
+  path: string;
+  line?: number | null;
+  text: string;
+};
+
+type AssistantDroneFileSearchResult = {
+  droneId: string;
+  path: string;
+  query: string;
+  matches: AssistantDroneFileSearchMatch[];
+  limit: number;
+};
+
+type AssistantDroneFileFindResult = {
+  droneId: string;
+  path: string;
+  pattern: string;
+  matches: AssistantDroneFileEntry[];
+  limit: number;
+};
+
+type AssistantPatchOperation =
+  | { kind: 'add'; path: string; content: string }
+  | { kind: 'delete'; path: string }
+  | { kind: 'update'; path: string; moveTo?: string; hunks: AssistantPatchHunk[] };
+
+type AssistantPatchHunk = {
+  oldText: string;
+  newText: string;
+};
+
+type AssistantApplyPatchResult = {
+  ok: true;
+  droneId: string;
+  operations: Array<{ kind: AssistantPatchOperation['kind']; path: string; movedTo?: string; size?: number | null }>;
 };
 
 type AssistantAppContext = {
@@ -278,11 +360,14 @@ const ASSISTANT_SYSTEM_PROMPT_DEFAULT = [
   'Use list_drones before referring to specific drones unless the user already provided an exact drone id.',
   'Use get_chat_overview before reading chat details, then read_chat_messages in pages when you need conversation context.',
   'Use assistant_files to maintain private, thread-scoped Markdown notes when tracking work, decisions, plans, questions, or handoff details. These files are for the user-facing Artifacts UI and are not visible to drones.',
+  'Use list_files, find_files, search_files, read_file, write_file, and apply_patch to inspect and modify files in drones you can access. Prefer apply_patch for coordinated code edits.',
+  'File paths are interpreted by drone id plus path. Relative paths resolve inside the target drone workspace, usually the repo root for repo-backed drones.',
   'Chat timelines contain user messages and agent messages. Queued or pending user messages appear in the same timeline with a non-completed status.',
   'When you send a drone chat message and need the result later, call subscribe_to_chats_idle on the target chat. This returns immediately so you can continue other work. If there is nothing else to do, end your turn; the system will resume this thread when the subscribed chats become idle.',
   'Do not load more chat pages than needed. Start with the latest page.',
   'Creating drones, changing drone groups, and sending a user message to a drone are actions that require user approval; explain briefly what you intend to do.',
-  'If one of those write tools returns successfully, the user already approved that action. Do not ask for the same approval again.',
+  'File write tools require write access to the target drone and should be used carefully for concrete code or content edits.',
+  'If an approval-gated write tool returns successfully, the user already approved that action. Do not ask for the same approval again.',
   'When creating a drone, omit fields you want inherited from the current open drone. Only set repoBranchSource=remote when the user asked for a remote branch and you have a remoteBranch value.',
   'Do not claim a drone completed work unless the drone transcript or user says so.',
   'Keep responses practical and short.',
@@ -517,6 +602,145 @@ function normalizeAssistantRepoBranchSource(raw: unknown): 'host' | 'remote' {
 
 function cleanOptionalString(raw: unknown): string {
   return String(raw ?? '').trim();
+}
+
+function normalizeAssistantDroneFilePath(raw: unknown): string {
+  const value = String(raw ?? '').trim();
+  if (!value) throw new Error('missing file path');
+  if (value.includes('\0') || value.includes('\r') || value.includes('\n')) throw new Error(`invalid file path: ${value}`);
+  const normalized = path.posix.normalize(value.replace(/\\/g, '/'));
+  if (!normalized || normalized === '.') throw new Error('missing file path');
+  const withoutLeading = normalized.replace(/^\/+/, '');
+  if (withoutLeading === '..' || withoutLeading.startsWith('../')) throw new Error(`invalid file path: ${value}`);
+  return value.startsWith('/') ? `/${withoutLeading}` : withoutLeading;
+}
+
+function normalizeAssistantPatchText(raw: unknown): string {
+  const text = String(raw ?? '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  if (!text.trim()) throw new Error('missing patch');
+  return text;
+}
+
+function collectPatchContent(lines: string[], startIndex: number): { content: string; nextIndex: number } {
+  const out: string[] = [];
+  let i = startIndex;
+  for (; i < lines.length; i += 1) {
+    const line = lines[i] ?? '';
+    if (line.startsWith('*** ')) break;
+    if (!line.startsWith('+')) throw new Error(`invalid add file line: ${line}`);
+    out.push(line.slice(1));
+  }
+  return { content: out.length > 0 ? `${out.join('\n')}\n` : '', nextIndex: i };
+}
+
+function collectPatchHunks(lines: string[], startIndex: number): { moveTo?: string; hunks: AssistantPatchHunk[]; nextIndex: number } {
+  let moveTo: string | undefined;
+  const hunks: AssistantPatchHunk[] = [];
+  let oldLines: string[] = [];
+  let newLines: string[] = [];
+  let sawHunk = false;
+  let i = startIndex;
+
+  const flush = () => {
+    if (!sawHunk && oldLines.length === 0 && newLines.length === 0) return;
+    hunks.push({
+      oldText: oldLines.length > 0 ? `${oldLines.join('\n')}\n` : '',
+      newText: newLines.length > 0 ? `${newLines.join('\n')}\n` : '',
+    });
+    oldLines = [];
+    newLines = [];
+    sawHunk = false;
+  };
+
+  for (; i < lines.length; i += 1) {
+    const line = lines[i] ?? '';
+    if (line.startsWith('*** Move to: ')) {
+      moveTo = normalizeAssistantDroneFilePath(line.slice('*** Move to: '.length));
+      continue;
+    }
+    if (line.startsWith('*** ')) break;
+    if (line.startsWith('@@')) {
+      flush();
+      sawHunk = true;
+      continue;
+    }
+    if (line.startsWith(' ')) {
+      oldLines.push(line.slice(1));
+      newLines.push(line.slice(1));
+      sawHunk = true;
+      continue;
+    }
+    if (line.startsWith('-')) {
+      oldLines.push(line.slice(1));
+      sawHunk = true;
+      continue;
+    }
+    if (line.startsWith('+')) {
+      newLines.push(line.slice(1));
+      sawHunk = true;
+      continue;
+    }
+    if (line === '') {
+      oldLines.push('');
+      newLines.push('');
+      sawHunk = true;
+      continue;
+    }
+    throw new Error(`invalid patch line: ${line}`);
+  }
+
+  flush();
+  return { moveTo, hunks, nextIndex: i };
+}
+
+function parseAssistantApplyPatch(raw: unknown): AssistantPatchOperation[] {
+  const text = normalizeAssistantPatchText(raw);
+  const lines = text.split('\n');
+  if (lines[lines.length - 1] === '') lines.pop();
+  if (lines[0] !== '*** Begin Patch') throw new Error('patch must start with "*** Begin Patch"');
+  if (lines[lines.length - 1] !== '*** End Patch') throw new Error('patch must end with "*** End Patch"');
+
+  const operations: AssistantPatchOperation[] = [];
+  let i = 1;
+  while (i < lines.length - 1) {
+    const line = lines[i] ?? '';
+    if (line === '*** End of File') {
+      i += 1;
+      continue;
+    }
+    if (line.startsWith('*** Add File: ')) {
+      const filePath = normalizeAssistantDroneFilePath(line.slice('*** Add File: '.length));
+      const collected = collectPatchContent(lines, i + 1);
+      operations.push({ kind: 'add', path: filePath, content: collected.content });
+      i = collected.nextIndex;
+      continue;
+    }
+    if (line.startsWith('*** Delete File: ')) {
+      operations.push({ kind: 'delete', path: normalizeAssistantDroneFilePath(line.slice('*** Delete File: '.length)) });
+      i += 1;
+      continue;
+    }
+    if (line.startsWith('*** Update File: ')) {
+      const filePath = normalizeAssistantDroneFilePath(line.slice('*** Update File: '.length));
+      const collected = collectPatchHunks(lines, i + 1);
+      operations.push({ kind: 'update', path: filePath, ...(collected.moveTo ? { moveTo: collected.moveTo } : {}), hunks: collected.hunks });
+      i = collected.nextIndex;
+      continue;
+    }
+    throw new Error(`invalid patch operation: ${line}`);
+  }
+
+  if (operations.length === 0) throw new Error('patch has no operations');
+  return operations;
+}
+
+function replaceTextOnce(content: string, oldText: string, newText: string, filePath: string): string {
+  if (!oldText) throw new Error(`empty patch hunk for ${filePath}`);
+  const first = content.indexOf(oldText);
+  if (first < 0) throw new Error(`patch context not found in ${filePath}`);
+  const second = content.indexOf(oldText, first + oldText.length);
+  if (second >= 0) throw new Error(`patch context is ambiguous in ${filePath}`);
+  return `${content.slice(0, first)}${newText}${content.slice(first + oldText.length)}`;
 }
 
 function normalizeAssistantSystemPrompt(raw: unknown): string {
@@ -1329,6 +1553,54 @@ export class HubAssistantService {
     return drones.filter((drone) => allowed.has(drone.id));
   }
 
+  private requireFileCallback<K extends keyof AssistantToolCallbacks>(name: K): NonNullable<AssistantToolCallbacks[K]> {
+    const callback = this.tools[name];
+    if (typeof callback !== 'function') throw new Error(`assistant file tool unavailable: ${String(name)}`);
+    return callback as NonNullable<AssistantToolCallbacks[K]>;
+  }
+
+  private async applyDronePatch(threadId: string, params: any): Promise<AssistantApplyPatchResult> {
+    const droneId = await this.requireDroneInScope(params?.droneId, 'write', threadId);
+    const operations = parseAssistantApplyPatch(params?.patch);
+    const readFile = this.requireFileCallback('readDroneFile');
+    const writeFile = this.requireFileCallback('writeDroneFile');
+    const deleteFile = this.requireFileCallback('deleteDroneFile');
+    const moveFile = this.requireFileCallback('moveDroneFile');
+    const applied: AssistantApplyPatchResult['operations'] = [];
+
+    for (const operation of operations) {
+      if (operation.kind === 'add') {
+        const written = await writeFile({ droneId, path: operation.path, content: operation.content });
+        applied.push({ kind: 'add', path: written.path, size: written.size ?? null });
+        continue;
+      }
+
+      if (operation.kind === 'delete') {
+        const deleted = await deleteFile({ droneId, path: operation.path });
+        applied.push({ kind: 'delete', path: deleted.path });
+        continue;
+      }
+
+      const read = await readFile({ droneId, path: operation.path });
+      let content = read.content;
+      for (const hunk of operation.hunks) {
+        content = replaceTextOnce(content, hunk.oldText, hunk.newText, operation.path);
+      }
+      if (operation.moveTo) {
+        if (operation.hunks.length > 0) {
+          await writeFile({ droneId, path: operation.path, content });
+        }
+        const moved = await moveFile({ droneId, fromPath: operation.path, toPath: operation.moveTo });
+        applied.push({ kind: 'update', path: operation.path, movedTo: moved.movedTo ?? operation.moveTo });
+        continue;
+      }
+      const written = await writeFile({ droneId, path: operation.path, content });
+      applied.push({ kind: 'update', path: written.path, size: written.size ?? null });
+    }
+
+    return { ok: true, droneId, operations: applied };
+  }
+
   private scopedAppContext(threadId: string): AssistantAppContext {
     const allowed = this.allowedDroneIdSet('read', threadId);
     if (!allowed) return { ...this.appContext };
@@ -2059,6 +2331,143 @@ export class HubAssistantService {
           return {
             content: [{ type: 'text', text: JSON.stringify({ drone }, null, 2) }],
             details: { drone },
+          };
+        },
+      },
+      {
+        name: 'list_files',
+        label: 'List files',
+        description: 'List files and folders in one drone. Requires assistant read access to that drone.',
+        parameters: Type.Object({
+          droneId: Type.String({ description: 'Drone id or visible name.' }),
+          path: Type.Optional(Type.String({ description: 'Directory path. Relative paths resolve inside the drone workspace.' })),
+        }),
+        execute: async (_toolCallId: string, params: any) => {
+          const droneId = await this.requireDroneInScope(params?.droneId, 'read', threadId);
+          const listFiles = this.requireFileCallback('listDroneFiles');
+          const rawPath = cleanOptionalString(params?.path);
+          const result = await listFiles({ droneId, path: rawPath ? normalizeAssistantDroneFilePath(rawPath) : undefined });
+          return {
+            content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+            details: result,
+          };
+        },
+      },
+      {
+        name: 'read_file',
+        label: 'Read file',
+        description: 'Read a UTF-8 text file from one drone. Requires assistant read access to that drone.',
+        parameters: Type.Object({
+          droneId: Type.String({ description: 'Drone id or visible name.' }),
+          path: Type.String({ description: 'File path. Relative paths resolve inside the drone workspace.' }),
+        }),
+        execute: async (_toolCallId: string, params: any) => {
+          const droneId = await this.requireDroneInScope(params?.droneId, 'read', threadId);
+          const filePath = normalizeAssistantDroneFilePath(params?.path);
+          const readFile = this.requireFileCallback('readDroneFile');
+          const result = await readFile({ droneId, path: filePath });
+          return {
+            content: [{ type: 'text', text: result.content }],
+            details: result,
+          };
+        },
+      },
+      {
+        name: 'search_files',
+        label: 'Search files',
+        description: 'Search text files in one drone without reading whole files. Requires assistant read access to that drone.',
+        parameters: Type.Object({
+          droneId: Type.String({ description: 'Drone id or visible name.' }),
+          query: Type.String({ description: 'Text to search for.' }),
+          path: Type.Optional(Type.String({ description: 'Directory path to search. Relative paths resolve inside the drone workspace.' })),
+          limit: Type.Optional(Type.Number({ description: 'Maximum matches. Defaults to 20, max 100.' })),
+        }),
+        execute: async (_toolCallId: string, params: any) => {
+          const droneId = await this.requireDroneInScope(params?.droneId, 'read', threadId);
+          const query = cleanOptionalString(params?.query);
+          if (!query) throw new Error('missing query');
+          const searchFiles = this.requireFileCallback('searchDroneFiles');
+          const limitRaw = Number(params?.limit);
+          const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(100, Math.floor(limitRaw))) : 20;
+          const rawPath = cleanOptionalString(params?.path);
+          const result = await searchFiles({
+            droneId,
+            query,
+            path: rawPath ? normalizeAssistantDroneFilePath(rawPath) : undefined,
+            limit,
+          });
+          return {
+            content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+            details: result,
+          };
+        },
+      },
+      {
+        name: 'find_files',
+        label: 'Find files',
+        description:
+          'Find file and directory paths in one drone by glob-like pattern or substring. Requires assistant read access to that drone.',
+        parameters: Type.Object({
+          droneId: Type.String({ description: 'Drone id or visible name.' }),
+          pattern: Type.Optional(Type.String({ description: 'Glob-like pattern or substring, such as *.ts, src/**/*.tsx, or package.json. Defaults to *.' })),
+          path: Type.Optional(Type.String({ description: 'Directory path to search. Relative paths resolve inside the drone workspace.' })),
+          limit: Type.Optional(Type.Number({ description: 'Maximum matches. Defaults to 100, max 500.' })),
+        }),
+        execute: async (_toolCallId: string, params: any) => {
+          const droneId = await this.requireDroneInScope(params?.droneId, 'read', threadId);
+          const findFiles = this.requireFileCallback('findDroneFiles');
+          const limitRaw = Number(params?.limit);
+          const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(500, Math.floor(limitRaw))) : 100;
+          const rawPath = cleanOptionalString(params?.path);
+          const pattern = cleanOptionalString(params?.pattern) || '*';
+          const result = await findFiles({
+            droneId,
+            pattern,
+            path: rawPath ? normalizeAssistantDroneFilePath(rawPath) : undefined,
+            limit,
+          });
+          return {
+            content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+            details: result,
+          };
+        },
+      },
+      {
+        name: 'write_file',
+        label: 'Write file',
+        description:
+          'Create or overwrite a UTF-8 text file in one drone. Requires assistant write access to that drone. Prefer apply_patch for code edits.',
+        parameters: Type.Object({
+          droneId: Type.String({ description: 'Drone id or visible name.' }),
+          path: Type.String({ description: 'File path. Relative paths resolve inside the drone workspace.' }),
+          content: Type.String({ description: 'Full UTF-8 text content to write.' }),
+        }),
+        execute: async (_toolCallId: string, params: any) => {
+          const droneId = await this.requireDroneInScope(params?.droneId, 'write', threadId);
+          const filePath = normalizeAssistantDroneFilePath(params?.path);
+          const writeFile = this.requireFileCallback('writeDroneFile');
+          const result = await writeFile({ droneId, path: filePath, content: String(params?.content ?? '') });
+          return {
+            content: [{ type: 'text', text: `Wrote ${result.path} (${result.size ?? 0} bytes).` }],
+            details: result,
+          };
+        },
+      },
+      {
+        name: 'apply_patch',
+        label: 'Apply patch',
+        description:
+          'Apply an OpenCode-style patch envelope to files in one drone. Supports Add File, Update File, Delete File, and Move to. Requires assistant write access to that drone.',
+        parameters: Type.Object({
+          droneId: Type.String({ description: 'Drone id or visible name.' }),
+          patch: Type.String({ description: 'Patch envelope beginning with *** Begin Patch and ending with *** End Patch.' }),
+        }),
+        executionMode: 'sequential',
+        execute: async (_toolCallId: string, params: any) => {
+          const result = await this.applyDronePatch(threadId, params ?? {});
+          return {
+            content: [{ type: 'text', text: `Applied ${result.operations.length} patch operation${result.operations.length === 1 ? '' : 's'} to ${result.droneId}.` }],
+            details: result,
           };
         },
       },
