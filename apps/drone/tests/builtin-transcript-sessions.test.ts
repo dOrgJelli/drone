@@ -1,5 +1,57 @@
 import { describe, expect, test } from 'bun:test';
-import { formatTranscriptJobFailure } from '../src/hub/builtin-transcript-sessions';
+import { formatTranscriptJobFailure, parseCodexJsonl } from '../src/hub/builtin-transcript-sessions';
+
+describe('parseCodexJsonl', () => {
+  test('parses legacy Codex agent_message items', () => {
+    expect(
+      parseCodexJsonl(
+        [
+          '{"type":"thread.started","thread_id":"019e1922-047b-74b1-bab8-0eaceadf4062"}',
+          '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Hello from Codex."}}',
+        ].join('\n'),
+      ),
+    ).toEqual({
+      threadId: '019e1922-047b-74b1-bab8-0eaceadf4062',
+      message: 'Hello from Codex.',
+    });
+  });
+
+  test('parses assistant message items with content arrays', () => {
+    expect(
+      parseCodexJsonl(
+        [
+          '{"type":"thread.started","thread_id":"019e1922-047b-74b1-bab8-0eaceadf4062"}',
+          '{"type":"item.completed","item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"First line."},{"type":"output_text","text":"Second line."}]}}',
+        ].join('\n'),
+      ),
+    ).toEqual({
+      threadId: '019e1922-047b-74b1-bab8-0eaceadf4062',
+      message: 'First line.\nSecond line.',
+    });
+  });
+
+  test('parses Responses-style completed output arrays', () => {
+    expect(
+      parseCodexJsonl(
+        JSON.stringify({
+          type: 'response.completed',
+          response: {
+            output: [
+              {
+                type: 'message',
+                role: 'assistant',
+                content: [{ type: 'output_text', text: 'Final answer.' }],
+              },
+            ],
+          },
+        }),
+      ),
+    ).toEqual({
+      threadId: null,
+      message: 'Final answer.',
+    });
+  });
+});
 
 describe('formatTranscriptJobFailure', () => {
   test('surfaces when the prompt command failed without any captured output', () => {
