@@ -59,6 +59,20 @@ describe('parseCodexJsonl', () => {
     });
   });
 
+  test('parses Codex agent message events that use message instead of text', () => {
+    expect(parseCodexJsonl('{"type":"agent_message","message":"Root message answer."}')).toEqual({
+      threadId: null,
+      message: 'Root message answer.',
+    });
+  });
+
+  test('parses final assistant text from completed turn metadata', () => {
+    expect(parseCodexJsonl('{"type":"turn.completed","last_agent_message":"Completed turn answer."}')).toEqual({
+      threadId: null,
+      message: 'Completed turn answer.',
+    });
+  });
+
   test('parses message items with output text even when role is omitted', () => {
     expect(
       parseCodexJsonl(

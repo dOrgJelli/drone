@@ -59,7 +59,11 @@ export function parseCodexJsonl(stdout: string): { threadId: string | null; mess
 
   function extractItemText(item: any): string | null {
     if (!item || typeof item !== 'object') return null;
-    const direct = takeStringText(item.text) ?? takeStringText(item.output_text);
+    const direct =
+      takeStringText(item.text) ??
+      takeStringText(item.output_text) ??
+      takeStringText(item.message) ??
+      takeStringText(item.last_agent_message);
     if (direct) return direct;
     return extractContentText(item.content);
   }
@@ -123,6 +127,10 @@ export function parseCodexJsonl(stdout: string): { threadId: string | null; mess
       const text = takeStringText(obj.text);
       if (text) lastMsg = text;
       continue;
+    }
+    if (obj.type === 'turn.completed') {
+      const text = takeStringText(obj.last_agent_message) ?? takeStringText(obj.message);
+      if (text) lastMsg = text;
     }
 
     considerAssistantItem(obj);
