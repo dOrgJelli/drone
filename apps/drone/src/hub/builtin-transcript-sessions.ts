@@ -38,6 +38,15 @@ function extractContentText(raw: any): string | null {
   return parts.join('\n');
 }
 
+function contentHasOutputText(raw: any): boolean {
+  if (!Array.isArray(raw)) return false;
+  return raw.some((c) => {
+    if (!c || typeof c !== 'object') return false;
+    const type = String((c as any).type ?? '').trim();
+    return type === 'output_text' || typeof (c as any).output_text === 'string';
+  });
+}
+
 function parseUuid(text: string): string | null {
   const match = String(text).match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
   return match ? match[0] : null;
@@ -63,7 +72,8 @@ export function parseCodexJsonl(stdout: string): { threadId: string | null; mess
       itemType === 'agent_message' ||
       itemType === 'assistant_message' ||
       role === 'assistant' ||
-      itemType === 'assistant'
+      itemType === 'assistant' ||
+      (itemType === 'message' && role !== 'user' && contentHasOutputText(item.content))
     );
   }
 
@@ -115,6 +125,7 @@ export function parseCodexJsonl(stdout: string): { threadId: string | null; mess
       continue;
     }
 
+    considerAssistantItem(obj);
     considerAssistantItem(obj.message);
     considerResponse(obj?.response);
   }

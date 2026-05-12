@@ -12,7 +12,6 @@ export type PendingPrompt = {
   attachments?: ChatImageAttachmentRef[];
   automation?: any;
   blockedByAutomation?: boolean;
-  codexEmptyResponseRetries?: number;
   state: PendingPromptState;
   error?: string;
   updatedAt?: string;
@@ -97,10 +96,6 @@ export function createDronePendingPromptStore(deps: {
           attachments: deps.normalizeChatImageAttachmentRefs(p?.attachments),
           automation: deps.normalizePromptAutomationMeta((p as any)?.automation),
           blockedByAutomation: Boolean((p as any)?.blockedByAutomation),
-          codexEmptyResponseRetries:
-            typeof p?.codexEmptyResponseRetries === 'number' && Number.isFinite(p.codexEmptyResponseRetries)
-              ? Math.max(0, Math.floor(p.codexEmptyResponseRetries))
-              : undefined,
           state:
             p?.state === 'sent' || p?.state === 'failed' || p?.state === 'sending' || p?.state === 'queued'
               ? (p.state as PendingPromptState)
