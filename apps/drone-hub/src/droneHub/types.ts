@@ -249,6 +249,13 @@ export type RepoPullChangesPayload =
         changed: number;
       };
       entries: RepoPullChangeEntry[];
+      applyPreview?: {
+        mode: 'host-merge' | 'drone-range';
+        counts: {
+          changed: number;
+        };
+        entries: RepoPullChangeEntry[];
+      };
     }
   | { ok: false; error: string; code?: string };
 

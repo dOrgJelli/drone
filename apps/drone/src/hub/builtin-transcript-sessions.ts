@@ -25,6 +25,19 @@ function takeStringText(raw: any): string | null {
   return null;
 }
 
+function extractContentText(raw: any): string | null {
+  if (typeof raw === 'string') return raw || null;
+  if (!Array.isArray(raw)) return null;
+  const parts: string[] = [];
+  for (const c of raw) {
+    if (!c || typeof c !== 'object') continue;
+    const t = takeStringText((c as any).text) ?? takeStringText((c as any).output_text);
+    if (t) parts.push(t);
+  }
+  if (parts.length === 0) return null;
+  return parts.join('\n');
+}
+
 function parseUuid(text: string): string | null {
   const match = String(text).match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
   return match ? match[0] : null;
@@ -39,16 +52,35 @@ export function parseCodexJsonl(stdout: string): { threadId: string | null; mess
     if (!item || typeof item !== 'object') return null;
     const direct = takeStringText(item.text) ?? takeStringText(item.output_text);
     if (direct) return direct;
-    const content = item.content;
-    if (!Array.isArray(content)) return null;
-    const parts: string[] = [];
-    for (const c of content) {
-      if (!c || typeof c !== 'object') continue;
-      const t = takeStringText((c as any).text) ?? takeStringText((c as any).output_text);
-      if (t) parts.push(t);
+    return extractContentText(item.content);
+  }
+
+  function isAssistantItem(item: any): boolean {
+    if (!item || typeof item !== 'object') return false;
+    const itemType = String(item.type ?? '').trim();
+    const role = String(item.role ?? '').trim();
+    return (
+      itemType === 'agent_message' ||
+      itemType === 'assistant_message' ||
+      role === 'assistant' ||
+      itemType === 'assistant'
+    );
+  }
+
+  function considerAssistantItem(item: any) {
+    if (!isAssistantItem(item)) return;
+    const text = extractItemText(item);
+    if (text) lastMsg = text;
+  }
+
+  function considerResponse(response: any) {
+    const responseText = takeStringText(response?.output_text);
+    if (responseText) {
+      lastMsg = responseText;
+      return;
     }
-    if (parts.length === 0) return null;
-    return parts.join('\n');
+    if (!Array.isArray(response?.output)) return;
+    for (const item of response.output) considerAssistantItem(item);
   }
 
   const lines = String(stdout || '')
@@ -68,11 +100,7 @@ export function parseCodexJsonl(stdout: string): { threadId: string | null; mess
       continue;
     }
     if ((obj.type === 'item.completed' || obj.type === 'item.started') && obj.item && typeof obj.item === 'object') {
-      const itemType = String(obj.item.type ?? '');
-      const text = extractItemText(obj.item);
-      if (text && (itemType === 'agent_message' || itemType === 'assistant_message')) {
-        lastMsg = text;
-      }
+      considerAssistantItem(obj.item);
       continue;
     }
 
@@ -87,8 +115,8 @@ export function parseCodexJsonl(stdout: string): { threadId: string | null; mess
       continue;
     }
 
-    const responseText = takeStringText(obj?.response?.output_text);
-    if (responseText) lastMsg = responseText;
+    considerAssistantItem(obj.message);
+    considerResponse(obj?.response);
   }
   if (!lastMsg && streamedMsg) lastMsg = streamedMsg;
   return { threadId, message: lastMsg };

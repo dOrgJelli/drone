@@ -202,6 +202,8 @@ export function transformMessages<TApi extends Api>(
 
 			result.push(msg);
 		} else if (msg.role === "toolResult") {
+			// Tool results without their matching assistant tool call are invalid to replay.
+			if (!pendingToolCalls.some((tc) => tc.id === msg.toolCallId)) continue;
 			existingToolResultIds.add(msg.toolCallId);
 			result.push(msg);
 		} else if (msg.role === "user") {
