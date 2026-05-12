@@ -11124,6 +11124,29 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         }
       }
 
+      if (pathname === '/api/assistant/overview-prompt') {
+        if (method === 'GET') {
+          json(res, 200, await assistantService.overviewPromptSettings());
+          return;
+        }
+
+        if (method === 'POST') {
+          let body: any = null;
+          try {
+            body = await readJsonBody(req);
+          } catch (e: any) {
+            json(res, 400, { ok: false, error: e?.message ?? String(e) });
+            return;
+          }
+          try {
+            json(res, 200, await assistantService.updateOverviewPrompt(body ?? {}));
+          } catch (e: any) {
+            json(res, 400, { ok: false, error: e?.message ?? String(e) });
+          }
+          return;
+        }
+      }
+
       if (pathname === '/api/assistant/threads' && method === 'GET') {
         json(res, 200, await assistantService.snapshot());
         return;
@@ -11221,6 +11244,22 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           if (assistantParts.length === 5 && assistantParts[4] === 'stop' && method === 'POST') {
             try {
               json(res, 200, await assistantService.stopThread(threadId));
+            } catch (e: any) {
+              json(res, /unknown assistant thread/i.test(String(e?.message ?? e)) ? 404 : 400, { ok: false, error: e?.message ?? String(e) });
+            }
+            return;
+          }
+
+          if (assistantParts.length === 5 && assistantParts[4] === 'overview' && method === 'POST') {
+            let body: any = null;
+            try {
+              body = await readJsonBody(req);
+            } catch (e: any) {
+              json(res, 400, { ok: false, error: e?.message ?? String(e) });
+              return;
+            }
+            try {
+              json(res, 200, await assistantService.generateThreadOverview(threadId, body ?? {}));
             } catch (e: any) {
               json(res, /unknown assistant thread/i.test(String(e?.message ?? e)) ? 404 : 400, { ok: false, error: e?.message ?? String(e) });
             }
