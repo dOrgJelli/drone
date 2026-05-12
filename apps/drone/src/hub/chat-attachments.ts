@@ -226,7 +226,9 @@ export function codexImageAttachmentFlags(files: Array<{ mime: string; path: str
     .map((item) => normalizeContainerPath(String(item?.path ?? '').trim()))
     .filter((item) => item && item !== '/');
   if (paths.length === 0) return '';
-  return paths.map((filePath) => ` --image ${bashQuote(filePath)}`).join('');
+  // Codex CLI treats `--image <FILE>...` as variadic, so terminate options before
+  // the positional prompt/session args that the caller appends after these flags.
+  return `${paths.map((filePath) => ` --image ${bashQuote(filePath)}`).join('')} --`;
 }
 
 export function buildChatAttachmentsDirectory(opts: {
