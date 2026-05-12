@@ -106,7 +106,7 @@ describe('codexImageAttachmentFlags', () => {
       },
     ]);
 
-    expect(flags).toBe(" --image '/work/repo/.drone-hub/attachments/default/prompt-123/screenshot one.png'");
+    expect(flags).toBe(" --image '/work/repo/.drone-hub/attachments/default/prompt-123/screenshot one.png' --");
   });
 });
 
