@@ -149,21 +149,11 @@ describe('drone pending prompt store', () => {
 
     const keptRecent = pendingPromptStore.pruneCompletedPendingPrompts(
       pendingPromptStore.pendingPromptsFromChatEntry({
-        pendingPrompts: [
-          {
-            id: 'done-1',
-            at: '2026-03-26T09:00:00.000Z',
-            prompt: 'done',
-            state: 'sent',
-            codexEmptyResponseRetries: 2,
-            updatedAt: '2026-03-26T09:01:00.000Z',
-          },
-        ],
+        pendingPrompts: [{ id: 'done-1', at: '2026-03-26T09:00:00.000Z', prompt: 'done', state: 'sent', updatedAt: '2026-03-26T09:01:00.000Z' }],
       }),
       [{ id: 'done-1', completedAt: '2026-03-26T09:01:30.000Z' }],
       { keepRecentlyCompleted: true, nowMs: Date.parse('2026-03-26T09:02:00.000Z') },
     );
     expect(keptRecent.map((item) => item.id)).toEqual(['done-1']);
-    expect(keptRecent[0]?.codexEmptyResponseRetries).toBe(2);
   });
 });

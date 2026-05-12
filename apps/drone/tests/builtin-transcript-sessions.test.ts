@@ -51,6 +51,27 @@ describe('parseCodexJsonl', () => {
       message: 'Final answer.',
     });
   });
+
+  test('parses root-level Codex agent message events', () => {
+    expect(parseCodexJsonl('{"type":"agent_message","text":"Root event answer."}')).toEqual({
+      threadId: null,
+      message: 'Root event answer.',
+    });
+  });
+
+  test('parses message items with output text even when role is omitted', () => {
+    expect(
+      parseCodexJsonl(
+        [
+          '{"type":"item.completed","item":{"id":"msg_2","type":"message","content":[{"type":"output_text","text":"Output without role."}]}}',
+          '{"type":"item.completed","item":{"id":"user_1","type":"message","content":[{"type":"input_text","text":"Do not treat input as output."}]}}',
+        ].join('\n'),
+      ),
+    ).toEqual({
+      threadId: null,
+      message: 'Output without role.',
+    });
+  });
 });
 
 describe('formatTranscriptJobFailure', () => {

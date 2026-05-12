@@ -7825,53 +7825,6 @@ function chatHasReconcilablePendingPrompts(entry: any): boolean {
   return false;
 }
 
-function codexEmptyResponseRetryLimit(): number {
-  const raw = String(process.env.DRONE_HUB_CODEX_EMPTY_RESPONSE_RETRIES ?? '').trim();
-  if (!raw) return 3;
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return 3;
-  return Math.max(0, Math.min(5, Math.floor(n)));
-}
-
-function normalizeCodexEmptyResponseRetries(raw: unknown): number {
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
-}
-
-function retryPromptIdForEmptyCodexResponse(idRaw: string, attempt: number): string {
-  const base = String(idRaw ?? '')
-    .trim()
-    .replace(/[^A-Za-z0-9._-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 72) || 'prompt';
-  const suffix = `-retry${Math.max(1, Math.floor(attempt))}-${crypto.randomBytes(3).toString('hex')}`;
-  return `${base.slice(0, Math.max(1, 96 - suffix.length))}${suffix}`;
-}
-
-async function retryEmptyCodexResponsePrompt(opts: {
-  droneId: string;
-  chatName: string;
-  pending: any;
-  attachmentRefs: ChatImageAttachmentRef[];
-  attempt: number;
-}): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
-  const retryId = retryPromptIdForEmptyCodexResponse(String(opts.pending?.id ?? ''), opts.attempt);
-  try {
-    await sendPromptToChat({
-      id: retryId,
-      droneId: opts.droneId,
-      chatName: opts.chatName,
-      prompt: String(opts.pending?.prompt ?? ''),
-      attachmentRefs: opts.attachmentRefs,
-      cwd: typeof opts.pending?.cwd === 'string' || opts.pending?.cwd === null ? opts.pending.cwd : null,
-    });
-    return { ok: true, id: retryId };
-  } catch (e: any) {
-    return { ok: false, error: String(e?.message ?? e ?? 'failed to retry empty Codex response') };
-  }
-}
-
 async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string }): Promise<void> {
   const regAny: any = await loadRegistry();
   const droneId = normalizeDroneIdentity(opts.droneId);
@@ -8015,52 +7968,14 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
         const msg = parsed.message;
         const output = String(msg ?? '').trimEnd();
         if (!output) {
-          const retryLimit = codexEmptyResponseRetryLimit();
-          const retryCount = normalizeCodexEmptyResponseRetries((p as any)?.codexEmptyResponseRetries);
-          const emptyResponseError = formatTranscriptJobFailure({
+          const error = formatTranscriptJobFailure({
             agentId: 'codex',
             stdoutRaw: stdout,
             stderrRaw: stderr,
             fallbackRaw: 'codex finished but no message was parsed',
             exitCode: 0,
           });
-          if (retryCount < retryLimit) {
-            const nextAttempt = retryCount + 1;
-            const retry = await retryEmptyCodexResponsePrompt({
-              droneId,
-              chatName,
-              pending: p,
-              attachmentRefs: promptAttachments,
-              attempt: nextAttempt,
-            });
-            if (retry.ok) {
-              pendingList[i] = {
-                ...p,
-                id: retry.id,
-                state: 'sent',
-                error: `Codex returned an empty response; retrying (${nextAttempt}/${retryLimit}).`,
-                codexEmptyResponseRetries: nextAttempt,
-                updatedAt: nowIso(),
-              };
-            } else {
-              pendingList[i] = {
-                ...p,
-                state: 'failed',
-                error: `${emptyResponseError}; retry failed: ${retry.error}`,
-                codexEmptyResponseRetries: retryCount,
-                updatedAt: nowIso(),
-              };
-            }
-          } else {
-            const attemptText = retryLimit > 0 ? ` after ${retryLimit} ${retryLimit === 1 ? 'retry' : 'retries'}` : '';
-            pendingList[i] = {
-              ...p,
-              state: 'failed',
-              error: `${emptyResponseError}${attemptText}`,
-              codexEmptyResponseRetries: retryCount,
-              updatedAt: nowIso(),
-            };
-          }
+          pendingList[i] = { ...p, state: 'failed', error, updatedAt: nowIso() };
           changed = true;
           continue;
         }
