@@ -9,6 +9,7 @@ import {
   resolveEffectiveProviderApiKeySettings,
   type LlmProviderId,
 } from './hub-settings';
+import { defaultHubLlmModelId, resolveHubLlmRuntime } from './llm-runtime';
 import {
   deleteAssistantArtifactsForThread,
   listAssistantArtifactFiles,
@@ -124,7 +125,19 @@ type StoredAssistantState = {
   chatIdleSubscriptions?: AssistantChatIdleSubscription[];
   systemPrompt?: string;
   systemPromptUpdatedAt?: string;
+  overviewPrompt?: string;
+  overviewPromptUpdatedAt?: string;
   updatedAt?: string;
+};
+
+type AssistantThreadOverviewCacheEntry = {
+  inputText: string;
+  inputFingerprint: string;
+  promptFingerprint: string;
+  markdown: string;
+  generatedAt: string;
+  provider: LlmProviderId;
+  model: string;
 };
 
 type AssistantRuntime = {
@@ -446,10 +459,36 @@ export type AssistantSystemPromptSettings = {
   };
 };
 
+export type AssistantOverviewPromptSettings = {
+  ok: true;
+  assistantOverviewPrompt: {
+    prompt: string;
+    promptSource: 'settings' | 'default';
+    updatedAt: string | null;
+    defaultPrompt: string;
+    maxPromptChars: number;
+  };
+};
+
+export type AssistantThreadOverviewResult = {
+  ok: true;
+  threadId: string;
+  markdown: string;
+  generatedAt: string;
+  inputFingerprint: string;
+  promptFingerprint: string;
+  provider: LlmProviderId;
+  model: string;
+  cached: boolean;
+  inputReused: boolean;
+};
+
 const ASSISTANT_THREAD_MESSAGE_LIMIT = 80;
 const ASSISTANT_REGISTRY_MAX_THREADS = 24;
 const ASSISTANT_STATE_FILE_NAME = 'assistant.json';
 const ASSISTANT_SYSTEM_PROMPT_MAX_CHARS = 20_000;
+const ASSISTANT_OVERVIEW_PROMPT_MAX_CHARS = 20_000;
+const ASSISTANT_OVERVIEW_INPUT_MAX_CHARS = 48_000;
 const CHAT_MESSAGE_DEFAULT_LIMIT = 10;
 const CHAT_MESSAGE_MAX_LIMIT = 50;
 const CHAT_MESSAGE_RESPONSE_MAX_BYTES = 500_000;
@@ -492,6 +531,13 @@ const ASSISTANT_SYSTEM_PROMPT_DEFAULT = [
   'When creating a drone, omit fields you want inherited from the current open drone. Only set repoBranchSource=remote when the user asked for a remote branch and you have a remoteBranch value.',
   'Do not claim a drone completed work unless the drone transcript or user says so.',
   'Keep responses practical and short.',
+].join('\n');
+const ASSISTANT_OVERVIEW_PROMPT_DEFAULT = [
+  'You write a concise Markdown status overview for an assistant thread in Drone Hub.',
+  'Focus on the current state of the work, recent actions, tool calls, approvals, blockers, and next likely step.',
+  'Do not invent facts. If the thread does not show a result yet, say that it is still in progress or unknown.',
+  'Prefer compact sections and bullets. Keep it useful at a glance.',
+  'Use present tense for current work and past tense for completed actions.',
 ].join('\n');
 let assistantStateWriteQueue: Promise<void> = Promise.resolve();
 const ASSISTANT_MODEL_OPTIONS: Array<{
@@ -890,6 +936,66 @@ function normalizeAssistantSystemPrompt(raw: unknown): string {
   return text.length > ASSISTANT_SYSTEM_PROMPT_MAX_CHARS
     ? text.slice(0, ASSISTANT_SYSTEM_PROMPT_MAX_CHARS).trim()
     : text;
+}
+
+function normalizeAssistantOverviewPrompt(raw: unknown): string {
+  const text = typeof raw === 'string' ? raw.trim() : '';
+  if (!text) return '';
+  return text.length > ASSISTANT_OVERVIEW_PROMPT_MAX_CHARS
+    ? text.slice(0, ASSISTANT_OVERVIEW_PROMPT_MAX_CHARS).trim()
+    : text;
+}
+
+function assistantTextFingerprint(text: string): string {
+  return crypto.createHash('sha256').update(text).digest('hex');
+}
+
+function clipAssistantOverviewText(raw: unknown, maxChars: number): string {
+  const text = String(raw ?? '').trim();
+  if (!text) return '';
+  return text.length > maxChars ? `${text.slice(0, maxChars).trimEnd()}...` : text;
+}
+
+function assistantOverviewContentText(message: any): string {
+  const content = message?.content;
+  if (typeof content === 'string') return clipAssistantOverviewText(content, 5000);
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((part: any) => {
+      if (!part || typeof part !== 'object') return '';
+      if (part.type === 'text') return clipAssistantOverviewText(part.text, 5000);
+      if (part.type === 'thinking') return `[thinking] ${clipAssistantOverviewText(part.thinking ?? part.text, 1200)}`;
+      if (part.type === 'toolCall') {
+        const name = cleanOptionalString(part.name) || 'tool';
+        const id = cleanOptionalString(part.id);
+        const args = clipAssistantOverviewText(JSON.stringify(part.arguments ?? {}, null, 2), 2400);
+        return [`[tool call] ${name}${id ? ` (${id})` : ''}`, args].filter(Boolean).join('\n');
+      }
+      return '';
+    })
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+function assistantOverviewMessageText(message: any, index: number): string {
+  const role = cleanOptionalString(message?.role) || 'message';
+  const at = typeof message?.timestamp === 'number' ? new Date(message.timestamp).toISOString() : cleanOptionalString(message?.at);
+  const toolName = cleanOptionalString(message?.toolName);
+  const toolCallId = cleanOptionalString(message?.toolCallId);
+  const isError = message?.isError ? 'yes' : 'no';
+  const body = assistantOverviewContentText(message) || '(no text content)';
+  return [
+    `## Message ${index + 1}`,
+    `Role: ${role}`,
+    at ? `At: ${at}` : null,
+    toolName ? `Tool: ${toolName}` : null,
+    toolCallId ? `Tool call id: ${toolCallId}` : null,
+    message?.isError != null ? `Error: ${isError}` : null,
+    '',
+    body,
+  ]
+    .filter((line): line is string => typeof line === 'string')
+    .join('\n');
 }
 
 function clampChatIdleTimeoutMs(raw: unknown): number {
@@ -1406,8 +1512,11 @@ function serializeState(input: {
   chatIdleSubscriptions: AssistantChatIdleSubscription[];
   systemPrompt: string;
   systemPromptUpdatedAt: string | null;
+  overviewPrompt: string;
+  overviewPromptUpdatedAt: string | null;
 }): StoredAssistantState {
   const systemPrompt = normalizeAssistantSystemPrompt(input.systemPrompt) || ASSISTANT_SYSTEM_PROMPT_DEFAULT;
+  const overviewPrompt = normalizeAssistantOverviewPrompt(input.overviewPrompt) || ASSISTANT_OVERVIEW_PROMPT_DEFAULT;
   const chatIdleSubscriptions = input.chatIdleSubscriptions
     .slice(-CHAT_IDLE_MAX_SUBSCRIPTIONS)
     .map(sanitizeChatIdleSubscription);
@@ -1419,6 +1528,12 @@ function serializeState(input: {
       ? {
           systemPrompt,
           systemPromptUpdatedAt: input.systemPromptUpdatedAt ?? nowIso(),
+        }
+      : {}),
+    ...(overviewPrompt !== ASSISTANT_OVERVIEW_PROMPT_DEFAULT
+      ? {
+          overviewPrompt,
+          overviewPromptUpdatedAt: input.overviewPromptUpdatedAt ?? nowIso(),
         }
       : {}),
     updatedAt: nowIso(),
@@ -1480,6 +1595,10 @@ export class HubAssistantService {
   private chatIdleSubscriptionCheck: Promise<void> | null = null;
   private defaultSystemPrompt = ASSISTANT_SYSTEM_PROMPT_DEFAULT;
   private defaultSystemPromptUpdatedAt: string | null = null;
+  private defaultOverviewPrompt = ASSISTANT_OVERVIEW_PROMPT_DEFAULT;
+  private defaultOverviewPromptUpdatedAt: string | null = null;
+  private overviewCache = new Map<string, AssistantThreadOverviewCacheEntry>();
+  private overviewInFlight = new Map<string, Promise<AssistantThreadOverviewResult>>();
   private appContext: AssistantAppContext = {
     activeDroneId: null,
     activeDroneName: null,
@@ -1953,6 +2072,123 @@ export class HubAssistantService {
     return this.systemPromptSettingsSync();
   }
 
+  async overviewPromptSettings(): Promise<AssistantOverviewPromptSettings> {
+    await this.ensureLoaded();
+    return this.overviewPromptSettingsSync();
+  }
+
+  async updateOverviewPrompt(input: { prompt?: unknown }): Promise<AssistantOverviewPromptSettings> {
+    await this.ensureLoaded();
+    const prompt = normalizeAssistantOverviewPrompt(input.prompt);
+    if (!prompt) throw new Error('missing overview prompt');
+    this.defaultOverviewPrompt = prompt;
+    this.defaultOverviewPromptUpdatedAt = prompt === ASSISTANT_OVERVIEW_PROMPT_DEFAULT ? null : nowIso();
+    await this.persist();
+    return this.overviewPromptSettingsSync();
+  }
+
+  async generateThreadOverview(
+    threadId: string,
+    input?: { force?: unknown; reuseLastInput?: unknown },
+  ): Promise<AssistantThreadOverviewResult> {
+    await this.ensureLoaded();
+    const thread = this.getThread(threadId);
+    const prompt = normalizeAssistantOverviewPrompt(this.defaultOverviewPrompt) || ASSISTANT_OVERVIEW_PROMPT_DEFAULT;
+    const promptFingerprint = assistantTextFingerprint(prompt);
+    const prior = this.overviewCache.get(thread.id) ?? null;
+    const reuseLastInput = input?.reuseLastInput === true || String(input?.reuseLastInput ?? '').trim() === '1';
+    const inputText = reuseLastInput ? prior?.inputText : this.buildOverviewInput(thread);
+    if (!inputText) throw new Error(reuseLastInput ? 'no previous overview input is available' : 'assistant thread has no overview input');
+    const inputFingerprint = assistantTextFingerprint(inputText);
+    const force = input?.force === true || String(input?.force ?? '').trim() === '1';
+    const cached =
+      prior &&
+      !force &&
+      !reuseLastInput &&
+      prior.inputFingerprint === inputFingerprint &&
+      prior.promptFingerprint === promptFingerprint;
+    if (cached) {
+      return {
+        ok: true,
+        threadId: thread.id,
+        markdown: prior.markdown,
+        generatedAt: prior.generatedAt,
+        inputFingerprint: prior.inputFingerprint,
+        promptFingerprint: prior.promptFingerprint,
+        provider: prior.provider,
+        model: prior.model,
+        cached: true,
+        inputReused: false,
+      };
+    }
+
+    const inFlightKey = `${thread.id}\u0000${inputFingerprint}\u0000${promptFingerprint}`;
+    if (!force) {
+      const inFlight = this.overviewInFlight.get(inFlightKey);
+      if (inFlight) return await inFlight;
+    }
+
+    const generated = (async (): Promise<AssistantThreadOverviewResult> => {
+      const provider = await defaultAssistantProvider();
+      const providerSettings = await resolveEffectiveProviderApiKeySettings(provider);
+      if (!providerSettings.apiKey) throw new Error(`Missing ${providerDisplayName(provider)} API key. Configure it in Settings.`);
+      const runtime = await resolveHubLlmRuntime({ provider, apiKey: providerSettings.apiKey });
+      const modelId = String(process.env.DRONE_HUB_ASSISTANT_OVERVIEW_MODEL ?? '').trim() || defaultHubLlmModelId(provider, 'small');
+      const schema = runtime.z.object({
+        markdown: runtime.z.string().min(1).describe('A concise Markdown overview of the assistant thread state.'),
+      });
+      const requestPrompt = [
+        'Overview instructions:',
+        prompt,
+        '',
+        'Assistant thread input:',
+        inputText,
+        '',
+        'Return Markdown only in the markdown field.',
+      ].join('\n');
+
+      const { object } = await runtime.generateObject({
+        model: runtime.modelFactory(modelId),
+        schema,
+        system: 'You summarize assistant thread state for a developer operations UI. Return only the requested structured output.',
+        prompt: requestPrompt,
+        temperature: 0.2,
+        maxRetries: 2,
+      });
+      const markdown = clipAssistantOverviewText((object as any)?.markdown, 12_000);
+      if (!markdown) throw new Error('overview generation returned empty markdown');
+      const next: AssistantThreadOverviewCacheEntry = {
+        inputText,
+        inputFingerprint,
+        promptFingerprint,
+        markdown,
+        generatedAt: nowIso(),
+        provider,
+        model: modelId,
+      };
+      this.overviewCache.set(thread.id, next);
+      return {
+        ok: true,
+        threadId: thread.id,
+        markdown: next.markdown,
+        generatedAt: next.generatedAt,
+        inputFingerprint: next.inputFingerprint,
+        promptFingerprint: next.promptFingerprint,
+        provider: next.provider,
+        model: next.model,
+        cached: false,
+        inputReused: reuseLastInput,
+      };
+    })();
+
+    if (!force) this.overviewInFlight.set(inFlightKey, generated);
+    try {
+      return await generated;
+    } finally {
+      if (this.overviewInFlight.get(inFlightKey) === generated) this.overviewInFlight.delete(inFlightKey);
+    }
+  }
+
   async updateThread(threadId: string, patch: { title?: unknown; model?: unknown; provider?: unknown; thinkingLevel?: unknown; autoApprove?: unknown; promptDeliveryMode?: unknown }): Promise<AssistantSnapshot> {
     await this.ensureLoaded();
     const thread = this.getThread(threadId);
@@ -1980,6 +2216,10 @@ export class HubAssistantService {
     this.activeAgents.delete(threadId);
     this.queuePumpPromises.delete(threadId);
     this.streamingMessages.delete(threadId);
+    this.overviewCache.delete(threadId);
+    for (const key of [...this.overviewInFlight.keys()]) {
+      if (key.startsWith(`${threadId}\u0000`)) this.overviewInFlight.delete(key);
+    }
     this.chatIdleSubscriptions = this.chatIdleSubscriptions.filter((subscription) => subscription.threadId !== threadId);
     await deleteAssistantArtifactsForThread(threadId);
     this.threads = this.threads.filter((thread) => thread.id !== threadId);
@@ -2350,10 +2590,16 @@ export class HubAssistantService {
     if (this.loaded) return;
     const stored = await readAssistantStateFile() ?? undefined;
     const storedSystemPrompt = normalizeAssistantSystemPrompt(stored?.systemPrompt);
+    const storedOverviewPrompt = normalizeAssistantOverviewPrompt(stored?.overviewPrompt);
     this.defaultSystemPrompt = storedSystemPrompt || ASSISTANT_SYSTEM_PROMPT_DEFAULT;
     this.defaultSystemPromptUpdatedAt =
       storedSystemPrompt && typeof stored?.systemPromptUpdatedAt === 'string' && stored.systemPromptUpdatedAt.trim()
         ? stored.systemPromptUpdatedAt.trim()
+        : null;
+    this.defaultOverviewPrompt = storedOverviewPrompt || ASSISTANT_OVERVIEW_PROMPT_DEFAULT;
+    this.defaultOverviewPromptUpdatedAt =
+      storedOverviewPrompt && typeof stored?.overviewPromptUpdatedAt === 'string' && stored.overviewPromptUpdatedAt.trim()
+        ? stored.overviewPromptUpdatedAt.trim()
         : null;
     const storedThreads = Array.isArray(stored?.threads) ? stored.threads : [];
     const storedFallbackProvider = normalizeProvider(storedThreads.find((thread: any) => thread && typeof thread === 'object')?.provider);
@@ -2427,6 +2673,8 @@ export class HubAssistantService {
       chatIdleSubscriptions: this.chatIdleSubscriptions,
       systemPrompt: this.defaultSystemPrompt,
       systemPromptUpdatedAt: this.defaultSystemPromptUpdatedAt,
+      overviewPrompt: this.defaultOverviewPrompt,
+      overviewPromptUpdatedAt: this.defaultOverviewPromptUpdatedAt,
     });
     await enqueueWriteAssistantStateFile(state);
   }
@@ -3147,6 +3395,64 @@ export class HubAssistantService {
     }));
   }
 
+  private buildOverviewInput(thread: AssistantThread): string {
+    const streamingMessage = this.activeThreadId === thread.id ? this.streamingMessages.get(thread.id) : null;
+    const messages = streamingMessage ? [...thread.messages, sanitizeMessage(streamingMessage)] : thread.messages;
+    const approvals = this.pendingApprovals().filter((approval) => approval.threadId === thread.id && approval.status === 'pending');
+    const queuedPrompts = Array.isArray(thread.queuedPrompts) ? thread.queuedPrompts : [];
+    const runningModel = this.runningModels.get(thread.id) ?? null;
+    const activeSubscriptions = this.activeChatIdleSubscriptions(thread.id);
+    const accessScope = thread.accessScope ?? makeAssistantAccessScope();
+
+    const header = [
+      `# Assistant Thread`,
+      `Thread id: ${thread.id}`,
+      `Title: ${thread.title}`,
+      `Status: ${thread.status}`,
+      thread.error ? `Error: ${thread.error}` : null,
+      `Updated at: ${thread.updatedAt}`,
+      `Model: ${thread.provider}/${thread.model} (${thread.thinkingLevel})`,
+      runningModel ? `Running model: ${runningModel.provider}/${runningModel.model} (${runningModel.thinkingLevel}), started ${runningModel.startedAt}` : null,
+      `Access: read=${accessScope.readMode}${accessScope.droneIds.length ? ` (${accessScope.droneIds.join(', ')})` : ''}; write=${accessScope.writeMode}${accessScope.droneIds.length ? ` (${accessScope.droneIds.join(', ')})` : ''}`,
+      queuedPrompts.length > 0
+        ? `Queued prompts:\n${queuedPrompts
+            .map((prompt, index) => `${index + 1}. ${clipAssistantOverviewText(prompt.prompt, 700)} (${prompt.deliveryMode ?? 'queue'}, ${prompt.createdAt})`)
+            .join('\n')}`
+        : `Queued prompts: none`,
+      approvals.length > 0
+        ? `Pending approvals:\n${approvals
+            .map((approval, index) => `${index + 1}. ${approval.label || approval.toolName} (${approval.toolName}, ${approval.createdAt})`)
+            .join('\n')}`
+        : `Pending approvals: none`,
+      activeSubscriptions.length > 0
+        ? `Waiting for chats idle:\n${activeSubscriptions
+            .map((subscription, index) => `${index + 1}. ${subscription.targets.map((target) => `${target.droneId}/${target.chatName}`).join(', ')}`)
+            .join('\n')}`
+        : `Waiting for chats idle: no`,
+      '',
+      'Messages below are chronological. Older messages may be omitted to fit the input budget; the latest messages are retained.',
+    ]
+      .filter((line): line is string => typeof line === 'string')
+      .join('\n');
+
+    const budget = Math.max(4000, ASSISTANT_OVERVIEW_INPUT_MAX_CHARS - header.length - 2);
+    const blocks = messages.map((message, index) => assistantOverviewMessageText(message, index));
+    const selected: string[] = [];
+    let used = 0;
+    for (let i = blocks.length - 1; i >= 0; i -= 1) {
+      const block = blocks[i];
+      const nextUsed = used + block.length + (selected.length > 0 ? 2 : 0);
+      if (nextUsed > budget && selected.length > 0) break;
+      if (nextUsed > budget) {
+        selected.unshift(clipAssistantOverviewText(block, budget));
+        break;
+      }
+      selected.unshift(block);
+      used = nextUsed;
+    }
+    return [header, selected.length > 0 ? selected.join('\n\n') : '(no messages yet)'].join('\n\n');
+  }
+
   private systemPromptSettingsSync(): AssistantSystemPromptSettings {
     const prompt = normalizeAssistantSystemPrompt(this.defaultSystemPrompt) || ASSISTANT_SYSTEM_PROMPT_DEFAULT;
     return {
@@ -3158,6 +3464,20 @@ export class HubAssistantService {
         defaultPrompt: ASSISTANT_SYSTEM_PROMPT_DEFAULT,
         maxPromptChars: ASSISTANT_SYSTEM_PROMPT_MAX_CHARS,
         runtimeAppendix: ASSISTANT_SYSTEM_PROMPT_RUNTIME_APPENDIX,
+      },
+    };
+  }
+
+  private overviewPromptSettingsSync(): AssistantOverviewPromptSettings {
+    const prompt = normalizeAssistantOverviewPrompt(this.defaultOverviewPrompt) || ASSISTANT_OVERVIEW_PROMPT_DEFAULT;
+    return {
+      ok: true,
+      assistantOverviewPrompt: {
+        prompt,
+        promptSource: prompt === ASSISTANT_OVERVIEW_PROMPT_DEFAULT ? 'default' : 'settings',
+        updatedAt: prompt === ASSISTANT_OVERVIEW_PROMPT_DEFAULT ? null : this.defaultOverviewPromptUpdatedAt,
+        defaultPrompt: ASSISTANT_OVERVIEW_PROMPT_DEFAULT,
+        maxPromptChars: ASSISTANT_OVERVIEW_PROMPT_MAX_CHARS,
       },
     };
   }

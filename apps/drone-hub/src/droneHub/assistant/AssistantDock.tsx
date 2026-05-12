@@ -3,17 +3,26 @@ import { useDndMonitor, useDroppable } from '@dnd-kit/core';
 import { requestJson } from '../http';
 import { MarkdownMessage } from '../chat/MarkdownMessage';
 import { parseDroneHubDragData } from '../app/drone-hub-dnd';
-import { IconChatThread, IconPencil, IconPlus, IconSidebarCollapse, IconSidebarExpand, IconTrash } from '../app/icons';
+import { IconChatThread, IconEye, IconList, IconPencil, IconPlus, IconSidebarCollapse, IconSidebarExpand, IconSpinner, IconTrash } from '../app/icons';
 import { useDroneHubUiStore } from '../app/use-drone-hub-ui-store';
 import { UiMenuSelect, type UiMenuSelectEntry } from '../../ui/menuSelect';
 import { IconFile, iconForFilePath } from '../icons';
 
 const ASSISTANT_THREAD_SIDEBAR_OPEN_STORAGE_KEY = 'droneHub.assistant.threadSidebarOpen';
 const ASSISTANT_FILES_OPEN_STORAGE_KEY = 'droneHub.assistant.filesOpen';
+const ASSISTANT_OVERVIEW_AUTO_STORAGE_KEY = 'droneHub.assistant.overviewAuto';
+const ASSISTANT_OVERVIEW_INTERVAL_STORAGE_KEY = 'droneHub.assistant.overviewIntervalMs';
 const TOOL_ROW_MESSAGE_PREVIEW_MAX = 72;
 const TOOL_ROW_TARGET_PREVIEW_MAX = 3;
 /** Distance from bottom (px) below which we treat the assistant transcript as "pinned" for auto-scroll. */
 const ASSISTANT_SCROLL_BOTTOM_THRESHOLD_PX = 48;
+const ASSISTANT_OVERVIEW_INTERVAL_OPTIONS = [
+  { value: '10000', label: '10s' },
+  { value: '30000', label: '30s' },
+  { value: '60000', label: '1m' },
+  { value: '120000', label: '2m' },
+  { value: '300000', label: '5m' },
+];
 
 type AssistantThreadStatus = 'idle' | 'running' | 'waiting_for_approval' | 'waiting_for_chats_idle' | 'error';
 
@@ -119,6 +128,30 @@ type AssistantSystemPromptSettings = {
   };
 };
 
+type AssistantOverviewPromptSettings = {
+  ok: true;
+  assistantOverviewPrompt: {
+    prompt: string;
+    promptSource: 'settings' | 'default';
+    updatedAt: string | null;
+    defaultPrompt: string;
+    maxPromptChars: number;
+  };
+};
+
+type AssistantThreadOverviewResult = {
+  ok: true;
+  threadId: string;
+  markdown: string;
+  generatedAt: string;
+  inputFingerprint: string;
+  promptFingerprint: string;
+  provider: AssistantProviderId;
+  model: string;
+  cached: boolean;
+  inputReused: boolean;
+};
+
 type AssistantArtifactSummary = {
   path: string;
   size: number;
@@ -147,6 +180,21 @@ function readInitialThreadSidebarOpen(): boolean {
 function readInitialFilesOpen(): boolean {
   if (typeof window === 'undefined') return false;
   return window.localStorage.getItem(ASSISTANT_FILES_OPEN_STORAGE_KEY) === '1';
+}
+
+function readInitialOverviewAutoEnabled(): boolean {
+  if (typeof window === 'undefined') return false;
+  return window.localStorage.getItem(ASSISTANT_OVERVIEW_AUTO_STORAGE_KEY) === '1';
+}
+
+function normalizeOverviewIntervalMs(raw: unknown): number {
+  const value = String(raw ?? '').trim();
+  return ASSISTANT_OVERVIEW_INTERVAL_OPTIONS.some((option) => option.value === value) ? Number(value) : 30_000;
+}
+
+function readInitialOverviewIntervalMs(): number {
+  if (typeof window === 'undefined') return 30_000;
+  return normalizeOverviewIntervalMs(window.localStorage.getItem(ASSISTANT_OVERVIEW_INTERVAL_STORAGE_KEY));
 }
 
 function assistantScopeSyncKey(readMode: AssistantScopeMode, writeMode: AssistantScopeMode, droneIds: string[]): string {
@@ -1510,6 +1558,202 @@ function AssistantSystemPromptModal({
   );
 }
 
+function AssistantOverviewPromptModal({
+  settings,
+  draft,
+  loading,
+  saving,
+  error,
+  notice,
+  onDraftChange,
+  onUseDefault,
+  onClose,
+  onSave,
+}: {
+  settings: AssistantOverviewPromptSettings | null;
+  draft: string;
+  loading: boolean;
+  saving: boolean;
+  error: string | null;
+  notice: string | null;
+  onDraftChange: (value: string) => void;
+  onUseDefault: () => void;
+  onClose: () => void;
+  onSave: () => void;
+}) {
+  const currentPrompt = settings?.assistantOverviewPrompt.prompt ?? '';
+  const maxChars = settings?.assistantOverviewPrompt.maxPromptChars ?? 20_000;
+  const dirty = draft !== currentPrompt;
+  const saveDisabled = loading || saving || !dirty || !draft.trim();
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 px-3 py-4">
+      <div className="flex max-h-[min(720px,calc(100vh-2rem))] w-[min(820px,calc(100vw-1.5rem))] flex-col overflow-hidden rounded border border-[var(--border)] bg-[var(--panel-alt)] shadow-[0_24px_80px_rgba(0,0,0,.55)]">
+        <div className="flex flex-shrink-0 items-center justify-between border-b border-[var(--border)] px-4 py-3">
+          <div className="min-w-0">
+            <div className="text-[13px] font-semibold text-[var(--fg)]" style={{ fontFamily: 'var(--display)' }}>
+              Assistant overview prompt
+            </div>
+            <div className="mt-1 text-[11px] text-[var(--muted-dim)]">
+              Saved changes apply globally to assistant overview generation.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="h-8 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]"
+            style={{ fontFamily: 'var(--display)' }}
+          >
+            Close
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+          {error ? (
+            <div className="mb-3 rounded border border-[rgba(255,90,90,.35)] bg-[rgba(255,90,90,.08)] px-3 py-2 text-[11px] text-[var(--red)]">
+              {error}
+            </div>
+          ) : null}
+          {notice ? (
+            <div className="mb-3 rounded border border-[rgba(52,211,153,.2)] bg-[rgba(16,185,129,.08)] px-3 py-2 text-[11px] text-[#34d399]">
+              {notice}
+            </div>
+          ) : null}
+          <label className="flex min-h-0 flex-col gap-2">
+            <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]">Prompt</span>
+            <textarea
+              value={draft}
+              onChange={(event) => onDraftChange(event.target.value)}
+              disabled={loading || saving}
+              maxLength={maxChars}
+              rows={18}
+              className="min-h-[320px] resize-y rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.18)] px-3 py-2 font-mono text-[12px] leading-relaxed text-[var(--fg)] placeholder:text-[var(--muted-dim)] transition-colors focus:border-[var(--accent-muted)] focus:outline-none disabled:opacity-50"
+              placeholder={loading ? 'Loading overview prompt...' : 'Enter the assistant overview prompt'}
+            />
+          </label>
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[10px] text-[var(--muted-dim)]">
+            <span>
+              Source: {settings?.assistantOverviewPrompt.promptSource === 'settings' ? 'settings' : 'default'}
+            </span>
+            <span>
+              {draft.length.toLocaleString()} / {maxChars.toLocaleString()}
+            </span>
+          </div>
+        </div>
+
+        <div className="flex flex-shrink-0 flex-wrap items-center justify-end gap-2 border-t border-[var(--border)] px-4 py-3">
+          <button
+            type="button"
+            onClick={onUseDefault}
+            disabled={loading || saving}
+            className="h-9 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 text-[11px] font-semibold uppercase tracking-wide text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)] disabled:cursor-not-allowed disabled:opacity-45"
+            style={{ fontFamily: 'var(--display)' }}
+          >
+            Use default
+          </button>
+          <button
+            type="button"
+            onClick={onSave}
+            disabled={saveDisabled}
+            className={`h-9 rounded border px-3 text-[11px] font-semibold uppercase tracking-wide ${
+              saveDisabled
+                ? 'cursor-not-allowed border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)] opacity-45'
+                : 'border-[var(--accent)] bg-[var(--accent)] text-[var(--accent-fg)] hover:brightness-110'
+            }`}
+            style={{ fontFamily: 'var(--display)' }}
+          >
+            {saving ? 'Saving...' : 'Save overview prompt'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AssistantOverviewOverlay({
+  overview,
+  loading,
+  error,
+  autoEnabled,
+  canRerun,
+  onClose,
+  onRerun,
+  onEditPrompt,
+}: {
+  overview: AssistantThreadOverviewResult | null;
+  loading: boolean;
+  error: string | null;
+  autoEnabled: boolean;
+  canRerun: boolean;
+  onClose: () => void;
+  onRerun: () => void;
+  onEditPrompt: () => void;
+}) {
+  const generatedAt = overview?.generatedAt ? formatUpdatedAt(overview.generatedAt) : '';
+  return (
+    <div className="pointer-events-none absolute inset-x-2 top-2 z-20">
+      <section className="pointer-events-auto max-h-[min(440px,calc(100vh-260px))] overflow-hidden rounded border border-[var(--border)] bg-[var(--panel-alt)] shadow-[0_18px_50px_rgba(0,0,0,.45)]">
+        <div className="flex min-h-10 items-center justify-between gap-2 border-b border-[var(--border)] px-3 py-2">
+          <div className="min-w-0">
+            <div className="flex min-w-0 items-center gap-2">
+              <IconList className="h-3.5 w-3.5 flex-shrink-0 text-[var(--accent)]" />
+              <div className="truncate text-[12px] font-semibold text-[var(--fg)]" style={{ fontFamily: 'var(--display)' }}>
+                Thread overview
+              </div>
+              {loading ? <IconSpinner className="h-3.5 w-3.5 flex-shrink-0 text-[var(--muted)]" /> : null}
+            </div>
+            <div className="mt-0.5 truncate text-[10px] text-[var(--muted-dim)]">
+              {generatedAt ? `${overview?.cached ? 'Cached' : overview?.inputReused ? 'Rerun' : 'Generated'} ${generatedAt}` : autoEnabled ? 'Auto overview is on' : 'No overview generated yet'}
+            </div>
+          </div>
+          <div className="flex flex-shrink-0 items-center gap-1.5">
+            <button
+              type="button"
+              onClick={onRerun}
+              disabled={!canRerun || loading}
+              className="h-7 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)] disabled:cursor-not-allowed disabled:opacity-45"
+              style={{ fontFamily: 'var(--display)' }}
+              title="Rerun the overview using the same captured chat input"
+            >
+              Rerun
+            </button>
+            <button
+              type="button"
+              onClick={onEditPrompt}
+              className="flex h-7 w-7 items-center justify-center rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]"
+              title="Edit overview prompt"
+              aria-label="Edit overview prompt"
+            >
+              <IconPencil className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="h-7 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]"
+              style={{ fontFamily: 'var(--display)' }}
+            >
+              Minimize
+            </button>
+          </div>
+        </div>
+        <div className="max-h-[calc(min(440px,calc(100vh-260px))-42px)] overflow-y-auto px-3 py-2">
+          {error ? (
+            <div className="rounded border border-[rgba(255,90,90,.35)] bg-[rgba(255,90,90,.08)] px-3 py-2 text-[11px] text-[var(--red)]">
+              {error}
+            </div>
+          ) : overview?.markdown ? (
+            <MarkdownMessage text={overview.markdown} className="text-[12px] leading-relaxed text-[var(--fg-secondary)]" />
+          ) : loading ? (
+            <div className="py-8 text-center text-[12px] text-[var(--muted)]">Generating overview...</div>
+          ) : (
+            <div className="py-8 text-center text-[12px] text-[var(--muted)]">No overview has been generated for this thread yet.</div>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 export function AssistantDock() {
   const [snapshot, setSnapshot] = React.useState<AssistantSnapshot | null>(null);
   const [loading, setLoading] = React.useState(true);
@@ -1538,6 +1782,19 @@ export function AssistantDock() {
   const [systemPromptSaving, setSystemPromptSaving] = React.useState(false);
   const [systemPromptError, setSystemPromptError] = React.useState<string | null>(null);
   const [systemPromptNotice, setSystemPromptNotice] = React.useState<string | null>(null);
+  const [overviewOpen, setOverviewOpen] = React.useState(false);
+  const [overviewAutoEnabled, setOverviewAutoEnabled] = React.useState(readInitialOverviewAutoEnabled);
+  const [overviewIntervalMs, setOverviewIntervalMs] = React.useState(readInitialOverviewIntervalMs);
+  const [overview, setOverview] = React.useState<AssistantThreadOverviewResult | null>(null);
+  const [overviewLoading, setOverviewLoading] = React.useState(false);
+  const [overviewError, setOverviewError] = React.useState<string | null>(null);
+  const [overviewPromptOpen, setOverviewPromptOpen] = React.useState(false);
+  const [overviewPromptSettings, setOverviewPromptSettings] = React.useState<AssistantOverviewPromptSettings | null>(null);
+  const [overviewPromptDraft, setOverviewPromptDraft] = React.useState('');
+  const [overviewPromptLoading, setOverviewPromptLoading] = React.useState(false);
+  const [overviewPromptSaving, setOverviewPromptSaving] = React.useState(false);
+  const [overviewPromptError, setOverviewPromptError] = React.useState<string | null>(null);
+  const [overviewPromptNotice, setOverviewPromptNotice] = React.useState<string | null>(null);
   const selectedDrone = useDroneHubUiStore((state) => state.selectedDrone);
   const selectedChat = useDroneHubUiStore((state) => state.selectedChat);
   const appView = useDroneHubUiStore((state) => state.appView);
@@ -1655,6 +1912,70 @@ export function AssistantDock() {
     }
   }, [systemPromptDraft]);
 
+  const loadOverviewPromptSettings = React.useCallback(async () => {
+    setOverviewPromptLoading(true);
+    setOverviewPromptError(null);
+    setOverviewPromptNotice(null);
+    try {
+      const data = await requestJson<AssistantOverviewPromptSettings>('/api/assistant/overview-prompt');
+      setOverviewPromptSettings(data);
+      setOverviewPromptDraft(data.assistantOverviewPrompt.prompt);
+    } catch (err: any) {
+      setOverviewPromptError(err?.message ?? String(err));
+    } finally {
+      setOverviewPromptLoading(false);
+    }
+  }, []);
+
+  const openOverviewPromptEditor = React.useCallback(() => {
+    setOverviewPromptOpen(true);
+    void loadOverviewPromptSettings();
+  }, [loadOverviewPromptSettings]);
+
+  const saveOverviewPromptSettings = React.useCallback(async () => {
+    setOverviewPromptSaving(true);
+    setOverviewPromptError(null);
+    setOverviewPromptNotice(null);
+    try {
+      const data = await requestJson<AssistantOverviewPromptSettings>('/api/assistant/overview-prompt', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt: overviewPromptDraft }),
+      });
+      setOverviewPromptSettings(data);
+      setOverviewPromptDraft(data.assistantOverviewPrompt.prompt);
+      setOverviewPromptNotice('Saved. Overview generation will use this prompt.');
+    } catch (err: any) {
+      setOverviewPromptError(err?.message ?? String(err));
+    } finally {
+      setOverviewPromptSaving(false);
+    }
+  }, [overviewPromptDraft]);
+
+  const requestOverview = React.useCallback(
+    async (options: { force?: boolean; reuseLastInput?: boolean; silent?: boolean } = {}) => {
+      const threadId = activeThreadIdRef.current;
+      if (!threadId) return;
+      if (!options.silent) setOverviewLoading(true);
+      setOverviewError(null);
+      try {
+        const data = await requestJson<AssistantThreadOverviewResult>(`/api/assistant/threads/${encodeURIComponent(threadId)}/overview`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ force: Boolean(options.force), reuseLastInput: Boolean(options.reuseLastInput) }),
+        });
+        if (activeThreadIdRef.current !== threadId) return;
+        setOverview(data);
+      } catch (err: any) {
+        if (activeThreadIdRef.current !== threadId) return;
+        setOverviewError(err?.message ?? String(err));
+      } finally {
+        if (!options.silent && activeThreadIdRef.current === threadId) setOverviewLoading(false);
+      }
+    },
+    [],
+  );
+
   React.useEffect(() => {
     void refresh();
   }, [refresh]);
@@ -1697,6 +2018,31 @@ export function AssistantDock() {
     if (typeof window === 'undefined') return;
     window.localStorage.setItem(ASSISTANT_THREAD_SIDEBAR_OPEN_STORAGE_KEY, threadSidebarOpen ? '1' : '0');
   }, [threadSidebarOpen]);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(ASSISTANT_OVERVIEW_AUTO_STORAGE_KEY, overviewAutoEnabled ? '1' : '0');
+  }, [overviewAutoEnabled]);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(ASSISTANT_OVERVIEW_INTERVAL_STORAGE_KEY, String(overviewIntervalMs));
+  }, [overviewIntervalMs]);
+
+  React.useEffect(() => {
+    setOverview(null);
+    setOverviewError(null);
+    setOverviewLoading(false);
+  }, [activeThreadId]);
+
+  React.useEffect(() => {
+    if (!overviewAutoEnabled || !activeThreadId) return;
+    void requestOverview();
+    const timer = window.setInterval(() => {
+      void requestOverview({ silent: true });
+    }, overviewIntervalMs);
+    return () => window.clearInterval(timer);
+  }, [activeThreadId, overviewAutoEnabled, overviewIntervalMs, requestOverview]);
 
   const resolveScopeDroneNames = React.useCallback(async (ids: string[], fallbackLabel?: string): Promise<AssistantScopeDrone[]> => {
     const cleanIds = Array.from(new Set(ids.map((id) => String(id ?? '').trim()).filter(Boolean)));
@@ -2314,7 +2660,8 @@ export function AssistantDock() {
         />
       ) : (
         <>
-      <div ref={scrollRef} className="flex-1 min-h-0 space-y-2 overflow-y-auto py-3">
+      <div className="relative min-h-0 flex-1">
+      <div ref={scrollRef} className="h-full space-y-2 overflow-y-auto py-3">
         {loading && !snapshot ? (
           <div className="px-3 text-[12px] text-[var(--muted)]">Loading assistant...</div>
         ) : visibleItems.length === 0 && !showThinking ? (
@@ -2357,6 +2704,19 @@ export function AssistantDock() {
           />
         ))}
         {error ? <div className="mx-3 rounded border border-[rgba(255,90,90,.35)] bg-[rgba(255,90,90,.08)] px-3 py-2 text-[11px] text-[var(--red)]">{error}</div> : null}
+      </div>
+        {overviewOpen ? (
+          <AssistantOverviewOverlay
+            overview={overview}
+            loading={overviewLoading}
+            error={overviewError}
+            autoEnabled={overviewAutoEnabled}
+            canRerun={Boolean(overview)}
+            onClose={() => setOverviewOpen(false)}
+            onRerun={() => void requestOverview({ force: true, reuseLastInput: true })}
+            onEditPrompt={openOverviewPromptEditor}
+          />
+        ) : null}
       </div>
 
       {assistantChatIdleHold ? (
@@ -2451,6 +2811,67 @@ export function AssistantDock() {
             <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${activeProvider === 'codex' ? 'bg-[var(--green)]' : 'bg-[var(--muted-dim)]'}`} />
             <span className="truncate">{activeProviderMeta.authLabel}</span>
           </div>
+          <div className="ml-auto flex flex-shrink-0 items-center gap-1.5">
+            <UiMenuSelect
+              value={String(overviewIntervalMs)}
+              disabled={!activeThread}
+              onValueChange={(value) => setOverviewIntervalMs(normalizeOverviewIntervalMs(value))}
+              entries={ASSISTANT_OVERVIEW_INTERVAL_OPTIONS.map((option) => ({
+                value: option.value,
+                label: option.label,
+                title: `Refresh overview every ${option.label}`,
+                searchText: option.label,
+              }))}
+              variant="toolbar"
+              role="listbox"
+              itemRole="option"
+              title="Overview refresh interval"
+              triggerLabel={ASSISTANT_OVERVIEW_INTERVAL_OPTIONS.find((option) => option.value === String(overviewIntervalMs))?.label ?? '30s'}
+              triggerClassName="h-7 w-[56px] justify-between border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-2 text-[10px] uppercase tracking-wide text-[var(--muted)] hover:text-[var(--fg-secondary)]"
+              triggerLabelClassName="font-semibold"
+              panelClassName="bottom-full right-0 mb-1.5 w-[120px]"
+              menuClassName="max-h-48 overflow-y-auto"
+              header="Overview"
+            />
+            <button
+              type="button"
+              onClick={() => {
+                const next = !overviewOpen;
+                setOverviewOpen(next);
+                if (next && !overview && !overviewLoading) void requestOverview();
+              }}
+              disabled={!activeThread}
+              aria-pressed={overviewOpen}
+              className={`flex h-7 w-7 items-center justify-center rounded border text-[var(--muted)] hover:text-[var(--fg)] disabled:cursor-not-allowed disabled:opacity-45 ${
+                overviewOpen
+                  ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
+                  : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)]'
+              }`}
+              title={overviewOpen ? 'Hide thread overview' : 'Show thread overview'}
+              aria-label={overviewOpen ? 'Hide thread overview' : 'Show thread overview'}
+            >
+              {overviewLoading ? <IconSpinner className="h-3.5 w-3.5" /> : <IconEye className="h-3.5 w-3.5" />}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                const next = !overviewAutoEnabled;
+                setOverviewAutoEnabled(next);
+                if (next) setOverviewOpen(true);
+              }}
+              disabled={!activeThread}
+              aria-pressed={overviewAutoEnabled}
+              aria-label="Toggle automatic thread overview"
+              title={overviewAutoEnabled ? 'Automatic overview is on' : 'Automatic overview is off'}
+              className={`flex h-7 w-7 items-center justify-center rounded border text-[var(--muted)] hover:text-[var(--fg)] disabled:cursor-not-allowed disabled:opacity-45 ${
+                overviewAutoEnabled
+                  ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
+                  : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)]'
+              }`}
+            >
+              <IconList className="h-3.5 w-3.5" />
+            </button>
+          </div>
         </div>
         <div className="relative rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.03)] focus-within:border-[var(--accent-muted)]">
           <textarea
@@ -2527,6 +2948,20 @@ export function AssistantDock() {
           onUseDefault={() => setSystemPromptDraft(systemPromptSettings?.assistantSystemPrompt.defaultPrompt ?? '')}
           onClose={() => setSystemPromptOpen(false)}
           onSave={() => void saveSystemPromptSettings()}
+        />
+      ) : null}
+      {overviewPromptOpen ? (
+        <AssistantOverviewPromptModal
+          settings={overviewPromptSettings}
+          draft={overviewPromptDraft}
+          loading={overviewPromptLoading}
+          saving={overviewPromptSaving}
+          error={overviewPromptError}
+          notice={overviewPromptNotice}
+          onDraftChange={setOverviewPromptDraft}
+          onUseDefault={() => setOverviewPromptDraft(overviewPromptSettings?.assistantOverviewPrompt.defaultPrompt ?? '')}
+          onClose={() => setOverviewPromptOpen(false)}
+          onSave={() => void saveOverviewPromptSettings()}
         />
       ) : null}
     </div>
