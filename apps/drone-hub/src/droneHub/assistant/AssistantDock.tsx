@@ -1546,6 +1546,7 @@ export function AssistantDock() {
   const playbookRunsOpen = useDroneHubUiStore((state) => state.playbookRunsOpen);
   const selectedGroupMultiChat = useDroneHubUiStore((state) => state.selectedGroupMultiChat);
   const scrollRef = React.useRef<HTMLDivElement | null>(null);
+  const scrollContentRef = React.useRef<HTMLDivElement | null>(null);
   /** When false, new transcript content must not force scroll position (user scrolled up). */
   const assistantStickToBottomRef = React.useRef(true);
   const inputRef = React.useRef<HTMLTextAreaElement | null>(null);
@@ -1558,6 +1559,40 @@ export function AssistantDock() {
     id: 'assistant-drone-scope-drop',
     data: { type: 'assistant-drone-scope-drop' },
   });
+
+  const updateAssistantPinned = React.useCallback((node: HTMLDivElement | null) => {
+    if (!node) return;
+    const gap = node.scrollHeight - node.scrollTop - node.clientHeight;
+    assistantStickToBottomRef.current = gap <= ASSISTANT_SCROLL_BOTTOM_THRESHOLD_PX;
+  }, []);
+
+  const scrollAssistantToBottom = React.useCallback((options: { force?: boolean; retries?: number } = {}) => {
+    const { force = false, retries = 4 } = options;
+    if (force) assistantStickToBottomRef.current = true;
+    let triesRemaining = retries;
+    const attempt = () => {
+      requestAnimationFrame(() => {
+        const node = scrollRef.current;
+        if (!node) {
+          if (triesRemaining > 0) {
+            triesRemaining -= 1;
+            attempt();
+          }
+          return;
+        }
+        if (!force && !assistantStickToBottomRef.current) return;
+        node.scrollTop = node.scrollHeight;
+        updateAssistantPinned(node);
+        if (force) assistantStickToBottomRef.current = true;
+        const gap = node.scrollHeight - node.scrollTop - node.clientHeight;
+        if (gap > 1 && triesRemaining > 0) {
+          triesRemaining -= 1;
+          attempt();
+        }
+      });
+    };
+    attempt();
+  }, [updateAssistantPinned]);
 
   const activeThread = React.useMemo(() => {
     if (!snapshot) return null;
@@ -1843,27 +1878,34 @@ export function AssistantDock() {
     },
   });
 
-  React.useEffect(() => {
-    assistantStickToBottomRef.current = true;
-  }, [activeThreadId]);
+  React.useLayoutEffect(() => {
+    scrollAssistantToBottom({ force: true });
+  }, [activeThreadId, filesOpen, scrollAssistantToBottom]);
 
   React.useEffect(() => {
     const node = scrollRef.current;
     if (!node) return;
-    const onScroll = () => {
-      const gap = node.scrollHeight - node.scrollTop - node.clientHeight;
-      assistantStickToBottomRef.current = gap <= ASSISTANT_SCROLL_BOTTOM_THRESHOLD_PX;
-    };
+    const onScroll = () => updateAssistantPinned(node);
     node.addEventListener('scroll', onScroll, { passive: true });
-    onScroll();
     return () => node.removeEventListener('scroll', onScroll);
-  }, [activeThreadId, loading]);
+  }, [activeThreadId, filesOpen, updateAssistantPinned]);
+
+  React.useEffect(() => {
+    if (!assistantStickToBottomRef.current) return;
+    scrollAssistantToBottom();
+  }, [activePendingApprovals.length, scrollAssistantToBottom, showThinking, snapshot?.streamingMessage, visibleItems]);
 
   React.useEffect(() => {
     const node = scrollRef.current;
-    if (!node || !assistantStickToBottomRef.current) return;
-    node.scrollTop = node.scrollHeight;
-  }, [visibleItems, activePendingApprovals.length, snapshot?.streamingMessage, showThinking]);
+    const content = scrollContentRef.current;
+    if ((!node && !content) || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => {
+      if (assistantStickToBottomRef.current) scrollAssistantToBottom({ retries: 1 });
+    });
+    if (node) observer.observe(node);
+    if (content) observer.observe(content);
+    return () => observer.disconnect();
+  }, [activeThreadId, filesOpen, scrollAssistantToBottom]);
 
   React.useEffect(() => {
     if (running || !refocusInputWhenIdleRef.current) return;
@@ -1946,6 +1988,7 @@ export function AssistantDock() {
     setError(null);
     if (!(await syncScopeToBackend())) return;
     setDraft('');
+    scrollAssistantToBottom({ force: true });
     refocusInputWhenIdleRef.current = true;
     const response = await fetch(`/api/assistant/threads/${encodeURIComponent(activeThread.id)}/prompt`, {
       method: 'POST',
@@ -1969,7 +2012,7 @@ export function AssistantDock() {
     } finally {
       void refresh();
     }
-  }, [activeThread, draft, refresh, syncScopeToBackend]);
+  }, [activeThread, draft, refresh, scrollAssistantToBottom, syncScopeToBackend]);
 
   const stop = React.useCallback(async () => {
     if (!activeThread) return;
@@ -2314,54 +2357,56 @@ export function AssistantDock() {
         />
       ) : (
         <>
-      <div ref={scrollRef} className="flex-1 min-h-0 space-y-2 overflow-y-auto py-3">
-        {loading && !snapshot ? (
-          <div className="px-3 text-[12px] text-[var(--muted)]">Loading assistant...</div>
-        ) : visibleItems.length === 0 && !showThinking ? (
-          <div className="mx-3 rounded border border-dashed border-[var(--border)] px-3 py-5 text-center">
-            <div className="text-[12px] text-[var(--fg-secondary)]">Start a thread to inspect drones or coordinate work.</div>
-            <div className="mt-1 text-[11px] text-[var(--muted-dim)]">Drone messaging will ask for approval first.</div>
+          <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto">
+            <div ref={scrollContentRef} className="space-y-2 py-3">
+              {loading && !snapshot ? (
+                <div className="px-3 text-[12px] text-[var(--muted)]">Loading assistant...</div>
+              ) : visibleItems.length === 0 && !showThinking ? (
+                <div className="mx-3 rounded border border-dashed border-[var(--border)] px-3 py-5 text-center">
+                  <div className="text-[12px] text-[var(--fg-secondary)]">Start a thread to inspect drones or coordinate work.</div>
+                  <div className="mt-1 text-[11px] text-[var(--muted-dim)]">Drone messaging will ask for approval first.</div>
+                </div>
+              ) : (
+                visibleItems.map((item) =>
+                  item.type === 'message' ? (
+                    <AssistantMessageRow
+                      key={item.key}
+                      message={item.message}
+                      showToolCalls={item.showToolCalls}
+                      isStreamingAssistant={
+                        item.message.role === 'assistant' && item.sourceMessageIndex === streamingAssistantSourceIndex
+                      }
+                    />
+                  ) : item.type === 'tool' ? (
+                    <ToolActivityRow key={item.key} call={item.call} result={item.result} droneNameById={droneNameById} />
+                  ) : (
+                    <QueuedPromptRow
+                      key={item.key}
+                      prompt={item.prompt}
+                      modelLabel={modelSelectionLabel({ provider: item.prompt.provider, model: item.prompt.model, thinkingLevel: item.prompt.thinkingLevel }, modelOptions)}
+                      busy={queuedCancelBusyId === item.prompt.id}
+                      onCancel={() => void cancelQueuedPrompt(item.prompt)}
+                    />
+                  ),
+                )
+              )}
+              {showThinking ? <AssistantThinkingRow /> : null}
+              {activePendingApprovals.map((approval) => (
+                <ApprovalCard
+                  key={approval.id}
+                  approval={approval}
+                  busy={approvalBusyId === approval.id}
+                  onApprove={() => void resolveApproval(approval, true)}
+                  onDeny={() => void resolveApproval(approval, false)}
+                />
+              ))}
+              {error ? <div className="mx-3 rounded border border-[rgba(255,90,90,.35)] bg-[rgba(255,90,90,.08)] px-3 py-2 text-[11px] text-[var(--red)]">{error}</div> : null}
+            </div>
           </div>
-        ) : (
-          visibleItems.map((item) =>
-            item.type === 'message' ? (
-              <AssistantMessageRow
-                key={item.key}
-                message={item.message}
-                showToolCalls={item.showToolCalls}
-                isStreamingAssistant={
-                  item.message.role === 'assistant' && item.sourceMessageIndex === streamingAssistantSourceIndex
-                }
-              />
-            ) : item.type === 'tool' ? (
-              <ToolActivityRow key={item.key} call={item.call} result={item.result} droneNameById={droneNameById} />
-            ) : (
-              <QueuedPromptRow
-                key={item.key}
-                prompt={item.prompt}
-                modelLabel={modelSelectionLabel({ provider: item.prompt.provider, model: item.prompt.model, thinkingLevel: item.prompt.thinkingLevel }, modelOptions)}
-                busy={queuedCancelBusyId === item.prompt.id}
-                onCancel={() => void cancelQueuedPrompt(item.prompt)}
-              />
-            ),
-          )
-        )}
-        {showThinking ? <AssistantThinkingRow /> : null}
-        {activePendingApprovals.map((approval) => (
-          <ApprovalCard
-            key={approval.id}
-            approval={approval}
-            busy={approvalBusyId === approval.id}
-            onApprove={() => void resolveApproval(approval, true)}
-            onDeny={() => void resolveApproval(approval, false)}
-          />
-        ))}
-        {error ? <div className="mx-3 rounded border border-[rgba(255,90,90,.35)] bg-[rgba(255,90,90,.08)] px-3 py-2 text-[11px] text-[var(--red)]">{error}</div> : null}
-      </div>
 
-      {assistantChatIdleHold ? (
-        <AssistantChatIdleFooterBanner subscriptions={activeChatIdleSubscriptionsForThread} droneNameById={droneNameById} />
-      ) : null}
+          {assistantChatIdleHold ? (
+            <AssistantChatIdleFooterBanner subscriptions={activeChatIdleSubscriptionsForThread} droneNameById={droneNameById} />
+          ) : null}
 
       <div className="flex-shrink-0 border-t border-[var(--border)] bg-[rgba(0,0,0,.12)] p-2">
         <div className="mb-2 flex min-w-0 flex-wrap items-center gap-1.5">
