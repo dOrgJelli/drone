@@ -61,6 +61,8 @@ type AssistantThread = {
   provider: LlmProviderId;
   thinkingLevel: AssistantThinkingLevel;
   systemPrompt: string;
+  systemPromptUpdatedAt: string | null;
+  enabledTools: string[];
   accessScope: AssistantAccessScope;
   autoApprove: boolean;
   promptDeliveryMode: AssistantPromptDeliveryMode;
@@ -434,6 +436,7 @@ export type AssistantSnapshot = {
   chatIdleSubscriptions: AssistantChatIdleSubscription[];
   pendingApprovals: AssistantApproval[];
   models: AssistantModelOption[];
+  availableTools: AssistantToolSummary[];
   accessScope: AssistantAccessScope;
   runningModels: Record<string, AssistantRunModel>;
   streamingMessage?: any;
@@ -447,12 +450,34 @@ export type AssistantModelOption = {
   thinkingLevel: AssistantThinkingLevel;
 };
 
+export type AssistantToolSummary = {
+  name: string;
+  label: string;
+  description: string;
+  category: 'context' | 'prompts' | 'files' | 'chats' | 'drones' | 'actions';
+};
+
 export type AssistantSystemPromptSettings = {
   ok: true;
   assistantSystemPrompt: {
     prompt: string;
     promptSource: 'settings' | 'default';
     updatedAt: string | null;
+    defaultPrompt: string;
+    maxPromptChars: number;
+    runtimeAppendix: string;
+  };
+};
+
+export type AssistantThreadSystemPromptSettings = {
+  ok: true;
+  threadId: string;
+  threadSystemPrompt: {
+    prompt: string;
+    promptSource: 'thread' | 'global' | 'default';
+    updatedAt: string | null;
+    globalPrompt: string;
+    globalPromptSource: 'settings' | 'default';
     defaultPrompt: string;
     maxPromptChars: number;
     runtimeAppendix: string;
@@ -532,6 +557,33 @@ const ASSISTANT_SYSTEM_PROMPT_DEFAULT = [
   'Do not claim a drone completed work unless the drone transcript or user says so.',
   'Keep responses practical and short.',
 ].join('\n');
+const ASSISTANT_TOOL_SUMMARIES: AssistantToolSummary[] = [
+  { name: 'list_drones', label: 'List drones', category: 'context', description: 'List drones visible to this assistant thread.' },
+  { name: 'get_current_context', label: 'Get current context', category: 'context', description: 'Read the current Drone Hub UI context.' },
+  { name: 'assistant_files', label: 'Assistant files', category: 'files', description: 'Maintain private Markdown or text artifacts for this thread.' },
+  { name: 'get_system_prompt', label: 'Get system prompt', category: 'prompts', description: 'Read the global and current thread system prompts.' },
+  { name: 'update_system_prompt', label: 'Update system prompt', category: 'prompts', description: 'Update only this thread system prompt.' },
+  { name: 'inspect_drone', label: 'Inspect drone', category: 'drones', description: 'Inspect one drone by id or name.' },
+  { name: 'list_files', label: 'List files', category: 'files', description: 'List files and folders in one drone.' },
+  { name: 'list_changed_files', label: 'List changed files', category: 'files', description: 'List changed files in one repo-attached drone.' },
+  { name: 'read_file', label: 'Read file', category: 'files', description: 'Read a UTF-8 text file from one drone.' },
+  { name: 'search_files', label: 'Search files', category: 'files', description: 'Search text files in one drone.' },
+  { name: 'find_files', label: 'Find files', category: 'files', description: 'Find file and directory paths in one drone.' },
+  { name: 'write_file', label: 'Write file', category: 'files', description: 'Create or overwrite a UTF-8 text file in one drone.' },
+  { name: 'bash', label: 'Run bash', category: 'actions', description: 'Run a non-interactive bash command in one container drone.' },
+  { name: 'apply_patch', label: 'Apply patch', category: 'actions', description: 'Apply a patch envelope to files in one drone.' },
+  { name: 'get_chat_overview', label: 'Get chat overview', category: 'chats', description: 'Read a lightweight overview of drone chats.' },
+  { name: 'read_chat_messages', label: 'Read chat messages', category: 'chats', description: 'Read a paginated timeline for a drone chat.' },
+  { name: 'search_chat_messages', label: 'Search chat messages', category: 'chats', description: 'Search user and agent messages across drone chats.' },
+  { name: 'subscribe_to_chats_idle', label: 'Subscribe to chats idle', category: 'chats', description: 'Resume this thread when subscribed drone chats become idle.' },
+  { name: 'create_drone', label: 'Create drone', category: 'actions', description: 'Create a new drone after user approval.' },
+  { name: 'set_drone_group', label: 'Set drone group', category: 'actions', description: 'Move drones to a group after user approval.' },
+  { name: 'message_drone', label: 'Send user message to drone', category: 'actions', description: 'Send a user message to a drone chat after approval.' },
+];
+const ASSISTANT_ALL_TOOL_NAMES = ASSISTANT_TOOL_SUMMARIES.map((tool) => tool.name);
+const ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES = ASSISTANT_ALL_TOOL_NAMES.filter(
+  (name) => name !== 'get_system_prompt' && name !== 'update_system_prompt',
+);
 const ASSISTANT_OVERVIEW_PROMPT_DEFAULT = [
   'You write a concise Markdown status overview for an assistant thread in Drone Hub.',
   'Focus on the current state of the work, recent actions, tool calls, approvals, blockers, and next likely step.',
@@ -944,6 +996,40 @@ function normalizeAssistantOverviewPrompt(raw: unknown): string {
   return text.length > ASSISTANT_OVERVIEW_PROMPT_MAX_CHARS
     ? text.slice(0, ASSISTANT_OVERVIEW_PROMPT_MAX_CHARS).trim()
     : text;
+}
+
+function normalizeAssistantEnabledTools(raw: unknown, fallback: string[] = ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES): string[] {
+  if (!Array.isArray(raw)) return [...fallback];
+  const allowed = new Set(ASSISTANT_ALL_TOOL_NAMES);
+  const seen = new Set<string>();
+  const tools: string[] = [];
+  for (const item of raw) {
+    const name = String(item ?? '').trim();
+    if (!allowed.has(name) || seen.has(name)) continue;
+    seen.add(name);
+    tools.push(name);
+  }
+  return tools;
+}
+
+function normalizeAssistantSystemPromptPatches(raw: unknown): Array<{ oldText: string; newText: string }> {
+  if (!Array.isArray(raw)) return [];
+  return raw.slice(0, 20).map((item, index) => {
+    const oldText = typeof item?.oldText === 'string' ? item.oldText : '';
+    const newText = typeof item?.newText === 'string' ? item.newText : '';
+    if (!oldText) throw new Error(`system prompt patch ${index + 1} missing oldText`);
+    return { oldText, newText };
+  });
+}
+
+function applyAssistantSystemPromptPatches(prompt: string, rawPatches: unknown): string {
+  const patches = normalizeAssistantSystemPromptPatches(rawPatches);
+  if (patches.length === 0) throw new Error('missing system prompt patch');
+  let next = prompt;
+  for (const patch of patches) {
+    next = replaceTextOnce(next, patch.oldText, patch.newText, 'thread system prompt');
+  }
+  return normalizeAssistantSystemPrompt(next);
 }
 
 function assistantTextFingerprint(text: string): string {
@@ -1466,6 +1552,9 @@ function sanitizeChatIdleSubscription(subscription: AssistantChatIdleSubscriptio
 function sanitizeThread(thread: AssistantThread): AssistantThread {
   return {
     ...thread,
+    systemPrompt: normalizeAssistantSystemPrompt(thread.systemPrompt) || ASSISTANT_SYSTEM_PROMPT_DEFAULT,
+    systemPromptUpdatedAt: cleanOptionalString(thread.systemPromptUpdatedAt) || null,
+    enabledTools: normalizeAssistantEnabledTools(thread.enabledTools),
     messages: thread.messages.slice(-ASSISTANT_THREAD_MESSAGE_LIMIT).map(sanitizeMessage),
     queuedPrompts: thread.queuedPrompts.map(sanitizeMessage),
     status: thread.status === 'running' || thread.status === 'waiting_for_approval' ? 'idle' : thread.status,
@@ -1496,6 +1585,8 @@ function normalizeThread(raw: any, fallback: { provider: LlmProviderId; model: s
     provider,
     thinkingLevel,
     systemPrompt: normalizeAssistantSystemPrompt(raw.systemPrompt) || fallback.systemPrompt || ASSISTANT_SYSTEM_PROMPT_DEFAULT,
+    systemPromptUpdatedAt: cleanOptionalString(raw.systemPromptUpdatedAt) || null,
+    enabledTools: normalizeAssistantEnabledTools(raw.enabledTools),
     accessScope: makeAssistantAccessScope(raw.accessScope),
     autoApprove: normalizeAssistantAutoApprove(raw.autoApprove),
     promptDeliveryMode: normalizeAssistantPromptDeliveryMode(raw.promptDeliveryMode),
@@ -2035,6 +2126,7 @@ export class HubAssistantService {
       chatIdleSubscriptions: this.chatIdleSubscriptions.map(sanitizeChatIdleSubscription),
       pendingApprovals: this.pendingApprovals(),
       models: await this.modelOptions(),
+      availableTools: ASSISTANT_TOOL_SUMMARIES,
       accessScope: sanitizeMessage(this.activeAccessScope()),
       runningModels: Object.fromEntries([...this.runningModels.entries()].map(([threadId, model]) => [threadId, sanitizeMessage(model)])),
       ...(streamingMessage ? { streamingMessage: sanitizeMessage(streamingMessage) } : {}),
@@ -2068,6 +2160,40 @@ export class HubAssistantService {
     if (!prompt) throw new Error('missing system prompt');
     this.defaultSystemPrompt = prompt;
     this.defaultSystemPromptUpdatedAt = prompt === ASSISTANT_SYSTEM_PROMPT_DEFAULT ? null : nowIso();
+    await this.persist();
+    return this.systemPromptSettingsSync();
+  }
+
+  async threadSystemPromptSettings(threadId: string): Promise<AssistantThreadSystemPromptSettings> {
+    await this.ensureLoaded();
+    return this.threadSystemPromptSettingsSync(threadId);
+  }
+
+  async updateThreadSystemPrompt(threadId: string, input: { prompt?: unknown; patches?: unknown }): Promise<AssistantThreadSystemPromptSettings> {
+    await this.ensureLoaded();
+    const thread = this.getThread(threadId);
+    const hasPrompt = typeof input.prompt === 'string' && input.prompt.trim();
+    const prompt = hasPrompt
+      ? normalizeAssistantSystemPrompt(input.prompt)
+      : applyAssistantSystemPromptPatches(thread.systemPrompt, input.patches);
+    if (!prompt) throw new Error('missing system prompt');
+    thread.systemPrompt = prompt;
+    thread.systemPromptUpdatedAt = prompt === this.defaultSystemPrompt ? null : nowIso();
+    thread.updatedAt = nowIso();
+    await this.persist();
+    return this.threadSystemPromptSettingsSync(thread.id);
+  }
+
+  async promoteThreadSystemPrompt(threadId: string, input?: { prompt?: unknown }): Promise<AssistantSystemPromptSettings> {
+    await this.ensureLoaded();
+    const thread = this.getThread(threadId);
+    const prompt = normalizeAssistantSystemPrompt(input?.prompt) || normalizeAssistantSystemPrompt(thread.systemPrompt);
+    if (!prompt) throw new Error('missing thread system prompt');
+    thread.systemPrompt = prompt;
+    this.defaultSystemPrompt = prompt;
+    this.defaultSystemPromptUpdatedAt = prompt === ASSISTANT_SYSTEM_PROMPT_DEFAULT ? null : nowIso();
+    thread.systemPromptUpdatedAt = null;
+    thread.updatedAt = nowIso();
     await this.persist();
     return this.systemPromptSettingsSync();
   }
@@ -2189,7 +2315,18 @@ export class HubAssistantService {
     }
   }
 
-  async updateThread(threadId: string, patch: { title?: unknown; model?: unknown; provider?: unknown; thinkingLevel?: unknown; autoApprove?: unknown; promptDeliveryMode?: unknown }): Promise<AssistantSnapshot> {
+  async updateThread(
+    threadId: string,
+    patch: {
+      title?: unknown;
+      model?: unknown;
+      provider?: unknown;
+      thinkingLevel?: unknown;
+      autoApprove?: unknown;
+      promptDeliveryMode?: unknown;
+      enabledTools?: unknown;
+    },
+  ): Promise<AssistantSnapshot> {
     await this.ensureLoaded();
     const thread = this.getThread(threadId);
     this.activeThreadId = thread.id;
@@ -2205,6 +2342,7 @@ export class HubAssistantService {
       if (thread.autoApprove) this.resolvePendingApprovalsForThread(thread.id, true);
     }
     if (patch.promptDeliveryMode != null) thread.promptDeliveryMode = normalizeAssistantPromptDeliveryMode(patch.promptDeliveryMode);
+    if (patch.enabledTools != null) thread.enabledTools = normalizeAssistantEnabledTools(patch.enabledTools, thread.enabledTools);
     thread.updatedAt = nowIso();
     await this.persist();
     return await this.snapshot();
@@ -2648,6 +2786,8 @@ export class HubAssistantService {
       model: allowedModelForProvider(provider, input?.model),
       thinkingLevel: allowedThinkingLevelForModel(provider, allowedModelForProvider(provider, input?.model), 'off'),
       systemPrompt: normalizeAssistantSystemPrompt(input?.systemPrompt) || this.defaultSystemPrompt,
+      systemPromptUpdatedAt: null,
+      enabledTools: [...ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES],
       accessScope: input?.accessScope ?? makeAssistantAccessScope(),
       autoApprove: false,
       promptDeliveryMode: 'queue',
@@ -2731,7 +2871,7 @@ export class HubAssistantService {
 
   private buildTools(runtime: AssistantRuntime, threadId: string, onEvent?: (event: AssistantPromptEvent) => void | Promise<void>): any[] {
     const Type = runtime.Type;
-    return [
+    const tools = [
       {
         name: 'list_drones',
         label: 'List drones',
@@ -2797,6 +2937,63 @@ export class HubAssistantService {
           return {
             content: [{ type: 'text', text: summary }],
             details: result,
+          };
+        },
+      },
+      {
+        name: 'get_system_prompt',
+        label: 'Get system prompt',
+        description:
+          'Read the current thread system prompt, the global assistant system prompt, and the runtime appendix. This is read-only.',
+        parameters: Type.Object({}),
+        execute: async () => {
+          const threadSettings = this.threadSystemPromptSettingsSync(threadId).threadSystemPrompt;
+          const result = {
+            threadId,
+            threadPrompt: {
+              prompt: threadSettings.prompt,
+              source: threadSettings.promptSource,
+              updatedAt: threadSettings.updatedAt,
+            },
+            globalPrompt: {
+              prompt: threadSettings.globalPrompt,
+              source: threadSettings.globalPromptSource,
+            },
+            runtimeAppendix: threadSettings.runtimeAppendix,
+          };
+          return {
+            content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+            details: result,
+          };
+        },
+      },
+      {
+        name: 'update_system_prompt',
+        label: 'Update system prompt',
+        description:
+          'Update only the current assistant thread system prompt. Pass prompt for a full replacement, or patches for exact oldText/newText replacements. This does not change the global prompt or any other thread.',
+        parameters: Type.Object({
+          prompt: Type.Optional(Type.String({ description: 'Full replacement system prompt for this assistant thread.' })),
+          patches: Type.Optional(
+            Type.Array(
+              Type.Object({
+                oldText: Type.String({ description: 'Exact text to replace. Must occur exactly once in the current thread system prompt.' }),
+                newText: Type.String({ description: 'Replacement text.' }),
+              }),
+            ),
+          ),
+        }),
+        execute: async (_toolCallId: string, params: any) => {
+          const settings = await this.updateThreadSystemPrompt(threadId, { prompt: params?.prompt, patches: params?.patches });
+          const usedPatch = Array.isArray(params?.patches) && params.patches.length > 0 && !(typeof params?.prompt === 'string' && params.prompt.trim());
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `${usedPatch ? 'Patched' : 'Updated'} this thread system prompt. The global prompt and other threads were not changed.`,
+              },
+            ],
+            details: settings,
           };
         },
       },
@@ -3216,6 +3413,8 @@ export class HubAssistantService {
         },
       },
     ];
+    const enabled = new Set(normalizeAssistantEnabledTools(this.getThread(threadId).enabledTools));
+    return tools.filter((tool) => enabled.has(String(tool.name ?? '')));
   }
 
   private async beforeToolCall(
@@ -3376,6 +3575,7 @@ export class HubAssistantService {
       chatIdleSubscriptions: this.chatIdleSubscriptions.map(sanitizeChatIdleSubscription),
       pendingApprovals: this.pendingApprovals(),
       models: [],
+      availableTools: ASSISTANT_TOOL_SUMMARIES,
       accessScope: sanitizeMessage(this.activeAccessScope()),
       runningModels: Object.fromEntries([...this.runningModels.entries()].map(([threadId, model]) => [threadId, sanitizeMessage(model)])),
       ...(streamingMessage ? { streamingMessage: sanitizeMessage(streamingMessage) } : {}),
@@ -3461,6 +3661,33 @@ export class HubAssistantService {
         prompt,
         promptSource: prompt === ASSISTANT_SYSTEM_PROMPT_DEFAULT ? 'default' : 'settings',
         updatedAt: prompt === ASSISTANT_SYSTEM_PROMPT_DEFAULT ? null : this.defaultSystemPromptUpdatedAt,
+        defaultPrompt: ASSISTANT_SYSTEM_PROMPT_DEFAULT,
+        maxPromptChars: ASSISTANT_SYSTEM_PROMPT_MAX_CHARS,
+        runtimeAppendix: ASSISTANT_SYSTEM_PROMPT_RUNTIME_APPENDIX,
+      },
+    };
+  }
+
+  private threadSystemPromptSettingsSync(threadId: string): AssistantThreadSystemPromptSettings {
+    const thread = this.getThread(threadId);
+    const globalPrompt = normalizeAssistantSystemPrompt(this.defaultSystemPrompt) || ASSISTANT_SYSTEM_PROMPT_DEFAULT;
+    const prompt = normalizeAssistantSystemPrompt(thread.systemPrompt) || globalPrompt;
+    const globalPromptSource = globalPrompt === ASSISTANT_SYSTEM_PROMPT_DEFAULT ? 'default' : 'settings';
+    const promptSource =
+      prompt === globalPrompt
+        ? globalPromptSource === 'default'
+          ? 'default'
+          : 'global'
+        : 'thread';
+    return {
+      ok: true,
+      threadId: thread.id,
+      threadSystemPrompt: {
+        prompt,
+        promptSource,
+        updatedAt: promptSource === 'thread' ? thread.systemPromptUpdatedAt : null,
+        globalPrompt,
+        globalPromptSource,
         defaultPrompt: ASSISTANT_SYSTEM_PROMPT_DEFAULT,
         maxPromptChars: ASSISTANT_SYSTEM_PROMPT_MAX_CHARS,
         runtimeAppendix: ASSISTANT_SYSTEM_PROMPT_RUNTIME_APPENDIX,

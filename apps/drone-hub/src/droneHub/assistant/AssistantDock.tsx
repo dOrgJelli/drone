@@ -3,7 +3,7 @@ import { useDndMonitor, useDroppable } from '@dnd-kit/core';
 import { requestJson } from '../http';
 import { MarkdownMessage } from '../chat/MarkdownMessage';
 import { parseDroneHubDragData } from '../app/drone-hub-dnd';
-import { IconChatThread, IconEye, IconList, IconPencil, IconPlus, IconSidebarCollapse, IconSidebarExpand, IconSpinner, IconTrash } from '../app/icons';
+import { IconChatThread, IconEye, IconList, IconPencil, IconPlus, IconSettings, IconSidebarCollapse, IconSidebarExpand, IconSpinner, IconTrash } from '../app/icons';
 import { useDroneHubUiStore } from '../app/use-drone-hub-ui-store';
 import { UiMenuSelect, type UiMenuSelectEntry } from '../../ui/menuSelect';
 import { IconFile, iconForFilePath } from '../icons';
@@ -72,6 +72,9 @@ type AssistantThread = {
   model: string;
   provider: AssistantProviderId;
   thinkingLevel: string;
+  systemPrompt?: string;
+  systemPromptUpdatedAt?: string | null;
+  enabledTools?: string[];
   accessScope: AssistantAccessScope;
   autoApprove: boolean;
   promptDeliveryMode: AssistantPromptDeliveryMode;
@@ -100,6 +103,13 @@ type AssistantModelOption = {
   thinkingLevel: string;
 };
 
+type AssistantToolSummary = {
+  name: string;
+  label: string;
+  description: string;
+  category: 'context' | 'prompts' | 'files' | 'chats' | 'drones' | 'actions';
+};
+
 type AssistantProviderId = 'openai' | 'gemini' | 'codex';
 
 type AssistantAccessScope = { readMode: 'all' | 'selected'; writeMode: 'all' | 'selected'; droneIds: string[]; updatedAt: string };
@@ -111,6 +121,7 @@ type AssistantSnapshot = {
   pendingApprovals: AssistantApproval[];
   chatIdleSubscriptions?: AssistantChatIdleSubscription[];
   models: AssistantModelOption[];
+  availableTools?: AssistantToolSummary[];
   accessScope?: AssistantAccessScope;
   runningModels?: Record<string, AssistantRunModel>;
   streamingMessage?: AssistantMessage;
@@ -122,6 +133,21 @@ type AssistantSystemPromptSettings = {
     prompt: string;
     promptSource: 'settings' | 'default';
     updatedAt: string | null;
+    defaultPrompt: string;
+    maxPromptChars: number;
+    runtimeAppendix: string;
+  };
+};
+
+type AssistantThreadSystemPromptSettings = {
+  ok: true;
+  threadId: string;
+  threadSystemPrompt: {
+    prompt: string;
+    promptSource: 'thread' | 'global' | 'default';
+    updatedAt: string | null;
+    globalPrompt: string;
+    globalPromptSource: 'settings' | 'default';
     defaultPrompt: string;
     maxPromptChars: number;
     runtimeAppendix: string;
@@ -254,6 +280,8 @@ const TOOL_LABELS: Record<string, string> = {
   create_drone: 'Create drone',
   assistant_files: 'Assistant files',
   get_current_context: 'Read current context',
+  get_system_prompt: 'Read system prompt',
+  update_system_prompt: 'Update system prompt',
   get_chat_overview: 'Read chat overview',
   inspect_drone: 'Inspect drone',
   list_drones: 'List drones',
@@ -1443,33 +1471,265 @@ function ScopeModeControl({
   );
 }
 
+const ASSISTANT_TOOL_CATEGORY_LABELS: Record<AssistantToolSummary['category'], string> = {
+  context: 'Context',
+  prompts: 'Prompts',
+  files: 'Files',
+  chats: 'Chats',
+  drones: 'Drones',
+  actions: 'Actions',
+};
+
+function AssistantToolsPanel({
+  tools,
+  enabledTools,
+  disabled,
+  onToggleTool,
+  onEnableAll,
+  onDisableAll,
+  onClose,
+}: {
+  tools: AssistantToolSummary[];
+  enabledTools: string[];
+  disabled: boolean;
+  onToggleTool: (toolName: string, enabled: boolean) => void;
+  onEnableAll: () => void;
+  onDisableAll: () => void;
+  onClose: () => void;
+}) {
+  const enabled = new Set(enabledTools);
+  const categories = React.useMemo(() => {
+    const groups = new Map<AssistantToolSummary['category'], AssistantToolSummary[]>();
+    for (const tool of tools) {
+      const current = groups.get(tool.category) ?? [];
+      current.push(tool);
+      groups.set(tool.category, current);
+    }
+    return Array.from(groups.entries());
+  }, [tools]);
+
+  return (
+    <div className="absolute right-2 top-10 z-30 w-[min(420px,calc(100vw-2rem))] overflow-hidden rounded border border-[var(--border)] bg-[var(--panel-alt)] shadow-[0_18px_55px_rgba(0,0,0,.48)]">
+      <div className="flex items-center justify-between gap-2 border-b border-[var(--border)] px-3 py-2">
+        <div className="min-w-0">
+          <div className="text-[12px] font-semibold text-[var(--fg)]" style={{ fontFamily: 'var(--display)' }}>
+            Assistant tools
+          </div>
+          <div className="mt-0.5 truncate text-[10px] text-[var(--muted-dim)]">
+            Tool changes apply when the assistant starts its next turn.
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="h-7 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]"
+          style={{ fontFamily: 'var(--display)' }}
+        >
+          Close
+        </button>
+      </div>
+      <div className="flex items-center gap-1.5 border-b border-[var(--border-subtle)] px-3 py-2">
+        <button
+          type="button"
+          onClick={onEnableAll}
+          disabled={disabled}
+          className="h-7 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)] disabled:opacity-45"
+          style={{ fontFamily: 'var(--display)' }}
+        >
+          Enable all
+        </button>
+        <button
+          type="button"
+          onClick={onDisableAll}
+          disabled={disabled}
+          className="h-7 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)] disabled:opacity-45"
+          style={{ fontFamily: 'var(--display)' }}
+        >
+          Disable all
+        </button>
+        <div className="ml-auto text-[10px] text-[var(--muted-dim)]">
+          {enabledTools.length} / {tools.length}
+        </div>
+      </div>
+      <div className="max-h-[min(520px,calc(100vh-190px))] overflow-y-auto p-2">
+        {categories.map(([category, categoryTools]) => (
+          <section key={category} className="mb-2 last:mb-0">
+            <div className="mb-1 px-1 text-[9px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+              {ASSISTANT_TOOL_CATEGORY_LABELS[category]}
+            </div>
+            <div className="space-y-1">
+              {categoryTools.map((tool) => {
+                const checked = enabled.has(tool.name);
+                return (
+                  <label
+                    key={tool.name}
+                    className={`flex cursor-pointer items-start gap-2 rounded border px-2 py-1.5 transition-colors ${
+                      checked
+                        ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)]'
+                        : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] hover:bg-[var(--hover)]'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      disabled={disabled}
+                      onChange={(event) => onToggleTool(tool.name, event.target.checked)}
+                      className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 accent-[var(--accent)]"
+                    />
+                    <span className="min-w-0">
+                      <span className="block truncate text-[11px] font-medium text-[var(--fg-secondary)]">{tool.label}</span>
+                      <span className="mt-0.5 block text-[10px] leading-snug text-[var(--muted-dim)]">{tool.description}</span>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </section>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+type PromptDiffLine = { kind: 'same' | 'add' | 'remove'; text: string; oldLine?: number; newLine?: number };
+
+function promptDiffLines(oldText: string, newText: string): PromptDiffLine[] {
+  const oldLines = oldText.split('\n');
+  const newLines = newText.split('\n');
+  const dp: number[][] = Array.from({ length: oldLines.length + 1 }, () => Array(newLines.length + 1).fill(0));
+  for (let i = oldLines.length - 1; i >= 0; i -= 1) {
+    for (let j = newLines.length - 1; j >= 0; j -= 1) {
+      dp[i][j] = oldLines[i] === newLines[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+
+  const lines: PromptDiffLine[] = [];
+  let i = 0;
+  let j = 0;
+  let oldLine = 1;
+  let newLine = 1;
+  while (i < oldLines.length || j < newLines.length) {
+    if (i < oldLines.length && j < newLines.length && oldLines[i] === newLines[j]) {
+      lines.push({ kind: 'same', text: oldLines[i], oldLine, newLine });
+      i += 1;
+      j += 1;
+      oldLine += 1;
+      newLine += 1;
+    } else if (j < newLines.length && (i >= oldLines.length || dp[i][j + 1] >= dp[i + 1][j])) {
+      lines.push({ kind: 'add', text: newLines[j], newLine });
+      j += 1;
+      newLine += 1;
+    } else if (i < oldLines.length) {
+      lines.push({ kind: 'remove', text: oldLines[i], oldLine });
+      i += 1;
+      oldLine += 1;
+    }
+  }
+  return lines;
+}
+
+function AssistantPromptDiffView({ oldText, newText }: { oldText: string; newText: string }) {
+  const lines = React.useMemo(() => promptDiffLines(oldText, newText), [oldText, newText]);
+  const changed = lines.some((line) => line.kind !== 'same');
+  return (
+    <div className="mt-3 overflow-hidden rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.18)]">
+      <div className="flex items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-3 py-2">
+        <div className="text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]" style={{ fontFamily: 'var(--display)' }}>
+          Promotion diff
+        </div>
+        <div className="text-[10px] text-[var(--muted-dim)]">Global to thread draft</div>
+      </div>
+      <div className="max-h-[260px] overflow-auto font-mono text-[11px] leading-relaxed">
+        {!changed ? (
+          <div className="px-3 py-3 text-[var(--muted-dim)]">No differences.</div>
+        ) : (
+          lines.map((line, index) => {
+            const tone =
+              line.kind === 'add'
+                ? 'bg-[rgba(52,211,153,.08)] text-[#a7f3d0]'
+                : line.kind === 'remove'
+                  ? 'bg-[rgba(255,90,90,.08)] text-[#fecaca]'
+                  : 'text-[var(--muted)]';
+            const marker = line.kind === 'add' ? '+' : line.kind === 'remove' ? '-' : ' ';
+            return (
+              <div key={`${index}:${line.kind}`} className={`grid grid-cols-[4.5rem_1rem_minmax(0,1fr)] gap-2 px-2 py-0.5 ${tone}`}>
+                <span className="select-none text-right text-[var(--muted-dim)]">
+                  {line.kind === 'add' ? '' : line.oldLine}
+                  <span className="px-1 text-[var(--muted-dim)]">/</span>
+                  {line.kind === 'remove' ? '' : line.newLine}
+                </span>
+                <span className="select-none text-[var(--muted-dim)]">{marker}</span>
+                <span className="min-w-0 whitespace-pre-wrap break-words">{line.text || ' '}</span>
+              </div>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
+}
+
 function AssistantSystemPromptModal({
+  mode,
   settings,
   draft,
+  threadSettings,
+  threadDraft,
   loading,
   saving,
+  threadSaving,
+  promoting,
   error,
   notice,
+  onModeChange,
   onDraftChange,
-  onUseDefault,
+  onThreadDraftChange,
+  onUseGlobalForThread,
+  onUseDefaultForGlobal,
   onClose,
-  onSave,
+  onSaveGlobal,
+  onSaveThread,
+  onPromoteThread,
 }: {
+  mode: 'thread' | 'global';
   settings: AssistantSystemPromptSettings | null;
   draft: string;
+  threadSettings: AssistantThreadSystemPromptSettings | null;
+  threadDraft: string;
   loading: boolean;
   saving: boolean;
+  threadSaving: boolean;
+  promoting: boolean;
   error: string | null;
   notice: string | null;
+  onModeChange: (mode: 'thread' | 'global') => void;
   onDraftChange: (value: string) => void;
-  onUseDefault: () => void;
+  onThreadDraftChange: (value: string) => void;
+  onUseGlobalForThread: () => void;
+  onUseDefaultForGlobal: () => void;
   onClose: () => void;
-  onSave: () => void;
+  onSaveGlobal: () => void;
+  onSaveThread: () => void;
+  onPromoteThread: () => void;
 }) {
+  const [diffOpen, setDiffOpen] = React.useState(false);
   const currentPrompt = settings?.assistantSystemPrompt.prompt ?? '';
-  const maxChars = settings?.assistantSystemPrompt.maxPromptChars ?? 20_000;
-  const dirty = draft !== currentPrompt;
-  const saveDisabled = loading || saving || !dirty || !draft.trim();
+  const currentThreadPrompt = threadSettings?.threadSystemPrompt.prompt ?? '';
+  const currentGlobalPrompt = currentPrompt || (threadSettings?.threadSystemPrompt.globalPrompt ?? '');
+  const maxChars = (mode === 'thread' ? threadSettings?.threadSystemPrompt.maxPromptChars : settings?.assistantSystemPrompt.maxPromptChars) ?? 20_000;
+  const globalDirty = draft !== currentPrompt;
+  const threadDirty = threadDraft !== currentThreadPrompt;
+  const globalSaveDisabled = loading || saving || !globalDirty || !draft.trim();
+  const threadSaveDisabled = loading || threadSaving || !threadDirty || !threadDraft.trim();
+  const activeDraft = mode === 'thread' ? threadDraft : draft;
+  const activeSource =
+    mode === 'thread'
+      ? threadSettings?.threadSystemPrompt.promptSource ?? 'thread'
+      : settings?.assistantSystemPrompt.promptSource ?? 'default';
+
+  React.useEffect(() => {
+    if (mode !== 'thread') setDiffOpen(false);
+  }, [mode]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 px-3 py-4">
@@ -1477,10 +1737,10 @@ function AssistantSystemPromptModal({
         <div className="flex flex-shrink-0 items-center justify-between border-b border-[var(--border)] px-4 py-3">
           <div className="min-w-0">
             <div className="text-[13px] font-semibold text-[var(--fg)]" style={{ fontFamily: 'var(--display)' }}>
-              Assistant system prompt
+              Assistant system prompts
             </div>
             <div className="mt-1 text-[11px] text-[var(--muted-dim)]">
-              Saved changes apply to new assistant threads. Existing threads keep the prompt they were created with.
+              Thread changes affect only the current thread. Global changes apply to new assistant threads.
             </div>
           </div>
           <button
@@ -1494,6 +1754,24 @@ function AssistantSystemPromptModal({
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+          <div className="mb-3 grid h-8 w-full max-w-[280px] grid-cols-2 overflow-hidden rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)]">
+            {(['thread', 'global'] as const).map((item) => (
+              <button
+                key={item}
+                type="button"
+                onClick={() => onModeChange(item)}
+                aria-pressed={mode === item}
+                className={`text-[10px] font-semibold uppercase tracking-wide ${
+                  mode === item
+                    ? 'bg-[var(--accent-subtle)] text-[var(--accent)]'
+                    : 'text-[var(--muted)] hover:bg-[rgba(255,255,255,.025)] hover:text-[var(--fg-secondary)]'
+                }`}
+                style={{ fontFamily: 'var(--display)' }}
+              >
+                {item === 'thread' ? 'This thread' : 'Global'}
+              </button>
+            ))}
+          </div>
           {error ? (
             <div className="mb-3 rounded border border-[rgba(255,90,90,.35)] bg-[rgba(255,90,90,.08)] px-3 py-2 text-[11px] text-[var(--red)]">
               {error}
@@ -1507,9 +1785,9 @@ function AssistantSystemPromptModal({
           <label className="flex min-h-0 flex-col gap-2">
             <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]">Prompt</span>
             <textarea
-              value={draft}
-              onChange={(event) => onDraftChange(event.target.value)}
-              disabled={loading || saving}
+              value={activeDraft}
+              onChange={(event) => (mode === 'thread' ? onThreadDraftChange(event.target.value) : onDraftChange(event.target.value))}
+              disabled={loading || saving || threadSaving || promoting}
               maxLength={maxChars}
               rows={20}
               className="min-h-[360px] resize-y rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.18)] px-3 py-2 font-mono text-[12px] leading-relaxed text-[var(--fg)] placeholder:text-[var(--muted-dim)] transition-colors focus:border-[var(--accent-muted)] focus:outline-none disabled:opacity-50"
@@ -1517,41 +1795,88 @@ function AssistantSystemPromptModal({
             />
           </label>
           <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[10px] text-[var(--muted-dim)]">
+            <span>Source: {activeSource}</span>
             <span>
-              Source: {settings?.assistantSystemPrompt.promptSource === 'settings' ? 'settings' : 'default'}
-            </span>
-            <span>
-              {draft.length.toLocaleString()} / {maxChars.toLocaleString()}
+              {activeDraft.length.toLocaleString()} / {maxChars.toLocaleString()}
             </span>
           </div>
           <div className="mt-2 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 py-2 text-[11px] leading-relaxed text-[var(--muted-dim)]">
-            {settings?.assistantSystemPrompt.runtimeAppendix ?? 'Access-scope instructions are appended at run time.'}
+            {(mode === 'thread' ? threadSettings?.threadSystemPrompt.runtimeAppendix : settings?.assistantSystemPrompt.runtimeAppendix) ??
+              'Access-scope instructions are appended at run time.'}
           </div>
+          {mode === 'thread' && diffOpen ? <AssistantPromptDiffView oldText={currentGlobalPrompt} newText={threadDraft} /> : null}
         </div>
 
         <div className="flex flex-shrink-0 flex-wrap items-center justify-end gap-2 border-t border-[var(--border)] px-4 py-3">
-          <button
-            type="button"
-            onClick={onUseDefault}
-            disabled={loading || saving}
-            className="h-9 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 text-[11px] font-semibold uppercase tracking-wide text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)] disabled:cursor-not-allowed disabled:opacity-45"
-            style={{ fontFamily: 'var(--display)' }}
-          >
-            Use default
-          </button>
-          <button
-            type="button"
-            onClick={onSave}
-            disabled={saveDisabled}
-            className={`h-9 rounded border px-3 text-[11px] font-semibold uppercase tracking-wide ${
-              saveDisabled
-                ? 'cursor-not-allowed border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)] opacity-45'
-                : 'border-[var(--accent)] bg-[var(--accent)] text-[var(--accent-fg)] hover:brightness-110'
-            }`}
-            style={{ fontFamily: 'var(--display)' }}
-          >
-            {saving ? 'Saving...' : 'Save for new threads'}
-          </button>
+          {mode === 'thread' ? (
+            <>
+              <button
+                type="button"
+                onClick={() => setDiffOpen((value) => !value)}
+                disabled={loading}
+                className="mr-auto h-9 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 text-[11px] font-semibold uppercase tracking-wide text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)] disabled:cursor-not-allowed disabled:opacity-45"
+                style={{ fontFamily: 'var(--display)' }}
+              >
+                {diffOpen ? 'Hide diff' : 'Show diff'}
+              </button>
+              <button
+                type="button"
+                onClick={onUseGlobalForThread}
+                disabled={loading || threadSaving || promoting}
+                className="h-9 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 text-[11px] font-semibold uppercase tracking-wide text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)] disabled:cursor-not-allowed disabled:opacity-45"
+                style={{ fontFamily: 'var(--display)' }}
+              >
+                Use global
+              </button>
+              <button
+                type="button"
+                onClick={onPromoteThread}
+                disabled={loading || threadSaving || promoting || !threadDraft.trim()}
+                className="h-9 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 text-[11px] font-semibold uppercase tracking-wide text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)] disabled:cursor-not-allowed disabled:opacity-45"
+                style={{ fontFamily: 'var(--display)' }}
+              >
+                {promoting ? 'Promoting...' : 'Promote to global'}
+              </button>
+              <button
+                type="button"
+                onClick={onSaveThread}
+                disabled={threadSaveDisabled}
+                className={`h-9 rounded border px-3 text-[11px] font-semibold uppercase tracking-wide ${
+                  threadSaveDisabled
+                    ? 'cursor-not-allowed border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)] opacity-45'
+                    : 'border-[var(--accent)] bg-[var(--accent)] text-[var(--accent-fg)] hover:brightness-110'
+                }`}
+                style={{ fontFamily: 'var(--display)' }}
+              >
+                {threadSaving ? 'Saving...' : 'Save for this thread'}
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={onUseDefaultForGlobal}
+                disabled={loading || saving || promoting}
+                className="h-9 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 text-[11px] font-semibold uppercase tracking-wide text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)] disabled:cursor-not-allowed disabled:opacity-45"
+                style={{ fontFamily: 'var(--display)' }}
+              >
+                Use default
+              </button>
+              <button
+                type="button"
+                onClick={onSaveGlobal}
+                disabled={globalSaveDisabled}
+                className={`h-9 rounded border px-3 text-[11px] font-semibold uppercase tracking-wide ${
+                  globalSaveDisabled
+                    ? 'cursor-not-allowed border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted-dim)] opacity-45'
+                    : 'border-[var(--accent)] bg-[var(--accent)] text-[var(--accent-fg)] hover:brightness-110'
+                }`}
+                style={{ fontFamily: 'var(--display)' }}
+              >
+                {saving ? 'Saving...' : 'Save for new threads'}
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -1775,11 +2100,18 @@ export function AssistantDock() {
   const [approvalBusyId, setApprovalBusyId] = React.useState<string | null>(null);
   const [queuedCancelBusyId, setQueuedCancelBusyId] = React.useState<string | null>(null);
   const [assistantStopBusy, setAssistantStopBusy] = React.useState(false);
+  const [toolsPanelOpen, setToolsPanelOpen] = React.useState(false);
+  const [enabledToolDraftNames, setEnabledToolDraftNames] = React.useState<string[]>([]);
   const [systemPromptOpen, setSystemPromptOpen] = React.useState(false);
+  const [systemPromptMode, setSystemPromptMode] = React.useState<'thread' | 'global'>('thread');
   const [systemPromptSettings, setSystemPromptSettings] = React.useState<AssistantSystemPromptSettings | null>(null);
   const [systemPromptDraft, setSystemPromptDraft] = React.useState('');
+  const [threadSystemPromptSettings, setThreadSystemPromptSettings] = React.useState<AssistantThreadSystemPromptSettings | null>(null);
+  const [threadSystemPromptDraft, setThreadSystemPromptDraft] = React.useState('');
   const [systemPromptLoading, setSystemPromptLoading] = React.useState(false);
   const [systemPromptSaving, setSystemPromptSaving] = React.useState(false);
+  const [threadSystemPromptSaving, setThreadSystemPromptSaving] = React.useState(false);
+  const [promoteSystemPromptSaving, setPromoteSystemPromptSaving] = React.useState(false);
   const [systemPromptError, setSystemPromptError] = React.useState<string | null>(null);
   const [systemPromptNotice, setSystemPromptNotice] = React.useState<string | null>(null);
   const [overviewOpen, setOverviewOpen] = React.useState(false);
@@ -1812,6 +2144,7 @@ export function AssistantDock() {
   const lastSyncedScopeKeyRef = React.useRef('');
   const scopeSyncPromiseRef = React.useRef<{ key: string; promise: Promise<boolean> } | null>(null);
   const updateThreadRequestRef = React.useRef(0);
+  const enabledToolDraftNamesRef = React.useRef<string[]>([]);
   const { isOver: scopeDropIsOver, setNodeRef: setScopeDropNodeRef } = useDroppable({
     id: 'assistant-drone-scope-drop',
     data: { type: 'assistant-drone-scope-drop' },
@@ -1908,13 +2241,21 @@ export function AssistantDock() {
   }, []);
 
   const loadSystemPromptSettings = React.useCallback(async () => {
+    const threadId = activeThreadIdRef.current;
     setSystemPromptLoading(true);
     setSystemPromptError(null);
     setSystemPromptNotice(null);
     try {
-      const data = await requestJson<AssistantSystemPromptSettings>('/api/assistant/system-prompt');
+      const [data, threadData] = await Promise.all([
+        requestJson<AssistantSystemPromptSettings>('/api/assistant/system-prompt'),
+        threadId
+          ? requestJson<AssistantThreadSystemPromptSettings>(`/api/assistant/threads/${encodeURIComponent(threadId)}/system-prompt`)
+          : Promise.resolve(null),
+      ]);
       setSystemPromptSettings(data);
       setSystemPromptDraft(data.assistantSystemPrompt.prompt);
+      setThreadSystemPromptSettings(threadData);
+      setThreadSystemPromptDraft(threadData?.threadSystemPrompt.prompt ?? '');
     } catch (err: any) {
       setSystemPromptError(err?.message ?? String(err));
     } finally {
@@ -1923,6 +2264,7 @@ export function AssistantDock() {
   }, []);
 
   const openSystemPromptEditor = React.useCallback(() => {
+    setSystemPromptMode('thread');
     setSystemPromptOpen(true);
     void loadSystemPromptSettings();
   }, [loadSystemPromptSettings]);
@@ -1939,6 +2281,25 @@ export function AssistantDock() {
       });
       setSystemPromptSettings(data);
       setSystemPromptDraft(data.assistantSystemPrompt.prompt);
+      setThreadSystemPromptSettings((prev) => {
+        if (!prev) return prev;
+        const promptSource =
+          prev.threadSystemPrompt.prompt === data.assistantSystemPrompt.prompt
+            ? data.assistantSystemPrompt.promptSource === 'default'
+              ? 'default'
+              : 'global'
+            : 'thread';
+        return {
+          ...prev,
+          threadSystemPrompt: {
+            ...prev.threadSystemPrompt,
+            promptSource,
+            globalPrompt: data.assistantSystemPrompt.prompt,
+            globalPromptSource: data.assistantSystemPrompt.promptSource,
+            updatedAt: promptSource === 'thread' ? prev.threadSystemPrompt.updatedAt : null,
+          },
+        };
+      });
       setSystemPromptNotice('Saved. New assistant threads will use this prompt.');
     } catch (err: any) {
       setSystemPromptError(err?.message ?? String(err));
@@ -1946,6 +2307,55 @@ export function AssistantDock() {
       setSystemPromptSaving(false);
     }
   }, [systemPromptDraft]);
+
+  const saveThreadSystemPromptSettings = React.useCallback(async () => {
+    const threadId = activeThreadIdRef.current;
+    if (!threadId) return;
+    setThreadSystemPromptSaving(true);
+    setSystemPromptError(null);
+    setSystemPromptNotice(null);
+    try {
+      const data = await requestJson<AssistantThreadSystemPromptSettings>(`/api/assistant/threads/${encodeURIComponent(threadId)}/system-prompt`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt: threadSystemPromptDraft }),
+      });
+      setThreadSystemPromptSettings(data);
+      setThreadSystemPromptDraft(data.threadSystemPrompt.prompt);
+      setSystemPromptNotice('Saved. Only this assistant thread will use this prompt.');
+      void refresh();
+    } catch (err: any) {
+      setSystemPromptError(err?.message ?? String(err));
+    } finally {
+      setThreadSystemPromptSaving(false);
+    }
+  }, [refresh, threadSystemPromptDraft]);
+
+  const promoteThreadSystemPrompt = React.useCallback(async () => {
+    const threadId = activeThreadIdRef.current;
+    if (!threadId) return;
+    const confirmed = window.confirm('Promote this thread system prompt to the global prompt for new assistant threads? Existing threads keep their own prompts.');
+    if (!confirmed) return;
+    setPromoteSystemPromptSaving(true);
+    setSystemPromptError(null);
+    setSystemPromptNotice(null);
+    try {
+      const data = await requestJson<AssistantSystemPromptSettings>(`/api/assistant/threads/${encodeURIComponent(threadId)}/promote-system-prompt`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt: threadSystemPromptDraft }),
+      });
+      setSystemPromptSettings(data);
+      setSystemPromptDraft(data.assistantSystemPrompt.prompt);
+      await loadSystemPromptSettings();
+      setSystemPromptNotice('Promoted. New assistant threads will use this prompt.');
+      void refresh();
+    } catch (err: any) {
+      setSystemPromptError(err?.message ?? String(err));
+    } finally {
+      setPromoteSystemPromptSaving(false);
+    }
+  }, [loadSystemPromptSettings, refresh, threadSystemPromptDraft]);
 
   const loadOverviewPromptSettings = React.useCallback(async () => {
     setOverviewPromptLoading(true);
@@ -2069,6 +2479,11 @@ export function AssistantDock() {
     setOverviewError(null);
     setOverviewLoading(false);
   }, [activeThreadId]);
+
+  React.useEffect(() => {
+    if (!systemPromptOpen) return;
+    void loadSystemPromptSettings();
+  }, [activeThreadId, loadSystemPromptSettings, systemPromptOpen]);
 
   React.useEffect(() => {
     if (!overviewAutoEnabled || !activeThreadId) return;
@@ -2311,7 +2726,7 @@ export function AssistantDock() {
     }
   }, []);
 
-  const updateThread = React.useCallback(async (patch: Partial<Pick<AssistantThread, 'model' | 'provider' | 'thinkingLevel' | 'autoApprove' | 'promptDeliveryMode'>>) => {
+  const updateThread = React.useCallback(async (patch: Partial<Pick<AssistantThread, 'model' | 'provider' | 'thinkingLevel' | 'autoApprove' | 'promptDeliveryMode' | 'enabledTools'>>) => {
     if (!activeThread) return;
     const requestId = updateThreadRequestRef.current + 1;
     updateThreadRequestRef.current = requestId;
@@ -2454,6 +2869,46 @@ export function AssistantDock() {
   const activeProviderMeta = providerOptions.find((provider) => provider.id === activeProvider) ?? ASSISTANT_PROVIDERS[0];
   const activeRunningModelLabel = activeRunningModel ? modelSelectionLabel(activeRunningModel, modelOptions) : '';
   const selectedScopeDisabled = scopeDrones.length === 0;
+  const availableTools = snapshot?.availableTools ?? [];
+  const snapshotEnabledToolNames = React.useMemo(() => {
+    const toolNames = availableTools.map((tool) => tool.name);
+    if (!activeThread) return [];
+    const configured = Array.isArray(activeThread.enabledTools)
+      ? activeThread.enabledTools
+      : toolNames.filter((name) => name !== 'get_system_prompt' && name !== 'update_system_prompt');
+    return configured.filter((name) => toolNames.includes(name));
+  }, [activeThread, availableTools]);
+  const availableToolNamesKey = React.useMemo(() => availableTools.map((tool) => tool.name).join('\u0000'), [availableTools]);
+
+  React.useEffect(() => {
+    enabledToolDraftNamesRef.current = snapshotEnabledToolNames;
+    setEnabledToolDraftNames(snapshotEnabledToolNames);
+  }, [activeThreadId, availableToolNamesKey, snapshotEnabledToolNames]);
+
+  const enabledToolNames = React.useMemo(() => {
+    const available = new Set(availableTools.map((tool) => tool.name));
+    return enabledToolDraftNames.filter((name) => available.has(name));
+  }, [availableTools, enabledToolDraftNames]);
+
+  const updateEnabledTools = React.useCallback(
+    (nextTools: string[]) => {
+      enabledToolDraftNamesRef.current = nextTools;
+      setEnabledToolDraftNames(nextTools);
+      void updateThread({ enabledTools: nextTools });
+    },
+    [updateThread],
+  );
+
+  const toggleAssistantTool = React.useCallback(
+    (toolName: string, enabled: boolean) => {
+      const current = new Set(enabledToolDraftNamesRef.current);
+      if (enabled) current.add(toolName);
+      else current.delete(toolName);
+      const ordered = availableTools.map((tool) => tool.name).filter((name) => current.has(name));
+      updateEnabledTools(ordered);
+    },
+    [availableTools, updateEnabledTools],
+  );
 
   const loadArtifactFiles = React.useCallback(async (options: { silent?: boolean } = {}) => {
     const threadId = activeThreadId;
@@ -2556,7 +3011,7 @@ export function AssistantDock() {
         />
       ) : null}
       <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex h-11 flex-shrink-0 items-center gap-2 border-b border-[var(--border)] bg-[rgba(255,255,255,.025)] px-2">
+        <div className="relative flex h-11 flex-shrink-0 items-center gap-2 border-b border-[var(--border)] bg-[rgba(255,255,255,.025)] px-2">
           <button
             type="button"
             onClick={() => setThreadSidebarOpen((open) => !open)}
@@ -2612,10 +3067,25 @@ export function AssistantDock() {
             type="button"
             onClick={openSystemPromptEditor}
             className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] text-[var(--muted)] hover:text-[var(--fg)]"
-            title="Edit assistant system prompt"
-            aria-label="Edit assistant system prompt"
+            title="Edit assistant system prompts"
+            aria-label="Edit assistant system prompts"
           >
             <IconPencil className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => setToolsPanelOpen((value) => !value)}
+            disabled={!activeThread}
+            aria-pressed={toolsPanelOpen}
+            className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded border text-[var(--muted)] hover:text-[var(--fg)] disabled:cursor-not-allowed disabled:opacity-45 ${
+              toolsPanelOpen
+                ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
+                : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)]'
+            }`}
+            title="Toggle assistant tools"
+            aria-label="Toggle assistant tools"
+          >
+            <IconSettings className="h-3.5 w-3.5" />
           </button>
           <button
             type="button"
@@ -2642,6 +3112,17 @@ export function AssistantDock() {
               <path d="M10 12.4l1.4 1.4 3-3.6" />
             </svg>
           </button>
+          {toolsPanelOpen ? (
+            <AssistantToolsPanel
+              tools={availableTools}
+              enabledTools={enabledToolNames}
+              disabled={!activeThread}
+              onToggleTool={toggleAssistantTool}
+              onEnableAll={() => updateEnabledTools(availableTools.map((tool) => tool.name))}
+              onDisableAll={() => updateEnabledTools([])}
+              onClose={() => setToolsPanelOpen(false)}
+            />
+          ) : null}
         </div>
 
       <div
@@ -2983,16 +3464,26 @@ export function AssistantDock() {
       </div>
       {systemPromptOpen ? (
         <AssistantSystemPromptModal
+          mode={systemPromptMode}
           settings={systemPromptSettings}
           draft={systemPromptDraft}
+          threadSettings={threadSystemPromptSettings}
+          threadDraft={threadSystemPromptDraft}
           loading={systemPromptLoading}
           saving={systemPromptSaving}
+          threadSaving={threadSystemPromptSaving}
+          promoting={promoteSystemPromptSaving}
           error={systemPromptError}
           notice={systemPromptNotice}
+          onModeChange={setSystemPromptMode}
           onDraftChange={setSystemPromptDraft}
-          onUseDefault={() => setSystemPromptDraft(systemPromptSettings?.assistantSystemPrompt.defaultPrompt ?? '')}
+          onThreadDraftChange={setThreadSystemPromptDraft}
+          onUseGlobalForThread={() => setThreadSystemPromptDraft(systemPromptSettings?.assistantSystemPrompt.prompt ?? threadSystemPromptSettings?.threadSystemPrompt.globalPrompt ?? '')}
+          onUseDefaultForGlobal={() => setSystemPromptDraft(systemPromptSettings?.assistantSystemPrompt.defaultPrompt ?? '')}
           onClose={() => setSystemPromptOpen(false)}
-          onSave={() => void saveSystemPromptSettings()}
+          onSaveGlobal={() => void saveSystemPromptSettings()}
+          onSaveThread={() => void saveThreadSystemPromptSettings()}
+          onPromoteThread={() => void promoteThreadSystemPrompt()}
         />
       ) : null}
       {overviewPromptOpen ? (

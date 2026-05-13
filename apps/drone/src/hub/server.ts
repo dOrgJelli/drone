@@ -11257,6 +11257,49 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             return;
           }
 
+          if (assistantParts.length === 5 && assistantParts[4] === 'system-prompt') {
+            if (method === 'GET') {
+              try {
+                json(res, 200, await assistantService.threadSystemPromptSettings(threadId));
+              } catch (e: any) {
+                json(res, /unknown assistant thread/i.test(String(e?.message ?? e)) ? 404 : 400, { ok: false, error: e?.message ?? String(e) });
+              }
+              return;
+            }
+
+            if (method === 'POST') {
+              let body: any = null;
+              try {
+                body = await readJsonBody(req);
+              } catch (e: any) {
+                json(res, 400, { ok: false, error: e?.message ?? String(e) });
+                return;
+              }
+              try {
+                json(res, 200, await assistantService.updateThreadSystemPrompt(threadId, body ?? {}));
+              } catch (e: any) {
+                json(res, /unknown assistant thread/i.test(String(e?.message ?? e)) ? 404 : 400, { ok: false, error: e?.message ?? String(e) });
+              }
+              return;
+            }
+          }
+
+          if (assistantParts.length === 5 && assistantParts[4] === 'promote-system-prompt' && method === 'POST') {
+            let body: any = null;
+            try {
+              body = await readJsonBody(req);
+            } catch (e: any) {
+              json(res, 400, { ok: false, error: e?.message ?? String(e) });
+              return;
+            }
+            try {
+              json(res, 200, await assistantService.promoteThreadSystemPrompt(threadId, body ?? {}));
+            } catch (e: any) {
+              json(res, /unknown assistant thread/i.test(String(e?.message ?? e)) ? 404 : 400, { ok: false, error: e?.message ?? String(e) });
+            }
+            return;
+          }
+
           if (assistantParts.length === 5 && assistantParts[4] === 'overview' && method === 'POST') {
             let body: any = null;
             try {
