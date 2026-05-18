@@ -95,6 +95,12 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse): Pro
     return;
   }
 
+  if (url.pathname === "/control") {
+    res.writeHead(426, { "content-type": "text/plain; charset=utf-8" });
+    res.end("Upgrade required. Connect to this endpoint with WebSocket.\n");
+    return;
+  }
+
   if (url.pathname === "/monitor") {
     res.writeHead(426, { "content-type": "text/plain; charset=utf-8" });
     res.end("Upgrade required. Connect to this endpoint with WebSocket.\n");
@@ -106,6 +112,7 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse): Pro
 }
 
 const wss = new WebSocketServer({ noServer: true });
+const controlWss = new WebSocketServer({ noServer: true });
 const monitorWss = new WebSocketServer({ noServer: true });
 const transcriptionConfig = buildTranscriptionConfigFromEnv(process.env);
 const ttsConfig = buildTtsConfigFromEnv(process.env);
@@ -113,22 +120,23 @@ const hubClientConfig = buildHubClientConfigFromEnv(process.env);
 let latestTranscriptStatus: TranscriptStatus = initialTranscriptStatus();
 
 let nextClientId = 1;
+let nextControlClientId = 1;
 let nextMonitorId = 1;
-const audioClients = new Map<number, WebSocket>();
+const controlClients = new Map<number, WebSocket>();
 
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
-  const target = url.pathname === "/audio" ? wss : url.pathname === "/monitor" ? monitorWss : null;
+  const target = url.pathname === "/audio" ? wss : url.pathname === "/control" ? controlWss : url.pathname === "/monitor" ? monitorWss : null;
 
   if (!target) {
     socket.destroy();
     return;
   }
 
-  if (url.pathname === "/audio" && !isAuthorizedAudioRequest(url)) {
+  if ((url.pathname === "/audio" || url.pathname === "/control") && !isAuthorizedAudioRequest(url)) {
     socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
     socket.destroy();
-    console.warn("[auth] rejected unauthorized /audio websocket");
+    console.warn(`[auth] rejected unauthorized ${url.pathname} websocket`);
     return;
   }
 
@@ -144,12 +152,7 @@ wss.on("connection", (socket, request) => {
     transcriptionConfig,
     (message) => broadcastTranscriptMessage(message),
     (command) => {
-      sendAudioCommand(socket, clientId, {
-        type: "wait_for_reply",
-        phrase: command.phrase,
-        detectedAt: command.detectedAt,
-        transcriptText: "",
-      });
+      sendAudioCommand(socket, clientId, command);
       void handleSleepCommand(clientId, command);
     },
     `client ${clientId}`,
@@ -158,7 +161,6 @@ wss.on("connection", (socket, request) => {
   let framesIn = 0;
 
   console.log(`[client ${clientId}] connected from ${remote}`);
-  audioClients.set(clientId, socket);
   void handleVoiceClientConnected(clientId);
 
   socket.on("message", (data, isBinary) => {
@@ -183,12 +185,27 @@ wss.on("connection", (socket, request) => {
     sttManager.flushPending();
     sttManager.stop();
     clearInterval(stats);
-    audioClients.delete(clientId);
     console.log(`[client ${clientId}] closed ${code} ${reason.toString()}`);
   });
 
   socket.on("error", (error) => {
     console.warn(`[client ${clientId}] error`, error);
+  });
+});
+
+controlWss.on("connection", (socket, request) => {
+  const clientId = nextControlClientId++;
+  const remote = `${request.socket.remoteAddress ?? "unknown"}:${request.socket.remotePort ?? ""}`;
+  console.log(`[control ${clientId}] connected from ${remote}`);
+  controlClients.set(clientId, socket);
+
+  socket.on("close", (code, reason) => {
+    controlClients.delete(clientId);
+    console.log(`[control ${clientId}] closed ${code} ${reason.toString()}`);
+  });
+
+  socket.on("error", (error) => {
+    console.warn(`[control ${clientId}] error`, error);
   });
 });
 
@@ -280,6 +297,7 @@ monitorWss.on("connection", (socket, request) => {
 
 server.listen(port, "0.0.0.0", () => {
   console.log(`Voice stream server listening on ws://0.0.0.0:${port}/audio`);
+  console.log(`Android control channel listening on ws://0.0.0.0:${port}/control`);
   console.log(`Browser monitor listening on ws://0.0.0.0:${port}/monitor`);
   console.log(`APK download page listening on http://0.0.0.0:${port}/`);
   console.log(`Groq STT: ${transcriptionConfig.apiKey ? `enabled (${transcriptionConfig.model})` : "disabled (missing GROQ_API_KEY)"}`);
@@ -963,23 +981,17 @@ async function serveSpeak(req: IncomingMessage, res: ServerResponse): Promise<vo
     return;
   }
 
-  const clients = [...audioClients.entries()].filter(([, socket]) => socket.readyState === WebSocket.OPEN);
+  const clients = [...controlClients.entries()].filter(([, socket]) => socket.readyState === WebSocket.OPEN);
   if (clients.length === 0) {
     res.writeHead(409, { "content-type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ ok: false, error: "No Android voice client is connected." }));
+    res.end(JSON.stringify({ ok: false, error: "No Android control client is connected." }));
     return;
   }
 
   try {
     const wav = await synthesizeTextWav(text.slice(0, 4_000), ttsConfig);
-    for (const [clientId, socket] of clients) {
+    for (const [, socket] of clients) {
       socket.send(wav, { binary: true });
-      sendAudioCommand(socket, clientId, {
-        type: "sleep",
-        phrase: "speak",
-        detectedAt: new Date().toISOString(),
-        transcriptText: "",
-      });
     }
     res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({ ok: true, clients: clients.length, bytes: wav.byteLength }));

@@ -36,7 +36,6 @@ class VoiceSessionService : Service() {
     private val serviceActive = AtomicBoolean(false)
     private val streaming = AtomicBoolean(false)
     private val outgoingReady = AtomicBoolean(false)
-    private val awaitingReply = AtomicBoolean(false)
     private val playbackQueue = LinkedBlockingQueue<ByteArray>(100)
     private val wakeController = WakeToggleController()
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -61,10 +60,9 @@ class VoiceSessionService : Service() {
             }
         }
     }
-    private val replyTimeoutRunnable = Runnable {
-        if (streaming.get() && awaitingReply.get()) {
-            DroneLog.w("WebSocket", "Timed out waiting for spoken reply")
-            endStreaming(waitingStatus(), returnToListening = true)
+    private val reconnectControlWebSocketRunnable = Runnable {
+        if (serviceActive.get() && controlWebSocket == null) {
+            connectControlWebSocket()
         }
     }
 
@@ -75,6 +73,7 @@ class VoiceSessionService : Service() {
 
     private var serverUrl: String = Constants.DEFAULT_SERVER_URL
     private var webSocket: WebSocket? = null
+    private var controlWebSocket: WebSocket? = null
     private var recorder: AudioRecord? = null
     private var player: AudioTrack? = null
     private var micThread: Thread? = null
@@ -156,6 +155,7 @@ class VoiceSessionService : Service() {
             return
         }
 
+        if (serverUrl != url) closeControlWebSocket("server URL changed")
         serverUrl = url
         if (!serviceActive.getAndSet(true)) {
             wakeController.startListening()
@@ -163,8 +163,11 @@ class VoiceSessionService : Service() {
             acquireWakeLock()
             ensureWakeDetector()
             startMicLoop()
+            connectControlWebSocket()
             uploadDiagnostics("listening-start", force = true)
             mainHandler.postDelayed(logUploadRunnable, LOG_UPLOAD_INTERVAL_MS)
+        } else {
+            ensureControlWebSocketConnected()
         }
 
         if (!streaming.get()) {
@@ -178,6 +181,7 @@ class VoiceSessionService : Service() {
         serviceActive.set(false)
         mainHandler.removeCallbacks(logUploadRunnable)
         mainHandler.removeCallbacks(approvalFinalizeRunnable)
+        mainHandler.removeCallbacks(reconnectControlWebSocketRunnable)
         uploadDiagnostics("listening-stop", force = true)
         wakeController.stopAll()
         approvalCodeRecognizer.reset()
@@ -190,6 +194,7 @@ class VoiceSessionService : Service() {
         wakeLock = null
         preRollBuffer.clear()
         pendingStreamBuffer.clear()
+        closeControlWebSocket("listening stopped")
         lastApprovalStatus = ""
         publishState("Off", Constants.MODE_OFF)
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -204,7 +209,6 @@ class VoiceSessionService : Service() {
         }
 
         outgoingReady.set(false)
-        awaitingReply.set(false)
         seedPendingStreamFromPreRoll()
         playbackQueue.clear()
         startPlayback()
@@ -222,8 +226,6 @@ class VoiceSessionService : Service() {
         }
 
         outgoingReady.set(false)
-        awaitingReply.set(false)
-        mainHandler.removeCallbacks(replyTimeoutRunnable)
         pendingStreamBuffer.clear()
         webSocket?.close(1000, "client stopped")
         webSocket = null
@@ -319,7 +321,7 @@ class VoiceSessionService : Service() {
                         mainHandler.post { handleWakeDetected(phrase) }
                     }
 
-                    if (wasStreaming && !awaitingReply.get()) {
+                    if (wasStreaming) {
                         if (outgoingReady.get()) {
                             flushPendingStreamFrames()
                             webSocket?.send(ByteString.of(*frame))
@@ -465,6 +467,67 @@ class VoiceSessionService : Service() {
         )
     }
 
+    private fun ensureControlWebSocketConnected() {
+        if (controlWebSocket != null) return
+        connectControlWebSocket()
+    }
+
+    private fun closeControlWebSocket(reason: String) {
+        mainHandler.removeCallbacks(reconnectControlWebSocketRunnable)
+        controlWebSocket?.close(1000, reason)
+        controlWebSocket = null
+    }
+
+    private fun scheduleControlWebSocketReconnect() {
+        if (!serviceActive.get()) return
+        mainHandler.removeCallbacks(reconnectControlWebSocketRunnable)
+        mainHandler.postDelayed(reconnectControlWebSocketRunnable, RECONNECT_CONTROL_WEBSOCKET_MS)
+    }
+
+    private fun connectControlWebSocket() {
+        if (controlWebSocket != null) return
+        val url = controlUrlForAudioUrl(serverUrl)
+        val request = Request.Builder().url(url).build()
+        val socket = httpClient.newWebSocket(request, object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                DroneLog.i("ControlWebSocket", "Connected to $url")
+            }
+
+            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                if (!serviceActive.get()) return
+                val data = bytes.toByteArray()
+                if (isWavAudio(data)) {
+                    ApprovalTtsPlayer.playWav(data)
+                }
+            }
+
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                webSocket.close(code, reason)
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                DroneLog.i("ControlWebSocket", "Closed code=$code reason=$reason")
+                if (this@VoiceSessionService.controlWebSocket === webSocket) {
+                    this@VoiceSessionService.controlWebSocket = null
+                }
+                scheduleControlWebSocketReconnect()
+            }
+
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                DroneLog.e("ControlWebSocket", "Control WebSocket failed response=${response?.code}", t)
+                if (this@VoiceSessionService.controlWebSocket === webSocket) {
+                    this@VoiceSessionService.controlWebSocket = null
+                }
+                scheduleControlWebSocketReconnect()
+            }
+        })
+        controlWebSocket = socket
+    }
+
+    private fun controlUrlForAudioUrl(audioUrl: String): String {
+        return Uri.parse(audioUrl).buildUpon().path("/control").build().toString()
+    }
+
     private fun connectWebSocket(url: String) {
         val request = Request.Builder().url(url).build()
         webSocket = httpClient.newWebSocket(request, object : WebSocketListener() {
@@ -475,22 +538,17 @@ class VoiceSessionService : Service() {
                     return
                 }
                 outgoingReady.set(true)
-                if (!awaitingReply.get()) {
-                    flushPendingStreamFrames()
-                }
+                flushPendingStreamFrames()
                 publishState("Awake: streaming", Constants.MODE_STREAMING)
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                if (streaming.get()) {
-                    val data = bytes.toByteArray()
-                    if (isWavAudio(data)) {
-                        awaitingReply.set(false)
-                        mainHandler.removeCallbacks(replyTimeoutRunnable)
-                        ApprovalTtsPlayer.playWav(data)
-                    } else {
-                        playbackQueue.offer(data)
-                    }
+                if (!streaming.get()) return
+                val data = bytes.toByteArray()
+                if (isWavAudio(data)) {
+                    ApprovalTtsPlayer.playWav(data)
+                } else {
+                    playbackQueue.offer(data)
                 }
             }
 
@@ -504,6 +562,10 @@ class VoiceSessionService : Service() {
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 DroneLog.i("WebSocket", "Closed code=$code reason=$reason")
+                if (this@VoiceSessionService.webSocket === webSocket) {
+                    this@VoiceSessionService.webSocket = null
+                }
+                outgoingReady.set(false)
                 if (streaming.get()) {
                     wakeController.manualStopStreaming(returnToListening = serviceActive.get())
                     endStreaming("${waitingStatus()}: server closed $code", returnToListening = serviceActive.get())
@@ -512,6 +574,10 @@ class VoiceSessionService : Service() {
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 DroneLog.e("WebSocket", "WebSocket failed response=${response?.code}", t)
+                if (this@VoiceSessionService.webSocket === webSocket) {
+                    this@VoiceSessionService.webSocket = null
+                }
+                outgoingReady.set(false)
                 if (streaming.get()) {
                     wakeController.manualStopStreaming(returnToListening = serviceActive.get())
                     endStreaming(
@@ -525,19 +591,6 @@ class VoiceSessionService : Service() {
 
     private fun handleServerControlMessage(text: String) {
         val type = runCatching { JSONObject(text).optString("type") }.getOrDefault("")
-        if (type == "wait_for_reply") {
-            DroneLog.i("WebSocket", "Server wait-for-reply command received")
-            mainHandler.post {
-                if (!streaming.get()) return@post
-                outgoingReady.set(false)
-                awaitingReply.set(true)
-                pendingStreamBuffer.clear()
-                publishState("Awake: waiting for reply", Constants.MODE_STREAMING)
-                mainHandler.removeCallbacks(replyTimeoutRunnable)
-                mainHandler.postDelayed(replyTimeoutRunnable, REPLY_TIMEOUT_MS)
-            }
-            return
-        }
         if (type != "sleep") return
 
         DroneLog.i("WebSocket", "Server sleep command received")
@@ -828,7 +881,7 @@ class VoiceSessionService : Service() {
         private const val TEMPORARY_STATUS_MS = 1_200L
         private const val APPROVAL_STATUS_MS = 2_500L
         private const val APPROVAL_CODE_CHECK_INTERVAL_MS = 250L
-        private const val REPLY_TIMEOUT_MS = 120_000L
+        private const val RECONNECT_CONTROL_WEBSOCKET_MS = 2_000L
         private const val UNLOCK_CODE = "1234"
         private const val LOCK_CODE = "4321"
         private const val LOCKED_OFF_CODE = "0000"

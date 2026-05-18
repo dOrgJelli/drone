@@ -18,7 +18,7 @@ export type TranscriptSegment = {
 export type TranscriptMessage = TranscriptStatus | TranscriptSegment;
 
 export type TranscriptCommand = {
-  type: "sleep" | "wait_for_reply";
+  type: "sleep";
   phrase: string;
   detectedAt: string;
   transcriptText: string;
