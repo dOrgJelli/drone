@@ -52,10 +52,16 @@ export function GeneralSettingsTab({
     clearingOpenAiSettings,
     showOpenAiKey,
     revealingOpenAiKey,
+    groqSettingsDraft,
+    savingGroqSettings,
+    clearingGroqSettings,
+    showGroqKey,
+    revealingGroqKey,
     llmSettingsNotice,
     setLlmProviderDraft,
     updateOpenAiSettingsDraft,
     updateGeminiSettingsDraft,
+    updateGroqSettingsDraft,
     loadLlmSettings,
     saveLlmProviderSettings,
     toggleApiKeyVisibility,
@@ -195,7 +201,7 @@ export function GeneralSettingsTab({
         {llmSettingsLoading && !llmSettings ? (
           <div className="text-[12px] text-[var(--muted-dim)]">Loading settings…</div>
         ) : (
-          <div className="grid grid-cols-1 xl:grid-cols-4 gap-3">
+          <div className="grid grid-cols-1 xl:grid-cols-5 gap-3">
             <div className="rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 py-3">
               <div className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]">Active provider</div>
               <div className="text-[13px] text-[var(--fg-secondary)] mt-2">
@@ -234,6 +240,15 @@ export function GeneralSettingsTab({
               </div>
               <div className="text-[11px] text-[var(--muted-dim)] mt-1">
                 {llmSettings?.codex.updatedAt ? `Refreshed ${new Date(llmSettings.codex.updatedAt).toLocaleString()}` : 'Uses local Codex CLI auth'}
+              </div>
+            </div>
+            <div className="rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 py-3">
+              <div className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]">GROQ key</div>
+              <div className="text-[13px] text-[var(--fg-secondary)] mt-2">
+                {llmSettings?.groq.hasKey ? llmSettings.groq.keyHint ?? 'Configured' : 'Not configured'}
+              </div>
+              <div className="text-[11px] text-[var(--muted-dim)] mt-1">
+                {llmSettings?.groq.updatedAt ? `Updated ${new Date(llmSettings.groq.updatedAt).toLocaleString()}` : 'Required for voice transcription'}
               </div>
             </div>
           </div>
@@ -468,6 +483,78 @@ export function GeneralSettingsTab({
               style={{ fontFamily: 'var(--display)' }}
             >
               {clearingGeminiSettings ? 'Clearing…' : 'Clear'}
+            </button>
+          </div>
+        </div>
+
+        <div className="rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.12)] px-3 py-3 flex flex-col gap-3">
+          <div className="text-[10px] font-semibold text-[var(--muted-dim)] tracking-[0.08em] uppercase" style={{ fontFamily: 'var(--display)' }}>
+            GROQ API key
+          </div>
+          {llmSettings?.groq.hasKey ? (
+            <div className="text-[11px] text-[var(--muted-dim)]">
+              {llmSettings.groq.keyHint ?? 'hidden'}
+              {llmSettings.groq.updatedAt ? ` • Updated ${new Date(llmSettings.groq.updatedAt).toLocaleString()}` : ''}
+            </div>
+          ) : (
+            <div className="text-[11px] text-[var(--muted-dim)]">No GROQ key configured.</div>
+          )}
+          <div className="text-[11px] text-[var(--muted-dim)] leading-relaxed">
+            Used only for the voice-to-clipboard shortcut transcription.
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              value={groqSettingsDraft}
+              onChange={(e) => updateGroqSettingsDraft(e.target.value)}
+              type="text"
+              autoComplete="off"
+              name="groq-api-key"
+              spellCheck={false}
+              style={({ WebkitTextSecurity: showGroqKey ? 'none' : 'disc' } as React.CSSProperties)}
+              className="flex-1 h-9 rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.15)] px-3 text-[13px] text-[var(--fg)] placeholder:text-[var(--muted-dim)] focus:outline-none focus:border-[var(--accent-muted)] transition-colors font-mono"
+              placeholder="gsk_..."
+              disabled={savingGroqSettings || clearingGroqSettings || revealingGroqKey}
+            />
+            <button
+              type="button"
+              onClick={() => void toggleApiKeyVisibility('groq')}
+              disabled={savingGroqSettings || clearingGroqSettings || revealingGroqKey}
+              className={`h-9 px-3 rounded text-[11px] font-semibold tracking-wide uppercase border transition-all ${
+                savingGroqSettings || clearingGroqSettings || revealingGroqKey
+                  ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
+                  : 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]'
+              }`}
+              style={{ fontFamily: 'var(--display)' }}
+            >
+              {revealingGroqKey ? 'Loading…' : showGroqKey ? 'Hide' : 'Show'}
+            </button>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void mutateApiKeySettings('groq', 'save')}
+              disabled={!groqSettingsDraft.trim() || savingGroqSettings || clearingGroqSettings}
+              className={`h-9 px-3 rounded text-[11px] font-semibold tracking-wide uppercase border transition-all ${
+                !groqSettingsDraft.trim() || savingGroqSettings || clearingGroqSettings
+                  ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
+                  : 'bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-fg)] hover:shadow-[var(--glow-accent)] hover:brightness-110'
+              }`}
+              style={{ fontFamily: 'var(--display)' }}
+            >
+              {savingGroqSettings ? 'Saving…' : 'Save'}
+            </button>
+            <button
+              type="button"
+              onClick={() => void mutateApiKeySettings('groq', 'clear')}
+              disabled={clearingGroqSettings || savingGroqSettings || !llmSettings?.groq.hasKey}
+              className={`h-9 px-3 rounded text-[11px] font-semibold tracking-wide uppercase border transition-all ${
+                clearingGroqSettings || savingGroqSettings || !llmSettings?.groq.hasKey
+                  ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
+                  : 'bg-[var(--red-subtle)] border-[rgba(255,90,90,.28)] text-[var(--red)] hover:bg-[rgba(255,90,90,.18)]'
+              }`}
+              style={{ fontFamily: 'var(--display)' }}
+            >
+              {clearingGroqSettings ? 'Clearing…' : 'Clear'}
             </button>
           </div>
         </div>

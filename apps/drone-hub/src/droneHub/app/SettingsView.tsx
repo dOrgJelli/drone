@@ -97,6 +97,8 @@ export function SettingsView({
     llm.clearingOpenAiSettings ||
     llm.savingGeminiSettings ||
     llm.clearingGeminiSettings ||
+    llm.savingGroqSettings ||
+    llm.clearingGroqSettings ||
     llm.savingLlmProvider ||
     agentMessageAutoContinue.savingAgentMessageAutoContinueSettings ||
     agentSuggestion.savingAgentSuggestionSettings ||

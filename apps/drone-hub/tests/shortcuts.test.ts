@@ -51,6 +51,14 @@ describe('shortcut defaults', () => {
       alt: false,
       shift: false,
     });
+    expect(defaults.toggleVoiceClipboardRecording).toEqual({
+      key: '`',
+      mod: false,
+      ctrl: false,
+      meta: false,
+      alt: false,
+      shift: false,
+    });
     expect(defaults.toggleRightPanelOpen).toEqual({
       key: 'd',
       mod: false,
