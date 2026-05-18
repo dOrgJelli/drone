@@ -183,6 +183,7 @@ describeSocketSuite('LLM settings api', () => {
   let server: Awaited<ReturnType<typeof startDroneHubApiServer>> | null = null;
   let baseUrl = '';
   let groqSettingsChangeNotifications = 0;
+  let voiceStreamPairingPasswordChangeNotifications = 0;
 
   const apiFetch = async (p: string, init?: RequestInit) => {
     const r = await fetch(`${baseUrl}${p}`, {
@@ -208,6 +209,9 @@ describeSocketSuite('LLM settings api', () => {
       apiToken: token,
       onGroqApiKeySettingsChanged: () => {
         groqSettingsChangeNotifications += 1;
+      },
+      onVoiceStreamPairingPasswordSettingsChanged: () => {
+        voiceStreamPairingPasswordChangeNotifications += 1;
       },
     });
     baseUrl = `http://${server.host}:${server.port}`;
@@ -271,6 +275,33 @@ describeSocketSuite('LLM settings api', () => {
     expect(cleared.data.hasKey).toBe(false);
     expect(cleared.data.source).toBeNull();
     expect(groqSettingsChangeNotifications).toBe(notificationCountBefore + 2);
+  });
+
+  test('stores Voice Stream pairing password settings', async () => {
+    const notificationCountBefore = voiceStreamPairingPasswordChangeNotifications;
+    const initial = await apiFetch('/api/settings/llm');
+    expect(initial.r.status).toBe(200);
+    expect(initial.data.voiceStreamPairingPassword.hasPassword).toBe(false);
+
+    const saved = await apiFetch('/api/settings/voice-stream/pairing-password', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ password: 'pair-password' }),
+    });
+    expect(saved.r.status).toBe(200);
+    expect(saved.data.hasPassword).toBe(true);
+    expect(saved.data.source).toBe('settings');
+    expect(saved.data.password).toBeUndefined();
+
+    const revealed = await apiFetch('/api/settings/voice-stream/pairing-password?reveal=1');
+    expect(revealed.r.status).toBe(200);
+    expect(revealed.data.password).toBe('pair-password');
+
+    const cleared = await apiFetch('/api/settings/voice-stream/pairing-password', { method: 'DELETE' });
+    expect(cleared.r.status).toBe(200);
+    expect(cleared.data.hasPassword).toBe(false);
+    expect(cleared.data.source).toBeNull();
+    expect(voiceStreamPairingPasswordChangeNotifications).toBe(notificationCountBefore + 2);
   });
 
   test('reads and updates agent auto-continue settings', async () => {

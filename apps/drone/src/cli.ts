@@ -52,7 +52,7 @@ import { ensureHubSetupState } from './host/setup-state';
 import { resolveDetachedCliLaunchSpec } from './hub/hub-launch';
 import { parseHubRunnerProcessesFromPsOutput, selectHubRunnerPidsToStop } from './hub/orphan-hub-runners';
 import { startDroneHubApiServer } from './hub/server';
-import { resolveGroqApiKeySettings } from './hub/hub-settings';
+import { resolveGroqApiKeySettings, resolveVoiceStreamPairingPasswordSettings } from './hub/hub-settings';
 import { buildVoiceStreamProcessEnv } from './hub/voice-stream-launch';
 
 function sleep(ms: number) {
@@ -391,11 +391,18 @@ async function startVoiceStreamServer(repoRoot: string, port: number): Promise<C
     return null;
   }
 
-  const groqSettings = await resolveGroqApiKeySettings();
+  const [groqSettings, pairingPasswordSettings] = await Promise.all([
+    resolveGroqApiKeySettings(),
+    resolveVoiceStreamPairingPasswordSettings(),
+  ]);
   const child = spawn('bun', ['run', 'dev'], {
     cwd: voiceStreamDir,
     stdio: 'inherit',
-    env: buildVoiceStreamProcessEnv(process.env, { port, groqApiKey: groqSettings.apiKey }),
+    env: buildVoiceStreamProcessEnv(process.env, {
+      port,
+      groqApiKey: groqSettings.apiKey,
+      pairingPassword: pairingPasswordSettings.password,
+    }),
   });
 
   child.once('error', (error) => {
@@ -1861,7 +1868,7 @@ async function hubRun(options: any) {
     });
   };
 
-  const restartVoiceStreamForGroqSettings = async () => {
+  const restartVoiceStreamForSettings = async () => {
     if (!voiceStreamEnabled || shuttingDown) return;
     if (voiceStreamRestart) await voiceStreamRestart;
     if (shuttingDown) return;
@@ -1876,7 +1883,7 @@ async function hubRun(options: any) {
       }
       trackVoiceStreamChild(await startVoiceStreamServer(repoRoot, voiceStreamPort));
       // eslint-disable-next-line no-console
-      console.log(`Voice Stream restarted after GROQ settings change: http://127.0.0.1:${voiceStreamPort}`);
+      console.log(`Voice Stream restarted after settings change: http://127.0.0.1:${voiceStreamPort}`);
     })();
     try {
       await voiceStreamRestart;
@@ -1890,7 +1897,8 @@ async function hubRun(options: any) {
     host: apiHost,
     apiToken,
     allowedOrigins: Array.from(allowedOrigins),
-    onGroqApiKeySettingsChanged: restartVoiceStreamForGroqSettings,
+    onGroqApiKeySettingsChanged: restartVoiceStreamForSettings,
+    onVoiceStreamPairingPasswordSettingsChanged: restartVoiceStreamForSettings,
   });
 
   const voiceStream = voiceStreamEnabled

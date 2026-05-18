@@ -99,6 +99,8 @@ export function SettingsView({
     llm.clearingGeminiSettings ||
     llm.savingGroqSettings ||
     llm.clearingGroqSettings ||
+    llm.savingVoiceStreamPairingPassword ||
+    llm.clearingVoiceStreamPairingPassword ||
     llm.savingLlmProvider ||
     agentMessageAutoContinue.savingAgentMessageAutoContinueSettings ||
     agentSuggestion.savingAgentSuggestionSettings ||

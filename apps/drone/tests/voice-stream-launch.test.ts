@@ -27,4 +27,13 @@ describe('voice stream launch env', () => {
     expect(env.GROQ_API_KEY).toBe('env-groq');
     expect(env.GROQ_TTS_API_KEY).toBeUndefined();
   });
+
+  test('injects the Hub pairing password for the QR page', () => {
+    const env = buildVoiceStreamProcessEnv(
+      { DRONE_PAIR_PASSWORD: 'env-password' },
+      { port: 3100, groqApiKey: null, pairingPassword: 'settings-password' },
+    );
+
+    expect(env.DRONE_PAIR_PASSWORD).toBe('settings-password');
+  });
 });

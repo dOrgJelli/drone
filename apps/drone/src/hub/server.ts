@@ -217,6 +217,7 @@ import {
 import {
   archiveRetentionMs,
   clearStoredProviderApiKey,
+  clearVoiceStreamPairingPassword,
   collectProviderApiKeyDiagnostics,
   FILESYSTEM_UPLOAD_MAX_BYTES_MAX,
   FILESYSTEM_UPLOAD_MAX_BYTES_MIN,
@@ -244,6 +245,7 @@ import {
   resolveFilesystemSettingsResponse,
   resolveEffectiveProviderApiKeySettings,
   resolveGroqApiKeySettings,
+  resolveVoiceStreamPairingPasswordSettings,
   resolveLlmSettingsResponse,
   resolveTaskPlaybookButtonSettingsResponse,
   resolveUiPreferencesSettingsResponse,
@@ -254,12 +256,14 @@ import {
   upsertStoredAgentSuggestionSettings,
   upsertStoredLlmProvider,
   upsertStoredProviderApiKey,
+  upsertVoiceStreamPairingPassword,
   upsertStoredTaskPlaybookButtonSettings,
   upsertStoredUiPreferencesSettings,
   type ArchiveRetentionId,
   type ArchiveRuntimePolicy,
   type LlmProviderId,
   type StoredApiKeyProviderId,
+  voiceStreamPairingPasswordSettingsResponse,
 } from './hub-settings';
 import {
   createSkill,
@@ -10545,6 +10549,7 @@ export async function startDroneHubApiServer(opts: {
   apiToken: string;
   allowedOrigins?: string[];
   onGroqApiKeySettingsChanged?: () => void | Promise<void>;
+  onVoiceStreamPairingPasswordSettingsChanged?: () => void | Promise<void>;
 }) {
   for (const timer of RECONCILE_RETRY_TIMERS.values()) {
     try {
@@ -10566,6 +10571,14 @@ export async function startDroneHubApiServer(opts: {
     if (!opts.onGroqApiKeySettingsChanged) return;
     void Promise.resolve(opts.onGroqApiKeySettingsChanged()).catch((error: any) => {
       hubLog('warn', 'Groq settings change hook failed', {
+        error: String(error?.message ?? error ?? ''),
+      });
+    });
+  };
+  const notifyVoiceStreamPairingPasswordSettingsChanged = () => {
+    if (!opts.onVoiceStreamPairingPasswordSettingsChanged) return;
+    void Promise.resolve(opts.onVoiceStreamPairingPasswordSettingsChanged()).catch((error: any) => {
+      hubLog('warn', 'Voice Stream pairing password settings change hook failed', {
         error: String(error?.message ?? error ?? ''),
       });
     });
@@ -11511,6 +11524,49 @@ export async function startDroneHubApiServer(opts: {
           json(res, 200, {
             ok: true,
             ...providerKeySettingsResponse(resolved),
+          });
+          return;
+        }
+      }
+
+      if (pathname === '/api/settings/voice-stream/pairing-password') {
+        if (method === 'GET') {
+          const resolved = await resolveVoiceStreamPairingPasswordSettings();
+          json(res, 200, {
+            ok: true,
+            ...voiceStreamPairingPasswordSettingsResponse(resolved, { includePassword: u.searchParams.get('reveal') === '1' }),
+          });
+          return;
+        }
+        if (method === 'POST') {
+          let body: any = null;
+          try {
+            body = await readJsonBody(req);
+          } catch (e: any) {
+            json(res, 400, { ok: false, error: e?.message ?? String(e) });
+            return;
+          }
+          const password = normalizeApiKey(body?.password);
+          if (!password) {
+            json(res, 400, { ok: false, error: 'Pairing password is required.' });
+            return;
+          }
+          await upsertVoiceStreamPairingPassword(password);
+          const resolved = await resolveVoiceStreamPairingPasswordSettings();
+          notifyVoiceStreamPairingPasswordSettingsChanged();
+          json(res, 200, {
+            ok: true,
+            ...voiceStreamPairingPasswordSettingsResponse(resolved),
+          });
+          return;
+        }
+        if (method === 'DELETE') {
+          await clearVoiceStreamPairingPassword();
+          const resolved = await resolveVoiceStreamPairingPasswordSettings();
+          notifyVoiceStreamPairingPasswordSettingsChanged();
+          json(res, 200, {
+            ok: true,
+            ...voiceStreamPairingPasswordSettingsResponse(resolved),
           });
           return;
         }

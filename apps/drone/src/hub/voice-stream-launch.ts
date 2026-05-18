@@ -1,6 +1,6 @@
 export function buildVoiceStreamProcessEnv(
   baseEnv: NodeJS.ProcessEnv,
-  opts: { port: number; groqApiKey?: string | null },
+  opts: { port: number; groqApiKey?: string | null; pairingPassword?: string | null },
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     ...baseEnv,
@@ -13,6 +13,11 @@ export function buildVoiceStreamProcessEnv(
     if (!String(env.GROQ_TTS_API_KEY ?? '').trim()) {
       env.GROQ_TTS_API_KEY = groqApiKey;
     }
+  }
+
+  const pairingPassword = String(opts.pairingPassword ?? '').trim();
+  if (pairingPassword) {
+    env.DRONE_PAIR_PASSWORD = pairingPassword;
   }
 
   return env;
