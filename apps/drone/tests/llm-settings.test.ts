@@ -182,6 +182,7 @@ describeSocketSuite('LLM settings api', () => {
   const droneDataDir = path.join(tempRoot, 'data', 'drone');
   let server: Awaited<ReturnType<typeof startDroneHubApiServer>> | null = null;
   let baseUrl = '';
+  let groqSettingsChangeNotifications = 0;
 
   const apiFetch = async (p: string, init?: RequestInit) => {
     const r = await fetch(`${baseUrl}${p}`, {
@@ -202,7 +203,13 @@ describeSocketSuite('LLM settings api', () => {
     process.env.XDG_DATA_HOME = xdgDataHome;
     process.env.DRONE_DATA_DIR = droneDataDir;
     resetDroneRootDirForTests();
-    server = await startDroneHubApiServer({ port: 0, apiToken: token });
+    server = await startDroneHubApiServer({
+      port: 0,
+      apiToken: token,
+      onGroqApiKeySettingsChanged: () => {
+        groqSettingsChangeNotifications += 1;
+      },
+    });
     baseUrl = `http://${server.host}:${server.port}`;
   });
 
@@ -234,6 +241,7 @@ describeSocketSuite('LLM settings api', () => {
   });
 
   test('stores GROQ key for voice transcription settings', async () => {
+    const notificationCountBefore = groqSettingsChangeNotifications;
     const initial = await apiFetch('/api/settings/llm');
     expect(initial.r.status).toBe(200);
     expect(initial.data.groq.hasKey).toBe(false);
@@ -262,6 +270,7 @@ describeSocketSuite('LLM settings api', () => {
     expect(cleared.r.status).toBe(200);
     expect(cleared.data.hasKey).toBe(false);
     expect(cleared.data.source).toBeNull();
+    expect(groqSettingsChangeNotifications).toBe(notificationCountBefore + 2);
   });
 
   test('reads and updates agent auto-continue settings', async () => {

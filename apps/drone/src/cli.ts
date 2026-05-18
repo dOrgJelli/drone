@@ -52,6 +52,8 @@ import { ensureHubSetupState } from './host/setup-state';
 import { resolveDetachedCliLaunchSpec } from './hub/hub-launch';
 import { parseHubRunnerProcessesFromPsOutput, selectHubRunnerPidsToStop } from './hub/orphan-hub-runners';
 import { startDroneHubApiServer } from './hub/server';
+import { resolveGroqApiKeySettings } from './hub/hub-settings';
+import { buildVoiceStreamProcessEnv } from './hub/voice-stream-launch';
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
@@ -381,7 +383,7 @@ function resolveRepoRootFromDroneCliDir(): string {
   return path.resolve(__dirname, '..', '..', '..');
 }
 
-function startVoiceStreamServer(repoRoot: string, port: number): ChildProcess | null {
+async function startVoiceStreamServer(repoRoot: string, port: number): Promise<ChildProcess | null> {
   const voiceStreamDir = path.join(repoRoot, 'apps', 'voice-stream');
   if (!fsSync.existsSync(path.join(voiceStreamDir, 'package.json'))) {
     // eslint-disable-next-line no-console
@@ -389,13 +391,11 @@ function startVoiceStreamServer(repoRoot: string, port: number): ChildProcess | 
     return null;
   }
 
+  const groqSettings = await resolveGroqApiKeySettings();
   const child = spawn('bun', ['run', 'dev'], {
     cwd: voiceStreamDir,
     stdio: 'inherit',
-    env: {
-      ...process.env,
-      PORT: String(port),
-    },
+    env: buildVoiceStreamProcessEnv(process.env, { port, groqApiKey: groqSettings.apiKey }),
   });
 
   child.once('error', (error) => {
@@ -1842,14 +1842,57 @@ async function hubRun(options: any) {
   if (apiHost && apiHost !== '0.0.0.0' && apiHost !== '::') {
     allowedOrigins.add(`http://${apiHost}:${uiPort}`);
   }
+  const repoRoot = resolveRepoRootFromDroneCliDir();
+  let shuttingDown = false;
+  let voiceStreamRestart: Promise<void> | null = null;
+  let voiceStreamChild: ChildProcess | null = null;
+  const intentionalVoiceStreamStops = new WeakSet<ChildProcess>();
+
+  const trackVoiceStreamChild = (child: ChildProcess | null) => {
+    voiceStreamChild = child;
+    child?.once('exit', (code, signal) => {
+      if (!shuttingDown && !intentionalVoiceStreamStops.has(child)) {
+        // eslint-disable-next-line no-console
+        console.warn(`Voice Stream exited code=${code ?? 'null'} signal=${signal ?? 'null'}`);
+      }
+      if (voiceStreamChild === child) {
+        voiceStreamChild = null;
+      }
+    });
+  };
+
+  const restartVoiceStreamForGroqSettings = async () => {
+    if (!voiceStreamEnabled || shuttingDown) return;
+    if (voiceStreamRestart) await voiceStreamRestart;
+    if (shuttingDown) return;
+    voiceStreamRestart = (async () => {
+      try {
+        if (voiceStreamChild) {
+          intentionalVoiceStreamStops.add(voiceStreamChild);
+          voiceStreamChild.kill('SIGINT');
+        }
+      } catch {
+        // ignore
+      }
+      trackVoiceStreamChild(await startVoiceStreamServer(repoRoot, voiceStreamPort));
+      // eslint-disable-next-line no-console
+      console.log(`Voice Stream restarted after GROQ settings change: http://127.0.0.1:${voiceStreamPort}`);
+    })();
+    try {
+      await voiceStreamRestart;
+    } finally {
+      voiceStreamRestart = null;
+    }
+  };
+
   const api = await startDroneHubApiServer({
     port: apiPort,
     host: apiHost,
     apiToken,
     allowedOrigins: Array.from(allowedOrigins),
+    onGroqApiKeySettingsChanged: restartVoiceStreamForGroqSettings,
   });
 
-  const repoRoot = resolveRepoRootFromDroneCliDir();
   const voiceStream = voiceStreamEnabled
     ? {
         port: voiceStreamPort,
@@ -1872,15 +1915,9 @@ async function hubRun(options: any) {
 
   // Start the drone-hub Vite dev server and proxy /api → Hub API server.
   const hubDir = path.join(repoRoot, 'apps', 'drone-hub');
-  let shuttingDown = false;
-  let voiceStreamChild: ChildProcess | null = voiceStreamEnabled ? startVoiceStreamServer(repoRoot, voiceStreamPort) : null;
-  voiceStreamChild?.once('exit', (code, signal) => {
-    if (!shuttingDown) {
-      // eslint-disable-next-line no-console
-      console.warn(`Voice Stream exited code=${code ?? 'null'} signal=${signal ?? 'null'}`);
-    }
-    voiceStreamChild = null;
-  });
+  if (voiceStreamEnabled) {
+    trackVoiceStreamChild(await startVoiceStreamServer(repoRoot, voiceStreamPort));
+  }
   const child = spawn('bun', ['run', 'dev', '--', '--port', String(uiPort), '--strictPort'], {
     cwd: hubDir,
     stdio: 'inherit',
@@ -1895,7 +1932,10 @@ async function hubRun(options: any) {
   const shutdown = async () => {
     shuttingDown = true;
     try {
-      voiceStreamChild?.kill('SIGINT');
+      if (voiceStreamChild) {
+        intentionalVoiceStreamStops.add(voiceStreamChild);
+        voiceStreamChild.kill('SIGINT');
+      }
     } catch {
       // ignore
     }

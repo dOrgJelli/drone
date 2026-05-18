@@ -195,6 +195,8 @@ drone hub stop
 drone hub restart
 ```
 
+When the Hub starts Voice Stream, it passes the GROQ API key saved in Drone Hub settings to the Voice Stream process. Saving or clearing the Hub GROQ key restarts the Voice Stream process so the key change takes effect. Standalone Voice Stream runs still read `GROQ_API_KEY` / `GROQ_TTS_API_KEY` from the environment.
+
 ### Drone Hub grouping
 
 The Drone Hub sidebar shows drones **grouped into folder-like sections by default** (using each drone’s `group` in the drone registry file). You can toggle to a **flat list** using the switch in the sidebar header.

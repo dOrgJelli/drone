@@ -53,7 +53,7 @@ The normal Drone workflow starts this server with the Hub:
 bun run drone hub
 ```
 
-By default the Hub starts Voice Stream on port `3000`. Use `drone hub start --voice-stream-port 3002` to pick a different port, or `drone hub start --no-voice-stream` to run only the Hub.
+By default the Hub starts Voice Stream on port `3000`. Use `drone hub start --voice-stream-port 3002` to pick a different port, or `drone hub start --no-voice-stream` to run only the Hub. When the Hub launches Voice Stream, it passes the GROQ API key saved in Drone Hub settings to the Voice Stream process and restarts Voice Stream when that key is saved or cleared.
 
 You can also run only Voice Stream from this app directory:
 

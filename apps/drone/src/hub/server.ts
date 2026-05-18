@@ -10539,7 +10539,13 @@ async function logHubLlmStartupSnapshot() {
   });
 }
 
-export async function startDroneHubApiServer(opts: { port: number; host?: string; apiToken: string; allowedOrigins?: string[] }) {
+export async function startDroneHubApiServer(opts: {
+  port: number;
+  host?: string;
+  apiToken: string;
+  allowedOrigins?: string[];
+  onGroqApiKeySettingsChanged?: () => void | Promise<void>;
+}) {
   for (const timer of RECONCILE_RETRY_TIMERS.values()) {
     try {
       clearTimeout(timer);
@@ -10555,6 +10561,15 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
   const host = opts.host ?? '127.0.0.1';
   const apiToken = String(opts.apiToken ?? '').trim();
   if (!apiToken) throw new Error('missing hub API token');
+
+  const notifyGroqApiKeySettingsChanged = () => {
+    if (!opts.onGroqApiKeySettingsChanged) return;
+    void Promise.resolve(opts.onGroqApiKeySettingsChanged()).catch((error: any) => {
+      hubLog('warn', 'Groq settings change hook failed', {
+        error: String(error?.message ?? error ?? ''),
+      });
+    });
+  };
 
   const allowedOrigins = new Set<string>();
   for (const o of opts.allowedOrigins ?? []) {
@@ -11477,6 +11492,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           }
           await upsertStoredProviderApiKey(provider as StoredApiKeyProviderId, apiKey);
           const resolved = provider === 'groq' ? await resolveGroqApiKeySettings() : await resolveEffectiveProviderApiKeySettings(provider);
+          if (provider === 'groq') notifyGroqApiKeySettingsChanged();
           json(res, 200, {
             ok: true,
             ...providerKeySettingsResponse(resolved),
@@ -11491,6 +11507,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           }
           await clearStoredProviderApiKey(provider as StoredApiKeyProviderId);
           const resolved = provider === 'groq' ? await resolveGroqApiKeySettings() : await resolveEffectiveProviderApiKeySettings(provider);
+          if (provider === 'groq') notifyGroqApiKeySettingsChanged();
           json(res, 200, {
             ok: true,
             ...providerKeySettingsResponse(resolved),
