@@ -3,10 +3,11 @@ import { maybeExtractApiKey } from './helpers';
 import type { ApiKeySettingsResponse, LlmProviderId, LlmSettingsResponse } from './settings-types';
 
 type RequestJsonFn = <T>(url: string, init?: RequestInit) => Promise<T>;
-type ApiKeyProviderId = 'openai' | 'gemini';
+type ApiKeyProviderId = 'openai' | 'gemini' | 'groq';
 
-function providerLabel(provider: LlmProviderId): string {
+function providerLabel(provider: LlmProviderId | ApiKeyProviderId): string {
   if (provider === 'codex') return 'Codex';
+  if (provider === 'groq') return 'GROQ';
   return provider === 'gemini' ? 'Gemini' : 'OpenAI';
 }
 
@@ -26,10 +27,16 @@ export type UseLlmSettingsResult = {
   clearingOpenAiSettings: boolean;
   showOpenAiKey: boolean;
   revealingOpenAiKey: boolean;
+  groqSettingsDraft: string;
+  savingGroqSettings: boolean;
+  clearingGroqSettings: boolean;
+  showGroqKey: boolean;
+  revealingGroqKey: boolean;
   llmSettingsNotice: string | null;
   setLlmProviderDraft: React.Dispatch<React.SetStateAction<LlmProviderId>>;
   updateOpenAiSettingsDraft: (raw: string) => void;
   updateGeminiSettingsDraft: (raw: string) => void;
+  updateGroqSettingsDraft: (raw: string) => void;
   loadLlmSettings: () => Promise<void>;
   saveLlmProviderSettings: () => Promise<void>;
   toggleApiKeyVisibility: (provider: ApiKeyProviderId) => Promise<void>;
@@ -54,6 +61,12 @@ export function useLlmSettings(requestJson: RequestJsonFn): UseLlmSettingsResult
   const [clearingOpenAiSettings, setClearingOpenAiSettings] = React.useState(false);
   const [showOpenAiKey, setShowOpenAiKey] = React.useState(false);
   const [revealingOpenAiKey, setRevealingOpenAiKey] = React.useState(false);
+  const [groqSettingsDraft, setGroqSettingsDraft] = React.useState('');
+  const [groqDraftLoadedFromSettings, setGroqDraftLoadedFromSettings] = React.useState(false);
+  const [savingGroqSettings, setSavingGroqSettings] = React.useState(false);
+  const [clearingGroqSettings, setClearingGroqSettings] = React.useState(false);
+  const [showGroqKey, setShowGroqKey] = React.useState(false);
+  const [revealingGroqKey, setRevealingGroqKey] = React.useState(false);
   const [llmSettingsNotice, setLlmSettingsNotice] = React.useState<string | null>(null);
 
   const loadLlmSettings = React.useCallback(async () => {
@@ -74,7 +87,7 @@ export function useLlmSettings(requestJson: RequestJsonFn): UseLlmSettingsResult
     void loadLlmSettings();
   }, [loadLlmSettings]);
 
-  const updateProviderKeySettings = React.useCallback((provider: LlmProviderId, data: ApiKeySettingsResponse) => {
+  const updateProviderKeySettings = React.useCallback((provider: LlmProviderId | ApiKeyProviderId, data: ApiKeySettingsResponse) => {
     setLlmSettings((prev) => {
       if (!prev) return prev;
       const next = {
@@ -85,16 +98,27 @@ export function useLlmSettings(requestJson: RequestJsonFn): UseLlmSettingsResult
       };
       if (provider === 'openai') return { ...prev, openai: next };
       if (provider === 'codex') return { ...prev, codex: next };
+      if (provider === 'groq') return { ...prev, groq: next };
       return { ...prev, gemini: next };
     });
   }, []);
 
   const toggleApiKeyVisibility = React.useCallback(
     async (provider: ApiKeyProviderId) => {
-      const showing = provider === 'openai' ? showOpenAiKey : showGeminiKey;
-      const draft = provider === 'openai' ? openAiSettingsDraft : geminiSettingsDraft;
-      const hasKey = provider === 'openai' ? Boolean(llmSettings?.openai.hasKey) : Boolean(llmSettings?.gemini.hasKey);
-      const draftLoadedFromSettings = provider === 'openai' ? openAiDraftLoadedFromSettings : geminiDraftLoadedFromSettings;
+      const showing = provider === 'openai' ? showOpenAiKey : provider === 'gemini' ? showGeminiKey : showGroqKey;
+      const draft = provider === 'openai' ? openAiSettingsDraft : provider === 'gemini' ? geminiSettingsDraft : groqSettingsDraft;
+      const hasKey =
+        provider === 'openai'
+          ? Boolean(llmSettings?.openai.hasKey)
+          : provider === 'gemini'
+            ? Boolean(llmSettings?.gemini.hasKey)
+            : Boolean(llmSettings?.groq.hasKey);
+      const draftLoadedFromSettings =
+        provider === 'openai'
+          ? openAiDraftLoadedFromSettings
+          : provider === 'gemini'
+            ? geminiDraftLoadedFromSettings
+            : groqDraftLoadedFromSettings;
 
       if (showing) {
         if (provider === 'openai') {
@@ -103,11 +127,17 @@ export function useLlmSettings(requestJson: RequestJsonFn): UseLlmSettingsResult
             setOpenAiSettingsDraft('');
             setOpenAiDraftLoadedFromSettings(false);
           }
-        } else {
+        } else if (provider === 'gemini') {
           setShowGeminiKey(false);
           if (draftLoadedFromSettings) {
             setGeminiSettingsDraft('');
             setGeminiDraftLoadedFromSettings(false);
+          }
+        } else {
+          setShowGroqKey(false);
+          if (draftLoadedFromSettings) {
+            setGroqSettingsDraft('');
+            setGroqDraftLoadedFromSettings(false);
           }
         }
         return;
@@ -115,7 +145,8 @@ export function useLlmSettings(requestJson: RequestJsonFn): UseLlmSettingsResult
 
       if (!draft.trim() && hasKey) {
         if (provider === 'openai') setRevealingOpenAiKey(true);
-        else setRevealingGeminiKey(true);
+        else if (provider === 'gemini') setRevealingGeminiKey(true);
+        else setRevealingGroqKey(true);
         setLlmSettingsError(null);
         try {
           const data = await requestJson<ApiKeySettingsResponse>(`/api/settings/${provider}?reveal=1`);
@@ -125,30 +156,38 @@ export function useLlmSettings(requestJson: RequestJsonFn): UseLlmSettingsResult
           if (provider === 'openai') {
             setOpenAiSettingsDraft(apiKey);
             setOpenAiDraftLoadedFromSettings(true);
-          } else {
+          } else if (provider === 'gemini') {
             setGeminiSettingsDraft(apiKey);
             setGeminiDraftLoadedFromSettings(true);
+          } else {
+            setGroqSettingsDraft(apiKey);
+            setGroqDraftLoadedFromSettings(true);
           }
         } catch (e: any) {
           setLlmSettingsError(e?.message ?? String(e));
           return;
         } finally {
           if (provider === 'openai') setRevealingOpenAiKey(false);
-          else setRevealingGeminiKey(false);
+          else if (provider === 'gemini') setRevealingGeminiKey(false);
+          else setRevealingGroqKey(false);
         }
       }
 
       if (provider === 'openai') setShowOpenAiKey(true);
-      else setShowGeminiKey(true);
+      else if (provider === 'gemini') setShowGeminiKey(true);
+      else setShowGroqKey(true);
     },
     [
       geminiDraftLoadedFromSettings,
       geminiSettingsDraft,
+      groqDraftLoadedFromSettings,
+      groqSettingsDraft,
       llmSettings,
       openAiDraftLoadedFromSettings,
       openAiSettingsDraft,
       requestJson,
       showGeminiKey,
+      showGroqKey,
       showOpenAiKey,
       updateProviderKeySettings,
     ],
@@ -157,8 +196,8 @@ export function useLlmSettings(requestJson: RequestJsonFn): UseLlmSettingsResult
   const mutateApiKeySettings = React.useCallback(
     async (provider: ApiKeyProviderId, action: 'save' | 'clear') => {
       const label = providerLabel(provider);
-      const envKeyName = provider === 'gemini' ? 'GEMINI_API_KEY' : 'OPENAI_API_KEY';
-      const draft = provider === 'openai' ? openAiSettingsDraft : geminiSettingsDraft;
+      const envKeyName = provider === 'gemini' ? 'GEMINI_API_KEY' : provider === 'openai' ? 'OPENAI_API_KEY' : '';
+      const draft = provider === 'openai' ? openAiSettingsDraft : provider === 'gemini' ? geminiSettingsDraft : groqSettingsDraft;
       const apiKey = String(maybeExtractApiKey(draft, provider) ?? '').trim();
       if (action === 'save') {
         if (!apiKey) {
@@ -167,16 +206,19 @@ export function useLlmSettings(requestJson: RequestJsonFn): UseLlmSettingsResult
         }
         if (apiKey !== draft) {
           if (provider === 'openai') setOpenAiSettingsDraft(apiKey);
-          else setGeminiSettingsDraft(apiKey);
+          else if (provider === 'gemini') setGeminiSettingsDraft(apiKey);
+          else setGroqSettingsDraft(apiKey);
         }
       }
       if (provider === 'openai') {
         if (action === 'save') setSavingOpenAiSettings(true);
         else setClearingOpenAiSettings(true);
-      } else if (action === 'save') {
-        setSavingGeminiSettings(true);
+      } else if (provider === 'gemini') {
+        if (action === 'save') setSavingGeminiSettings(true);
+        else setClearingGeminiSettings(true);
       } else {
-        setClearingGeminiSettings(true);
+        if (action === 'save') setSavingGroqSettings(true);
+        else setClearingGroqSettings(true);
       }
       setLlmSettingsError(null);
       setLlmSettingsNotice(null);
@@ -195,15 +237,19 @@ export function useLlmSettings(requestJson: RequestJsonFn): UseLlmSettingsResult
           setOpenAiSettingsDraft('');
           setOpenAiDraftLoadedFromSettings(false);
           setShowOpenAiKey(false);
-        } else {
+        } else if (provider === 'gemini') {
           setGeminiSettingsDraft('');
           setGeminiDraftLoadedFromSettings(false);
           setShowGeminiKey(false);
+        } else {
+          setGroqSettingsDraft('');
+          setGroqDraftLoadedFromSettings(false);
+          setShowGroqKey(false);
         }
         if (action === 'save') {
           setLlmSettingsNotice(`Saved ${label} API key.`);
         } else {
-          setLlmSettingsNotice(data.hasKey ? `Using environment ${envKeyName}.` : `Cleared stored ${label} API key.`);
+          setLlmSettingsNotice(data.hasKey && envKeyName ? `Using environment ${envKeyName}.` : `Cleared stored ${label} API key.`);
         }
       } catch (e: any) {
         setLlmSettingsError(e?.message ?? String(e));
@@ -211,14 +257,16 @@ export function useLlmSettings(requestJson: RequestJsonFn): UseLlmSettingsResult
         if (provider === 'openai') {
           if (action === 'save') setSavingOpenAiSettings(false);
           else setClearingOpenAiSettings(false);
-        } else if (action === 'save') {
-          setSavingGeminiSettings(false);
+        } else if (provider === 'gemini') {
+          if (action === 'save') setSavingGeminiSettings(false);
+          else setClearingGeminiSettings(false);
         } else {
-          setClearingGeminiSettings(false);
+          if (action === 'save') setSavingGroqSettings(false);
+          else setClearingGroqSettings(false);
         }
       }
     },
-    [geminiSettingsDraft, openAiSettingsDraft, requestJson, updateProviderKeySettings],
+    [geminiSettingsDraft, groqSettingsDraft, openAiSettingsDraft, requestJson, updateProviderKeySettings],
   );
 
   const saveLlmProviderSettings = React.useCallback(async () => {
@@ -251,6 +299,11 @@ export function useLlmSettings(requestJson: RequestJsonFn): UseLlmSettingsResult
     setGeminiSettingsDraft(maybeExtractApiKey(raw, 'gemini'));
   }, []);
 
+  const updateGroqSettingsDraft = React.useCallback((raw: string) => {
+    setGroqDraftLoadedFromSettings(false);
+    setGroqSettingsDraft(maybeExtractApiKey(raw, 'groq'));
+  }, []);
+
   return {
     llmSettings,
     llmSettingsLoading,
@@ -267,10 +320,16 @@ export function useLlmSettings(requestJson: RequestJsonFn): UseLlmSettingsResult
     clearingOpenAiSettings,
     showOpenAiKey,
     revealingOpenAiKey,
+    groqSettingsDraft,
+    savingGroqSettings,
+    clearingGroqSettings,
+    showGroqKey,
+    revealingGroqKey,
     llmSettingsNotice,
     setLlmProviderDraft,
     updateOpenAiSettingsDraft,
     updateGeminiSettingsDraft,
+    updateGroqSettingsDraft,
     loadLlmSettings,
     saveLlmProviderSettings,
     toggleApiKeyVisibility,

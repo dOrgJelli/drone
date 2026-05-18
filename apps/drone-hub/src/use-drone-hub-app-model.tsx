@@ -71,6 +71,7 @@ import { useDroneHubRuntimeState } from './droneHub/app/use-drone-hub-runtime-st
 import { useDroneHubLifecycleEffects } from './droneHub/app/use-drone-hub-lifecycle-effects';
 import { useDroneHubRegistryData } from './droneHub/app/use-drone-hub-registry-data';
 import { useDroneHubToolbarMenuState } from './droneHub/app/use-drone-hub-toolbar-menu-state';
+import { useVoiceClipboardRecorder } from './droneHub/app/use-voice-clipboard-recorder';
 import { useTranscriptTldrState } from './droneHub/app/use-transcript-tldr-state';
 import { useAgentSuggestionState } from './droneHub/app/use-agent-suggestion-state';
 import { useWorkspaceNavigationActions } from './droneHub/app/use-workspace-navigation-actions';
@@ -861,6 +862,24 @@ export function useDroneHubAppModel(): DroneHubAppModel {
       setNameSuggestToast((cur) => (cur?.id === id ? null : cur));
     }, 6000);
   }, []);
+
+  const showShortcutToast = React.useCallback(
+    (message: string, title: string, tone: 'success' | 'error' = 'error') => {
+      const text = String(message ?? '').trim();
+      if (!text) return;
+      const id = makeId();
+      setNameSuggestToast({ id, title, message: text, tone });
+      window.setTimeout(() => {
+        setNameSuggestToast((current) => (current?.id === id ? null : current));
+      }, 5000);
+    },
+    [setNameSuggestToast],
+  );
+
+  const { toggleVoiceClipboardRecording } = useVoiceClipboardRecorder({
+    requestJson,
+    showToast: showShortcutToast,
+  });
   const {
     deletingDrones,
     renamingDrones,
@@ -2626,6 +2645,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     openGroupMultiChat,
     openSidebarVisibleMultiChat,
     toggleTldrFromShortcut,
+    toggleVoiceClipboardRecording,
     createOpen,
     setCreateRepoMenuOpen,
     createNameRef,

@@ -1,14 +1,43 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { URL } from 'node:url';
 
-export async function readJsonBody(req: IncomingMessage): Promise<any> {
+export async function readRawBody(req: IncomingMessage, opts: { maxBytes?: number } = {}): Promise<Buffer> {
+  const maxBytes = Number.isFinite(Number(opts.maxBytes)) ? Math.max(1, Math.floor(Number(opts.maxBytes))) : null;
+  if (maxBytes != null) {
+    const contentLengthRaw = Array.isArray(req.headers['content-length'])
+      ? req.headers['content-length'][0]
+      : req.headers['content-length'];
+    const contentLength = Number(contentLengthRaw);
+    if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+      throw new Error(`request body too large (max ${maxBytes} bytes)`);
+    }
+  }
   const chunks: Buffer[] = [];
+  let total = 0;
   await new Promise<void>((resolve, reject) => {
-    req.on('data', (d) => chunks.push(Buffer.isBuffer(d) ? d : Buffer.from(String(d))));
-    req.on('end', () => resolve());
+    let rejected = false;
+    req.on('data', (d) => {
+      if (rejected) return;
+      const chunk = Buffer.isBuffer(d) ? d : Buffer.from(String(d));
+      total += chunk.length;
+      if (maxBytes != null && total > maxBytes) {
+        rejected = true;
+        reject(new Error(`request body too large (max ${maxBytes} bytes)`));
+        req.resume();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      if (!rejected) resolve();
+    });
     req.on('error', reject);
   });
-  const raw = Buffer.concat(chunks).toString('utf8').trim();
+  return Buffer.concat(chunks);
+}
+
+export async function readJsonBody(req: IncomingMessage): Promise<any> {
+  const raw = (await readRawBody(req)).toString('utf8').trim();
   if (!raw) return null;
   try {
     return JSON.parse(raw);

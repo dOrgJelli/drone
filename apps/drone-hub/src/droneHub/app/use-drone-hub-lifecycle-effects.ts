@@ -44,6 +44,7 @@ type UseDroneHubLifecycleEffectsArgs = {
   openGroupMultiChat: (group: string) => void;
   openSidebarVisibleMultiChat: () => void;
   toggleTldrFromShortcut: () => void;
+  toggleVoiceClipboardRecording: () => boolean;
   createOpen: boolean;
   setCreateRepoMenuOpen: Setter<boolean>;
   createNameRef: React.RefObject<HTMLInputElement | null>;
@@ -118,6 +119,7 @@ export function useDroneHubLifecycleEffects({
   openGroupMultiChat,
   openSidebarVisibleMultiChat,
   toggleTldrFromShortcut,
+  toggleVoiceClipboardRecording,
   createOpen,
   setCreateRepoMenuOpen,
   createNameRef,
@@ -325,6 +327,7 @@ export function useDroneHubLifecycleEffects({
         return true;
       },
       focusPrimaryChatInput: () => focusPrimaryChatInput(),
+      toggleVoiceClipboardRecording: () => toggleVoiceClipboardRecording(),
       markSelectedDronesUnread: () => onMarkSelectedDronesUnreadShortcut(),
       toggleSidebarCollapsed: () => {
         setSidebarCollapsed((prev) => !prev);
@@ -475,6 +478,7 @@ export function useDroneHubLifecycleEffects({
     onDeleteSelectedDroneFromInputShortcut,
     onMarkSelectedDronesUnreadShortcut,
     toggleTldrFromShortcut,
+    toggleVoiceClipboardRecording,
   ]);
 
   React.useEffect(() => {

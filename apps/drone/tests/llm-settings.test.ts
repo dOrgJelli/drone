@@ -233,6 +233,37 @@ describeSocketSuite('LLM settings api', () => {
     expect(revealed.data.apiKey).toBe('stored-openai-key');
   });
 
+  test('stores GROQ key for voice transcription settings', async () => {
+    const initial = await apiFetch('/api/settings/llm');
+    expect(initial.r.status).toBe(200);
+    expect(initial.data.groq.hasKey).toBe(false);
+
+    const saved = await apiFetch('/api/settings/groq', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ apiKey: 'stored-groq-key' }),
+    });
+    expect(saved.r.status).toBe(200);
+    expect(saved.data.hasKey).toBe(true);
+    expect(saved.data.source).toBe('settings');
+    expect(saved.data.apiKey).toBeUndefined();
+
+    const hidden = await apiFetch('/api/settings/groq');
+    expect(hidden.r.status).toBe(200);
+    expect(hidden.data.hasKey).toBe(true);
+    expect(hidden.data.keyHint).toBe('stor...-key');
+    expect(hidden.data.apiKey).toBeUndefined();
+
+    const revealed = await apiFetch('/api/settings/groq?reveal=1');
+    expect(revealed.r.status).toBe(200);
+    expect(revealed.data.apiKey).toBe('stored-groq-key');
+
+    const cleared = await apiFetch('/api/settings/groq', { method: 'DELETE' });
+    expect(cleared.r.status).toBe(200);
+    expect(cleared.data.hasKey).toBe(false);
+    expect(cleared.data.source).toBeNull();
+  });
+
   test('reads and updates agent auto-continue settings', async () => {
     const initial = await apiFetch('/api/settings/agent-message-auto-continue');
     expect(initial.r.status).toBe(200);

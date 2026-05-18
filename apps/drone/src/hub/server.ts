@@ -166,7 +166,8 @@ import {
 } from './repoOps';
 import { isHubApiAuthorized, isHubApiAuthorizedForWebSocket, rejectWebSocketUpgrade } from './hub-auth';
 import { bashQuote, encodeRemotePath, hexEncodeUtf8, normalizeContainerPath, parseBoolParam, shellQuoteIfNeeded } from './hub-format';
-import { readJsonBody, withCors } from './hub-http';
+import { readJsonBody, readRawBody, withCors } from './hub-http';
+import { GROQ_TRANSCRIPTION_MAX_BYTES, transcribeAudioWithGroq } from './groq-transcription';
 import {
   createHubShellSessionName,
   hubChatSessionName,
@@ -242,6 +243,7 @@ import {
   resolveEffectiveLlmProvider,
   resolveFilesystemSettingsResponse,
   resolveEffectiveProviderApiKeySettings,
+  resolveGroqApiKeySettings,
   resolveLlmSettingsResponse,
   resolveTaskPlaybookButtonSettingsResponse,
   resolveUiPreferencesSettingsResponse,
@@ -257,6 +259,7 @@ import {
   type ArchiveRetentionId,
   type ArchiveRuntimePolicy,
   type LlmProviderId,
+  type StoredApiKeyProviderId,
 } from './hub-settings';
 import {
   createSkill,
@@ -11118,6 +11121,25 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         return;
       }
 
+      if (pathname === '/api/audio/transcriptions' && method === 'POST') {
+        try {
+          const groqSettings = await resolveGroqApiKeySettings();
+          if (!groqSettings.apiKey) {
+            json(res, 400, { ok: false, error: 'GROQ API key is not configured. Add it in Drone Hub settings.' });
+            return;
+          }
+          const audio = await readRawBody(req, { maxBytes: GROQ_TRANSCRIPTION_MAX_BYTES });
+          const mimeType = String(req.headers['content-type'] ?? '').split(';')[0]?.trim() || 'audio/webm';
+          const transcription = await transcribeAudioWithGroq({ audio, apiKey: groqSettings.apiKey, mimeType });
+          json(res, 200, { ok: true, ...transcription });
+        } catch (e: any) {
+          const message = e?.message ?? String(e);
+          const status = /too large/i.test(message) ? 413 : /GROQ API key is not configured/i.test(message) ? 400 : 502;
+          json(res, status, { ok: false, error: message });
+        }
+        return;
+      }
+
       if (pathname === '/api/assistant/system-prompt') {
         if (method === 'GET') {
           json(res, 200, await assistantService.systemPromptSettings());
@@ -11418,12 +11440,12 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
         return;
       }
 
-      if (pathname === '/api/settings/openai' || pathname === '/api/settings/gemini' || pathname === '/api/settings/codex') {
-        const provider: LlmProviderId = pathname.endsWith('/gemini') ? 'gemini' : pathname.endsWith('/codex') ? 'codex' : 'openai';
+      if (pathname === '/api/settings/openai' || pathname === '/api/settings/gemini' || pathname === '/api/settings/codex' || pathname === '/api/settings/groq') {
+        const provider = pathname.endsWith('/gemini') ? 'gemini' : pathname.endsWith('/codex') ? 'codex' : pathname.endsWith('/groq') ? 'groq' : 'openai';
         if (method === 'GET') {
-          const resolved = await resolveEffectiveProviderApiKeySettings(provider);
+          const resolved = provider === 'groq' ? await resolveGroqApiKeySettings() : await resolveEffectiveProviderApiKeySettings(provider);
           const revealApiKey = u.searchParams.get('reveal') === '1';
-          if (!resolved.apiKey) {
+          if (!resolved.apiKey && provider !== 'groq') {
             await logProviderApiKeyResolution('warn', 'settings provider lookup resolved without API key', provider, {
               pathname,
               method,
@@ -11453,8 +11475,8 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             json(res, 400, { ok: false, error: 'API key is required.' });
             return;
           }
-          await upsertStoredProviderApiKey(provider, apiKey);
-          const resolved = await resolveEffectiveProviderApiKeySettings(provider);
+          await upsertStoredProviderApiKey(provider as StoredApiKeyProviderId, apiKey);
+          const resolved = provider === 'groq' ? await resolveGroqApiKeySettings() : await resolveEffectiveProviderApiKeySettings(provider);
           json(res, 200, {
             ok: true,
             ...providerKeySettingsResponse(resolved),
@@ -11467,8 +11489,8 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
             json(res, 400, { ok: false, error: 'Codex credentials are managed by the Codex CLI.' });
             return;
           }
-          await clearStoredProviderApiKey(provider);
-          const resolved = await resolveEffectiveProviderApiKeySettings(provider);
+          await clearStoredProviderApiKey(provider as StoredApiKeyProviderId);
+          const resolved = provider === 'groq' ? await resolveGroqApiKeySettings() : await resolveEffectiveProviderApiKeySettings(provider);
           json(res, 200, {
             ok: true,
             ...providerKeySettingsResponse(resolved),
