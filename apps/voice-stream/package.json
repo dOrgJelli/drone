@@ -9,6 +9,7 @@
     "start": "node server/dist/index.js",
     "typecheck": "tsc -p server/tsconfig.json --noEmit",
     "test": "tsx server/test/wav.test.ts",
+    "apk": "./gradlew :android:app:assembleDebug",
     "android:assembleDebug": "./gradlew :android:app:assembleDebug"
   },
   "dependencies": {

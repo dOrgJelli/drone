@@ -53,7 +53,7 @@ The normal Drone workflow starts this server with the Hub:
 bun run drone hub
 ```
 
-By default the Hub starts Voice Stream on port `3000`. Use `drone hub start --voice-stream-port 3002` to pick a different port, or `drone hub start --no-voice-stream` to run only the Hub. When the Hub launches Voice Stream, it passes the GROQ API key saved in Drone Hub settings to the Voice Stream process and restarts Voice Stream when that key is saved or cleared.
+By default the Hub starts Voice Stream on port `3199`. Use `drone hub start --voice-stream-port 3200` to pick a different port, or `drone hub start --no-voice-stream` to run only the Hub. When the Hub launches Voice Stream, it passes the GROQ API key saved in Drone Hub settings to the Voice Stream process and restarts Voice Stream when that key is saved or cleared.
 
 You can also run only Voice Stream from this app directory:
 
@@ -61,7 +61,7 @@ You can also run only Voice Stream from this app directory:
 bun run dev
 ```
 
-The server listens on `ws://0.0.0.0:3000/audio` by default for audio streaming and serves a browser download page at `http://0.0.0.0:3000/`.
+When run standalone with `bun run dev`, the server listens on `ws://0.0.0.0:3000/audio` by default for audio streaming and serves a browser download page at `http://0.0.0.0:3000/`. When launched by `drone hub`, it uses the Hub Voice Stream port, which defaults to `3199`.
 
 Authenticated Android clients can also POST approval codes to `http://0.0.0.0:3000/approvals`. The browser page shows recent approval codes near the transcript and broadcasts new codes over `/monitor`. When Groq TTS is configured, the endpoint responds to Android with WAV audio saying the approval code back in English.
 
@@ -103,7 +103,7 @@ The APK download route is:
 http://0.0.0.0:3000/download/app-debug.apk
 ```
 
-To use a different port:
+To use a different standalone port:
 
 ```bash
 PORT=9000 bun run dev
@@ -210,7 +210,7 @@ Enter that `wss://.../audio` URL in the Android app and tap `Save URL`. The brow
 This app has a Gradle wrapper. Use your local Android SDK by setting `ANDROID_HOME` when needed.
 
 ```bash
-ANDROID_HOME=/path/to/android-sdk bun run android:assembleDebug
+ANDROID_HOME=/path/to/android-sdk bun run apk
 ```
 
 The debug APK is produced at:
@@ -221,7 +221,13 @@ android/app/build/outputs/apk/debug/app-debug.apk
 
 ## Install The APK
 
-From a browser, open the server page and tap the download button:
+From a browser, open the server page and tap the download button. With `drone hub`, the default URL is:
+
+```text
+http://127.0.0.1:3199/
+```
+
+With standalone `bun run dev`, the default URL is:
 
 ```text
 http://127.0.0.1:3000/

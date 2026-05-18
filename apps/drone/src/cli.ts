@@ -359,7 +359,7 @@ async function getFreeTcpPort(): Promise<number> {
 }
 
 const DEFAULT_HUB_API_PORT = 8787;
-const DEFAULT_VOICE_STREAM_PORT = 3000;
+const DEFAULT_VOICE_STREAM_PORT = 3199;
 
 function parsePortOption(raw: unknown, optionName: string): number {
   const value = Number(raw);

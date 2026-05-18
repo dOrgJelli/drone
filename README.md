@@ -103,6 +103,9 @@ bun run drone -- --help
 # voice-stream server
 bun run voice-stream
 
+# voice-stream Android debug APK
+ANDROID_HOME=/path/to/android-sdk bun run voice-stream:apk
+
 # looped dev (ts-node)
 bun run looped -- --help
 ```
