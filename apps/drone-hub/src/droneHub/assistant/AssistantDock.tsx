@@ -16,6 +16,9 @@ const TOOL_ROW_MESSAGE_PREVIEW_MAX = 72;
 const TOOL_ROW_TARGET_PREVIEW_MAX = 3;
 /** Distance from bottom (px) below which we treat the assistant transcript as "pinned" for auto-scroll. */
 const ASSISTANT_SCROLL_BOTTOM_THRESHOLD_PX = 48;
+const ASSISTANT_IDLE_REFRESH_INTERVAL_MS = 2_500;
+const ASSISTANT_ACTIVE_REFRESH_INTERVAL_MS = 1_000;
+const ASSISTANT_EVENT_REFRESH_DEBOUNCE_MS = 150;
 const ASSISTANT_OVERVIEW_INTERVAL_OPTIONS = [
   { value: '10000', label: '10s' },
   { value: '30000', label: '30s' },
@@ -2129,6 +2132,11 @@ export function AssistantDock() {
   const [overviewPromptSaving, setOverviewPromptSaving] = React.useState(false);
   const [overviewPromptError, setOverviewPromptError] = React.useState<string | null>(null);
   const [overviewPromptNotice, setOverviewPromptNotice] = React.useState<string | null>(null);
+  const [assistantEventsConnected, setAssistantEventsConnected] = React.useState(false);
+  const [assistantEventsUnavailable, setAssistantEventsUnavailable] = React.useState(
+    () => typeof window === 'undefined' || typeof window.EventSource === 'undefined',
+  );
+  const [voiceDraftActive, setVoiceDraftActive] = React.useState(false);
   const selectedDrone = useDroneHubUiStore((state) => state.selectedDrone);
   const selectedChat = useDroneHubUiStore((state) => state.selectedChat);
   const appView = useDroneHubUiStore((state) => state.appView);
@@ -2147,6 +2155,11 @@ export function AssistantDock() {
   const scopeSyncPromiseRef = React.useRef<{ key: string; promise: Promise<boolean> } | null>(null);
   const updateThreadRequestRef = React.useRef(0);
   const enabledToolDraftNamesRef = React.useRef<string[]>([]);
+  const assistantEventRefreshTimerRef = React.useRef<number | null>(null);
+  const draftRef = React.useRef('');
+  const voiceDraftActiveRef = React.useRef(false);
+  const voiceDraftTextRef = React.useRef('');
+  const voiceEnabledRef = React.useRef(false);
   const { isOver: scopeDropIsOver, setNodeRef: setScopeDropNodeRef } = useDroppable({
     id: 'assistant-drone-scope-drop',
     data: { type: 'assistant-drone-scope-drop' },
@@ -2194,6 +2207,7 @@ export function AssistantDock() {
   activeThreadIdRef.current = activeThreadId;
   const autoApprove = Boolean(activeThread?.autoApprove);
   const voiceEnabled = Boolean(activeThread?.voiceEnabled);
+  voiceEnabledRef.current = voiceEnabled;
   const promptDeliveryMode: AssistantPromptDeliveryMode = activeThread?.promptDeliveryMode === 'asap' ? 'asap' : 'queue';
   const activeAccessScope: AssistantAccessScope | null = activeThread?.accessScope ?? snapshot?.accessScope ?? null;
   const activeAccessScopeDroneIdsKey = activeAccessScope?.droneIds?.join('\u0000') ?? '';
@@ -2231,17 +2245,50 @@ export function AssistantDock() {
   const showThinking = running && activePendingApprovals.length === 0 && !messageText(snapshot?.streamingMessage ?? { role: 'assistant' }).trim();
   const toolDroneKey = React.useMemo(() => toolDroneLookupKey(visibleItems), [visibleItems]);
 
-  const refresh = React.useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  const refresh = React.useCallback(async (options: { silent?: boolean } = {}) => {
+    if (!options.silent) {
+      setLoading(true);
+      setError(null);
+    }
     try {
       setSnapshot(await requestJson<AssistantSnapshot>('/api/assistant/threads'));
     } catch (err: any) {
-      setError(err?.message ?? String(err));
+      if (!options.silent) setError(err?.message ?? String(err));
     } finally {
-      setLoading(false);
+      if (!options.silent) setLoading(false);
     }
   }, []);
+
+  React.useEffect(() => {
+    draftRef.current = draft;
+  }, [draft]);
+
+  React.useEffect(() => {
+    voiceDraftActiveRef.current = voiceDraftActive;
+  }, [voiceDraftActive]);
+
+  const appendVoiceTranscriptSegment = React.useCallback((textRaw: unknown) => {
+    const text = String(textRaw ?? '').trim();
+    if (!text || !voiceEnabledRef.current) return;
+    const currentDraft = draftRef.current;
+    if (currentDraft.trim() && !voiceDraftActiveRef.current) return;
+    const next = currentDraft.trim() ? `${currentDraft.trimEnd()}\n${text}` : text;
+    voiceDraftTextRef.current = next.trim();
+    voiceDraftActiveRef.current = true;
+    setVoiceDraftActive(true);
+    setDraft(next);
+  }, []);
+
+  const scheduleAssistantEventRefresh = React.useCallback(() => {
+    if (typeof window === 'undefined') return;
+    if (assistantEventRefreshTimerRef.current != null) {
+      window.clearTimeout(assistantEventRefreshTimerRef.current);
+    }
+    assistantEventRefreshTimerRef.current = window.setTimeout(() => {
+      assistantEventRefreshTimerRef.current = null;
+      void refresh({ silent: true });
+    }, ASSISTANT_EVENT_REFRESH_DEBOUNCE_MS);
+  }, [refresh]);
 
   const loadSystemPromptSettings = React.useCallback(async () => {
     const threadId = activeThreadIdRef.current;
@@ -2429,16 +2476,96 @@ export function AssistantDock() {
   }, [refresh]);
 
   React.useEffect(() => {
-    const hasAssistantBackgroundActivity =
-      Object.keys(snapshot?.runningModels ?? {}).length > 0 ||
-      (snapshot?.threads ?? []).some((thread) => thread.status === 'waiting_for_chats_idle') ||
-      (snapshot?.chatIdleSubscriptions ?? []).some((subscription) => subscription.status === 'active');
-    if (!hasAssistantBackgroundActivity) return;
+    if (typeof window === 'undefined' || typeof window.EventSource === 'undefined') {
+      setAssistantEventsUnavailable(true);
+      return;
+    }
+    let closed = false;
+    const source = new window.EventSource('/api/assistant/events');
+    const markConnected = () => {
+      if (closed) return;
+      setAssistantEventsConnected(true);
+      setAssistantEventsUnavailable(false);
+      scheduleAssistantEventRefresh();
+    };
+    const markChanged = () => {
+      if (closed) return;
+      scheduleAssistantEventRefresh();
+    };
+    source.onopen = markConnected;
+    source.onmessage = markChanged;
+    source.addEventListener('connected', markConnected);
+    source.addEventListener('assistant_change', markChanged);
+    source.onerror = () => {
+      if (closed) return;
+      setAssistantEventsConnected(false);
+      setAssistantEventsUnavailable(true);
+    };
+    return () => {
+      closed = true;
+      source.close();
+    };
+  }, [scheduleAssistantEventRefresh]);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.EventSource === 'undefined') return;
+    let closed = false;
+    const source = new window.EventSource('/api/assistant/voice/transcript/events');
+    source.addEventListener('voice_transcript_segment', (event) => {
+      if (closed) return;
+      try {
+        const data = JSON.parse((event as MessageEvent).data);
+        appendVoiceTranscriptSegment(data?.text);
+      } catch {
+        // Ignore malformed transcript messages.
+      }
+    });
+    return () => {
+      closed = true;
+      source.close();
+    };
+  }, [appendVoiceTranscriptSegment]);
+
+  React.useEffect(() => {
+    return () => {
+      if (assistantEventRefreshTimerRef.current != null) {
+        window.clearTimeout(assistantEventRefreshTimerRef.current);
+        assistantEventRefreshTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  React.useEffect(() => {
+    if (!voiceDraftActive) return;
+    const voiceText = voiceDraftTextRef.current.trim();
+    if (!voiceText) return;
+    const normalizedVoiceText = voiceText.replace(/\s+/g, ' ').trim().toLowerCase();
+    const delivered = (activeThread?.messages ?? []).some((message) => {
+      if (message.role !== 'user') return false;
+      const normalizedMessageText = messageText(message).replace(/\s+/g, ' ').trim().toLowerCase();
+      return normalizedMessageText === normalizedVoiceText || normalizedMessageText.includes(normalizedVoiceText);
+    });
+    if (!delivered) return;
+    setDraft((current) => (current.trim() === voiceText ? '' : current));
+    voiceDraftTextRef.current = '';
+    voiceDraftActiveRef.current = false;
+    setVoiceDraftActive(false);
+  }, [activeThread?.messages, voiceDraftActive]);
+
+  const hasAssistantBackgroundActivity =
+    Object.keys(snapshot?.runningModels ?? {}).length > 0 ||
+    (snapshot?.threads ?? []).some((thread) => thread.status === 'running' || thread.status === 'waiting_for_approval' || thread.status === 'waiting_for_chats_idle') ||
+    (snapshot?.chatIdleSubscriptions ?? []).some((subscription) => subscription.status === 'active');
+  const shouldPollAssistantSnapshot = assistantEventsUnavailable || !assistantEventsConnected;
+
+  React.useEffect(() => {
+    if (!shouldPollAssistantSnapshot) return;
+    const intervalMs = hasAssistantBackgroundActivity ? ASSISTANT_ACTIVE_REFRESH_INTERVAL_MS : ASSISTANT_IDLE_REFRESH_INTERVAL_MS;
     const timer = window.setInterval(() => {
-      void refresh();
-    }, 1000);
+      void refresh({ silent: true });
+    }, intervalMs);
     return () => window.clearInterval(timer);
-  }, [refresh, snapshot?.chatIdleSubscriptions, snapshot?.runningModels, snapshot?.threads]);
+  }, [hasAssistantBackgroundActivity, refresh, shouldPollAssistantSnapshot]);
 
   React.useEffect(() => {
     if (!toolDroneKey) return;
@@ -3426,7 +3553,15 @@ export function AssistantDock() {
           <textarea
             ref={inputRef}
             value={draft}
-            onChange={(event) => setDraft(event.target.value)}
+            onChange={(event) => {
+              const next = event.target.value;
+              setDraft(next);
+              if (voiceDraftActiveRef.current && next.trim() !== voiceDraftTextRef.current.trim()) {
+                voiceDraftActiveRef.current = false;
+                voiceDraftTextRef.current = '';
+                setVoiceDraftActive(false);
+              }
+            }}
             onKeyDown={(event) => {
               if (event.key === 'Enter' && !event.shiftKey) {
                 event.preventDefault();
@@ -3452,6 +3587,14 @@ export function AssistantDock() {
               style={{ fontFamily: 'var(--display)' }}
             >
               Running {activeRunningModelLabel}
+            </span>
+          ) : voiceDraftActive ? (
+            <span
+              className="absolute bottom-2 left-2 max-w-[calc(100%-150px)] truncate rounded border border-[var(--accent-muted)] bg-[var(--accent-subtle)] px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--accent)]"
+              title="Voice transcript draft"
+              style={{ fontFamily: 'var(--display)' }}
+            >
+              Voice draft
             </span>
           ) : null}
           <div className="absolute bottom-2 right-2 flex items-center gap-1.5">

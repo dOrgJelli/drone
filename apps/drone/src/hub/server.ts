@@ -11010,6 +11010,16 @@ export async function startDroneHubApiServer(opts: {
     return data;
   };
 
+  const voiceStreamMonitorWebSocketUrl = (): string => {
+    if (!voiceStreamUrl) throw new Error('Voice Stream server is not running.');
+    const u = new URL(voiceStreamUrl);
+    u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+    u.pathname = '/monitor';
+    u.search = '';
+    u.hash = '';
+    return u.toString();
+  };
+
   const assistantService = new HubAssistantService({
     listDrones: async (): Promise<AssistantDroneSummary[]> => {
       const regAny: any = await loadRegistry();
@@ -11112,6 +11122,12 @@ export async function startDroneHubApiServer(opts: {
     runDroneBash: async ({ droneId, command, cwd, timeoutMs }) => await assistantRunDroneBash({ droneId, command, cwd, timeoutMs }),
     listDroneChangedFiles: async ({ droneId }) => await assistantListDroneChangedFiles({ droneId }),
   });
+
+  function writeAssistantSseEvent(res: http.ServerResponse, event: string, data: any): void {
+    if (res.destroyed || res.writableEnded) return;
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  }
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -11244,6 +11260,128 @@ export async function startDroneHubApiServer(opts: {
 
       if (pathname === '/api/assistant/threads' && method === 'GET') {
         json(res, 200, await assistantService.snapshot());
+        return;
+      }
+
+      if (pathname === '/api/assistant/events' && method === 'GET') {
+        res.statusCode = 200;
+        res.setHeader('content-type', 'text/event-stream; charset=utf-8');
+        res.setHeader('cache-control', 'no-cache, no-transform');
+        res.setHeader('connection', 'keep-alive');
+        req.socket.setTimeout(0);
+        (res as any).flushHeaders?.();
+        writeAssistantSseEvent(res, 'connected', { ok: true, at: new Date().toISOString() });
+        const unsubscribe = assistantService.subscribeChanges((event) => {
+          writeAssistantSseEvent(res, 'assistant_change', event);
+        });
+        const keepAlive = setInterval(() => {
+          if (res.destroyed || res.writableEnded) return;
+          res.write(': keepalive\n\n');
+        }, 25_000);
+        (keepAlive as any).unref?.();
+        let cleanedUp = false;
+        const cleanup = () => {
+          if (cleanedUp) return;
+          cleanedUp = true;
+          clearInterval(keepAlive);
+          unsubscribe();
+        };
+        req.on('close', cleanup);
+        res.on('close', cleanup);
+        return;
+      }
+
+      if (pathname === '/api/assistant/voice/transcript/events' && method === 'GET') {
+        if (!voiceStreamUrl) {
+          json(res, 503, { ok: false, error: 'Voice Stream server is not running.' });
+          return;
+        }
+        res.statusCode = 200;
+        res.setHeader('content-type', 'text/event-stream; charset=utf-8');
+        res.setHeader('cache-control', 'no-cache, no-transform');
+        res.setHeader('connection', 'keep-alive');
+        req.socket.setTimeout(0);
+        (res as any).flushHeaders?.();
+        writeAssistantSseEvent(res, 'connected', { ok: true, at: new Date().toISOString() });
+
+        let cleanedUp = false;
+        let monitor: WebSocket | null = null;
+        const keepAlive = setInterval(() => {
+          if (res.destroyed || res.writableEnded) return;
+          res.write(': keepalive\n\n');
+        }, 25_000);
+        (keepAlive as any).unref?.();
+        const cleanup = () => {
+          if (cleanedUp) return;
+          cleanedUp = true;
+          clearInterval(keepAlive);
+          try {
+            monitor?.close(1000, 'Hub SSE closed');
+          } catch {
+            // ignore
+          }
+        };
+
+        try {
+          monitor = new WebSocket(voiceStreamMonitorWebSocketUrl());
+        } catch (e: any) {
+          writeAssistantSseEvent(res, 'voice_transcript_status', {
+            type: 'transcript_status',
+            configured: false,
+            status: 'error',
+            message: e?.message ?? String(e),
+          });
+          cleanup();
+          res.end();
+          return;
+        }
+
+        monitor.on('open', () => {
+          writeAssistantSseEvent(res, 'voice_transcript_status', {
+            type: 'transcript_status',
+            configured: true,
+            status: 'connected',
+            message: 'Connected to Voice Stream transcript monitor.',
+          });
+        });
+        monitor.on('message', (data, isBinary) => {
+          if (isBinary) return;
+          let message: any = null;
+          try {
+            message = JSON.parse(data.toString('utf8'));
+          } catch {
+            return;
+          }
+          if (message?.type === 'transcript_segment') {
+            writeAssistantSseEvent(res, 'voice_transcript_segment', message);
+            return;
+          }
+          if (message?.type === 'transcript_status') {
+            writeAssistantSseEvent(res, 'voice_transcript_status', message);
+          }
+        });
+        monitor.on('error', (error) => {
+          writeAssistantSseEvent(res, 'voice_transcript_status', {
+            type: 'transcript_status',
+            configured: false,
+            status: 'error',
+            message: String((error as any)?.message ?? error ?? 'Voice Stream monitor failed.'),
+          });
+        });
+        monitor.on('close', () => {
+          if (!cleanedUp) {
+            writeAssistantSseEvent(res, 'voice_transcript_status', {
+              type: 'transcript_status',
+              configured: false,
+              status: 'disconnected',
+              message: 'Voice Stream transcript monitor disconnected.',
+            });
+            cleanup();
+            res.end();
+          }
+        });
+        req.on('close', cleanup);
+        res.on('close', cleanup);
         return;
       }
 

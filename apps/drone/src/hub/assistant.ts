@@ -158,6 +158,14 @@ type AssistantPromptEvent =
   | { type: 'approval_pending'; approval: AssistantApproval; snapshot: AssistantSnapshot }
   | { type: 'error'; threadId?: string; error: string };
 
+export type AssistantChangeEvent = {
+  type: 'assistant_changed';
+  sequence: number;
+  reason: string;
+  threadId?: string;
+  at: string;
+};
+
 type AssistantToolCallbacks = {
   listDrones: () => Promise<AssistantDroneSummary[]>;
   createDrone: (opts: any) => Promise<AssistantCreateDroneResult>;
@@ -1713,6 +1721,8 @@ export class HubAssistantService {
   private defaultOverviewPromptUpdatedAt: string | null = null;
   private overviewCache = new Map<string, AssistantThreadOverviewCacheEntry>();
   private overviewInFlight = new Map<string, Promise<AssistantThreadOverviewResult>>();
+  private changeSequence = 0;
+  private readonly changeListeners = new Set<(event: AssistantChangeEvent) => void>();
   private appContext: AssistantAppContext = {
     activeDroneId: null,
     activeDroneName: null,
@@ -1728,6 +1738,28 @@ export class HubAssistantService {
   >();
 
   constructor(private readonly tools: AssistantToolCallbacks) {}
+
+  subscribeChanges(listener: (event: AssistantChangeEvent) => void): () => void {
+    this.changeListeners.add(listener);
+    return () => this.changeListeners.delete(listener);
+  }
+
+  private emitChange(reason: string, threadId?: string): void {
+    const event: AssistantChangeEvent = {
+      type: 'assistant_changed',
+      sequence: ++this.changeSequence,
+      reason,
+      ...(threadId ? { threadId } : {}),
+      at: nowIso(),
+    };
+    for (const listener of this.changeListeners) {
+      try {
+        listener(event);
+      } catch {
+        // Ignore a broken listener so one stale SSE client cannot block assistant work.
+      }
+    }
+  }
 
   private activeChatIdleSubscriptions(threadId?: string): AssistantChatIdleSubscription[] {
     const id = cleanOptionalString(threadId);
@@ -2735,6 +2767,7 @@ export class HubAssistantService {
       thread.status = 'running';
       thread.error = null;
       thread.updatedAt = nowIso();
+      this.emitChange('prompt_started', thread.id);
       await onEvent?.({ type: 'snapshot', snapshot: await this.snapshot() });
 
       agent.subscribe(async (event: any) => {
@@ -2760,6 +2793,7 @@ export class HubAssistantService {
           thread.error = String(event.message.errorMessage);
           thread.status = 'error';
         }
+        this.emitChange('prompt_event', thread.id);
         await onEvent?.({ type: 'agent_event', threadId: thread.id, event });
         await onEvent?.({ type: 'snapshot', snapshot: await this.snapshot() });
       });
@@ -2900,6 +2934,7 @@ export class HubAssistantService {
       overviewPromptUpdatedAt: this.defaultOverviewPromptUpdatedAt,
     });
     await enqueueWriteAssistantStateFile(state);
+    this.emitChange('persisted', activeThread.id);
   }
 
   private async runtime(): Promise<AssistantRuntime> {
@@ -3649,11 +3684,13 @@ export class HubAssistantService {
         resolve: (approved: boolean) => {
           approval.status = approved ? 'approved' : 'denied';
           thread.status = 'running';
+          this.emitChange('approval_resolved', input.threadId);
           resolve();
         },
       };
       this.approvals.set(approvalId, entry);
       void input.onEvent?.({ type: 'approval_pending', approval, snapshot: this.snapshotSyncFallback() });
+      this.emitChange('approval_pending', input.threadId);
       if (input.signal) {
         input.signal.addEventListener(
           'abort',
