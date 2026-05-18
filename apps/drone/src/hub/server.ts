@@ -558,10 +558,20 @@ async function readManagedHubStateAtRoot(rootDir: string): Promise<ManagedHubSta
     apiHost: typeof parsed.apiHost === 'string' ? parsed.apiHost : '127.0.0.1',
     apiPort,
     uiPort,
+    voiceStream: parseManagedHubVoiceStreamState(parsed.voiceStream),
     startedAt: typeof parsed.startedAt === 'string' ? parsed.startedAt : new Date().toISOString(),
     logPath: typeof parsed.logPath === 'string' ? parsed.logPath : path.join(rootDir, 'hub.log'),
     launchEnv: parsed.launchEnv ?? null,
   };
+}
+
+function parseManagedHubVoiceStreamState(raw: unknown): ManagedHubState['voiceStream'] {
+  if (!raw || typeof raw !== 'object') return null;
+  const value = raw as any;
+  const port = Number(value.port);
+  const url = typeof value.url === 'string' ? value.url : '';
+  if (!Number.isFinite(port) || port <= 0 || !url) return null;
+  return { port, url };
 }
 
 function profileSettingsErrorStatus(error: unknown): number {

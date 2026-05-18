@@ -178,7 +178,7 @@ drone purge --orphans
 drone purge --orphans --apply
 drone purge --orphans --apply --keep-volume
 
-# start the local Drone Hub (detached by default)
+# start the local Drone Hub and Voice Stream server (detached by default)
 drone hub
 
 # inside a drone/container: inspect fleet access and queue fleet actions
@@ -189,6 +189,8 @@ fleet read --from reviewer-1 --chat default --limit 20
 
 # explicitly manage the detached Hub
 drone hub start --port 5174 --api-port 0 --host 127.0.0.1
+drone hub start --voice-stream-port 3000
+drone hub start --no-voice-stream
 drone hub stop
 drone hub restart
 ```
