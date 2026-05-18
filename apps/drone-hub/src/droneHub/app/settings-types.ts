@@ -29,6 +29,7 @@ export type LlmSettingsResponse = {
   openai: Omit<ApiKeySettingsResponse, 'ok'>;
   gemini: Omit<ApiKeySettingsResponse, 'ok'>;
   codex: Omit<ApiKeySettingsResponse, 'ok'>;
+  groq: Omit<ApiKeySettingsResponse, 'ok'>;
 };
 
 export type HubLogsResponse = {

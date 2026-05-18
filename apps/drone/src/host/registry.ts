@@ -152,6 +152,10 @@ type DroneRegistryV1 = {
       apiKey?: string;
       updatedAt?: string;
     };
+    groq?: {
+      apiKey?: string;
+      updatedAt?: string;
+    };
     filesystem?: {
       uploadMaxBytes?: number;
       updatedAt?: string;

@@ -3,7 +3,7 @@ import type { HubLogsResponse } from './settings-types';
 
 type RequestJsonFn = <T>(url: string, init?: RequestInit) => Promise<T>;
 
-type CopyTextFn = (text: string) => Promise<void>;
+type CopyTextFn = (text: string) => Promise<boolean>;
 
 export type UseHubLogsResult = {
   hubLogs: HubLogsResponse | null;

@@ -5,6 +5,7 @@ export type ShortcutActionId =
   | 'createDroneChat'
   | 'openKanbanBoard'
   | 'focusPrimaryChatInput'
+  | 'toggleVoiceClipboardRecording'
   | 'markSelectedDronesUnread'
   | 'toggleSidebarCollapsed'
   | 'toggleRightPanelOpen'
@@ -65,6 +66,11 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     id: 'focusPrimaryChatInput',
     label: 'Focus chat input',
     description: 'Focuses the primary chat input.',
+  },
+  {
+    id: 'toggleVoiceClipboardRecording',
+    label: 'Record voice to clipboard',
+    description: 'Starts or stops a microphone recording, transcribes it with GROQ, and copies the result.',
   },
   {
     id: 'markSelectedDronesUnread',
@@ -135,6 +141,7 @@ const DEFAULT_SHORTCUT_BINDINGS: ShortcutBindingMap = {
   createDroneChat: { key: 'w', mod: false, ctrl: false, meta: false, alt: false, shift: false },
   openKanbanBoard: { key: 'y', mod: false, ctrl: false, meta: false, alt: false, shift: false },
   focusPrimaryChatInput: { key: 'enter', mod: false, ctrl: false, meta: false, alt: false, shift: false },
+  toggleVoiceClipboardRecording: { key: '`', mod: false, ctrl: false, meta: false, alt: false, shift: false },
   markSelectedDronesUnread: { key: 'z', mod: false, ctrl: false, meta: false, alt: false, shift: false },
   toggleSidebarCollapsed: { key: 'a', mod: false, ctrl: false, meta: false, alt: false, shift: false },
   toggleRightPanelOpen: { key: 'd', mod: false, ctrl: false, meta: false, alt: false, shift: false },
@@ -206,6 +213,7 @@ export function cloneDefaultShortcutBindings(): ShortcutBindingMap {
     createDroneChat: cloneShortcutBinding(DEFAULT_SHORTCUT_BINDINGS.createDroneChat),
     openKanbanBoard: cloneShortcutBinding(DEFAULT_SHORTCUT_BINDINGS.openKanbanBoard),
     focusPrimaryChatInput: cloneShortcutBinding(DEFAULT_SHORTCUT_BINDINGS.focusPrimaryChatInput),
+    toggleVoiceClipboardRecording: cloneShortcutBinding(DEFAULT_SHORTCUT_BINDINGS.toggleVoiceClipboardRecording),
     markSelectedDronesUnread: cloneShortcutBinding(DEFAULT_SHORTCUT_BINDINGS.markSelectedDronesUnread),
     toggleSidebarCollapsed: cloneShortcutBinding(DEFAULT_SHORTCUT_BINDINGS.toggleSidebarCollapsed),
     toggleRightPanelOpen: cloneShortcutBinding(DEFAULT_SHORTCUT_BINDINGS.toggleRightPanelOpen),

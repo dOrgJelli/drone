@@ -62,6 +62,7 @@ export function hubLog(level: 'info' | 'warn' | 'error', message: string, meta?:
 }
 
 export type LlmProviderId = 'openai' | 'gemini' | 'codex';
+export type StoredApiKeyProviderId = 'openai' | 'gemini' | 'groq';
 export type ApiKeySettingsSource = 'settings' | 'environment' | 'codex-cli' | null;
 export type EffectiveProviderApiKeySettings = {
   apiKey: string | null;
@@ -491,10 +492,9 @@ export function providerDisplayName(provider: LlmProviderId): string {
   return provider === 'openai' ? 'OpenAI' : 'Gemini';
 }
 
-async function getStoredProviderApiKey(provider: LlmProviderId): Promise<{ apiKey: string; updatedAt: string | null } | null> {
-  if (provider === 'codex') return null;
+async function getStoredProviderApiKey(provider: StoredApiKeyProviderId): Promise<{ apiKey: string; updatedAt: string | null } | null> {
   const reg = await loadRegistry();
-  const block = provider === 'openai' ? reg.settings?.openai : reg.settings?.gemini;
+  const block = provider === 'openai' ? reg.settings?.openai : provider === 'gemini' ? reg.settings?.gemini : reg.settings?.groq;
   const apiKey = normalizeApiKey(block?.apiKey);
   if (!apiKey) return null;
   const updatedAtRaw = block?.updatedAt;
@@ -502,28 +502,30 @@ async function getStoredProviderApiKey(provider: LlmProviderId): Promise<{ apiKe
   return { apiKey, updatedAt };
 }
 
-export async function upsertStoredProviderApiKey(provider: LlmProviderId, apiKeyRaw: string): Promise<void> {
-  if (provider === 'codex') throw new Error('Codex uses local Codex CLI authentication, not a stored API key.');
+export async function upsertStoredProviderApiKey(provider: StoredApiKeyProviderId, apiKeyRaw: string): Promise<void> {
   const apiKey = normalizeApiKey(apiKeyRaw);
   if (!apiKey) throw new Error('API key is required.');
   const updatedAt = new Date().toISOString();
   await updateRegistry((reg) => {
     reg.settings ??= {};
     if (provider === 'openai') reg.settings.openai = { apiKey, updatedAt };
-    else reg.settings.gemini = { apiKey, updatedAt };
+    else if (provider === 'gemini') reg.settings.gemini = { apiKey, updatedAt };
+    else reg.settings.groq = { apiKey, updatedAt };
   });
 }
 
-export async function clearStoredProviderApiKey(provider: LlmProviderId): Promise<void> {
-  if (provider === 'codex') return;
+export async function clearStoredProviderApiKey(provider: StoredApiKeyProviderId): Promise<void> {
   await updateRegistry((reg) => {
     if (!reg.settings) return;
     if (provider === 'openai') {
       if (!reg.settings.openai) return;
       delete reg.settings.openai;
-    } else {
+    } else if (provider === 'gemini') {
       if (!reg.settings.gemini) return;
       delete reg.settings.gemini;
+    } else {
+      if (!reg.settings.groq) return;
+      delete reg.settings.groq;
     }
     if (Object.keys(reg.settings).length === 0) delete reg.settings;
   });
@@ -647,9 +649,19 @@ export async function resolveEffectiveProviderApiKeySettings(provider: LlmProvid
   };
 }
 
+export async function resolveGroqApiKeySettings(): Promise<EffectiveProviderApiKeySettings> {
+  const stored = await getStoredProviderApiKey('groq');
+  if (!stored) return { apiKey: null, source: null, updatedAt: null };
+  return {
+    apiKey: stored.apiKey,
+    source: 'settings',
+    updatedAt: stored.updatedAt,
+  };
+}
+
 export async function collectProviderApiKeyDiagnostics(provider: LlmProviderId): Promise<ProviderApiKeyResolutionDiagnostics> {
   const envVar = providerApiKeyEnvVar(provider);
-  const stored = await getStoredProviderApiKey(provider);
+  const stored = provider === 'codex' ? null : await getStoredProviderApiKey(provider);
   const effective = await resolveEffectiveProviderApiKeySettings(provider);
   return {
     provider,
@@ -715,12 +727,14 @@ export async function resolveLlmSettingsResponse(): Promise<{
   openai: { hasKey: boolean; source: ApiKeySettingsSource; keyHint: string | null; updatedAt: string | null };
   gemini: { hasKey: boolean; source: ApiKeySettingsSource; keyHint: string | null; updatedAt: string | null };
   codex: { hasKey: boolean; source: ApiKeySettingsSource; keyHint: string | null; updatedAt: string | null };
+  groq: { hasKey: boolean; source: ApiKeySettingsSource; keyHint: string | null; updatedAt: string | null };
 }> {
-  const [provider, openai, gemini, codex] = await Promise.all([
+  const [provider, openai, gemini, codex, groq] = await Promise.all([
     resolveEffectiveLlmProvider(),
     resolveEffectiveProviderApiKeySettings('openai'),
     resolveEffectiveProviderApiKeySettings('gemini'),
     resolveEffectiveProviderApiKeySettings('codex'),
+    resolveGroqApiKeySettings(),
   ]);
   return {
     ok: true,
@@ -728,6 +742,7 @@ export async function resolveLlmSettingsResponse(): Promise<{
     openai: providerKeySettingsResponse(openai),
     gemini: providerKeySettingsResponse(gemini),
     codex: providerKeySettingsResponse(codex),
+    groq: providerKeySettingsResponse(groq),
   };
 }
 
