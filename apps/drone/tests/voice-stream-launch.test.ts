@@ -36,4 +36,14 @@ describe('voice stream launch env', () => {
 
     expect(env.DRONE_PAIR_PASSWORD).toBe('settings-password');
   });
+
+  test('injects the Hub API connection for voice assistant messages', () => {
+    const env = buildVoiceStreamProcessEnv(
+      {},
+      { port: 3100, groqApiKey: null, hubApiUrl: 'http://127.0.0.1:8787', hubApiToken: 'hub-token' },
+    );
+
+    expect(env.DRONE_HUB_API_URL).toBe('http://127.0.0.1:8787');
+    expect(env.DRONE_HUB_API_TOKEN).toBe('hub-token');
+  });
 });

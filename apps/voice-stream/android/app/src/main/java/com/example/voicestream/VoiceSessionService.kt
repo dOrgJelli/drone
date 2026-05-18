@@ -36,6 +36,7 @@ class VoiceSessionService : Service() {
     private val serviceActive = AtomicBoolean(false)
     private val streaming = AtomicBoolean(false)
     private val outgoingReady = AtomicBoolean(false)
+    private val awaitingReply = AtomicBoolean(false)
     private val playbackQueue = LinkedBlockingQueue<ByteArray>(100)
     private val wakeController = WakeToggleController()
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -58,6 +59,12 @@ class VoiceSessionService : Service() {
                 uploadDiagnostics("periodic", force = false)
                 mainHandler.postDelayed(this, LOG_UPLOAD_INTERVAL_MS)
             }
+        }
+    }
+    private val replyTimeoutRunnable = Runnable {
+        if (streaming.get() && awaitingReply.get()) {
+            DroneLog.w("WebSocket", "Timed out waiting for spoken reply")
+            endStreaming(waitingStatus(), returnToListening = true)
         }
     }
 
@@ -197,6 +204,7 @@ class VoiceSessionService : Service() {
         }
 
         outgoingReady.set(false)
+        awaitingReply.set(false)
         seedPendingStreamFromPreRoll()
         playbackQueue.clear()
         startPlayback()
@@ -214,6 +222,8 @@ class VoiceSessionService : Service() {
         }
 
         outgoingReady.set(false)
+        awaitingReply.set(false)
+        mainHandler.removeCallbacks(replyTimeoutRunnable)
         pendingStreamBuffer.clear()
         webSocket?.close(1000, "client stopped")
         webSocket = null
@@ -309,7 +319,7 @@ class VoiceSessionService : Service() {
                         mainHandler.post { handleWakeDetected(phrase) }
                     }
 
-                    if (wasStreaming) {
+                    if (wasStreaming && !awaitingReply.get()) {
                         if (outgoingReady.get()) {
                             flushPendingStreamFrames()
                             webSocket?.send(ByteString.of(*frame))
@@ -465,13 +475,22 @@ class VoiceSessionService : Service() {
                     return
                 }
                 outgoingReady.set(true)
-                flushPendingStreamFrames()
+                if (!awaitingReply.get()) {
+                    flushPendingStreamFrames()
+                }
                 publishState("Awake: streaming", Constants.MODE_STREAMING)
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 if (streaming.get()) {
-                    playbackQueue.offer(bytes.toByteArray())
+                    val data = bytes.toByteArray()
+                    if (isWavAudio(data)) {
+                        awaitingReply.set(false)
+                        mainHandler.removeCallbacks(replyTimeoutRunnable)
+                        ApprovalTtsPlayer.playWav(data)
+                    } else {
+                        playbackQueue.offer(data)
+                    }
                 }
             }
 
@@ -506,9 +525,20 @@ class VoiceSessionService : Service() {
 
     private fun handleServerControlMessage(text: String) {
         val type = runCatching { JSONObject(text).optString("type") }.getOrDefault("")
-        if (type != "sleep") {
+        if (type == "wait_for_reply") {
+            DroneLog.i("WebSocket", "Server wait-for-reply command received")
+            mainHandler.post {
+                if (!streaming.get()) return@post
+                outgoingReady.set(false)
+                awaitingReply.set(true)
+                pendingStreamBuffer.clear()
+                publishState("Awake: waiting for reply", Constants.MODE_STREAMING)
+                mainHandler.removeCallbacks(replyTimeoutRunnable)
+                mainHandler.postDelayed(replyTimeoutRunnable, REPLY_TIMEOUT_MS)
+            }
             return
         }
+        if (type != "sleep") return
 
         DroneLog.i("WebSocket", "Server sleep command received")
         mainHandler.post {
@@ -517,6 +547,18 @@ class VoiceSessionService : Service() {
             cuePlayer.play(LocalCue.SLEEP)
             endStreaming(waitingStatus(), returnToListening = true)
         }
+    }
+
+    private fun isWavAudio(data: ByteArray): Boolean {
+        return data.size >= 12 &&
+            data[0] == 'R'.code.toByte() &&
+            data[1] == 'I'.code.toByte() &&
+            data[2] == 'F'.code.toByte() &&
+            data[3] == 'F'.code.toByte() &&
+            data[8] == 'W'.code.toByte() &&
+            data[9] == 'A'.code.toByte() &&
+            data[10] == 'V'.code.toByte() &&
+            data[11] == 'E'.code.toByte()
     }
 
     private fun startPlayback() {
@@ -786,6 +828,7 @@ class VoiceSessionService : Service() {
         private const val TEMPORARY_STATUS_MS = 1_200L
         private const val APPROVAL_STATUS_MS = 2_500L
         private const val APPROVAL_CODE_CHECK_INTERVAL_MS = 250L
+        private const val REPLY_TIMEOUT_MS = 120_000L
         private const val UNLOCK_CODE = "1234"
         private const val LOCK_CODE = "4321"
         private const val LOCKED_OFF_CODE = "0000"

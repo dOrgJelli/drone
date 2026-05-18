@@ -38,8 +38,17 @@ export function buildApprovalCodeSpeechText(code: string): string {
 }
 
 export async function synthesizeApprovalCodeWav(code: string, config: GroqTtsConfig): Promise<Buffer> {
+  return await synthesizeTextWav(buildApprovalCodeSpeechText(code), config);
+}
+
+export async function synthesizeTextWav(text: string, config: GroqTtsConfig): Promise<Buffer> {
   if (!config.apiKey) {
     throw new Error("Groq TTS disabled: set GROQ_API_KEY or GROQ_TTS_API_KEY");
+  }
+
+  const input = text.trim();
+  if (!input) {
+    throw new Error("missing TTS text");
   }
 
   const response = await fetch(config.endpoint, {
@@ -50,7 +59,7 @@ export async function synthesizeApprovalCodeWav(code: string, config: GroqTtsCon
     },
     body: JSON.stringify({
       model: config.model,
-      input: buildApprovalCodeSpeechText(code),
+      input,
       voice: config.voice,
       response_format: config.responseFormat,
     }),

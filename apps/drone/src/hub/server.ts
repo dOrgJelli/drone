@@ -10547,6 +10547,7 @@ export async function startDroneHubApiServer(opts: {
   port: number;
   host?: string;
   apiToken: string;
+  voiceStreamUrl?: string | null;
   allowedOrigins?: string[];
   onGroqApiKeySettingsChanged?: () => void | Promise<void>;
   onVoiceStreamPairingPasswordSettingsChanged?: () => void | Promise<void>;
@@ -10566,6 +10567,7 @@ export async function startDroneHubApiServer(opts: {
   const host = opts.host ?? '127.0.0.1';
   const apiToken = String(opts.apiToken ?? '').trim();
   if (!apiToken) throw new Error('missing hub API token');
+  const voiceStreamUrl = String(opts.voiceStreamUrl ?? '').trim().replace(/\/+$/, '');
 
   const notifyGroqApiKeySettingsChanged = () => {
     if (!opts.onGroqApiKeySettingsChanged) return;
@@ -10985,6 +10987,29 @@ export async function startDroneHubApiServer(opts: {
     return data;
   };
 
+  const callVoiceStreamApi = async (pathname: string, body: any): Promise<any> => {
+    if (!voiceStreamUrl) throw new Error('Voice Stream server is not running.');
+    const response = await fetch(`${voiceStreamUrl}${pathname}`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${apiToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(body ?? {}),
+    });
+    const text = await response.text();
+    let data: any = null;
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = { error: text };
+      }
+    }
+    if (!response.ok) throw new Error(data?.error ?? `${response.status} ${response.statusText}`);
+    return data;
+  };
+
   const assistantService = new HubAssistantService({
     listDrones: async (): Promise<AssistantDroneSummary[]> => {
       const regAny: any = await loadRegistry();
@@ -11071,6 +11096,9 @@ export async function startDroneHubApiServer(opts: {
       const r = await createOrEnqueuePromptUnified({ droneId: id, chatName: chat, prompt: message, cwd: null });
       if (r.kind === 'error') throw new Error(r.error);
       return { promptId: r.id, pendingState: r.pendingState, blockedByAutomation: r.blockedByAutomation };
+    },
+    speak: async ({ threadId, text }) => {
+      return await callVoiceStreamApi('/speak', { threadId, text });
     },
     listDroneFiles: async ({ droneId, path }) => await assistantListDroneFiles({ droneId, path }),
     readDroneFile: async ({ droneId, path, startLine, endLine }) => await assistantReadDroneFile({ droneId, path, startLine, endLine }),
@@ -11216,6 +11244,38 @@ export async function startDroneHubApiServer(opts: {
 
       if (pathname === '/api/assistant/threads' && method === 'GET') {
         json(res, 200, await assistantService.snapshot());
+        return;
+      }
+
+      if (pathname === '/api/assistant/voice/connect' && method === 'POST') {
+        let body: any = null;
+        try {
+          body = await readJsonBody(req);
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+          return;
+        }
+        try {
+          json(res, 200, await assistantService.ensureLatestVoiceThread({ title: body?.title }));
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+        }
+        return;
+      }
+
+      if (pathname === '/api/assistant/voice/message' && method === 'POST') {
+        let body: any = null;
+        try {
+          body = await readJsonBody(req);
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+          return;
+        }
+        try {
+          json(res, 202, await assistantService.submitVoicePrompt({ prompt: body?.prompt ?? body?.message, title: body?.title }));
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+        }
         return;
       }
 

@@ -383,7 +383,11 @@ function resolveRepoRootFromDroneCliDir(): string {
   return path.resolve(__dirname, '..', '..', '..');
 }
 
-async function startVoiceStreamServer(repoRoot: string, port: number): Promise<ChildProcess | null> {
+async function startVoiceStreamServer(
+  repoRoot: string,
+  port: number,
+  hubApi: { url: string; token: string },
+): Promise<ChildProcess | null> {
   const voiceStreamDir = path.join(repoRoot, 'apps', 'voice-stream');
   if (!fsSync.existsSync(path.join(voiceStreamDir, 'package.json'))) {
     // eslint-disable-next-line no-console
@@ -402,6 +406,8 @@ async function startVoiceStreamServer(repoRoot: string, port: number): Promise<C
       port,
       groqApiKey: groqSettings.apiKey,
       pairingPassword: pairingPasswordSettings.password,
+      hubApiUrl: hubApi.url,
+      hubApiToken: hubApi.token,
     }),
   });
 
@@ -1881,7 +1887,10 @@ async function hubRun(options: any) {
       } catch {
         // ignore
       }
-      trackVoiceStreamChild(await startVoiceStreamServer(repoRoot, voiceStreamPort));
+      trackVoiceStreamChild(await startVoiceStreamServer(repoRoot, voiceStreamPort, {
+        url: `http://127.0.0.1:${api.port}`,
+        token: apiToken,
+      }));
       // eslint-disable-next-line no-console
       console.log(`Voice Stream restarted after settings change: http://127.0.0.1:${voiceStreamPort}`);
     })();
@@ -1896,6 +1905,7 @@ async function hubRun(options: any) {
     port: apiPort,
     host: apiHost,
     apiToken,
+    voiceStreamUrl: voiceStreamEnabled ? `http://127.0.0.1:${voiceStreamPort}` : null,
     allowedOrigins: Array.from(allowedOrigins),
     onGroqApiKeySettingsChanged: restartVoiceStreamForSettings,
     onVoiceStreamPairingPasswordSettingsChanged: restartVoiceStreamForSettings,
@@ -1924,7 +1934,10 @@ async function hubRun(options: any) {
   // Start the drone-hub Vite dev server and proxy /api → Hub API server.
   const hubDir = path.join(repoRoot, 'apps', 'drone-hub');
   if (voiceStreamEnabled) {
-    trackVoiceStreamChild(await startVoiceStreamServer(repoRoot, voiceStreamPort));
+    trackVoiceStreamChild(await startVoiceStreamServer(repoRoot, voiceStreamPort, {
+      url: `http://127.0.0.1:${api.port}`,
+      token: apiToken,
+    }));
   }
   const child = spawn('bun', ['run', 'dev', '--', '--port', String(uiPort), '--strictPort'], {
     cwd: hubDir,

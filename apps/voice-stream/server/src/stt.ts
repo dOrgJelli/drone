@@ -18,9 +18,10 @@ export type TranscriptSegment = {
 export type TranscriptMessage = TranscriptStatus | TranscriptSegment;
 
 export type TranscriptCommand = {
-  type: "sleep";
+  type: "sleep" | "wait_for_reply";
   phrase: string;
   detectedAt: string;
+  transcriptText: string;
 };
 
 export type TranscriptionConfig = {
@@ -188,7 +189,9 @@ export class GroqTranscriptionManager {
       const text = await transcribeWavWithGroq(wav, this.config, prompt);
       const commandResult = stripTranscriptCommands(text);
       this.logSegmentResult(segment, text, commandResult, Date.now() - startedAt, prompt);
+      const trimmed = commandResult.text;
       if (commandResult.sleepDetected) {
+        const transcriptText = this.buildFullTranscriptText(trimmed);
         this.log(
           `command=sleep segment=${segment.sequence} phrase=${formatLogValue(commandResult.sleepPhrase ?? "that's it")} ` +
           `detectedAt=${new Date().toISOString()}`
@@ -197,6 +200,7 @@ export class GroqTranscriptionManager {
           type: "sleep",
           phrase: commandResult.sleepPhrase ?? "that's it",
           detectedAt: new Date().toISOString(),
+          transcriptText,
         });
         this.broadcast({
           type: "transcript_status",
@@ -207,7 +211,6 @@ export class GroqTranscriptionManager {
         });
       }
 
-      const trimmed = commandResult.text;
       if (hasTranscriptContent(trimmed)) {
         this.rememberTranscript(trimmed);
         this.broadcast({
@@ -246,6 +249,10 @@ export class GroqTranscriptionManager {
   private rememberTranscript(text: string): void {
     const next = `${this.transcriptContext} ${text}`.trim();
     this.transcriptContext = next.slice(Math.max(0, next.length - this.config.contextChars));
+  }
+
+  private buildFullTranscriptText(text: string): string {
+    return `${this.transcriptContext} ${text}`.trim();
   }
 
   private enqueueSegments(segments: QueuedSegment[]): void {

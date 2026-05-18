@@ -69,6 +69,8 @@ type AssistantThread = {
   title: string;
   createdAt: string;
   updatedAt: string;
+  voiceEnabled?: boolean;
+  voiceEnabledAt?: string | null;
   model: string;
   provider: AssistantProviderId;
   thinkingLevel: string;
@@ -2191,6 +2193,7 @@ export function AssistantDock() {
   const activeThreadId = activeThread?.id ?? '';
   activeThreadIdRef.current = activeThreadId;
   const autoApprove = Boolean(activeThread?.autoApprove);
+  const voiceEnabled = Boolean(activeThread?.voiceEnabled);
   const promptDeliveryMode: AssistantPromptDeliveryMode = activeThread?.promptDeliveryMode === 'asap' ? 'asap' : 'queue';
   const activeAccessScope: AssistantAccessScope | null = activeThread?.accessScope ?? snapshot?.accessScope ?? null;
   const activeAccessScopeDroneIdsKey = activeAccessScope?.droneIds?.join('\u0000') ?? '';
@@ -2726,7 +2729,7 @@ export function AssistantDock() {
     }
   }, []);
 
-  const updateThread = React.useCallback(async (patch: Partial<Pick<AssistantThread, 'model' | 'provider' | 'thinkingLevel' | 'autoApprove' | 'promptDeliveryMode' | 'enabledTools'>>) => {
+  const updateThread = React.useCallback(async (patch: Partial<Pick<AssistantThread, 'model' | 'provider' | 'thinkingLevel' | 'autoApprove' | 'promptDeliveryMode' | 'enabledTools' | 'voiceEnabled'>>) => {
     if (!activeThread) return;
     const requestId = updateThreadRequestRef.current + 1;
     updateThreadRequestRef.current = requestId;
@@ -3086,6 +3089,26 @@ export function AssistantDock() {
             aria-label="Toggle assistant tools"
           >
             <IconSettings className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => void updateThread({ voiceEnabled: !voiceEnabled })}
+            disabled={!activeThread}
+            aria-pressed={voiceEnabled}
+            aria-label="Toggle voice mode"
+            title={voiceEnabled ? 'Voice mode is on' : 'Voice mode is off'}
+            className={`h-8 w-8 flex-shrink-0 rounded border text-[var(--muted)] hover:text-[var(--fg)] disabled:cursor-not-allowed disabled:opacity-45 ${
+              voiceEnabled
+                ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
+                : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)]'
+            }`}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true" className="mx-auto h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="9" y="3" width="6" height="11" rx="3" />
+              <path d="M5 11a7 7 0 0 0 14 0" />
+              <path d="M12 18v3" />
+              <path d="M8 21h8" />
+            </svg>
           </button>
           <button
             type="button"

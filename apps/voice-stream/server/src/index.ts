@@ -17,7 +17,13 @@ import {
 import {
   buildTtsConfigFromEnv,
   synthesizeApprovalCodeWav,
+  synthesizeTextWav,
 } from "./tts.js";
+import {
+  buildHubClientConfigFromEnv,
+  connectVoiceThread,
+  submitVoiceMessage,
+} from "./hub-client.js";
 
 const port = Number.parseInt(process.env.PORT ?? "3000", 10);
 const sampleRateHz = 16_000;
@@ -78,6 +84,11 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse): Pro
     return;
   }
 
+  if (url.pathname === "/speak") {
+    await serveSpeak(req, res);
+    return;
+  }
+
   if (url.pathname === "/audio") {
     res.writeHead(426, { "content-type": "text/plain; charset=utf-8" });
     res.end("Upgrade required. Connect to this endpoint with WebSocket.\n");
@@ -98,10 +109,12 @@ const wss = new WebSocketServer({ noServer: true });
 const monitorWss = new WebSocketServer({ noServer: true });
 const transcriptionConfig = buildTranscriptionConfigFromEnv(process.env);
 const ttsConfig = buildTtsConfigFromEnv(process.env);
+const hubClientConfig = buildHubClientConfigFromEnv(process.env);
 let latestTranscriptStatus: TranscriptStatus = initialTranscriptStatus();
 
 let nextClientId = 1;
 let nextMonitorId = 1;
+const audioClients = new Map<number, WebSocket>();
 
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
@@ -130,13 +143,23 @@ wss.on("connection", (socket, request) => {
   const sttManager = new GroqTranscriptionManager(
     transcriptionConfig,
     (message) => broadcastTranscriptMessage(message),
-    (command) => sendAudioCommand(socket, clientId, command),
+    (command) => {
+      sendAudioCommand(socket, clientId, {
+        type: "wait_for_reply",
+        phrase: command.phrase,
+        detectedAt: command.detectedAt,
+        transcriptText: "",
+      });
+      void handleSleepCommand(clientId, command);
+    },
     `client ${clientId}`,
   );
   let bytesIn = 0;
   let framesIn = 0;
 
   console.log(`[client ${clientId}] connected from ${remote}`);
+  audioClients.set(clientId, socket);
+  void handleVoiceClientConnected(clientId);
 
   socket.on("message", (data, isBinary) => {
     if (!isBinary) {
@@ -160,6 +183,7 @@ wss.on("connection", (socket, request) => {
     sttManager.flushPending();
     sttManager.stop();
     clearInterval(stats);
+    audioClients.delete(clientId);
     console.log(`[client ${clientId}] closed ${code} ${reason.toString()}`);
   });
 
@@ -179,6 +203,37 @@ function sendAudioCommand(socket: WebSocket, clientId: number, command: Transcri
     console.log(`[command] sent ${command.type} to client ${clientId}`);
   } catch (error) {
     console.warn(`[command] failed to send ${command.type} to client ${clientId}`, error);
+  }
+}
+
+async function handleVoiceClientConnected(clientId: number): Promise<void> {
+  if (!hubClientConfig) {
+    console.warn(`[hub] skipped voice thread connect for client ${clientId}: missing DRONE_HUB_API_URL or DRONE_HUB_API_TOKEN`);
+    return;
+  }
+  try {
+    const result = await connectVoiceThread(hubClientConfig);
+    console.log(`[hub] voice client ${clientId} using assistant thread ${result.threadId}${result.created ? " (created)" : ""}`);
+  } catch (error) {
+    console.warn(`[hub] voice thread connect failed for client ${clientId}`, error);
+  }
+}
+
+async function handleSleepCommand(clientId: number, command: TranscriptCommand): Promise<void> {
+  const prompt = String(command.transcriptText ?? "").trim();
+  if (!prompt) {
+    console.warn(`[hub] skipped empty voice transcript for client ${clientId}`);
+    return;
+  }
+  if (!hubClientConfig) {
+    console.warn(`[hub] skipped voice transcript for client ${clientId}: missing DRONE_HUB_API_URL or DRONE_HUB_API_TOKEN`);
+    return;
+  }
+  try {
+    const result = await submitVoiceMessage(hubClientConfig, prompt);
+    console.log(`[hub] submitted voice transcript chars=${prompt.length} thread=${result.threadId}`);
+  } catch (error) {
+    console.warn(`[hub] voice transcript submit failed for client ${clientId}`, error);
   }
 }
 
@@ -229,6 +284,7 @@ server.listen(port, "0.0.0.0", () => {
   console.log(`APK download page listening on http://0.0.0.0:${port}/`);
   console.log(`Groq STT: ${transcriptionConfig.apiKey ? `enabled (${transcriptionConfig.model})` : "disabled (missing GROQ_API_KEY)"}`);
   console.log(`Groq TTS: ${ttsConfig.apiKey ? `enabled (${ttsConfig.model}, voice ${ttsConfig.voice})` : "disabled (missing GROQ_API_KEY or GROQ_TTS_API_KEY)"}`);
+  console.log(`Hub voice mode: ${hubClientConfig ? `enabled (${hubClientConfig.apiUrl})` : "disabled (missing DRONE_HUB_API_URL or DRONE_HUB_API_TOKEN)"}`);
   console.log("Audio auth: /audio requires pairing token");
   console.log(`Android log upload: http://0.0.0.0:${port}/logs/android`);
   console.log(`Android log path: ${androidLogPath}`);
@@ -881,6 +937,60 @@ async function serveApprovalCode(req: IncomingMessage, res: ServerResponse, url:
   }
 }
 
+async function serveSpeak(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, {
+      "allow": "POST",
+      "content-type": "text/plain; charset=utf-8",
+    });
+    res.end("Method not allowed\n");
+    return;
+  }
+
+  if (!isAuthorizedHubRequest(req)) {
+    res.writeHead(401, { "content-type": "text/plain; charset=utf-8" });
+    res.end("Unauthorized\n");
+    console.warn("[speak] rejected unauthorized request");
+    return;
+  }
+
+  const body = await readRequestBody(req, 32_768);
+  const payload = safeJsonParse(body);
+  const text = typeof payload?.text === "string" ? payload.text.trim() : "";
+  if (!text) {
+    res.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
+    res.end("Expected JSON body with text\n");
+    return;
+  }
+
+  const clients = [...audioClients.entries()].filter(([, socket]) => socket.readyState === WebSocket.OPEN);
+  if (clients.length === 0) {
+    res.writeHead(409, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: false, error: "No Android voice client is connected." }));
+    return;
+  }
+
+  try {
+    const wav = await synthesizeTextWav(text.slice(0, 4_000), ttsConfig);
+    for (const [clientId, socket] of clients) {
+      socket.send(wav, { binary: true });
+      sendAudioCommand(socket, clientId, {
+        type: "sleep",
+        phrase: "speak",
+        detectedAt: new Date().toISOString(),
+        transcriptText: "",
+      });
+    }
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: true, clients: clients.length, bytes: wav.byteLength }));
+    console.log(`[speak] sent tts chars=${text.length} bytes=${wav.byteLength} clients=${clients.length}`);
+  } catch (error) {
+    console.warn("[speak] tts failed", error);
+    res.writeHead(502, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+  }
+}
+
 function parseApprovalCodeBody(body: string): { code: string; source: string; detectedAt?: string } | null {
   const payload = safeJsonParse(body);
   if (!payload) {
@@ -899,7 +1009,7 @@ function parseApprovalCodeBody(body: string): { code: string; source: string; de
   return { code, source, detectedAt };
 }
 
-function safeJsonParse(body: string): { code?: unknown; source?: unknown; detectedAt?: unknown } | null {
+function safeJsonParse(body: string): Record<string, unknown> | null {
   try {
     return JSON.parse(body) as { code?: unknown; source?: unknown; detectedAt?: unknown };
   } catch {
@@ -984,6 +1094,15 @@ function buildPairingPayload(req: IncomingMessage, authorizedAudioUrl: string): 
 
 function isAuthorizedAudioRequest(url: URL): boolean {
   return isAuthorizedToken(url.searchParams.get("token") ?? "");
+}
+
+function isAuthorizedHubRequest(req: IncomingMessage): boolean {
+  const expected = hubClientConfig?.apiToken ?? "";
+  const authorization = req.headers.authorization?.toString() ?? "";
+  const bearerPrefix = "Bearer ";
+  const token = authorization.startsWith(bearerPrefix) ? authorization.slice(bearerPrefix.length).trim() : "";
+  if (!expected || !token || token.length !== expected.length) return false;
+  return timingSafeEqual(Buffer.from(token), Buffer.from(expected));
 }
 
 function getRequestToken(req: IncomingMessage, url: URL): string {

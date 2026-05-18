@@ -1,6 +1,6 @@
 export function buildVoiceStreamProcessEnv(
   baseEnv: NodeJS.ProcessEnv,
-  opts: { port: number; groqApiKey?: string | null; pairingPassword?: string | null },
+  opts: { port: number; groqApiKey?: string | null; pairingPassword?: string | null; hubApiUrl?: string | null; hubApiToken?: string | null },
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     ...baseEnv,
@@ -19,6 +19,11 @@ export function buildVoiceStreamProcessEnv(
   if (pairingPassword) {
     env.DRONE_PAIR_PASSWORD = pairingPassword;
   }
+
+  const hubApiUrl = String(opts.hubApiUrl ?? '').trim();
+  const hubApiToken = String(opts.hubApiToken ?? '').trim();
+  if (hubApiUrl) env.DRONE_HUB_API_URL = hubApiUrl;
+  if (hubApiToken) env.DRONE_HUB_API_TOKEN = hubApiToken;
 
   return env;
 }
