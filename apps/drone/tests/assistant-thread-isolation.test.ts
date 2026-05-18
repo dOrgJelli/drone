@@ -138,6 +138,27 @@ describe('assistant thread isolation', () => {
     });
   });
 
+  test('voice assistant threads are tagged and get speak by default', async () => {
+    await withTempDroneDataDir('assistant-voice-thread-', async () => {
+      const service = makeService();
+      installFakeRuntime(service, {});
+
+      const normal = await service.createThread({ title: 'normal' });
+      let thread = normal.threads.find((item) => item.id === normal.activeThreadId) as any;
+      expect(thread.voiceEnabled).toBe(false);
+      expect(thread.enabledTools).not.toContain('speak');
+
+      const voice = await service.ensureLatestVoiceThread();
+      expect(voice.created).toBe(true);
+      expect(voice.thread.voiceEnabled).toBe(true);
+      expect(voice.thread.enabledTools).toContain('speak');
+
+      const reused = await service.ensureLatestVoiceThread();
+      expect(reused.created).toBe(false);
+      expect(reused.threadId).toBe(voice.threadId);
+    });
+  });
+
   test('defaults new assistant threads to Codex GPT-5.5 instant when Codex is connected', async () => {
     await withTempDroneDataDir('assistant-default-codex-', async (droneDataDir) => {
       const previousCodexAuthFile = process.env.DRONE_HUB_CODEX_AUTH_FILE;

@@ -69,6 +69,11 @@ export type EffectiveProviderApiKeySettings = {
   source: ApiKeySettingsSource;
   updatedAt: string | null;
 };
+export type EffectiveVoiceStreamPairingPasswordSettings = {
+  password: string | null;
+  source: ApiKeySettingsSource;
+  updatedAt: string | null;
+};
 export type SecretValueDiagnostics = {
   present: boolean;
   hasValue: boolean;
@@ -531,6 +536,33 @@ export async function clearStoredProviderApiKey(provider: StoredApiKeyProviderId
   });
 }
 
+async function getStoredVoiceStreamPairingPassword(): Promise<{ password: string; updatedAt: string | null } | null> {
+  const reg = await loadRegistry();
+  const password = normalizeApiKey(reg.settings?.voiceStream?.pairingPassword);
+  if (!password) return null;
+  const updatedAtRaw = reg.settings?.voiceStream?.updatedAt;
+  const updatedAt = typeof updatedAtRaw === 'string' && updatedAtRaw.trim() ? updatedAtRaw : null;
+  return { password, updatedAt };
+}
+
+export async function upsertVoiceStreamPairingPassword(passwordRaw: string): Promise<void> {
+  const pairingPassword = normalizeApiKey(passwordRaw);
+  if (!pairingPassword) throw new Error('Pairing password is required.');
+  const updatedAt = new Date().toISOString();
+  await updateRegistry((reg) => {
+    reg.settings ??= {};
+    reg.settings.voiceStream = { pairingPassword, updatedAt };
+  });
+}
+
+export async function clearVoiceStreamPairingPassword(): Promise<void> {
+  await updateRegistry((reg) => {
+    if (!reg.settings?.voiceStream) return;
+    delete reg.settings.voiceStream;
+    if (Object.keys(reg.settings).length === 0) delete reg.settings;
+  });
+}
+
 function codexAuthFilePath(): string {
   const configured = normalizeApiKey(process.env.DRONE_HUB_CODEX_AUTH_FILE);
   if (configured) return configured;
@@ -659,6 +691,30 @@ export async function resolveGroqApiKeySettings(): Promise<EffectiveProviderApiK
   };
 }
 
+export async function resolveVoiceStreamPairingPasswordSettings(): Promise<EffectiveVoiceStreamPairingPasswordSettings> {
+  const stored = await getStoredVoiceStreamPairingPassword();
+  if (stored) {
+    return {
+      password: stored.password,
+      source: 'settings',
+      updatedAt: stored.updatedAt,
+    };
+  }
+  const envPassword = normalizeApiKey(process.env.DRONE_PAIR_PASSWORD);
+  if (envPassword) {
+    return {
+      password: envPassword,
+      source: 'environment',
+      updatedAt: null,
+    };
+  }
+  return {
+    password: null,
+    source: null,
+    updatedAt: null,
+  };
+}
+
 export async function collectProviderApiKeyDiagnostics(provider: LlmProviderId): Promise<ProviderApiKeyResolutionDiagnostics> {
   const envVar = providerApiKeyEnvVar(provider);
   const stored = provider === 'codex' ? null : await getStoredProviderApiKey(provider);
@@ -721,6 +777,25 @@ export function providerKeySettingsResponse(
   };
 }
 
+export function voiceStreamPairingPasswordSettingsResponse(
+  settings: EffectiveVoiceStreamPairingPasswordSettings,
+  options?: { includePassword?: boolean },
+): {
+  hasPassword: boolean;
+  source: ApiKeySettingsSource;
+  passwordHint: string | null;
+  updatedAt: string | null;
+  password?: string | null;
+} {
+  return {
+    hasPassword: Boolean(settings.password),
+    source: settings.source,
+    passwordHint: apiKeyHint(settings.password),
+    updatedAt: settings.source === 'settings' ? settings.updatedAt : null,
+    ...(options?.includePassword ? { password: settings.password } : {}),
+  };
+}
+
 export async function resolveLlmSettingsResponse(): Promise<{
   ok: true;
   provider: { selected: LlmProviderId; source: LlmProviderSource };
@@ -728,13 +803,15 @@ export async function resolveLlmSettingsResponse(): Promise<{
   gemini: { hasKey: boolean; source: ApiKeySettingsSource; keyHint: string | null; updatedAt: string | null };
   codex: { hasKey: boolean; source: ApiKeySettingsSource; keyHint: string | null; updatedAt: string | null };
   groq: { hasKey: boolean; source: ApiKeySettingsSource; keyHint: string | null; updatedAt: string | null };
+  voiceStreamPairingPassword: { hasPassword: boolean; source: ApiKeySettingsSource; passwordHint: string | null; updatedAt: string | null };
 }> {
-  const [provider, openai, gemini, codex, groq] = await Promise.all([
+  const [provider, openai, gemini, codex, groq, voiceStreamPairingPassword] = await Promise.all([
     resolveEffectiveLlmProvider(),
     resolveEffectiveProviderApiKeySettings('openai'),
     resolveEffectiveProviderApiKeySettings('gemini'),
     resolveEffectiveProviderApiKeySettings('codex'),
     resolveGroqApiKeySettings(),
+    resolveVoiceStreamPairingPasswordSettings(),
   ]);
   return {
     ok: true,
@@ -743,6 +820,7 @@ export async function resolveLlmSettingsResponse(): Promise<{
     gemini: providerKeySettingsResponse(gemini),
     codex: providerKeySettingsResponse(codex),
     groq: providerKeySettingsResponse(groq),
+    voiceStreamPairingPassword: voiceStreamPairingPasswordSettingsResponse(voiceStreamPairingPassword),
   };
 }
 

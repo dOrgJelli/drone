@@ -148,6 +148,11 @@ data/
 .turbo/
 artifacts/
 
+# Android / local app runtime
+.gradle/
+local.properties
+**/.runtime/
+
 
 AGENTS.md
 CLAUDE.md

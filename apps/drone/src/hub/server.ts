@@ -217,6 +217,7 @@ import {
 import {
   archiveRetentionMs,
   clearStoredProviderApiKey,
+  clearVoiceStreamPairingPassword,
   collectProviderApiKeyDiagnostics,
   FILESYSTEM_UPLOAD_MAX_BYTES_MAX,
   FILESYSTEM_UPLOAD_MAX_BYTES_MIN,
@@ -244,6 +245,7 @@ import {
   resolveFilesystemSettingsResponse,
   resolveEffectiveProviderApiKeySettings,
   resolveGroqApiKeySettings,
+  resolveVoiceStreamPairingPasswordSettings,
   resolveLlmSettingsResponse,
   resolveTaskPlaybookButtonSettingsResponse,
   resolveUiPreferencesSettingsResponse,
@@ -254,12 +256,14 @@ import {
   upsertStoredAgentSuggestionSettings,
   upsertStoredLlmProvider,
   upsertStoredProviderApiKey,
+  upsertVoiceStreamPairingPassword,
   upsertStoredTaskPlaybookButtonSettings,
   upsertStoredUiPreferencesSettings,
   type ArchiveRetentionId,
   type ArchiveRuntimePolicy,
   type LlmProviderId,
   type StoredApiKeyProviderId,
+  voiceStreamPairingPasswordSettingsResponse,
 } from './hub-settings';
 import {
   createSkill,
@@ -561,10 +565,20 @@ async function readManagedHubStateAtRoot(rootDir: string): Promise<ManagedHubSta
     apiHost: typeof parsed.apiHost === 'string' ? parsed.apiHost : '127.0.0.1',
     apiPort,
     uiPort,
+    voiceStream: parseManagedHubVoiceStreamState(parsed.voiceStream),
     startedAt: typeof parsed.startedAt === 'string' ? parsed.startedAt : new Date().toISOString(),
     logPath: typeof parsed.logPath === 'string' ? parsed.logPath : path.join(rootDir, 'hub.log'),
     launchEnv: parsed.launchEnv ?? null,
   };
+}
+
+function parseManagedHubVoiceStreamState(raw: unknown): ManagedHubState['voiceStream'] {
+  if (!raw || typeof raw !== 'object') return null;
+  const value = raw as any;
+  const port = Number(value.port);
+  const url = typeof value.url === 'string' ? value.url : '';
+  if (!Number.isFinite(port) || port <= 0 || !url) return null;
+  return { port, url };
 }
 
 function profileSettingsErrorStatus(error: unknown): number {
@@ -10529,7 +10543,15 @@ async function logHubLlmStartupSnapshot() {
   });
 }
 
-export async function startDroneHubApiServer(opts: { port: number; host?: string; apiToken: string; allowedOrigins?: string[] }) {
+export async function startDroneHubApiServer(opts: {
+  port: number;
+  host?: string;
+  apiToken: string;
+  voiceStreamUrl?: string | null;
+  allowedOrigins?: string[];
+  onGroqApiKeySettingsChanged?: () => void | Promise<void>;
+  onVoiceStreamPairingPasswordSettingsChanged?: () => void | Promise<void>;
+}) {
   for (const timer of RECONCILE_RETRY_TIMERS.values()) {
     try {
       clearTimeout(timer);
@@ -10545,6 +10567,24 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
   const host = opts.host ?? '127.0.0.1';
   const apiToken = String(opts.apiToken ?? '').trim();
   if (!apiToken) throw new Error('missing hub API token');
+  const voiceStreamUrl = String(opts.voiceStreamUrl ?? '').trim().replace(/\/+$/, '');
+
+  const notifyGroqApiKeySettingsChanged = () => {
+    if (!opts.onGroqApiKeySettingsChanged) return;
+    void Promise.resolve(opts.onGroqApiKeySettingsChanged()).catch((error: any) => {
+      hubLog('warn', 'Groq settings change hook failed', {
+        error: String(error?.message ?? error ?? ''),
+      });
+    });
+  };
+  const notifyVoiceStreamPairingPasswordSettingsChanged = () => {
+    if (!opts.onVoiceStreamPairingPasswordSettingsChanged) return;
+    void Promise.resolve(opts.onVoiceStreamPairingPasswordSettingsChanged()).catch((error: any) => {
+      hubLog('warn', 'Voice Stream pairing password settings change hook failed', {
+        error: String(error?.message ?? error ?? ''),
+      });
+    });
+  };
 
   const allowedOrigins = new Set<string>();
   for (const o of opts.allowedOrigins ?? []) {
@@ -10947,6 +10987,29 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
     return data;
   };
 
+  const callVoiceStreamApi = async (pathname: string, body: any): Promise<any> => {
+    if (!voiceStreamUrl) throw new Error('Voice Stream server is not running.');
+    const response = await fetch(`${voiceStreamUrl}${pathname}`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${apiToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(body ?? {}),
+    });
+    const text = await response.text();
+    let data: any = null;
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = { error: text };
+      }
+    }
+    if (!response.ok) throw new Error(data?.error ?? `${response.status} ${response.statusText}`);
+    return data;
+  };
+
   const assistantService = new HubAssistantService({
     listDrones: async (): Promise<AssistantDroneSummary[]> => {
       const regAny: any = await loadRegistry();
@@ -11033,6 +11096,9 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
       const r = await createOrEnqueuePromptUnified({ droneId: id, chatName: chat, prompt: message, cwd: null });
       if (r.kind === 'error') throw new Error(r.error);
       return { promptId: r.id, pendingState: r.pendingState, blockedByAutomation: r.blockedByAutomation };
+    },
+    speak: async ({ threadId, text }) => {
+      return await callVoiceStreamApi('/speak', { threadId, text });
     },
     listDroneFiles: async ({ droneId, path }) => await assistantListDroneFiles({ droneId, path }),
     readDroneFile: async ({ droneId, path, startLine, endLine }) => await assistantReadDroneFile({ droneId, path, startLine, endLine }),
@@ -11178,6 +11244,38 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
 
       if (pathname === '/api/assistant/threads' && method === 'GET') {
         json(res, 200, await assistantService.snapshot());
+        return;
+      }
+
+      if (pathname === '/api/assistant/voice/connect' && method === 'POST') {
+        let body: any = null;
+        try {
+          body = await readJsonBody(req);
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+          return;
+        }
+        try {
+          json(res, 200, await assistantService.ensureLatestVoiceThread({ title: body?.title }));
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+        }
+        return;
+      }
+
+      if (pathname === '/api/assistant/voice/message' && method === 'POST') {
+        let body: any = null;
+        try {
+          body = await readJsonBody(req);
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+          return;
+        }
+        try {
+          json(res, 202, await assistantService.submitVoicePrompt({ prompt: body?.prompt ?? body?.message, title: body?.title }));
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+        }
         return;
       }
 
@@ -11467,6 +11565,7 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           }
           await upsertStoredProviderApiKey(provider as StoredApiKeyProviderId, apiKey);
           const resolved = provider === 'groq' ? await resolveGroqApiKeySettings() : await resolveEffectiveProviderApiKeySettings(provider);
+          if (provider === 'groq') notifyGroqApiKeySettingsChanged();
           json(res, 200, {
             ok: true,
             ...providerKeySettingsResponse(resolved),
@@ -11481,9 +11580,53 @@ export async function startDroneHubApiServer(opts: { port: number; host?: string
           }
           await clearStoredProviderApiKey(provider as StoredApiKeyProviderId);
           const resolved = provider === 'groq' ? await resolveGroqApiKeySettings() : await resolveEffectiveProviderApiKeySettings(provider);
+          if (provider === 'groq') notifyGroqApiKeySettingsChanged();
           json(res, 200, {
             ok: true,
             ...providerKeySettingsResponse(resolved),
+          });
+          return;
+        }
+      }
+
+      if (pathname === '/api/settings/voice-stream/pairing-password') {
+        if (method === 'GET') {
+          const resolved = await resolveVoiceStreamPairingPasswordSettings();
+          json(res, 200, {
+            ok: true,
+            ...voiceStreamPairingPasswordSettingsResponse(resolved, { includePassword: u.searchParams.get('reveal') === '1' }),
+          });
+          return;
+        }
+        if (method === 'POST') {
+          let body: any = null;
+          try {
+            body = await readJsonBody(req);
+          } catch (e: any) {
+            json(res, 400, { ok: false, error: e?.message ?? String(e) });
+            return;
+          }
+          const password = normalizeApiKey(body?.password);
+          if (!password) {
+            json(res, 400, { ok: false, error: 'Pairing password is required.' });
+            return;
+          }
+          await upsertVoiceStreamPairingPassword(password);
+          const resolved = await resolveVoiceStreamPairingPasswordSettings();
+          notifyVoiceStreamPairingPasswordSettingsChanged();
+          json(res, 200, {
+            ok: true,
+            ...voiceStreamPairingPasswordSettingsResponse(resolved),
+          });
+          return;
+        }
+        if (method === 'DELETE') {
+          await clearVoiceStreamPairingPassword();
+          const resolved = await resolveVoiceStreamPairingPasswordSettings();
+          notifyVoiceStreamPairingPasswordSettingsChanged();
+          json(res, 200, {
+            ok: true,
+            ...voiceStreamPairingPasswordSettingsResponse(resolved),
           });
           return;
         }

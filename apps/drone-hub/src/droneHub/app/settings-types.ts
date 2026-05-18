@@ -30,6 +30,21 @@ export type LlmSettingsResponse = {
   gemini: Omit<ApiKeySettingsResponse, 'ok'>;
   codex: Omit<ApiKeySettingsResponse, 'ok'>;
   groq: Omit<ApiKeySettingsResponse, 'ok'>;
+  voiceStreamPairingPassword: {
+    hasPassword: boolean;
+    source: 'settings' | 'environment' | null;
+    passwordHint: string | null;
+    updatedAt: string | null;
+  };
+};
+
+export type VoiceStreamPairingPasswordSettingsResponse = {
+  ok: true;
+  hasPassword: boolean;
+  source: 'settings' | 'environment' | null;
+  passwordHint: string | null;
+  updatedAt: string | null;
+  password?: string | null;
 };
 
 export type HubLogsResponse = {

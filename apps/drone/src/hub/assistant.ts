@@ -57,6 +57,8 @@ type AssistantThread = {
   title: string;
   createdAt: string;
   updatedAt: string;
+  voiceEnabled: boolean;
+  voiceEnabledAt: string | null;
   model: string;
   provider: LlmProviderId;
   thinkingLevel: AssistantThinkingLevel;
@@ -165,6 +167,7 @@ type AssistantToolCallbacks = {
     chatName: string;
     prompt: string;
   }) => Promise<AssistantMessageDroneResult>;
+  speak?: (opts: { threadId: string; text: string }) => Promise<any>;
   listDroneFiles?: (opts: { droneId: string; path?: string }) => Promise<AssistantDroneFileListResult>;
   readDroneFile?: (opts: { droneId: string; path: string; startLine?: number; endLine?: number }) => Promise<AssistantDroneFileReadResult>;
   writeDroneFile?: (opts: { droneId: string; path: string; content: string }) => Promise<AssistantDroneFileWriteResult>;
@@ -553,6 +556,7 @@ const ASSISTANT_SYSTEM_PROMPT_DEFAULT = [
   'Creating drones, changing drone groups, sending a user message to a drone, and running bash in a drone are actions that require user approval; explain briefly what you intend to do.',
   'File write tools require write access to the target drone and should be used carefully for concrete code or content edits.',
   'If an approval-gated write tool returns successfully, the user already approved that action. Do not ask for the same approval again.',
+  'Voice threads can use speak to send short spoken replies back to the connected Android voice app.',
   'When creating a drone, omit fields you want inherited from the current open drone. Only set repoBranchSource=remote when the user asked for a remote branch and you have a remoteBranch value.',
   'Do not claim a drone completed work unless the drone transcript or user says so.',
   'Keep responses practical and short.',
@@ -576,14 +580,18 @@ const ASSISTANT_TOOL_SUMMARIES: AssistantToolSummary[] = [
   { name: 'read_chat_messages', label: 'Read chat messages', category: 'chats', description: 'Read a paginated timeline for a drone chat.' },
   { name: 'search_chat_messages', label: 'Search chat messages', category: 'chats', description: 'Search user and agent messages across drone chats.' },
   { name: 'subscribe_to_chats_idle', label: 'Subscribe to chats idle', category: 'chats', description: 'Resume this thread when subscribed drone chats become idle.' },
+  { name: 'speak', label: 'Speak', category: 'actions', description: 'Send a short spoken reply to the connected Android voice app.' },
   { name: 'create_drone', label: 'Create drone', category: 'actions', description: 'Create a new drone after user approval.' },
   { name: 'set_drone_group', label: 'Set drone group', category: 'actions', description: 'Move drones to a group after user approval.' },
   { name: 'message_drone', label: 'Send user message to drone', category: 'actions', description: 'Send a user message to a drone chat after approval.' },
 ];
 const ASSISTANT_ALL_TOOL_NAMES = ASSISTANT_TOOL_SUMMARIES.map((tool) => tool.name);
 const ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES = ASSISTANT_ALL_TOOL_NAMES.filter(
-  (name) => name !== 'get_system_prompt' && name !== 'update_system_prompt',
+  (name) => name !== 'get_system_prompt' && name !== 'update_system_prompt' && name !== 'speak',
 );
+const ASSISTANT_VOICE_DEFAULT_ENABLED_TOOL_NAMES = ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES.includes('speak')
+  ? ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES
+  : [...ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES, 'speak'];
 const ASSISTANT_OVERVIEW_PROMPT_DEFAULT = [
   'You write a concise Markdown status overview for an assistant thread in Drone Hub.',
   'Focus on the current state of the work, recent actions, tool calls, approvals, blockers, and next likely step.',
@@ -1010,6 +1018,16 @@ function normalizeAssistantEnabledTools(raw: unknown, fallback: string[] = ASSIS
     tools.push(name);
   }
   return tools;
+}
+
+function normalizeAssistantVoiceEnabled(raw: unknown): boolean {
+  return raw === true || String(raw ?? '').trim() === 'true';
+}
+
+function enabledToolsForVoiceMode(enabledTools: string[], voiceEnabled: boolean): string[] {
+  const base = normalizeAssistantEnabledTools(enabledTools);
+  if (!voiceEnabled) return base.filter((name) => name !== 'speak');
+  return normalizeAssistantEnabledTools([...base, 'speak'], ASSISTANT_VOICE_DEFAULT_ENABLED_TOOL_NAMES);
 }
 
 function normalizeAssistantSystemPromptPatches(raw: unknown): Array<{ oldText: string; newText: string }> {
@@ -1550,11 +1568,14 @@ function sanitizeChatIdleSubscription(subscription: AssistantChatIdleSubscriptio
 }
 
 function sanitizeThread(thread: AssistantThread): AssistantThread {
+  const voiceEnabled = normalizeAssistantVoiceEnabled(thread.voiceEnabled);
   return {
     ...thread,
+    voiceEnabled,
+    voiceEnabledAt: voiceEnabled ? cleanOptionalString(thread.voiceEnabledAt) || thread.updatedAt || thread.createdAt || null : null,
     systemPrompt: normalizeAssistantSystemPrompt(thread.systemPrompt) || ASSISTANT_SYSTEM_PROMPT_DEFAULT,
     systemPromptUpdatedAt: cleanOptionalString(thread.systemPromptUpdatedAt) || null,
-    enabledTools: normalizeAssistantEnabledTools(thread.enabledTools),
+    enabledTools: enabledToolsForVoiceMode(thread.enabledTools, voiceEnabled),
     messages: thread.messages.slice(-ASSISTANT_THREAD_MESSAGE_LIMIT).map(sanitizeMessage),
     queuedPrompts: thread.queuedPrompts.map(sanitizeMessage),
     status: thread.status === 'running' || thread.status === 'waiting_for_approval' ? 'idle' : thread.status,
@@ -1581,12 +1602,14 @@ function normalizeThread(raw: any, fallback: { provider: LlmProviderId; model: s
     title: String(raw.title ?? '').trim() || DEFAULT_THREAD_TITLE,
     createdAt,
     updatedAt,
+    voiceEnabled: normalizeAssistantVoiceEnabled(raw.voiceEnabled),
+    voiceEnabledAt: normalizeAssistantVoiceEnabled(raw.voiceEnabled) ? cleanOptionalString(raw.voiceEnabledAt) || updatedAt : null,
     model,
     provider,
     thinkingLevel,
     systemPrompt: normalizeAssistantSystemPrompt(raw.systemPrompt) || fallback.systemPrompt || ASSISTANT_SYSTEM_PROMPT_DEFAULT,
     systemPromptUpdatedAt: cleanOptionalString(raw.systemPromptUpdatedAt) || null,
-    enabledTools: normalizeAssistantEnabledTools(raw.enabledTools),
+    enabledTools: enabledToolsForVoiceMode(raw.enabledTools, normalizeAssistantVoiceEnabled(raw.voiceEnabled)),
     accessScope: makeAssistantAccessScope(raw.accessScope),
     autoApprove: normalizeAssistantAutoApprove(raw.autoApprove),
     promptDeliveryMode: normalizeAssistantPromptDeliveryMode(raw.promptDeliveryMode),
@@ -2133,7 +2156,7 @@ export class HubAssistantService {
     };
   }
 
-  async createThread(input?: { title?: unknown; model?: unknown; provider?: unknown; activeDroneId?: unknown; activeChatName?: unknown }): Promise<AssistantSnapshot> {
+  async createThread(input?: { title?: unknown; model?: unknown; provider?: unknown; activeDroneId?: unknown; activeChatName?: unknown; voiceEnabled?: unknown }): Promise<AssistantSnapshot> {
     await this.ensureLoaded();
     const explicitProvider = String(input?.provider ?? '').trim();
     const provider = explicitProvider ? normalizeProvider(explicitProvider) : await defaultAssistantProvider();
@@ -2142,11 +2165,47 @@ export class HubAssistantService {
       model: String(input?.model ?? '').trim() || defaultModelForProvider(provider),
       title: String(input?.title ?? '').trim() || DEFAULT_THREAD_TITLE,
       accessScope: this.defaultAccessScopeForNewThread(input),
+      voiceEnabled: normalizeAssistantVoiceEnabled(input?.voiceEnabled),
     });
     this.threads = [thread, ...this.threads].slice(0, ASSISTANT_REGISTRY_MAX_THREADS);
     this.activeThreadId = thread.id;
     await this.persist();
     return await this.snapshot();
+  }
+
+  async ensureLatestVoiceThread(input?: { title?: unknown }): Promise<{ ok: true; threadId: string; created: boolean; thread: AssistantThread }> {
+    await this.ensureLoaded();
+    const existing = this.latestVoiceThread();
+    if (existing) {
+      this.activeThreadId = existing.id;
+      await this.persist();
+      return { ok: true, threadId: existing.id, created: false, thread: sanitizeThread(existing) };
+    }
+
+    const provider = await defaultAssistantProvider();
+    const thread = this.makeThread({
+      provider,
+      model: defaultModelForProvider(provider),
+      title: String(input?.title ?? '').trim() || 'Voice thread',
+      voiceEnabled: true,
+    });
+    this.threads = [thread, ...this.threads].slice(0, ASSISTANT_REGISTRY_MAX_THREADS);
+    this.activeThreadId = thread.id;
+    await this.persist();
+    return { ok: true, threadId: thread.id, created: true, thread: sanitizeThread(thread) };
+  }
+
+  async submitVoicePrompt(input: { prompt?: unknown; title?: unknown }): Promise<{ ok: true; threadId: string; created: boolean; accepted: boolean }> {
+    const prompt = String(input.prompt ?? '').trim();
+    if (!prompt) throw new Error('missing prompt');
+    const voiceThread = await this.ensureLatestVoiceThread({ title: input.title });
+    void this.promptThread(voiceThread.threadId, { prompt, deliveryMode: 'queue' }).catch((error: any) => {
+      console.warn('[assistant] voice prompt failed', {
+        threadId: voiceThread.threadId,
+        error: String(error?.message ?? error ?? ''),
+      });
+    });
+    return { ok: true, threadId: voiceThread.threadId, created: voiceThread.created, accepted: true };
   }
 
   async systemPromptSettings(): Promise<AssistantSystemPromptSettings> {
@@ -2325,6 +2384,7 @@ export class HubAssistantService {
       autoApprove?: unknown;
       promptDeliveryMode?: unknown;
       enabledTools?: unknown;
+      voiceEnabled?: unknown;
     },
   ): Promise<AssistantSnapshot> {
     await this.ensureLoaded();
@@ -2343,6 +2403,11 @@ export class HubAssistantService {
     }
     if (patch.promptDeliveryMode != null) thread.promptDeliveryMode = normalizeAssistantPromptDeliveryMode(patch.promptDeliveryMode);
     if (patch.enabledTools != null) thread.enabledTools = normalizeAssistantEnabledTools(patch.enabledTools, thread.enabledTools);
+    if (patch.voiceEnabled != null) {
+      thread.voiceEnabled = normalizeAssistantVoiceEnabled(patch.voiceEnabled);
+      thread.voiceEnabledAt = thread.voiceEnabled ? nowIso() : null;
+      thread.enabledTools = enabledToolsForVoiceMode(thread.enabledTools, thread.voiceEnabled);
+    }
     thread.updatedAt = nowIso();
     await this.persist();
     return await this.snapshot();
@@ -2774,20 +2839,23 @@ export class HubAssistantService {
     return makeAssistantAccessScope({ readMode: 'all', writeMode: 'selected', droneIds: [activeDroneId] });
   }
 
-  private makeThread(input?: { provider?: LlmProviderId; model?: string; title?: string; accessScope?: AssistantAccessScope; systemPrompt?: string }): AssistantThread {
+  private makeThread(input?: { provider?: LlmProviderId; model?: string; title?: string; accessScope?: AssistantAccessScope; systemPrompt?: string; voiceEnabled?: boolean }): AssistantThread {
     const provider = normalizeProvider(input?.provider);
     const at = nowIso();
+    const voiceEnabled = input?.voiceEnabled === true;
     return {
       id: makeAssistantId('thread'),
       title: input?.title?.trim() || DEFAULT_THREAD_TITLE,
       createdAt: at,
       updatedAt: at,
+      voiceEnabled,
+      voiceEnabledAt: voiceEnabled ? at : null,
       provider,
       model: allowedModelForProvider(provider, input?.model),
       thinkingLevel: allowedThinkingLevelForModel(provider, allowedModelForProvider(provider, input?.model), 'off'),
       systemPrompt: normalizeAssistantSystemPrompt(input?.systemPrompt) || this.defaultSystemPrompt,
       systemPromptUpdatedAt: null,
-      enabledTools: [...ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES],
+      enabledTools: [...(voiceEnabled ? ASSISTANT_VOICE_DEFAULT_ENABLED_TOOL_NAMES : ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES)],
       accessScope: input?.accessScope ?? makeAssistantAccessScope(),
       autoApprove: false,
       promptDeliveryMode: 'queue',
@@ -2803,6 +2871,21 @@ export class HubAssistantService {
     const thread = this.threads.find((item) => item.id === id);
     if (!thread) throw new Error(`unknown assistant thread: ${threadId}`);
     return thread;
+  }
+
+  private latestVoiceThread(): AssistantThread | null {
+    let latest: AssistantThread | null = null;
+    let latestMs = -1;
+    for (const thread of this.threads) {
+      if (!normalizeAssistantVoiceEnabled(thread.voiceEnabled)) continue;
+      const updatedMs = Date.parse(thread.updatedAt || thread.voiceEnabledAt || thread.createdAt);
+      const normalizedMs = Number.isFinite(updatedMs) ? updatedMs : 0;
+      if (!latest || normalizedMs > latestMs) {
+        latest = thread;
+        latestMs = normalizedMs;
+      }
+    }
+    return latest;
   }
 
   private async persist(): Promise<void> {
@@ -3321,6 +3404,26 @@ export class HubAssistantService {
               },
             ],
             details: { ok: true, subscription },
+          };
+        },
+      },
+      {
+        name: 'speak',
+        label: 'Speak',
+        description:
+          'Speak a short text response through the connected Android voice app. Use concise text; this is for voice replies, not long transcripts.',
+        parameters: Type.Object({
+          text: Type.String({ description: 'Short spoken text to send to the Android voice app.' }),
+        }),
+        execute: async (_toolCallId: string, params: any) => {
+          const text = String(params?.text ?? '').trim();
+          if (!text) throw new Error('missing text');
+          const speak = this.tools.speak;
+          if (typeof speak !== 'function') throw new Error('voice speak tool unavailable');
+          const result = await speak({ threadId, text });
+          return {
+            content: [{ type: 'text', text: `Sent spoken reply (${text.length} chars).` }],
+            details: result,
           };
         },
       },

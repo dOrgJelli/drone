@@ -57,15 +57,23 @@ export function GeneralSettingsTab({
     clearingGroqSettings,
     showGroqKey,
     revealingGroqKey,
+    voiceStreamPairingPasswordDraft,
+    savingVoiceStreamPairingPassword,
+    clearingVoiceStreamPairingPassword,
+    showVoiceStreamPairingPassword,
+    revealingVoiceStreamPairingPassword,
     llmSettingsNotice,
     setLlmProviderDraft,
     updateOpenAiSettingsDraft,
     updateGeminiSettingsDraft,
     updateGroqSettingsDraft,
+    updateVoiceStreamPairingPasswordDraft,
     loadLlmSettings,
     saveLlmProviderSettings,
     toggleApiKeyVisibility,
     mutateApiKeySettings,
+    toggleVoiceStreamPairingPasswordVisibility,
+    mutateVoiceStreamPairingPasswordSettings,
   } = llm;
   const {
     filesystemSettings,
@@ -312,6 +320,79 @@ export function GeneralSettingsTab({
           >
             {savingLlmProvider ? 'Saving…' : 'Save provider'}
           </button>
+        </div>
+
+        <div className="rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.12)] px-3 py-3 flex flex-col gap-3">
+          <div className="text-[10px] font-semibold text-[var(--muted-dim)] tracking-[0.08em] uppercase" style={{ fontFamily: 'var(--display)' }}>
+            Voice Stream QR password
+          </div>
+          {llmSettings?.voiceStreamPairingPassword.hasPassword ? (
+            <div className="text-[11px] text-[var(--muted-dim)]">
+              {llmSettings.voiceStreamPairingPassword.passwordHint ?? 'hidden'}
+              {llmSettings.voiceStreamPairingPassword.updatedAt ? ` • Updated ${new Date(llmSettings.voiceStreamPairingPassword.updatedAt).toLocaleString()}` : ''}
+              {llmSettings.voiceStreamPairingPassword.source === 'environment' ? ' • From environment' : ''}
+            </div>
+          ) : (
+            <div className="text-[11px] text-[var(--muted-dim)]">No pairing password configured.</div>
+          )}
+          <div className="text-[11px] text-[var(--muted-dim)] leading-relaxed">
+            Protects the Voice Stream pairing QR page. Changing it restarts Voice Stream.
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              value={voiceStreamPairingPasswordDraft}
+              onChange={(e) => updateVoiceStreamPairingPasswordDraft(e.target.value)}
+              type="text"
+              autoComplete="off"
+              name="voice-stream-pairing-password"
+              spellCheck={false}
+              style={({ WebkitTextSecurity: showVoiceStreamPairingPassword ? 'none' : 'disc' } as React.CSSProperties)}
+              className="flex-1 h-9 rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.15)] px-3 text-[13px] text-[var(--fg)] placeholder:text-[var(--muted-dim)] focus:outline-none focus:border-[var(--accent-muted)] transition-colors font-mono"
+              placeholder="Pairing page password"
+              disabled={savingVoiceStreamPairingPassword || clearingVoiceStreamPairingPassword || revealingVoiceStreamPairingPassword}
+            />
+            <button
+              type="button"
+              onClick={() => void toggleVoiceStreamPairingPasswordVisibility()}
+              disabled={savingVoiceStreamPairingPassword || clearingVoiceStreamPairingPassword || revealingVoiceStreamPairingPassword}
+              className={`h-9 px-3 rounded text-[11px] font-semibold tracking-wide uppercase border transition-all ${
+                savingVoiceStreamPairingPassword || clearingVoiceStreamPairingPassword || revealingVoiceStreamPairingPassword
+                  ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
+                  : 'bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]'
+              }`}
+              style={{ fontFamily: 'var(--display)' }}
+            >
+              {revealingVoiceStreamPairingPassword ? 'Loading…' : showVoiceStreamPairingPassword ? 'Hide' : 'Show'}
+            </button>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void mutateVoiceStreamPairingPasswordSettings('save')}
+              disabled={!voiceStreamPairingPasswordDraft.trim() || savingVoiceStreamPairingPassword || clearingVoiceStreamPairingPassword}
+              className={`h-9 px-3 rounded text-[11px] font-semibold tracking-wide uppercase border transition-all ${
+                !voiceStreamPairingPasswordDraft.trim() || savingVoiceStreamPairingPassword || clearingVoiceStreamPairingPassword
+                  ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
+                  : 'bg-[var(--accent)] border-[var(--accent)] text-[var(--accent-fg)] hover:shadow-[var(--glow-accent)] hover:brightness-110'
+              }`}
+              style={{ fontFamily: 'var(--display)' }}
+            >
+              {savingVoiceStreamPairingPassword ? 'Saving…' : 'Save'}
+            </button>
+            <button
+              type="button"
+              onClick={() => void mutateVoiceStreamPairingPasswordSettings('clear')}
+              disabled={clearingVoiceStreamPairingPassword || savingVoiceStreamPairingPassword || !llmSettings?.voiceStreamPairingPassword.hasPassword}
+              className={`h-9 px-3 rounded text-[11px] font-semibold tracking-wide uppercase border transition-all ${
+                clearingVoiceStreamPairingPassword || savingVoiceStreamPairingPassword || !llmSettings?.voiceStreamPairingPassword.hasPassword
+                  ? 'opacity-40 cursor-not-allowed bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted-dim)]'
+                  : 'bg-[var(--red-subtle)] border-[rgba(255,90,90,.28)] text-[var(--red)] hover:bg-[rgba(255,90,90,.18)]'
+              }`}
+              style={{ fontFamily: 'var(--display)' }}
+            >
+              {clearingVoiceStreamPairingPassword ? 'Clearing…' : 'Clear'}
+            </button>
+          </div>
         </div>
       </div>
 

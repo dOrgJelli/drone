@@ -2,6 +2,7 @@
 import { Command } from 'commander';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import * as fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import net from 'node:net';
@@ -51,6 +52,8 @@ import { ensureHubSetupState } from './host/setup-state';
 import { resolveDetachedCliLaunchSpec } from './hub/hub-launch';
 import { parseHubRunnerProcessesFromPsOutput, selectHubRunnerPidsToStop } from './hub/orphan-hub-runners';
 import { startDroneHubApiServer } from './hub/server';
+import { resolveGroqApiKeySettings, resolveVoiceStreamPairingPasswordSettings } from './hub/hub-settings';
+import { buildVoiceStreamProcessEnv } from './hub/voice-stream-launch';
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
@@ -356,6 +359,65 @@ async function getFreeTcpPort(): Promise<number> {
 }
 
 const DEFAULT_HUB_API_PORT = 8787;
+const DEFAULT_VOICE_STREAM_PORT = 3199;
+
+function parsePortOption(raw: unknown, optionName: string): number {
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0 || value > 65535) throw new Error(`invalid ${optionName}`);
+  return value;
+}
+
+function shouldRunVoiceStream(options: any): boolean {
+  return options.voiceStream !== false;
+}
+
+function resolveVoiceStreamPort(options: any): number {
+  const raw = options.voiceStreamPort ?? process.env.DRONE_VOICE_STREAM_PORT ?? DEFAULT_VOICE_STREAM_PORT;
+  return parsePortOption(raw, '--voice-stream-port');
+}
+
+function resolveRepoRootFromDroneCliDir(): string {
+  // Repo root from this file's directory:
+  // - src -> drone -> apps -> <repoRoot>
+  // - dist -> drone -> apps -> <repoRoot>
+  return path.resolve(__dirname, '..', '..', '..');
+}
+
+async function startVoiceStreamServer(
+  repoRoot: string,
+  port: number,
+  hubApi: { url: string; token: string },
+): Promise<ChildProcess | null> {
+  const voiceStreamDir = path.join(repoRoot, 'apps', 'voice-stream');
+  if (!fsSync.existsSync(path.join(voiceStreamDir, 'package.json'))) {
+    // eslint-disable-next-line no-console
+    console.warn(`Voice Stream app not found at ${voiceStreamDir}; skipping voice stream server.`);
+    return null;
+  }
+
+  const [groqSettings, pairingPasswordSettings] = await Promise.all([
+    resolveGroqApiKeySettings(),
+    resolveVoiceStreamPairingPasswordSettings(),
+  ]);
+  const child = spawn('bun', ['run', 'dev'], {
+    cwd: voiceStreamDir,
+    stdio: 'inherit',
+    env: buildVoiceStreamProcessEnv(process.env, {
+      port,
+      groqApiKey: groqSettings.apiKey,
+      pairingPassword: pairingPasswordSettings.password,
+      hubApiUrl: hubApi.url,
+      hubApiToken: hubApi.token,
+    }),
+  });
+
+  child.once('error', (error) => {
+    // eslint-disable-next-line no-console
+    console.error(`Voice Stream failed to start: ${String((error as any)?.message ?? error)}`);
+  });
+
+  return child;
+}
 
 async function getUniqueFreeTcpPorts(count: number): Promise<number[]> {
   const ports: number[] = [];
@@ -389,6 +451,10 @@ type HubState = {
   apiHost: string;
   apiPort: number;
   uiPort: number;
+  voiceStream?: {
+    port: number;
+    url: string;
+  } | null;
   startedAt: string;
   logPath: string;
   launchEnv?: HubLaunchEnvSnapshot | null;
@@ -522,10 +588,20 @@ async function readHubState(rootDir?: string): Promise<HubState | null> {
     const startedAt = typeof parsed.startedAt === 'string' ? parsed.startedAt : new Date().toISOString();
     const logPath = typeof parsed.logPath === 'string' ? parsed.logPath : hubLogPath(rootDir);
     const launchEnv = parseHubLaunchEnvSnapshot(parsed.launchEnv);
-    return { version: 1, pid, apiHost, apiPort, uiPort, startedAt, logPath, launchEnv };
+    const voiceStream = parseHubVoiceStreamState(parsed.voiceStream);
+    return { version: 1, pid, apiHost, apiPort, uiPort, voiceStream, startedAt, logPath, launchEnv };
   } catch {
     return null;
   }
+}
+
+function parseHubVoiceStreamState(raw: unknown): HubState['voiceStream'] {
+  if (!raw || typeof raw !== 'object') return null;
+  const value = raw as any;
+  const port = Number(value.port);
+  const url = typeof value.url === 'string' ? value.url : '';
+  if (!Number.isFinite(port) || port <= 0 || !url) return null;
+  return { port, url };
 }
 
 async function writeHubState(state: HubState, rootDir?: string): Promise<void> {
@@ -1769,6 +1845,8 @@ async function hubRun(options: any) {
   if (!Number.isFinite(apiPort) || apiPort <= 0) throw new Error('invalid --api-port');
 
   const apiHost = String(options.host || '127.0.0.1');
+  const voiceStreamEnabled = shouldRunVoiceStream(options);
+  const voiceStreamPort = voiceStreamEnabled ? resolveVoiceStreamPort(options) : DEFAULT_VOICE_STREAM_PORT;
   await ensureDefaultProfileForFirstRun();
   await ensureHubSetupState();
   const activeProfile = readActiveProfileNameSync();
@@ -1777,12 +1855,68 @@ async function hubRun(options: any) {
   if (apiHost && apiHost !== '0.0.0.0' && apiHost !== '::') {
     allowedOrigins.add(`http://${apiHost}:${uiPort}`);
   }
+  const repoRoot = resolveRepoRootFromDroneCliDir();
+  let shuttingDown = false;
+  let voiceStreamRestart: Promise<void> | null = null;
+  let voiceStreamChild: ChildProcess | null = null;
+  const intentionalVoiceStreamStops = new WeakSet<ChildProcess>();
+
+  const trackVoiceStreamChild = (child: ChildProcess | null) => {
+    voiceStreamChild = child;
+    child?.once('exit', (code, signal) => {
+      if (!shuttingDown && !intentionalVoiceStreamStops.has(child)) {
+        // eslint-disable-next-line no-console
+        console.warn(`Voice Stream exited code=${code ?? 'null'} signal=${signal ?? 'null'}`);
+      }
+      if (voiceStreamChild === child) {
+        voiceStreamChild = null;
+      }
+    });
+  };
+
+  const restartVoiceStreamForSettings = async () => {
+    if (!voiceStreamEnabled || shuttingDown) return;
+    if (voiceStreamRestart) await voiceStreamRestart;
+    if (shuttingDown) return;
+    voiceStreamRestart = (async () => {
+      try {
+        if (voiceStreamChild) {
+          intentionalVoiceStreamStops.add(voiceStreamChild);
+          voiceStreamChild.kill('SIGINT');
+        }
+      } catch {
+        // ignore
+      }
+      trackVoiceStreamChild(await startVoiceStreamServer(repoRoot, voiceStreamPort, {
+        url: `http://127.0.0.1:${api.port}`,
+        token: apiToken,
+      }));
+      // eslint-disable-next-line no-console
+      console.log(`Voice Stream restarted after settings change: http://127.0.0.1:${voiceStreamPort}`);
+    })();
+    try {
+      await voiceStreamRestart;
+    } finally {
+      voiceStreamRestart = null;
+    }
+  };
+
   const api = await startDroneHubApiServer({
     port: apiPort,
     host: apiHost,
     apiToken,
+    voiceStreamUrl: voiceStreamEnabled ? `http://127.0.0.1:${voiceStreamPort}` : null,
     allowedOrigins: Array.from(allowedOrigins),
+    onGroqApiKeySettingsChanged: restartVoiceStreamForSettings,
+    onVoiceStreamPairingPasswordSettingsChanged: restartVoiceStreamForSettings,
   });
+
+  const voiceStream = voiceStreamEnabled
+    ? {
+        port: voiceStreamPort,
+        url: `http://127.0.0.1:${voiceStreamPort}`,
+      }
+    : null;
 
   await writeHubState({
     version: 1,
@@ -1790,18 +1924,21 @@ async function hubRun(options: any) {
     apiHost: api.host,
     apiPort: api.port,
     uiPort,
+    voiceStream,
     startedAt: new Date().toISOString(),
     logPath: hubLogPath(),
     launchEnv: captureHubLaunchEnvSnapshot(),
   });
   await writeHubApiToken(apiToken);
 
-  // Repo root from this file's directory:
-  // - src -> drone -> apps -> <repoRoot>
-  const repoRoot = path.resolve(__dirname, '..', '..', '..');
-
   // Start the drone-hub Vite dev server and proxy /api → Hub API server.
   const hubDir = path.join(repoRoot, 'apps', 'drone-hub');
+  if (voiceStreamEnabled) {
+    trackVoiceStreamChild(await startVoiceStreamServer(repoRoot, voiceStreamPort, {
+      url: `http://127.0.0.1:${api.port}`,
+      token: apiToken,
+    }));
+  }
   const child = spawn('bun', ['run', 'dev', '--', '--port', String(uiPort), '--strictPort'], {
     cwd: hubDir,
     stdio: 'inherit',
@@ -1814,6 +1951,15 @@ async function hubRun(options: any) {
   });
 
   const shutdown = async () => {
+    shuttingDown = true;
+    try {
+      if (voiceStreamChild) {
+        intentionalVoiceStreamStops.add(voiceStreamChild);
+        voiceStreamChild.kill('SIGINT');
+      }
+    } catch {
+      // ignore
+    }
     try {
       child.kill('SIGINT');
     } catch {
@@ -1838,6 +1984,10 @@ async function hubRun(options: any) {
   console.log(`Drone Hub API: http://${api.host}:${api.port}`);
   // eslint-disable-next-line no-console
   console.log(`Drone Hub UI:  http://127.0.0.1:${uiPort}`);
+  if (voiceStream) {
+    // eslint-disable-next-line no-console
+    console.log(`Voice Stream:  ${voiceStream.url}`);
+  }
 
   await new Promise<void>((resolve, reject) => {
     child.once('error', reject);
@@ -1852,6 +2002,8 @@ async function hubStart(options: any) {
   const apiPortRaw = Number(options.apiPort ?? 0);
   if (!Number.isFinite(apiPortRaw) || apiPortRaw < 0) throw new Error('invalid --api-port');
   const apiHost = String(options.host || '127.0.0.1');
+  const voiceStreamEnabled = shouldRunVoiceStream(options);
+  const voiceStreamPort = voiceStreamEnabled ? resolveVoiceStreamPort(options) : DEFAULT_VOICE_STREAM_PORT;
 
   const cur = await readHubState();
   if (cur && pidIsRunning(cur.pid)) {
@@ -1896,7 +2048,20 @@ async function hubStart(options: any) {
     const launch = resolveDetachedCliLaunchSpec({ cliFilename: __filename });
     const child = spawn(
       launch.command,
-      [...launch.args, 'hub', 'run', '--port', String(uiPort), '--api-port', String(apiPortRaw), '--host', apiHost],
+      [
+        ...launch.args,
+        'hub',
+        'run',
+        '--port',
+        String(uiPort),
+        '--api-port',
+        String(apiPortRaw),
+        '--host',
+        apiHost,
+        '--voice-stream-port',
+        String(voiceStreamPort),
+        ...(voiceStreamEnabled ? [] : ['--no-voice-stream']),
+      ],
       { detached: true, stdio: ['ignore', logHandle.fd, logHandle.fd], env: { ...process.env, DRONE_HUB_DAEMON: '1' } }
     );
     child.unref();
@@ -1923,6 +2088,7 @@ async function hubStart(options: any) {
             ? {
                 apiUrl: `http://${state.apiHost}:${state.apiPort}`,
                 uiUrl: `http://127.0.0.1:${state.uiPort}`,
+                ...(state.voiceStream ? { voiceStreamUrl: state.voiceStream.url } : {}),
                 logPath: state.logPath,
               }
             : { logPath }),
@@ -2071,6 +2237,8 @@ hub.command('start')
   .option('--port <port>', 'UI port (Vite dev server)', '5174')
   .option('--api-port <port>', `Hub API port (${DEFAULT_HUB_API_PORT} by default; pass 0 for auto)`, String(DEFAULT_HUB_API_PORT))
   .option('--host <host>', 'Bind host for Hub API server', '127.0.0.1')
+  .option('--voice-stream-port <port>', `Voice Stream server port (${DEFAULT_VOICE_STREAM_PORT} by default)`)
+  .option('--no-voice-stream', 'Do not start the Voice Stream companion server')
   .action(async (options) => {
     await hubStart(options);
   });
@@ -2084,6 +2252,8 @@ hub.command('restart')
   .option('--port <port>', 'UI port (Vite dev server)', '5174')
   .option('--api-port <port>', `Hub API port (${DEFAULT_HUB_API_PORT} by default; pass 0 for auto)`, String(DEFAULT_HUB_API_PORT))
   .option('--host <host>', 'Bind host for Hub API server', '127.0.0.1')
+  .option('--voice-stream-port <port>', `Voice Stream server port (${DEFAULT_VOICE_STREAM_PORT} by default)`)
+  .option('--no-voice-stream', 'Do not start the Voice Stream companion server')
   .action(async (options) => {
     await hubStop();
     await hubStart(options);
@@ -2093,6 +2263,8 @@ hub.command('run')
   .option('--port <port>', 'UI port (Vite dev server)', '5174')
   .option('--api-port <port>', `Hub API port (${DEFAULT_HUB_API_PORT} by default; pass 0 for auto)`, String(DEFAULT_HUB_API_PORT))
   .option('--host <host>', 'Bind host for Hub API server', '127.0.0.1')
+  .option('--voice-stream-port <port>', `Voice Stream server port (${DEFAULT_VOICE_STREAM_PORT} by default)`)
+  .option('--no-voice-stream', 'Do not start the Voice Stream companion server')
   .action(async (options) => {
     await hubRun(options);
   });
