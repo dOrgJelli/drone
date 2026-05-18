@@ -52,7 +52,7 @@ class MainActivity : ComponentActivity() {
         if (granted) {
             launchQrScanner()
         } else {
-            showPairingMessage("Camera permission denied. Paste the pairing text instead.")
+            showPairingMessage("Camera permission denied. Paste the QR text instead.")
         }
     }
 
@@ -234,18 +234,18 @@ class MainActivity : ComponentActivity() {
                     bottomMargin = 18.dp()
                 })
 
-                addView(fieldLabel("Pairing text or authenticated URL"))
+                addView(fieldLabel("QR text or authenticated URL"))
 
                 pairingInput = EditText(this@MainActivity).apply {
                     setSingleLine(true)
-                    hint = "voicestream://pair?... or wss://.../audio?token=..."
+                    hint = "voicestream://pair?... or voicestream://update?..."
                     inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
                     styleInput()
                 }
                 addView(pairingInput)
 
                 val applyPairingButton = Button(this@MainActivity).apply {
-                    text = "Apply Pairing Text"
+                    text = "Apply QR Text"
                     styleButton(primary = false)
                     setOnClickListener {
                         applyPairingPayload(pairingInput.text.toString())
@@ -265,6 +265,13 @@ class MainActivity : ComponentActivity() {
                     setPadding(0, 12.dp(), 0, 0)
                 }
                 addView(pairingText)
+
+                addView(TextView(this@MainActivity).apply {
+                    text = "Version: ${currentVersionLabel()}"
+                    textSize = 11f
+                    setTextColor(COLOR_MUTED)
+                    setPadding(0, 12.dp(), 0, 0)
+                })
 
                 addView(TextView(this@MainActivity).apply {
                     text = "Diagnostics: ${DroneLog.path(this@MainActivity)}"
@@ -310,7 +317,7 @@ class MainActivity : ComponentActivity() {
         })
 
         qrButton = ImageButton(this).apply {
-            contentDescription = "Scan pairing QR"
+            contentDescription = "Scan Drone QR"
             setImageResource(android.R.drawable.ic_menu_camera)
             scaleType = android.widget.ImageView.ScaleType.CENTER
             styleIconButton()
@@ -601,17 +608,26 @@ class MainActivity : ComponentActivity() {
     private fun launchQrScanner() {
         val options = ScanOptions()
             .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-            .setPrompt("Scan Drone pairing QR")
+            .setPrompt("Scan Drone QR")
             .setBeepEnabled(false)
             .setOrientationLocked(false)
         try {
             qrScanLauncher.launch(options)
         } catch (error: Throwable) {
-            showPairingMessage("Scanner unavailable: ${error.message}. Paste the pairing text instead.")
+            showPairingMessage("Scanner unavailable: ${error.message}. Paste the QR text instead.")
         }
     }
 
     private fun applyPairingPayload(payload: String) {
+        if (PairingPayloadParser.isUpdatePayload(payload)) {
+            val config = PairingPayloadParser.parseUpdate(payload).getOrElse { error ->
+                showPairingMessage("Update check failed: ${error.message}")
+                return
+            }
+            handleUpdatePayload(config)
+            return
+        }
+
         val config = PairingPayloadParser.parse(payload).getOrElse { error ->
             showPairingMessage("Pairing failed: ${error.message}")
             return
@@ -632,6 +648,29 @@ class MainActivity : ComponentActivity() {
         pairingInput.setText("")
         updatePairingText()
         showPairingMessage("Paired with server")
+    }
+
+    private fun handleUpdatePayload(config: UpdateConfig) {
+        val currentVersionCode = currentVersionCode()
+        if (currentVersionCode >= config.versionCode) {
+            showPairingMessage("Drone app is up to date")
+            return
+        }
+
+        showUpdateAvailable(config)
+    }
+
+    private fun showUpdateAvailable(config: UpdateConfig) {
+        val message = "A newer Drone app build is available. Current versionCode is ${currentVersionCode()}; latest is ${config.versionCode}."
+        showPairingMessage("Update available")
+        AlertDialog.Builder(this)
+            .setTitle("Update Drone")
+            .setMessage(message)
+            .setPositiveButton("Download APK") { _, _ ->
+                openUpdateUrl(config.apkUrl)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun showUpdateRequired(config: PairingConfig) {
@@ -667,6 +706,18 @@ class MainActivity : ComponentActivity() {
             @Suppress("DEPRECATION")
             packageInfo.versionCode.toLong()
         }
+    }
+
+    private fun currentVersionLabel(): String {
+        val packageInfo = packageManager.getPackageInfo(packageName, 0)
+        val versionName = packageInfo.versionName?.takeIf { it.isNotBlank() } ?: "unknown"
+        val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            packageInfo.longVersionCode
+        } else {
+            @Suppress("DEPRECATION")
+            packageInfo.versionCode.toLong()
+        }
+        return "$versionName (versionCode $versionCode)"
     }
 
     private fun showPairingMessage(message: String) {

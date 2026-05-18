@@ -30,6 +30,25 @@ class PairingPayloadParserTest {
     }
 
     @Test
+    fun parsesUpdatePayload() {
+        val apkUrl = "https://example.ngrok-free.app/download/app-debug.apk"
+        val payload = "voicestream://update?versionCode=28&apk=${encode(apkUrl)}"
+
+        val config = PairingPayloadParser.parseUpdate(payload).getOrThrow()
+
+        assertEquals(28L, config.versionCode)
+        assertEquals(apkUrl, config.apkUrl)
+        assertTrue(PairingPayloadParser.isUpdatePayload(payload))
+    }
+
+    @Test
+    fun rejectsUpdatePayloadWithoutVersion() {
+        val result = PairingPayloadParser.parseUpdate("voicestream://update?apk=https%3A%2F%2Fexample.ngrok-free.app%2Fapp.apk")
+
+        assertTrue(result.isFailure)
+    }
+
+    @Test
     fun rejectsPayloadWithoutToken() {
         val result = PairingPayloadParser.parse("wss://example.ngrok-free.app/audio")
 

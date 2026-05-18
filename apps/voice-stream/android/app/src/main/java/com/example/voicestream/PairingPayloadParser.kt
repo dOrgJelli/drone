@@ -11,6 +11,11 @@ data class PairingConfig(
     val apkUrl: String? = null
 )
 
+data class UpdateConfig(
+    val versionCode: Long,
+    val apkUrl: String? = null
+)
+
 object PairingPayloadParser {
     fun parse(payload: String): Result<PairingConfig> = runCatching {
         val trimmed = payload.trim()
@@ -25,6 +30,33 @@ object PairingPayloadParser {
         } else {
             throw IllegalArgumentException("Pairing text must be a Drone QR payload or ws:// URL")
         }
+    }
+
+    fun isUpdatePayload(payload: String): Boolean = runCatching {
+        val uri = URI(payload.trim())
+        uri.scheme.equals("voicestream", ignoreCase = true) && uri.host.equals("update", ignoreCase = true)
+    }.getOrDefault(false)
+
+    fun parseUpdate(payload: String): Result<UpdateConfig> = runCatching {
+        val trimmed = payload.trim()
+        if (trimmed.isBlank()) {
+            throw IllegalArgumentException("Update QR is empty")
+        }
+
+        val uri = URI(trimmed)
+        if (!uri.scheme.equals("voicestream", ignoreCase = true) || !uri.host.equals("update", ignoreCase = true)) {
+            throw IllegalArgumentException("QR does not contain Drone update data")
+        }
+
+        val params = parseQuery(uri.rawQuery)
+        val versionCode = params["versionCode"]?.toLongOrNull()
+            ?: throw IllegalArgumentException("QR does not contain an app version")
+        if (versionCode < 1) {
+            throw IllegalArgumentException("QR contains an invalid app version")
+        }
+
+        val apkUrl = params["apk"]?.takeIf { it.isNotBlank() }
+        UpdateConfig(versionCode, apkUrl)
     }
 
     private fun parseVoiceStreamPayload(payload: String): PairingConfig {

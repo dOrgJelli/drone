@@ -35,8 +35,14 @@ const pairingToken = loadPairingToken();
 const pairingAdminPassword = process.env.DRONE_PAIR_PASSWORD?.trim();
 const pairingAdminSessions = new Set<string>();
 const androidLogPath = resolve(repoRoot, "server/.runtime/android-logs/drone-android.log");
-const androidMinVersion = resolveAndroidMinVersionCode();
+const androidMinVersion = resolveAndroidVersionInfo();
 const approvalCodes: ApprovalCodeMessage[] = [];
+
+type AndroidVersionInfo = {
+  versionCode: number;
+  versionName?: string;
+  source: string;
+};
 
 type ApprovalCodeMessage = {
   type: "approval_code";
@@ -60,7 +66,7 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse): Pro
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
 
   if (url.pathname === "/" || url.pathname === "/index.html") {
-    serveDownloadPage(req, res);
+    await serveDownloadPage(req, res);
     return;
   }
 
@@ -306,16 +312,23 @@ server.listen(port, "0.0.0.0", () => {
   console.log("Audio auth: /audio requires pairing token");
   console.log(`Android log upload: http://0.0.0.0:${port}/logs/android`);
   console.log(`Android log path: ${androidLogPath}`);
-  console.log(`Android minimum pairing versionCode: ${androidMinVersion.versionCode} (${androidMinVersion.source})`);
+  console.log(`Android APK version: ${formatAndroidVersion(androidMinVersion)} (${androidMinVersion.source})`);
   console.log(`Pairing page: ${pairingAdminPassword ? "enabled (/pair)" : "disabled (missing DRONE_PAIR_PASSWORD)"}`);
   console.log(`APK path: ${apkPath}`);
   console.log("Audio format: 16 kHz mono signed 16-bit little-endian PCM");
 });
 
-function serveDownloadPage(req: IncomingMessage, res: ServerResponse): void {
+async function serveDownloadPage(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const apk = getApkInfo();
   const transcription = latestTranscriptStatus;
   const audioUrl = getWebSocketUrl(req);
+  const androidVersionLabel = formatAndroidVersion(androidMinVersion);
+  const updatePayload = buildUpdatePayload(req);
+  const updateQrDataUrl = await QRCode.toDataURL(updatePayload, {
+    errorCorrectionLevel: "M",
+    margin: 1,
+    width: 220,
+  });
   const status = apk.exists
     ? `APK ready: ${formatBytes(apk.size)} built ${apk.modified}`
     : `APK not found at ${apk.path}`;
@@ -347,7 +360,8 @@ function serveDownloadPage(req: IncomingMessage, res: ServerResponse): void {
     .metric span { display: block; color: var(--muted); font-size: 12px; }
     .metric strong { display: block; margin-top: 2px; font-size: 18px; }
     .transcript { min-height: 130px; max-height: 280px; overflow: auto; white-space: pre-wrap; border: 1px solid var(--line); border-radius: 6px; padding: 12px; background: white; }
-    .qr { width: 180px; height: 180px; border: 1px solid var(--line); border-radius: 6px; background: white; }
+    .qr-row { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; }
+    .qr { width: 220px; height: 220px; border: 1px solid var(--line); border-radius: 6px; background: white; }
     .muted { color: var(--muted); }
     @media (max-width: 560px) { body { margin-top: 28px; } .metrics { grid-template-columns: 1fr; } }
   </style>
@@ -355,8 +369,19 @@ function serveDownloadPage(req: IncomingMessage, res: ServerResponse): void {
 <body>
   <h1>Drone APK</h1>
   <p class="status">${escapeHtml(status)}</p>
+  <p>Current APK version: <code>${escapeHtml(androidVersionLabel)}</code></p>
   <p><a class="button" href="/download/app-debug.apk">Download debug APK</a></p>
   <p>Android app WebSocket URL for this server: <code>${escapeHtml(audioUrl)}</code></p>
+  <section class="panel" aria-labelledby="update-title">
+    <h2 id="update-title">Update Android app</h2>
+    <div class="qr-row">
+      <img class="qr" alt="Drone APK update QR code" src="${updateQrDataUrl}">
+      <div>
+        <p>Scan this in the Android app to check the installed build against <code>${escapeHtml(androidVersionLabel)}</code>.</p>
+        <p class="muted">If the phone has an older build, it opens the APK download. If it is current, it shows an up-to-date message.</p>
+      </div>
+    </div>
+  </section>
   <section class="panel" aria-labelledby="pairing-title">
     <h2 id="pairing-title">Pair Android app</h2>
     <p>Pairing is password-protected. Open the pairing page to unlock the QR code when you are ready to scan it.</p>
@@ -793,7 +818,7 @@ async function renderPairQrPage(req: IncomingMessage, res: ServerResponse): Prom
     <p class="muted">Scan this QR code in the Android app to save the authenticated server URL.</p>
     <img class="qr" alt="Drone pairing QR code" src="${qrDataUrl}">
     <p>Android app WebSocket URL: <code>${escapeHtml(getWebSocketUrl(req))}</code></p>
-    <p>Minimum app build: <code>versionCode ${androidMinVersion.versionCode}</code></p>
+    <p>Minimum app build: <code>${escapeHtml(formatAndroidVersion(androidMinVersion))}</code></p>
   </section>
   <p><a class="button" href="/">Back to download page</a></p>
   <p><button id="clear-saved-password" type="button">Clear Saved Pairing Password</button></p>
@@ -1104,6 +1129,13 @@ function buildPairingPayload(req: IncomingMessage, authorizedAudioUrl: string): 
   return payload.toString();
 }
 
+function buildUpdatePayload(req: IncomingMessage): string {
+  const payload = new URL("voicestream://update");
+  payload.searchParams.set("versionCode", String(androidMinVersion.versionCode));
+  payload.searchParams.set("apk", getApkDownloadUrl(req));
+  return payload.toString();
+}
+
 function isAuthorizedAudioRequest(url: URL): boolean {
   return isAuthorizedToken(url.searchParams.get("token") ?? "");
 }
@@ -1133,7 +1165,7 @@ function isAuthorizedToken(token: string): boolean {
   return timingSafeEqual(Buffer.from(token), Buffer.from(pairingToken));
 }
 
-function resolveAndroidMinVersionCode(): { versionCode: number; source: string } {
+function resolveAndroidVersionInfo(): AndroidVersionInfo {
   const envValue = process.env.DRONE_ANDROID_MIN_VERSION_CODE?.trim();
   if (envValue) {
     const parsed = Number.parseInt(envValue, 10);
@@ -1143,9 +1175,14 @@ function resolveAndroidMinVersionCode(): { versionCode: number; source: string }
     return { versionCode: parsed, source: "DRONE_ANDROID_MIN_VERSION_CODE" };
   }
 
-  const apkVersionCode = readApkVersionCode();
-  if (apkVersionCode != null) {
-    return { versionCode: apkVersionCode, source: "APK metadata" };
+  const apkVersion = readApkVersionInfo();
+  if (apkVersion != null) {
+    return { ...apkVersion, source: "APK metadata" };
+  }
+
+  const versionProperties = readVersionPropertiesInfo();
+  if (versionProperties != null) {
+    return { ...versionProperties, source: "android/version.properties" };
   }
 
   const gradleVersionCode = readGradleVersionCode();
@@ -1156,16 +1193,17 @@ function resolveAndroidMinVersionCode(): { versionCode: number; source: string }
   return { versionCode: 1, source: "fallback" };
 }
 
-function readApkVersionCode(): number | null {
+function readApkVersionInfo(): Omit<AndroidVersionInfo, "source"> | null {
   if (!existsSync(apkPath)) return null;
   for (const candidate of aaptCandidates()) {
     if (!existsSync(candidate)) continue;
     const output = runAaptBadging(candidate);
-    const match = output?.match(/versionCode='(\d+)'/);
-    if (match?.[1]) {
-      const parsed = Number.parseInt(match[1], 10);
+    const codeMatch = output?.match(/versionCode='(\d+)'/);
+    if (codeMatch?.[1]) {
+      const parsed = Number.parseInt(codeMatch[1], 10);
       if (Number.isSafeInteger(parsed) && parsed > 0) {
-        return parsed;
+        const versionName = output?.match(/versionName='([^']+)'/)?.[1]?.trim();
+        return versionName ? { versionCode: parsed, versionName } : { versionCode: parsed };
       }
     }
   }
@@ -1185,6 +1223,22 @@ function runAaptBadging(aaptPath: string): string | null {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"],
   }));
+}
+
+function readVersionPropertiesInfo(): Omit<AndroidVersionInfo, "source"> | null {
+  const versionPath = resolve(repoRoot, "android/version.properties");
+  if (!existsSync(versionPath)) return null;
+  const text = readFileSync(versionPath, "utf8");
+  const codeMatch = text.match(/^versionCode=(\d+)$/m);
+  if (!codeMatch?.[1]) return null;
+  const parsed = Number.parseInt(codeMatch[1], 10);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) return null;
+  const nameBase = text.match(/^versionNameBase=(.+)$/m)?.[1]?.trim();
+  return nameBase ? { versionCode: parsed, versionName: `${nameBase}.${parsed}` } : { versionCode: parsed };
+}
+
+function formatAndroidVersion(info: AndroidVersionInfo): string {
+  return info.versionName ? `${info.versionName} (versionCode ${info.versionCode})` : `versionCode ${info.versionCode}`;
 }
 
 function readGradleVersionCode(): number | null {
