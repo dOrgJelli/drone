@@ -334,6 +334,7 @@ import {
   type AssistantCreateDroneResult,
   type AssistantDroneSummary,
   type AssistantSetDroneGroupResult,
+  type AssistantVoiceSource,
 } from './assistant';
 
 const HUB_API_LOADED_AT = new Date().toISOString();
@@ -11031,7 +11032,12 @@ export async function startDroneHubApiServer(opts: {
         data = { error: text };
       }
     }
-    if (!response.ok) throw new Error(data?.error ?? `${response.status} ${response.statusText}`);
+    if (!response.ok) {
+      const error = new Error(data?.error ?? `${response.status} ${response.statusText}`) as Error & { status?: number; data?: any };
+      error.status = response.status;
+      error.data = data;
+      throw error;
+    }
     return data;
   };
 
@@ -11052,6 +11058,39 @@ export async function startDroneHubApiServer(opts: {
     u.search = '';
     u.hash = '';
     return u.toString();
+  };
+
+  let desktopVoiceService!: DesktopVoiceService;
+  const speakToDesktopVoice = (text: string): { ok: true; target: 'desktop' } => {
+    if (!desktopVoiceService.speak(text)) throw new Error('Desktop voice frontend is not connected.');
+    return { ok: true, target: 'desktop' };
+  };
+  const isAndroidSpeakUnavailable = (error: unknown): boolean => {
+    const anyError = error as any;
+    const message = String(anyError?.message ?? error ?? '');
+    return message.includes('Voice Stream server is not running') ||
+      (Number(anyError?.status) === 409 && /no android control client/i.test(message));
+  };
+  const speakToVoiceTarget = async ({ threadId, text, source }: { threadId: string; text: string; source?: AssistantVoiceSource | null }) => {
+    if (source === 'desktop') {
+      try {
+        return speakToDesktopVoice(text);
+      } catch (desktopError) {
+        try {
+          const result = await callVoiceStreamApi('/speak', { threadId, text });
+          return { ok: true, target: 'android', fallbackFrom: 'desktop', result };
+        } catch {
+          throw desktopError;
+        }
+      }
+    }
+    try {
+      const result = await callVoiceStreamApi('/speak', { threadId, text });
+      return { ok: true, target: 'android', result };
+    } catch (error) {
+      if ((source === 'android' || source == null) && isAndroidSpeakUnavailable(error)) return speakToDesktopVoice(text);
+      throw error;
+    }
   };
 
   const assistantService = new HubAssistantService({
@@ -11141,9 +11180,7 @@ export async function startDroneHubApiServer(opts: {
       if (r.kind === 'error') throw new Error(r.error);
       return { promptId: r.id, pendingState: r.pendingState, blockedByAutomation: r.blockedByAutomation };
     },
-    speak: async ({ threadId, text }) => {
-      return await callVoiceStreamApi('/speak', { threadId, text });
-    },
+    speak: speakToVoiceTarget,
     listDroneFiles: async ({ droneId, path }) => await assistantListDroneFiles({ droneId, path }),
     readDroneFile: async ({ droneId, path, startLine, endLine }) => await assistantReadDroneFile({ droneId, path, startLine, endLine }),
     writeDroneFile: async ({ droneId, path, content }) => await assistantWriteDroneFile({ droneId, path, content }),
@@ -11156,14 +11193,14 @@ export async function startDroneHubApiServer(opts: {
     runDroneBash: async ({ droneId, command, cwd, timeoutMs }) => await assistantRunDroneBash({ droneId, command, cwd, timeoutMs }),
     listDroneChangedFiles: async ({ droneId }) => await assistantListDroneChangedFiles({ droneId }),
   });
-  const desktopVoiceService = new DesktopVoiceService({
+  desktopVoiceService = new DesktopVoiceService({
     transcribeWav: async (wav) => {
       const groqSettings = await resolveGroqApiKeySettings();
       if (!groqSettings.apiKey) throw new Error('GROQ API key is not configured. Add it in Drone Hub settings.');
       return await transcribeAudioWithGroq({ audio: wav, apiKey: groqSettings.apiKey, mimeType: 'audio/wav' });
     },
     submitAssistantPrompt: async (prompt) => {
-      await assistantService.submitVoicePrompt({ prompt, title: 'Desktop voice thread' });
+      await assistantService.submitVoicePrompt({ prompt, title: 'Desktop voice thread', source: 'desktop' });
     },
   });
 
@@ -11296,6 +11333,8 @@ export async function startDroneHubApiServer(opts: {
           if (event.type === 'desktop_voice_clipboard_result') {
             writeAssistantSseEvent(res, event.type, { text: event.text });
           } else if (event.type === 'desktop_voice_transcript_segment') {
+            writeAssistantSseEvent(res, event.type, { text: event.text });
+          } else if (event.type === 'desktop_voice_speak') {
             writeAssistantSseEvent(res, event.type, { text: event.text });
           } else {
             writeAssistantSseEvent(res, event.type, event.status);
@@ -11529,7 +11568,7 @@ export async function startDroneHubApiServer(opts: {
           return;
         }
         try {
-          json(res, 202, await assistantService.submitVoicePrompt({ prompt: body?.prompt ?? body?.message, title: body?.title }));
+          json(res, 202, await assistantService.submitVoicePrompt({ prompt: body?.prompt ?? body?.message, title: body?.title, source: 'android' }));
         } catch (e: any) {
           json(res, 400, { ok: false, error: e?.message ?? String(e) });
         }

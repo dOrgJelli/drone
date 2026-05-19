@@ -1,0 +1,24 @@
+import { describe, expect, test } from 'bun:test';
+
+import { isLikelyShortSleepMistranscription, stripCommands } from '../src/hub/voice-transcription-segmenter';
+
+describe('voice transcription command stripping', () => {
+  test('detects sleep phrase variants and removes them from transcript text', () => {
+    expect(stripCommands("that's it").sleep).toBe(true);
+    expect(stripCommands('thats it').sleep).toBe(true);
+    expect(stripCommands('that is it').sleep).toBe(true);
+    expect(stripCommands("write this down that's it").text).toBe('write this down');
+  });
+
+  test('does not treat common non-command text as sleep in the shared stripper', () => {
+    const command = stripCommands('thank you');
+    expect(command.sleep).toBe(false);
+    expect(command.text).toBe('thank you');
+  });
+
+  test('identifies known short sleep phrase mistranscriptions for desktop stop handling', () => {
+    expect(isLikelyShortSleepMistranscription('Thank you.')).toBe(true);
+    expect(isLikelyShortSleepMistranscription('thanks')).toBe(true);
+    expect(isLikelyShortSleepMistranscription('thank you for checking')).toBe(false);
+  });
+});

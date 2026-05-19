@@ -72,6 +72,16 @@ function playCueForStatus(status: DesktopAssistantVoiceStatus): void {
   playLocalVoiceCue(cue);
 }
 
+function speakDesktopVoiceText(text: string): void {
+  if (typeof window === 'undefined' || !('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') return;
+  const trimmed = text.trim();
+  if (!trimmed) return;
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(trimmed);
+  utterance.lang = 'en-US';
+  window.speechSynthesis.speak(utterance);
+}
+
 async function requestDesktopVoiceToggle(): Promise<void> {
   const now = Date.now();
   if (toggleInFlight || now - lastToggleAt < 500) return;
@@ -135,6 +145,15 @@ export function subscribeAssistantDesktopVoiceStatus(listener: (status: DesktopA
         const data = JSON.parse((event as MessageEvent).data);
         const text = String(data?.text ?? '').trim();
         if (text) dispatchAssistantDesktopVoiceTranscriptSegment(text);
+      } catch {
+        // Ignore malformed event payloads.
+      }
+    });
+    source.addEventListener('desktop_voice_speak', (event) => {
+      try {
+        const data = JSON.parse((event as MessageEvent).data);
+        const text = String(data?.text ?? '').trim();
+        if (text) speakDesktopVoiceText(text);
       } catch {
         // Ignore malformed event payloads.
       }

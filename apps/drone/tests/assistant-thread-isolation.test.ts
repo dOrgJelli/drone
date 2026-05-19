@@ -36,6 +36,7 @@ function installFakeRuntime(
   class FakeAgent {
     state: { messages: any[]; streamingMessage: any };
     private readonly run: { provider: string; model: string; thinkingLevel: string };
+    private readonly tools: any[];
     private subscribers: Array<(event: any) => Promise<void> | void> = [];
 
     constructor(opts: any) {
@@ -48,6 +49,7 @@ function installFakeRuntime(
         messages: [...(opts?.initialState?.messages ?? [])],
         streamingMessage: null,
       };
+      this.tools = Array.isArray(opts?.initialState?.tools) ? opts.initialState.tools : [];
     }
 
     subscribe(callback: (event: any) => Promise<void> | void): void {
@@ -63,6 +65,10 @@ function installFakeRuntime(
       this.state.streamingMessage = { role: 'assistant', content: [{ type: 'text', text: `running ${prompt}` }] };
       await this.emit({ type: 'message_update', message: this.state.streamingMessage });
       await handlers.onPrompt?.(prompt, this.run);
+      if (prompt.startsWith('speak:')) {
+        const speak = this.tools.find((tool) => tool?.name === 'speak');
+        await speak?.execute?.('tool_fake_speak', { text: prompt.slice('speak:'.length).trim() });
+      }
       this.state.streamingMessage = null;
       this.state.messages.push({ role: 'assistant', content: [{ type: 'text', text: `done ${prompt}` }] });
       await this.emit({ type: 'turn_end', message: this.state.messages[this.state.messages.length - 1] });
@@ -156,6 +162,60 @@ describe('assistant thread isolation', () => {
       const reused = await service.ensureLatestVoiceThread();
       expect(reused.created).toBe(false);
       expect(reused.threadId).toBe(voice.threadId);
+    });
+  });
+
+  test('routes voice speak replies by queued prompt source instead of latest thread source', async () => {
+    await withTempDroneDataDir('assistant-voice-source-routing-', async () => {
+      const previousKey = process.env.OPENAI_API_KEY;
+      process.env.OPENAI_API_KEY = 'test-key';
+      try {
+        const firstStarted = deferred();
+        const releaseFirst = deferred();
+        const spoken: Array<{ text: string; source: string | null }> = [];
+        const secondSpoken = deferred();
+        const service = new HubAssistantService({
+          listDrones: async () => [],
+          createDrone: async () => {
+            throw new Error('not implemented');
+          },
+          setDroneGroup: async () => {
+            throw new Error('not implemented');
+          },
+          messageDrone: async () => {
+            throw new Error('not implemented');
+          },
+          speak: async ({ text, source }) => {
+            spoken.push({ text, source: source ?? null });
+            if (text === 'second') secondSpoken.resolve();
+            return { ok: true };
+          },
+        });
+        installFakeRuntime(service, {
+          onPrompt: async (prompt) => {
+            if (prompt === 'speak:first') {
+              firstStarted.resolve();
+              await releaseFirst.promise;
+            }
+          },
+        });
+
+        await service.ensureLatestVoiceThread();
+        await service.submitVoicePrompt({ prompt: 'speak:first', source: 'desktop' });
+        await firstStarted.promise;
+        await service.submitVoicePrompt({ prompt: 'speak:second', source: 'android' });
+
+        releaseFirst.resolve();
+        await secondSpoken.promise;
+
+        expect(spoken).toEqual([
+          { text: 'first', source: 'desktop' },
+          { text: 'second', source: 'android' },
+        ]);
+      } finally {
+        if (previousKey == null) delete process.env.OPENAI_API_KEY;
+        else process.env.OPENAI_API_KEY = previousKey;
+      }
     });
   });
 

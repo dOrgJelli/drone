@@ -20,6 +20,7 @@ import {
 
 type AssistantThreadStatus = 'idle' | 'running' | 'waiting_for_approval' | 'waiting_for_chats_idle' | 'error';
 type AssistantThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+export type AssistantVoiceSource = 'android' | 'desktop';
 
 export type AssistantDroneSummary = {
   id: string;
@@ -82,6 +83,7 @@ type AssistantQueuedPrompt = {
   model: string;
   thinkingLevel: AssistantThinkingLevel;
   deliveryMode: AssistantPromptDeliveryMode;
+  voiceSource?: AssistantVoiceSource | null;
 };
 
 type AssistantPromptDeliveryMode = 'queue' | 'asap';
@@ -109,6 +111,7 @@ type AssistantRunModel = {
   model: string;
   thinkingLevel: AssistantThinkingLevel;
   promptId: string;
+  voiceSource?: AssistantVoiceSource | null;
   startedAt: string;
 };
 
@@ -175,7 +178,7 @@ type AssistantToolCallbacks = {
     chatName: string;
     prompt: string;
   }) => Promise<AssistantMessageDroneResult>;
-  speak?: (opts: { threadId: string; text: string }) => Promise<any>;
+  speak?: (opts: { threadId: string; text: string; source?: AssistantVoiceSource | null }) => Promise<any>;
   listDroneFiles?: (opts: { droneId: string; path?: string }) => Promise<AssistantDroneFileListResult>;
   readDroneFile?: (opts: { droneId: string; path: string; startLine?: number; endLine?: number }) => Promise<AssistantDroneFileReadResult>;
   writeDroneFile?: (opts: { droneId: string; path: string; content: string }) => Promise<AssistantDroneFileWriteResult>;
@@ -564,7 +567,7 @@ const ASSISTANT_SYSTEM_PROMPT_DEFAULT = [
   'Creating drones, changing drone groups, sending a user message to a drone, and running bash in a drone are actions that require user approval; explain briefly what you intend to do.',
   'File write tools require write access to the target drone and should be used carefully for concrete code or content edits.',
   'If an approval-gated write tool returns successfully, the user already approved that action. Do not ask for the same approval again.',
-  'Voice threads can use speak to send short spoken replies back to the connected Android voice app.',
+  'Voice threads can use speak to send short spoken replies back to the voice device that started the request.',
   'When creating a drone, omit fields you want inherited from the current open drone. Only set repoBranchSource=remote when the user asked for a remote branch and you have a remoteBranch value.',
   'Do not claim a drone completed work unless the drone transcript or user says so.',
   'Keep responses practical and short.',
@@ -588,7 +591,7 @@ const ASSISTANT_TOOL_SUMMARIES: AssistantToolSummary[] = [
   { name: 'read_chat_messages', label: 'Read chat messages', category: 'chats', description: 'Read a paginated timeline for a drone chat.' },
   { name: 'search_chat_messages', label: 'Search chat messages', category: 'chats', description: 'Search user and agent messages across drone chats.' },
   { name: 'subscribe_to_chats_idle', label: 'Subscribe to chats idle', category: 'chats', description: 'Resume this thread when subscribed drone chats become idle.' },
-  { name: 'speak', label: 'Speak', category: 'actions', description: 'Send a short spoken reply to the connected Android voice app.' },
+  { name: 'speak', label: 'Speak', category: 'actions', description: 'Send a short spoken reply to the connected Android or desktop voice device.' },
   { name: 'create_drone', label: 'Create drone', category: 'actions', description: 'Create a new drone after user approval.' },
   { name: 'set_drone_group', label: 'Set drone group', category: 'actions', description: 'Move drones to a group after user approval.' },
   { name: 'message_drone', label: 'Send user message to drone', category: 'actions', description: 'Send a user message to a drone chat after approval.' },
@@ -1030,6 +1033,11 @@ function normalizeAssistantEnabledTools(raw: unknown, fallback: string[] = ASSIS
 
 function normalizeAssistantVoiceEnabled(raw: unknown): boolean {
   return raw === true || String(raw ?? '').trim() === 'true';
+}
+
+function normalizeAssistantVoiceSource(raw: unknown): AssistantVoiceSource | null {
+  const value = String(raw ?? '').trim().toLowerCase();
+  return value === 'android' || value === 'desktop' ? value : null;
 }
 
 function enabledToolsForVoiceMode(enabledTools: string[], voiceEnabled: boolean): string[] {
@@ -1519,6 +1527,7 @@ function normalizeQueuedPrompt(raw: any, fallback: { provider: LlmProviderId; mo
     model,
     thinkingLevel: allowedThinkingLevelForModel(provider, model, raw.thinkingLevel ?? fallback.thinkingLevel ?? 'off'),
     deliveryMode: normalizeAssistantPromptDeliveryMode(raw.deliveryMode),
+    voiceSource: normalizeAssistantVoiceSource(raw.voiceSource),
   };
 }
 
@@ -2227,11 +2236,11 @@ export class HubAssistantService {
     return { ok: true, threadId: thread.id, created: true, thread: sanitizeThread(thread) };
   }
 
-  async submitVoicePrompt(input: { prompt?: unknown; title?: unknown }): Promise<{ ok: true; threadId: string; created: boolean; accepted: boolean }> {
+  async submitVoicePrompt(input: { prompt?: unknown; title?: unknown; source?: AssistantVoiceSource }): Promise<{ ok: true; threadId: string; created: boolean; accepted: boolean }> {
     const prompt = String(input.prompt ?? '').trim();
     if (!prompt) throw new Error('missing prompt');
     const voiceThread = await this.ensureLatestVoiceThread({ title: input.title });
-    void this.promptThread(voiceThread.threadId, { prompt, deliveryMode: 'queue' }).catch((error: any) => {
+    void this.promptThread(voiceThread.threadId, { prompt, deliveryMode: 'queue', voiceSource: input.source }).catch((error: any) => {
       console.warn('[assistant] voice prompt failed', {
         threadId: voiceThread.threadId,
         error: String(error?.message ?? error ?? ''),
@@ -2587,7 +2596,7 @@ export class HubAssistantService {
 
   async promptThread(
     threadId: string,
-    input: { prompt?: unknown; model?: unknown; provider?: unknown; thinkingLevel?: unknown; deliveryMode?: unknown },
+    input: { prompt?: unknown; model?: unknown; provider?: unknown; thinkingLevel?: unknown; deliveryMode?: unknown; voiceSource?: unknown },
     onEvent?: (event: AssistantPromptEvent) => void | Promise<void>,
   ): Promise<void> {
     await this.ensureLoaded();
@@ -2643,7 +2652,7 @@ export class HubAssistantService {
 
   private makeQueuedPrompt(
     thread: AssistantThread,
-    input: { prompt?: unknown; model?: unknown; provider?: unknown; thinkingLevel?: unknown; deliveryMode?: unknown },
+    input: { prompt?: unknown; model?: unknown; provider?: unknown; thinkingLevel?: unknown; deliveryMode?: unknown; voiceSource?: unknown },
   ): AssistantQueuedPrompt {
     const prompt = String(input.prompt ?? '').trim();
     if (!prompt) throw new Error('missing prompt');
@@ -2657,6 +2666,7 @@ export class HubAssistantService {
       model,
       thinkingLevel: allowedThinkingLevelForModel(provider, model, input.thinkingLevel ?? thread.thinkingLevel),
       deliveryMode: normalizeAssistantPromptDeliveryMode(input.deliveryMode),
+      voiceSource: normalizeAssistantVoiceSource(input.voiceSource),
     };
   }
 
@@ -2722,7 +2732,7 @@ export class HubAssistantService {
     try {
       const runtime = await this.runtime();
       const model = this.resolveModel(runtime, runProvider, runModel);
-      const tools = this.buildTools(runtime, thread.id, onEvent);
+      const tools = this.buildTools(runtime, thread.id, queuedPrompt.voiceSource ?? null, onEvent);
       const providerSettings = await resolveEffectiveProviderApiKeySettings(runProvider);
       if (!providerSettings.apiKey) {
         throw new Error(`Missing ${providerDisplayName(runProvider)} API key. Configure it in Settings.`);
@@ -2762,6 +2772,7 @@ export class HubAssistantService {
         model: runModel,
         thinkingLevel: runThinkingLevel,
         promptId: queuedPrompt.id,
+        voiceSource: queuedPrompt.voiceSource ?? null,
         startedAt: nowIso(),
       });
       thread.status = 'running';
@@ -2987,7 +2998,12 @@ export class HubAssistantService {
     }
   }
 
-  private buildTools(runtime: AssistantRuntime, threadId: string, onEvent?: (event: AssistantPromptEvent) => void | Promise<void>): any[] {
+  private buildTools(
+    runtime: AssistantRuntime,
+    threadId: string,
+    voiceSource: AssistantVoiceSource | null = null,
+    onEvent?: (event: AssistantPromptEvent) => void | Promise<void>,
+  ): any[] {
     const Type = runtime.Type;
     const tools = [
       {
@@ -3446,16 +3462,16 @@ export class HubAssistantService {
         name: 'speak',
         label: 'Speak',
         description:
-          'Speak a short text response through the connected Android voice app. Use concise text; this is for voice replies, not long transcripts.',
+          'Speak a short text response through the voice device that started this request. Use concise text; this is for voice replies, not long transcripts.',
         parameters: Type.Object({
-          text: Type.String({ description: 'Short spoken text to send to the Android voice app.' }),
+          text: Type.String({ description: 'Short spoken text to send to the active voice device.' }),
         }),
         execute: async (_toolCallId: string, params: any) => {
           const text = String(params?.text ?? '').trim();
           if (!text) throw new Error('missing text');
           const speak = this.tools.speak;
           if (typeof speak !== 'function') throw new Error('voice speak tool unavailable');
-          const result = await speak({ threadId, text });
+          const result = await speak({ threadId, text, source: voiceSource });
           return {
             content: [{ type: 'text', text: `Sent spoken reply (${text.length} chars).` }],
             details: result,

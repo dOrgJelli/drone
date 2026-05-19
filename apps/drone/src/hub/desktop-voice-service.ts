@@ -7,6 +7,16 @@ import { existsSync } from 'node:fs';
 
 import { DESKTOP_VOICE_CODES, type DesktopVoiceClipboardMode, type DesktopVoiceMode } from './desktop-voice-behavior';
 import { managedDesktopVoiceModelDirSync } from './desktop-voice-models';
+import { ApprovalCodeRecognizer, type ApprovalCodeUpdate } from './voice-approval-code';
+import {
+  hasTranscriptContent,
+  isLikelyShortSleepMistranscription,
+  pcm16leRms,
+  pcm16leToWav,
+  PromptSpeechSegmenter,
+  stripCommands,
+  type PromptSpeechSegment,
+} from './voice-transcription-segmenter';
 
 type CaptureCommand = {
   label: string;
@@ -60,6 +70,9 @@ type DesktopVoiceEvent = {
   text: string;
 } | {
   type: 'desktop_voice_transcript_segment';
+  text: string;
+} | {
+  type: 'desktop_voice_speak';
   text: string;
 };
 
@@ -124,233 +137,9 @@ function commandDisplay(command: CaptureCommand): string {
   return [command.command, ...command.args].join(' ');
 }
 
-function pcm16leRms(buffer: Buffer): number {
-  const samples = Math.floor(buffer.length / 2);
-  if (samples <= 0) return 0;
-  let sumSquares = 0;
-  for (let offset = 0; offset + 1 < buffer.length; offset += 2) {
-    const sample = buffer.readInt16LE(offset) / 32768;
-    sumSquares += sample * sample;
-  }
-  return Math.sqrt(sumSquares / samples);
-}
-
 function normalizeLevel(rms: number): number {
   const normalized = Math.max(0, Math.min(1, (rms - 0.003) / 0.08));
   return Math.sqrt(normalized);
-}
-
-function pcm16leToWav(pcm: Buffer, sampleRateHz = 16_000, channels = 1): Buffer {
-  const bitsPerSample = 16;
-  const byteRate = sampleRateHz * channels * bitsPerSample / 8;
-  const blockAlign = channels * bitsPerSample / 8;
-  const header = Buffer.alloc(44);
-  header.write('RIFF', 0, 'ascii');
-  header.writeUInt32LE(36 + pcm.byteLength, 4);
-  header.write('WAVE', 8, 'ascii');
-  header.write('fmt ', 12, 'ascii');
-  header.writeUInt32LE(16, 16);
-  header.writeUInt16LE(1, 20);
-  header.writeUInt16LE(channels, 22);
-  header.writeUInt32LE(sampleRateHz, 24);
-  header.writeUInt32LE(byteRate, 28);
-  header.writeUInt16LE(blockAlign, 32);
-  header.writeUInt16LE(bitsPerSample, 34);
-  header.write('data', 36, 'ascii');
-  header.writeUInt32LE(pcm.byteLength, 40);
-  return Buffer.concat([header, pcm], header.byteLength + pcm.byteLength);
-}
-
-function normalizeWords(text: string): string[] {
-  return String(text ?? '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
-}
-
-function stripCommands(text: string): { text: string; wake: boolean; sleep: boolean; status: boolean } {
-  let cleaned = String(text ?? '');
-  let wake = false;
-  let sleep = false;
-  cleaned = cleaned.replace(/\b(?:hey|hay)\s+sebastian\b[\s,.:;!?-]*/gi, () => {
-    wake = true;
-    return ' ';
-  });
-  cleaned = cleaned.replace(/\b(?:that's|thats|that\s+is)\s+it\b[\s,.:;!?-]*/gi, () => {
-    sleep = true;
-    return ' ';
-  });
-  const words = normalizeWords(cleaned);
-  const compact = words.join('');
-  const status = words.includes('status') || compact === 'stateus' || compact === 'stateis' || compact === 'statuscheck' || compact === 'checkstatus';
-  return {
-    text: cleaned.replace(/\s+([,.:;!?])/g, '$1').replace(/\s+/g, ' ').trim(),
-    wake,
-    sleep,
-    status,
-  };
-}
-
-function hasTranscriptContent(text: string): boolean {
-  return /[\p{L}\p{N}]/u.test(text);
-}
-
-function pcmDurationMs(bytes: number, sampleRateHz = 16_000, channels = 1): number {
-  return Math.round((bytes / (sampleRateHz * channels * 2)) * 1000);
-}
-
-function lastPcmMs(pcm: Buffer, ms: number, sampleRateHz = 16_000, channels = 1): Buffer {
-  const byteCount = Math.min(pcm.byteLength, Math.round(sampleRateHz * channels * 2 * ms / 1000));
-  const evenByteCount = byteCount - (byteCount % 2);
-  return evenByteCount > 0 ? Buffer.from(pcm.subarray(pcm.byteLength - evenByteCount)) : Buffer.alloc(0);
-}
-
-function padPcmToMinDuration(pcm: Buffer, minMs: number, sampleRateHz = 16_000, channels = 1): Buffer {
-  const minBytes = Math.round(sampleRateHz * channels * 2 * minMs / 1000);
-  if (pcm.byteLength >= minBytes) return pcm;
-  const paddingBytes = minBytes - pcm.byteLength;
-  const leadingBytes = Math.floor(paddingBytes / 2) - (Math.floor(paddingBytes / 2) % 2);
-  const trailingBytes = paddingBytes - leadingBytes - ((paddingBytes - leadingBytes) % 2);
-  return Buffer.concat([Buffer.alloc(leadingBytes), pcm, Buffer.alloc(trailingBytes)], leadingBytes + pcm.byteLength + trailingBytes);
-}
-
-type PromptSpeechSegment = {
-  pcm: Buffer;
-  audioMs: number;
-  speechMs: number;
-  trailingSilenceMs: number;
-  reason: 'silence' | 'short_silence' | 'max_segment' | 'flush';
-  sequence: number;
-};
-
-class PromptSpeechSegmenter {
-  private currentChunks: Buffer[] = [];
-  private currentBytes = 0;
-  private speechMs = 0;
-  private trailingSilenceMs = 0;
-  private carryover: Buffer = Buffer.alloc(0);
-  private nextSequence = 1;
-
-  get hasOpenSpeech(): boolean {
-    return this.speechMs > 0;
-  }
-
-  reset(): void {
-    this.currentChunks = [];
-    this.currentBytes = 0;
-    this.speechMs = 0;
-    this.trailingSilenceMs = 0;
-    this.carryover = Buffer.alloc(0);
-  }
-
-  append(pcm: Buffer): PromptSpeechSegment[] {
-    if (pcm.byteLength === 0) return [];
-    this.currentChunks.push(Buffer.from(pcm));
-    this.currentBytes += pcm.byteLength;
-
-    const chunkMs = pcmDurationMs(pcm.byteLength);
-    const rms = pcm16leRms(pcm);
-    if (rms >= this.silenceThreshold()) {
-      this.speechMs += chunkMs;
-      this.trailingSilenceMs = 0;
-    } else if (this.speechMs > 0) {
-      this.trailingSilenceMs += chunkMs;
-    }
-
-    const currentMs = pcmDurationMs(this.currentBytes);
-    if (this.speechMs === 0 && currentMs > Math.max(1_000, this.silenceMs())) {
-      this.resetCurrent();
-      return [];
-    }
-    if (this.speechMs >= this.minSpeechMs() && this.trailingSilenceMs >= this.silenceMs()) return [this.takeSegment('silence')];
-    if (this.speechMs > 0 && this.trailingSilenceMs >= this.shortUtteranceSilenceMs()) return [this.takeSegment('short_silence')];
-    if (this.speechMs >= this.minSpeechMs() && currentMs >= this.maxSegmentMs()) return [this.takeSegment('max_segment')];
-    return [];
-  }
-
-  flush(): PromptSpeechSegment | null {
-    if (this.speechMs < this.minSpeechMs()) {
-      this.resetCurrent();
-      return null;
-    }
-    return this.takeSegment('flush');
-  }
-
-  private takeSegment(reason: PromptSpeechSegment['reason']): PromptSpeechSegment {
-    const segment = Buffer.concat(this.currentChunks, this.currentBytes);
-    const pcm = this.carryover.byteLength > 0 ? Buffer.concat([this.carryover, segment]) : segment;
-    const padded = padPcmToMinDuration(pcm, this.minSubmitMs());
-    const out = {
-      pcm: padded,
-      audioMs: pcmDurationMs(padded.byteLength),
-      speechMs: this.speechMs,
-      trailingSilenceMs: this.trailingSilenceMs,
-      reason,
-      sequence: this.nextSequence,
-    };
-    this.nextSequence += 1;
-    this.carryover = lastPcmMs(segment, this.overlapMs());
-    this.resetCurrent();
-    return out;
-  }
-
-  private resetCurrent(): void {
-    this.currentChunks = [];
-    this.currentBytes = 0;
-    this.speechMs = 0;
-    this.trailingSilenceMs = 0;
-  }
-
-  private minSpeechMs(): number {
-    return positiveIntEnv('GROQ_TRANSCRIBE_MIN_SPEECH_MS', 180);
-  }
-
-  private minSubmitMs(): number {
-    return positiveIntEnv('GROQ_TRANSCRIBE_MIN_SUBMIT_MS', 1_000);
-  }
-
-  private silenceMs(): number {
-    return positiveIntEnv('GROQ_TRANSCRIBE_SILENCE_MS', 650);
-  }
-
-  private shortUtteranceSilenceMs(): number {
-    return positiveIntEnv('GROQ_TRANSCRIBE_SHORT_UTTERANCE_SILENCE_MS', 1_000);
-  }
-
-  private maxSegmentMs(): number {
-    return positiveIntEnv('GROQ_TRANSCRIBE_MAX_SEGMENT_MS', 10_000);
-  }
-
-  private overlapMs(): number {
-    return positiveIntEnv('GROQ_TRANSCRIBE_OVERLAP_MS', 500);
-  }
-
-  private silenceThreshold(): number {
-    const parsed = Number.parseFloat(String(process.env.GROQ_TRANSCRIBE_SILENCE_THRESHOLD ?? '0.025'));
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0.025;
-  }
-}
-
-function positiveIntEnv(name: string, fallback: number): number {
-  const parsed = Number.parseInt(String(process.env[name] ?? ''), 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function approvalCodeFromText(text: string): string | null {
-  const words = normalizeWords(text);
-  const codeIndex = words.findIndex((word, index) => word === 'code' && words[index - 1] === 'approval');
-  if (codeIndex < 0) return null;
-  const digits = words.slice(codeIndex + 1).map((word) => {
-    if (word === '0' || word === 'zero' || word === 'oh' || word === 'o') return '0';
-    if (word === '1' || word === 'one' || word === 'won') return '1';
-    if (word === '2' || word === 'two' || word === 'too' || word === 'to') return '2';
-    if (word === '3' || word === 'three' || word === 'tree') return '3';
-    if (word === '4' || word === 'four' || word === 'for') return '4';
-    if (word === '5' || word === 'five') return '5';
-    if (word === '6' || word === 'six') return '6';
-    if (word === '7' || word === 'seven') return '7';
-    if (word === '8' || word === 'eight' || word === 'ate') return '8';
-    if (word === '9' || word === 'nine' || word === 'niner') return '9';
-    return '';
-  }).join('').slice(0, 8);
-  return digits.length >= 4 ? digits : null;
 }
 
 const requireForDesktopVoice = createRequire(__filename);
@@ -700,6 +489,9 @@ export class DesktopVoiceService {
   private readonly events = new EventEmitter();
   private readonly capture = new HostMicrophoneCapture();
   private readonly recognizer = new VoskCommandRecognizer();
+  private readonly approvalRecognizer = new ApprovalCodeRecognizer();
+  private approvalFinalizeTimer: NodeJS.Timeout | null = null;
+  private desktopSubscriberCount = 0;
   private mode: DesktopVoiceMode = 'off';
   private message = 'Desktop voice is off.';
   private updatedAt = new Date().toISOString();
@@ -782,9 +574,20 @@ export class DesktopVoiceService {
   }
 
   subscribe(listener: (event: DesktopVoiceEvent) => void): () => void {
+    this.desktopSubscriberCount += 1;
     this.events.on('event', listener);
     listener({ type: 'desktop_voice_status', status: this.snapshot() });
-    return () => this.events.off('event', listener);
+    return () => {
+      this.events.off('event', listener);
+      this.desktopSubscriberCount = Math.max(0, this.desktopSubscriberCount - 1);
+    };
+  }
+
+  speak(text: string): boolean {
+    const trimmed = String(text ?? '').trim();
+    if (!trimmed || this.desktopSubscriberCount <= 0) return false;
+    this.events.emit('event', { type: 'desktop_voice_speak', text: trimmed } satisfies DesktopVoiceEvent);
+    return true;
   }
 
   toggle(): DesktopVoiceStatus {
@@ -796,6 +599,7 @@ export class DesktopVoiceService {
     desktopVoiceLog('desktop voice start requested');
     this.mode = 'locked';
     this.message = 'Locked: starting host microphone and local wake model.';
+    this.resetApprovalCollection();
     this.touch();
     this.recognizer.start();
     this.capture.start();
@@ -810,6 +614,7 @@ export class DesktopVoiceService {
     this.mode = 'off';
     this.message = message;
     this.promptChunks = [];
+    this.resetApprovalCollection();
     this.resetPromptTranscription();
     this.touch();
     this.emitChange();
@@ -861,15 +666,21 @@ export class DesktopVoiceService {
     if (this.clipboardMode === 'recording') this.clipboardChunks.push(chunk);
   }
 
-  private handleRecognizedText(text: string, final: boolean): void {
+  private handleRecognizedText(text: string, _final: boolean): void {
     if (this.mode === 'off' || this.mode === 'error') return;
     this.touch();
     this.emitChange();
-    const approvalCode = approvalCodeFromText(text);
-    if (approvalCode && (final || approvalCode.length >= 4)) {
-      this.handleApprovalCode(approvalCode);
+
+    const approvalUpdate = this.approvalRecognizer.accept(text, Date.now());
+    this.handleApprovalUpdate(approvalUpdate);
+    if (this.approvalRecognizer.isCollecting) {
+      this.scheduleApprovalFinalize();
       return;
     }
+    if (approvalUpdate.type !== 'none') {
+      return;
+    }
+
     const command = stripCommands(text);
     if (command.status && this.mode === 'sleeping' && this.shouldAcceptCommand('status', 1000)) {
       this.message = 'Asleep: status OK.';
@@ -881,6 +692,45 @@ export class DesktopVoiceService {
       this.startAssistantPromptRecording();
       return;
     }
+  }
+
+  private scheduleApprovalFinalize(): void {
+    if (this.approvalFinalizeTimer) clearTimeout(this.approvalFinalizeTimer);
+    this.approvalFinalizeTimer = setTimeout(() => {
+      this.approvalFinalizeTimer = null;
+      this.handleApprovalUpdate(this.approvalRecognizer.flush(Date.now()));
+      if (this.approvalRecognizer.isCollecting && this.mode !== 'off' && this.mode !== 'error') this.scheduleApprovalFinalize();
+    }, 250);
+    this.approvalFinalizeTimer.unref?.();
+  }
+
+  private resetApprovalCollection(): void {
+    if (this.approvalFinalizeTimer) {
+      clearTimeout(this.approvalFinalizeTimer);
+      this.approvalFinalizeTimer = null;
+    }
+    this.approvalRecognizer.reset();
+  }
+
+  private handleApprovalUpdate(update: ApprovalCodeUpdate): void {
+    if (update.type === 'none') return;
+    if (update.type === 'collecting') {
+      if (update.partialCode) {
+        this.message = this.mode === 'locked' ? `Unlock: ${update.partialCode}` : `Approval: ${update.partialCode}`;
+      } else {
+        this.message = this.mode === 'locked' ? 'Unlock code...' : 'Approval code...';
+      }
+      this.touch();
+      this.emitChange();
+      return;
+    }
+    if (update.type === 'cancelled') {
+      this.message = 'Approval cancelled.';
+      this.touch();
+      this.emitChange();
+      return;
+    }
+    this.handleApprovalCode(update.code);
   }
 
   private handleApprovalCode(code: string): void {
@@ -904,6 +754,7 @@ export class DesktopVoiceService {
       this.mode = 'locked';
       this.message = 'Locked: say approval code one two three four.';
       this.promptChunks = [];
+      this.resetApprovalCollection();
       this.resetPromptTranscription();
       this.touch();
       this.emitChange();
@@ -961,11 +812,14 @@ export class DesktopVoiceService {
     try {
       const result = await this.opts.transcribeWav(pcm16leToWav(segment.pcm));
       const command = stripCommands(result.text);
-      const text = command.text.trim();
+      const inferredSleep = !command.sleep && this.shouldInferSleepCommand(result.text, segment);
+      const sleep = command.sleep || inferredSleep;
+      const text = inferredSleep ? '' : command.text.trim();
       desktopVoiceLog('prompt transcript segment', {
         sequence: segment.sequence,
         model: result.model,
-        sleep: command.sleep,
+        sleep,
+        sleepInferred: inferredSleep,
         rawText: result.text,
         text,
       });
@@ -976,7 +830,7 @@ export class DesktopVoiceService {
       }
       this.promptTranscriptError = null;
       this.promptTranscribing = false;
-      if (command.sleep && this.mode === 'recording' && this.shouldAcceptCommand('sleep:transcript', 1200)) {
+      if (sleep && this.mode === 'recording' && this.shouldAcceptCommand('sleep:transcript', 1200)) {
         await this.finishAssistantPromptRecordingFromTranscript();
         return;
       }
@@ -994,6 +848,11 @@ export class DesktopVoiceService {
       this.emitChange();
       this.processPromptTranscriptQueue();
     }
+  }
+
+  private shouldInferSleepCommand(text: string, segment: PromptSpeechSegment): boolean {
+    if (segment.speechMs > 900) return false;
+    return isLikelyShortSleepMistranscription(text);
   }
 
   private async finishAssistantPromptRecordingFromTranscript(): Promise<void> {
