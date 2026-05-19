@@ -194,9 +194,9 @@ class VoiceSessionService : Service() {
         wakeLock = null
         preRollBuffer.clear()
         pendingStreamBuffer.clear()
-        closeControlWebSocket("listening stopped")
         lastApprovalStatus = ""
         publishState("Off", Constants.MODE_OFF)
+        closeControlWebSocket("listening stopped")
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -491,6 +491,7 @@ class VoiceSessionService : Service() {
         val socket = httpClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 DroneLog.i("ControlWebSocket", "Connected to $url")
+                sendControlStatus(webSocket)
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
@@ -745,6 +746,20 @@ class VoiceSessionService : Service() {
             putExtra(Constants.EXTRA_MICROPHONE, currentMicrophone)
             putExtra(Constants.EXTRA_APPROVAL_STATUS, lastApprovalStatus)
         })
+        sendControlStatus()
+    }
+
+    private fun sendControlStatus(socket: WebSocket? = controlWebSocket) {
+        val localSocket = socket ?: return
+        val payload = JSONObject()
+            .put("type", "android_status")
+            .put("status", lastStatus)
+            .put("mode", lastMode)
+            .put("microphone", currentMicrophone)
+            .put("approvalStatus", lastApprovalStatus)
+            .put("reportedAt", System.currentTimeMillis())
+            .toString()
+        runCatching { localSocket.send(payload) }
     }
 
     private fun updateNotification(state: String, mode: String) {

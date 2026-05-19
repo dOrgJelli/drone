@@ -9,6 +9,7 @@ import { UiMenuSelect, type UiMenuSelectEntry } from '../../ui/menuSelect';
 import { IconFile, iconForFilePath } from '../icons';
 
 const ASSISTANT_THREAD_SIDEBAR_OPEN_STORAGE_KEY = 'droneHub.assistant.threadSidebarOpen';
+const ASSISTANT_THREAD_MODE_STORAGE_KEY = 'droneHub.assistant.threadMode';
 const ASSISTANT_FILES_OPEN_STORAGE_KEY = 'droneHub.assistant.filesOpen';
 const ASSISTANT_OVERVIEW_AUTO_STORAGE_KEY = 'droneHub.assistant.overviewAuto';
 const ASSISTANT_OVERVIEW_INTERVAL_STORAGE_KEY = 'droneHub.assistant.overviewIntervalMs';
@@ -49,6 +50,7 @@ type AssistantQueuedPrompt = {
 };
 
 type AssistantPromptDeliveryMode = 'queue' | 'asap';
+type AssistantPanelMode = 'normal' | 'voice';
 
 type AssistantRunModel = {
   provider: AssistantProviderId;
@@ -206,6 +208,11 @@ const ASSISTANT_PROVIDERS: Array<{ id: AssistantProviderId; label: string; authL
 function readInitialThreadSidebarOpen(): boolean {
   if (typeof window === 'undefined') return true;
   return window.localStorage.getItem(ASSISTANT_THREAD_SIDEBAR_OPEN_STORAGE_KEY) !== '0';
+}
+
+function readInitialAssistantPanelMode(): AssistantPanelMode {
+  if (typeof window === 'undefined') return 'normal';
+  return window.localStorage.getItem(ASSISTANT_THREAD_MODE_STORAGE_KEY) === 'voice' ? 'voice' : 'normal';
 }
 
 function readInitialFilesOpen(): boolean {
@@ -1326,29 +1333,44 @@ function AssistantThreadFilesView({
 function AssistantThreadSidebar({
   threads,
   activeThreadId,
+  mode,
   onCreateThread,
   onSelectThread,
   onDeleteThread,
+  onModeChange,
+  onOpenPairing,
   onCollapse,
 }: {
   threads: AssistantThread[];
   activeThreadId: string | null;
+  mode: AssistantPanelMode;
   onCreateThread: () => void;
   onSelectThread: (thread: AssistantThread) => void;
   onDeleteThread: (thread: AssistantThread) => void;
+  onModeChange: (mode: AssistantPanelMode) => void;
+  onOpenPairing: () => void;
   onCollapse: () => void;
 }) {
+  const voiceMode = mode === 'voice';
   return (
     <aside className="flex w-52 max-w-[46%] min-w-0 flex-shrink-0 flex-col border-r border-[var(--border)] bg-[rgba(0,0,0,.14)]">
       <div className="flex h-11 flex-shrink-0 items-center gap-2 border-b border-[var(--border)] px-2">
         <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.03)] text-[var(--muted)]">
-          <IconChatThread className="h-3.5 w-3.5" />
+          {voiceMode ? (
+            <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+              <path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z" />
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+              <path d="M12 19v3" />
+            </svg>
+          ) : (
+            <IconChatThread className="h-3.5 w-3.5" />
+          )}
         </div>
         <div className="min-w-0 flex-1">
           <div className="truncate text-[11px] font-semibold uppercase tracking-wide text-[var(--muted)]" style={{ fontFamily: 'var(--display)' }}>
-            Threads
+            {voiceMode ? 'Voice' : 'Threads'}
           </div>
-          <div className="text-[10px] text-[var(--muted-dim)]">{threads.length || 0} total</div>
+          <div className="text-[10px] text-[var(--muted-dim)]">{threads.length || 0} {voiceMode ? 'voice' : 'normal'}</div>
         </div>
         <button
           type="button"
@@ -1368,12 +1390,12 @@ function AssistantThreadSidebar({
           style={{ fontFamily: 'var(--display)' }}
         >
           <IconPlus className="h-3.5 w-3.5" />
-          New Thread
+          {voiceMode ? 'New Voice Thread' : 'New Thread'}
         </button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
         {threads.length === 0 ? (
-          <div className="px-2 py-3 text-[11px] text-[var(--muted-dim)]">No assistant threads yet.</div>
+          <div className="px-2 py-3 text-[11px] text-[var(--muted-dim)]">{voiceMode ? 'No voice threads yet.' : 'No assistant threads yet.'}</div>
         ) : (
           <div className="space-y-1">
             {threads.map((thread) => {
@@ -1426,6 +1448,46 @@ function AssistantThreadSidebar({
             })}
           </div>
         )}
+      </div>
+      <div className="flex-shrink-0 space-y-2 border-t border-[var(--border)] p-2">
+        <button
+          type="button"
+          onClick={() => onModeChange(voiceMode ? 'normal' : 'voice')}
+          aria-pressed={voiceMode}
+          title={voiceMode ? 'Show normal assistant threads' : 'Show voice assistant threads'}
+          className={`flex min-h-[44px] w-full items-center justify-center gap-2 rounded border px-2 text-[10px] font-semibold uppercase tracking-wide transition-colors ${
+            voiceMode
+              ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)] shadow-[0_0_18px_rgba(167,139,250,.16)]'
+              : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.025)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]'
+          }`}
+          style={{ fontFamily: 'var(--display)' }}
+        >
+          <svg viewBox="0 0 24 24" className="h-4 w-4 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+            <path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z" />
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+            <path d="M12 19v3" />
+          </svg>
+          {voiceMode ? 'Voice Mode' : 'Voice'}
+        </button>
+        {voiceMode ? (
+          <button
+            type="button"
+            onClick={onOpenPairing}
+            title="Open Android pairing QR code"
+            className="flex h-8 w-full items-center justify-center gap-1.5 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.025)] px-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]"
+            style={{ fontFamily: 'var(--display)' }}
+          >
+            <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 flex-shrink-0" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+              <path d="M3 3h7v7H3z" />
+              <path d="M14 3h7v7h-7z" />
+              <path d="M3 14h7v7H3z" />
+              <path d="M14 14h3v3h-3z" />
+              <path d="M19 14h2v7h-5" />
+              <path d="M14 19h2" />
+            </svg>
+            Pair Android
+          </button>
+        ) : null}
       </div>
     </aside>
   );
@@ -2090,6 +2152,7 @@ export function AssistantDock() {
   const [error, setError] = React.useState<string | null>(null);
   const [draft, setDraft] = React.useState('');
   const [threadSidebarOpen, setThreadSidebarOpen] = React.useState(readInitialThreadSidebarOpen);
+  const [assistantPanelMode, setAssistantPanelMode] = React.useState<AssistantPanelMode>(readInitialAssistantPanelMode);
   const [filesOpen, setFilesOpen] = React.useState(readInitialFilesOpen);
   const [artifactFiles, setArtifactFiles] = React.useState<AssistantArtifactSummary[]>([]);
   const [selectedArtifactPath, setSelectedArtifactPath] = React.useState<string | null>(null);
@@ -2136,6 +2199,9 @@ export function AssistantDock() {
   const [assistantEventsUnavailable, setAssistantEventsUnavailable] = React.useState(
     () => typeof window === 'undefined' || typeof window.EventSource === 'undefined',
   );
+  const [voiceTranscriptionActive, setVoiceTranscriptionActive] = React.useState(false);
+  const [voiceAndroidMode, setVoiceAndroidMode] = React.useState('');
+  const [voiceAndroidStatus, setVoiceAndroidStatus] = React.useState('');
   const [voiceDraftActive, setVoiceDraftActive] = React.useState(false);
   const selectedDrone = useDroneHubUiStore((state) => state.selectedDrone);
   const selectedChat = useDroneHubUiStore((state) => state.selectedChat);
@@ -2199,10 +2265,15 @@ export function AssistantDock() {
     attempt();
   }, [updateAssistantPinned]);
 
+  const visibleThreads = React.useMemo(() => {
+    const threads = snapshot?.threads ?? [];
+    return threads.filter((thread) => (assistantPanelMode === 'voice' ? Boolean(thread.voiceEnabled) : !thread.voiceEnabled));
+  }, [assistantPanelMode, snapshot?.threads]);
+
   const activeThread = React.useMemo(() => {
     if (!snapshot) return null;
-    return snapshot.threads.find((thread) => thread.id === snapshot.activeThreadId) ?? snapshot.threads[0] ?? null;
-  }, [snapshot]);
+    return visibleThreads.find((thread) => thread.id === snapshot.activeThreadId) ?? visibleThreads[0] ?? null;
+  }, [snapshot, visibleThreads]);
   const activeThreadId = activeThread?.id ?? '';
   activeThreadIdRef.current = activeThreadId;
   const autoApprove = Boolean(activeThread?.autoApprove);
@@ -2266,6 +2337,14 @@ export function AssistantDock() {
   React.useEffect(() => {
     voiceDraftActiveRef.current = voiceDraftActive;
   }, [voiceDraftActive]);
+
+  React.useEffect(() => {
+    if (!voiceEnabled) {
+      setVoiceTranscriptionActive(false);
+      setVoiceAndroidMode('');
+      setVoiceAndroidStatus('');
+    }
+  }, [voiceEnabled]);
 
   const appendVoiceTranscriptSegment = React.useCallback((textRaw: unknown) => {
     const text = String(textRaw ?? '').trim();
@@ -2520,6 +2599,32 @@ export function AssistantDock() {
         // Ignore malformed transcript messages.
       }
     });
+    source.addEventListener('voice_transcript_status', (event) => {
+      if (closed) return;
+      try {
+        const data = JSON.parse((event as MessageEvent).data);
+        const status = String(data?.status ?? '').trim();
+        setVoiceTranscriptionActive(status === 'collecting' || status === 'transcribing');
+      } catch {
+        // Ignore malformed status messages.
+      }
+    });
+    source.addEventListener('voice_android_status', (event) => {
+      if (closed) return;
+      try {
+        const data = JSON.parse((event as MessageEvent).data);
+        setVoiceAndroidMode(String(data?.mode ?? '').trim());
+        setVoiceAndroidStatus(String(data?.status ?? '').trim());
+      } catch {
+        // Ignore malformed Android status messages.
+      }
+    });
+    source.onerror = () => {
+      if (closed) return;
+      setVoiceTranscriptionActive(false);
+      setVoiceAndroidMode('');
+      setVoiceAndroidStatus('');
+    };
     return () => {
       closed = true;
       source.close();
@@ -2593,6 +2698,11 @@ export function AssistantDock() {
     if (typeof window === 'undefined') return;
     window.localStorage.setItem(ASSISTANT_THREAD_SIDEBAR_OPEN_STORAGE_KEY, threadSidebarOpen ? '1' : '0');
   }, [threadSidebarOpen]);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(ASSISTANT_THREAD_MODE_STORAGE_KEY, assistantPanelMode);
+  }, [assistantPanelMode]);
 
   React.useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -2823,6 +2933,8 @@ export function AssistantDock() {
         body: JSON.stringify({
           activeDroneId: activeDroneId || null,
           activeChatName: activeDroneId ? String(selectedChat ?? '').trim() || 'default' : null,
+          voiceEnabled: assistantPanelMode === 'voice',
+          title: assistantPanelMode === 'voice' ? 'Voice thread' : undefined,
         }),
       });
       setSnapshot(next);
@@ -2830,7 +2942,27 @@ export function AssistantDock() {
     } catch (err: any) {
       setError(err?.message ?? String(err));
     }
-  }, [selectedChat, selectedDrone, selectedDroneChatOpen]);
+  }, [assistantPanelMode, selectedChat, selectedDrone, selectedDroneChatOpen]);
+
+  const openVoicePairing = React.useCallback(async () => {
+    const popup = typeof window === 'undefined' ? null : window.open('about:blank', '_blank');
+    if (popup) popup.opener = null;
+    try {
+      const data = await requestJson<{ ok: true; url: string }>('/api/assistant/voice/pairing-url');
+      if (popup) {
+        popup.location.href = data.url;
+      } else if (typeof window !== 'undefined') {
+        window.open(data.url, '_blank', 'noopener,noreferrer');
+      }
+    } catch (err: any) {
+      try {
+        popup?.close();
+      } catch {
+        // ignore
+      }
+      setError(err?.message ?? String(err));
+    }
+  }, []);
 
   const selectThread = React.useCallback(async (thread: AssistantThread) => {
     updateThreadRequestRef.current += 1;
@@ -3132,11 +3264,14 @@ export function AssistantDock() {
     <div className="flex h-full min-h-0 bg-[var(--panel-alt)]">
       {threadSidebarOpen ? (
         <AssistantThreadSidebar
-          threads={snapshot?.threads ?? []}
+          threads={visibleThreads}
           activeThreadId={activeThread?.id ?? null}
+          mode={assistantPanelMode}
           onCreateThread={() => void createThread()}
           onSelectThread={(thread) => void selectThread(thread)}
           onDeleteThread={(thread) => void deleteThread(thread)}
+          onModeChange={setAssistantPanelMode}
+          onOpenPairing={() => void openVoicePairing()}
           onCollapse={() => setThreadSidebarOpen(false)}
         />
       ) : null}
@@ -3161,6 +3296,43 @@ export function AssistantDock() {
             <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
               {activeThread ? <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${assistantThreadStatusTone(activeThread.status)}`} /> : null}
               <span className="truncate">{assistantThreadStatusLabel(activeThread?.status, loading ? 'loading' : 'idle')}</span>
+              {voiceEnabled && voiceAndroidMode === 'listening' ? (
+                <span
+                  className="inline-flex h-5 flex-shrink-0 items-center gap-1 rounded-full border border-[rgba(74,222,128,.32)] bg-[rgba(74,222,128,.08)] px-1.5 text-[9px] font-semibold text-[var(--green)]"
+                  title={voiceAndroidStatus || 'Android app listening for wake phrase'}
+                >
+                  <span className="h-1.5 w-1.5 rounded-full bg-[var(--green)]" />
+                  Listening
+                </span>
+              ) : null}
+              {voiceEnabled && voiceAndroidMode === 'streaming' ? (
+                <span
+                  className="inline-flex h-5 flex-shrink-0 items-center gap-1 rounded-full border border-[var(--accent-muted)] bg-[var(--accent-subtle)] px-1.5 text-[9px] font-semibold text-[var(--accent)] shadow-[0_0_14px_rgba(59,130,246,.28)]"
+                  title={voiceAndroidStatus || 'Android app streaming audio'}
+                >
+                  <span className="relative flex h-1.5 w-1.5">
+                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--accent)] opacity-60" />
+                    <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
+                  </span>
+                  Streaming
+                </span>
+              ) : null}
+              {voiceEnabled && voiceTranscriptionActive ? (
+                <span
+                  className="relative ml-0.5 inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full border border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)] shadow-[0_0_18px_rgba(59,130,246,.42)]"
+                  title="Voice transcription active"
+                  role="img"
+                  aria-label="Voice transcription active"
+                >
+                  <span className="absolute inset-0 rounded-full bg-[var(--accent)] opacity-20 animate-ping" />
+                  <svg viewBox="0 0 24 24" aria-hidden="true" className="relative h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2">
+                    <rect x="9" y="3" width="6" height="11" rx="3" />
+                    <path d="M5 11a7 7 0 0 0 14 0" />
+                    <path d="M12 18v3" />
+                    <path d="M8 21h8" />
+                  </svg>
+                </span>
+              ) : null}
             </div>
           </div>
           {!threadSidebarOpen ? (

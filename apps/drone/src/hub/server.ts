@@ -11020,6 +11020,15 @@ export async function startDroneHubApiServer(opts: {
     return u.toString();
   };
 
+  const voiceStreamPairingUrl = (): string => {
+    if (!voiceStreamUrl) throw new Error('Voice Stream server is not running.');
+    const u = new URL(voiceStreamUrl);
+    u.pathname = '/pair';
+    u.search = '';
+    u.hash = '';
+    return u.toString();
+  };
+
   const assistantService = new HubAssistantService({
     listDrones: async (): Promise<AssistantDroneSummary[]> => {
       const regAny: any = await loadRegistry();
@@ -11291,6 +11300,15 @@ export async function startDroneHubApiServer(opts: {
         return;
       }
 
+      if (pathname === '/api/assistant/voice/pairing-url' && method === 'GET') {
+        if (!voiceStreamUrl) {
+          json(res, 503, { ok: false, error: 'Voice Stream server is not running.' });
+          return;
+        }
+        json(res, 200, { ok: true, url: voiceStreamPairingUrl() });
+        return;
+      }
+
       if (pathname === '/api/assistant/voice/transcript/events' && method === 'GET') {
         if (!voiceStreamUrl) {
           json(res, 503, { ok: false, error: 'Voice Stream server is not running.' });
@@ -11358,6 +11376,10 @@ export async function startDroneHubApiServer(opts: {
           }
           if (message?.type === 'transcript_status') {
             writeAssistantSseEvent(res, 'voice_transcript_status', message);
+            return;
+          }
+          if (message?.type === 'android_status') {
+            writeAssistantSseEvent(res, 'voice_android_status', message);
           }
         });
         monitor.on('error', (error) => {

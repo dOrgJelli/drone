@@ -52,6 +52,17 @@ type ApprovalCodeMessage = {
   detectedAt?: string;
 };
 
+type AndroidStatusMessage = {
+  type: "android_status";
+  mode: string;
+  status: string;
+  microphone?: string;
+  approvalStatus?: string;
+  reportedAt?: string;
+  receivedAt: string;
+  controlClientId?: number;
+};
+
 const server = createServer((req, res) => {
   void handleHttpRequest(req, res).catch((error) => {
     console.error("HTTP handler failed", error);
@@ -124,6 +135,7 @@ const transcriptionConfig = buildTranscriptionConfigFromEnv(process.env);
 const ttsConfig = buildTtsConfigFromEnv(process.env);
 const hubClientConfig = buildHubClientConfigFromEnv(process.env);
 let latestTranscriptStatus: TranscriptStatus = initialTranscriptStatus();
+let latestAndroidStatus: AndroidStatusMessage | null = null;
 
 let nextClientId = 1;
 let nextControlClientId = 1;
@@ -205,8 +217,23 @@ controlWss.on("connection", (socket, request) => {
   console.log(`[control ${clientId}] connected from ${remote}`);
   controlClients.set(clientId, socket);
 
+  socket.on("message", (data, isBinary) => {
+    if (isBinary) return;
+    handleControlMessage(clientId, data.toString("utf8"));
+  });
+
   socket.on("close", (code, reason) => {
     controlClients.delete(clientId);
+    if (latestAndroidStatus?.controlClientId === clientId) {
+      latestAndroidStatus = {
+        type: "android_status",
+        mode: "off",
+        status: "Disconnected",
+        receivedAt: new Date().toISOString(),
+        controlClientId: clientId,
+      };
+      broadcastMonitorJson(latestAndroidStatus);
+    }
     console.log(`[control ${clientId}] closed ${code} ${reason.toString()}`);
   });
 
@@ -214,6 +241,28 @@ controlWss.on("connection", (socket, request) => {
     console.warn(`[control ${clientId}] error`, error);
   });
 });
+
+function handleControlMessage(clientId: number, text: string): void {
+  let parsed: any = null;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return;
+  }
+  if (parsed?.type !== "android_status") return;
+  const message: AndroidStatusMessage = {
+    type: "android_status",
+    mode: String(parsed.mode ?? "").trim() || "unknown",
+    status: String(parsed.status ?? "").trim() || "Unknown",
+    microphone: String(parsed.microphone ?? "").trim() || undefined,
+    approvalStatus: String(parsed.approvalStatus ?? "").trim() || undefined,
+    reportedAt: String(parsed.reportedAt ?? "").trim() || undefined,
+    receivedAt: new Date().toISOString(),
+    controlClientId: clientId,
+  };
+  latestAndroidStatus = message;
+  broadcastMonitorJson(message);
+}
 
 function sendAudioCommand(socket: WebSocket, clientId: number, command: TranscriptCommand): void {
   const payload = JSON.stringify(command);
@@ -291,6 +340,7 @@ monitorWss.on("connection", (socket, request) => {
   const remote = `${request.socket.remoteAddress ?? "unknown"}:${request.socket.remotePort ?? ""}`;
   console.log(`[monitor ${monitorId}] connected from ${remote}`);
   sendMonitorJson(socket, latestTranscriptStatus);
+  if (latestAndroidStatus) sendMonitorJson(socket, latestAndroidStatus);
 
   socket.on("close", (code, reason) => {
     console.log(`[monitor ${monitorId}] closed ${code} ${reason.toString()}`);
@@ -1363,14 +1413,14 @@ function broadcastToMonitors(data: Buffer): void {
   }
 }
 
-function broadcastMonitorJson(message: TranscriptMessage | ApprovalCodeMessage): void {
+function broadcastMonitorJson(message: TranscriptMessage | ApprovalCodeMessage | AndroidStatusMessage): void {
   const payload = JSON.stringify(message);
   for (const monitor of monitorWss.clients) {
     sendMonitorText(monitor, payload);
   }
 }
 
-function sendMonitorJson(socket: WebSocket, message: TranscriptMessage | ApprovalCodeMessage): void {
+function sendMonitorJson(socket: WebSocket, message: TranscriptMessage | ApprovalCodeMessage | AndroidStatusMessage): void {
   sendMonitorText(socket, JSON.stringify(message));
 }
 
