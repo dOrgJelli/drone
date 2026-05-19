@@ -7,6 +7,12 @@ import { IconChatThread, IconEye, IconList, IconPencil, IconPlus, IconSettings, 
 import { useDroneHubUiStore } from '../app/use-drone-hub-ui-store';
 import { UiMenuSelect, type UiMenuSelectEntry } from '../../ui/menuSelect';
 import { IconFile, iconForFilePath } from '../icons';
+import {
+  ASSISTANT_DESKTOP_VOICE_TRANSCRIPT_SEGMENT_EVENT,
+  dispatchAssistantDesktopVoiceToggle,
+  subscribeAssistantDesktopVoiceStatus,
+  type DesktopAssistantVoiceStatus,
+} from './desktop-assistant-voice';
 
 const ASSISTANT_THREAD_SIDEBAR_OPEN_STORAGE_KEY = 'droneHub.assistant.threadSidebarOpen';
 const ASSISTANT_THREAD_MODE_STORAGE_KEY = 'droneHub.assistant.threadMode';
@@ -1339,6 +1345,8 @@ function AssistantThreadSidebar({
   onDeleteThread,
   onModeChange,
   onOpenPairing,
+  desktopVoiceStatus,
+  onToggleDesktopVoice,
   onCollapse,
 }: {
   threads: AssistantThread[];
@@ -1349,9 +1357,26 @@ function AssistantThreadSidebar({
   onDeleteThread: (thread: AssistantThread) => void;
   onModeChange: (mode: AssistantPanelMode) => void;
   onOpenPairing: () => void;
+  desktopVoiceStatus: DesktopAssistantVoiceStatus;
+  onToggleDesktopVoice: () => void;
   onCollapse: () => void;
 }) {
   const voiceMode = mode === 'voice';
+  const desktopVoiceActive = desktopVoiceStatus.mode !== 'off' && desktopVoiceStatus.mode !== 'error';
+  const desktopVoiceBusy = desktopVoiceStatus.mode === 'recording' || desktopVoiceStatus.mode === 'transcribing';
+  const desktopVoiceHeardText = String(desktopVoiceStatus.recognizer?.text ?? desktopVoiceStatus.recognizer?.finalText ?? '').trim();
+  const desktopVoiceLabel =
+    desktopVoiceStatus.mode === 'off'
+      ? 'Desktop voice'
+      : desktopVoiceStatus.mode === 'locked'
+        ? 'Locked'
+      : desktopVoiceStatus.mode === 'sleeping'
+        ? 'Asleep'
+        : desktopVoiceStatus.mode === 'recording'
+          ? 'Recording'
+          : desktopVoiceStatus.mode === 'transcribing'
+            ? 'Transcribing'
+            : 'Voice error';
   return (
     <aside className="flex w-52 max-w-[46%] min-w-0 flex-shrink-0 flex-col border-r border-[var(--border)] bg-[rgba(0,0,0,.14)]">
       <div className="flex h-11 flex-shrink-0 items-center gap-2 border-b border-[var(--border)] px-2">
@@ -1450,6 +1475,49 @@ function AssistantThreadSidebar({
         )}
       </div>
       <div className="flex-shrink-0 space-y-2 border-t border-[var(--border)] p-2">
+        <div className="flex flex-col items-center gap-1.5 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-2 py-3">
+          <button
+            type="button"
+            onClick={onToggleDesktopVoice}
+            aria-pressed={desktopVoiceActive}
+            aria-label="Toggle desktop assistant voice"
+            title={
+              desktopVoiceStatus.mode === 'off'
+                ? 'Start desktop assistant voice'
+                : desktopVoiceStatus.mode === 'error'
+                  ? desktopVoiceStatus.message
+                  : 'Stop desktop assistant voice'
+            }
+            className={`relative flex h-16 w-16 items-center justify-center rounded-full border transition-colors ${
+              desktopVoiceStatus.mode === 'error'
+                ? 'border-[rgba(255,90,90,.5)] bg-[rgba(255,90,90,.1)] text-[var(--red)]'
+                : desktopVoiceActive
+                  ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)] shadow-[0_0_24px_rgba(59,130,246,.26)]'
+                  : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.035)] text-[var(--muted)] hover:border-[var(--accent-muted)] hover:text-[var(--fg-secondary)]'
+            }`}
+          >
+            {desktopVoiceBusy ? (
+              <span className="absolute inset-0 rounded-full bg-[var(--accent)] opacity-20 animate-ping" aria-hidden="true" />
+            ) : null}
+            <svg viewBox="0 0 24 24" aria-hidden="true" className="relative h-7 w-7" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="9" y="3" width="6" height="11" rx="3" />
+              <path d="M5 11a7 7 0 0 0 14 0" />
+              <path d="M12 18v3" />
+              <path d="M8 21h8" />
+            </svg>
+          </button>
+          <div className="max-w-full truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]" style={{ fontFamily: 'var(--display)' }}>
+            {desktopVoiceLabel}
+          </div>
+          {desktopVoiceHeardText ? (
+            <div
+              className="w-full truncate rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.16)] px-2 py-1 text-center text-[10px] text-[var(--muted-dim)]"
+              title={desktopVoiceHeardText}
+            >
+              {desktopVoiceStatus.recognizer?.textFinal ? 'Heard' : 'Hearing'}: {desktopVoiceHeardText}
+            </div>
+          ) : null}
+        </div>
         <button
           type="button"
           onClick={() => onModeChange(voiceMode ? 'normal' : 'voice')}
@@ -2203,6 +2271,10 @@ export function AssistantDock() {
   const [voiceAndroidMode, setVoiceAndroidMode] = React.useState('');
   const [voiceAndroidStatus, setVoiceAndroidStatus] = React.useState('');
   const [voiceDraftActive, setVoiceDraftActive] = React.useState(false);
+  const [desktopVoiceStatus, setDesktopVoiceStatus] = React.useState<DesktopAssistantVoiceStatus>({
+    mode: 'off',
+    message: 'Desktop voice is off.',
+  });
   const selectedDrone = useDroneHubUiStore((state) => state.selectedDrone);
   const selectedChat = useDroneHubUiStore((state) => state.selectedChat);
   const appView = useDroneHubUiStore((state) => state.appView);
@@ -2338,6 +2410,8 @@ export function AssistantDock() {
     voiceDraftActiveRef.current = voiceDraftActive;
   }, [voiceDraftActive]);
 
+  React.useEffect(() => subscribeAssistantDesktopVoiceStatus(setDesktopVoiceStatus), []);
+
   React.useEffect(() => {
     if (!voiceEnabled) {
       setVoiceTranscriptionActive(false);
@@ -2346,9 +2420,9 @@ export function AssistantDock() {
     }
   }, [voiceEnabled]);
 
-  const appendVoiceTranscriptSegment = React.useCallback((textRaw: unknown) => {
+  const appendVoiceTranscriptSegment = React.useCallback((textRaw: unknown, options?: { requireVoiceEnabled?: boolean }) => {
     const text = String(textRaw ?? '').trim();
-    if (!text || !voiceEnabledRef.current) return;
+    if (!text || (options?.requireVoiceEnabled !== false && !voiceEnabledRef.current)) return;
     const currentDraft = draftRef.current;
     if (currentDraft.trim() && !voiceDraftActiveRef.current) return;
     const next = currentDraft.trim() ? `${currentDraft.trimEnd()}\n${text}` : text;
@@ -2357,6 +2431,15 @@ export function AssistantDock() {
     setVoiceDraftActive(true);
     setDraft(next);
   }, []);
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handler = (event: Event) => {
+      appendVoiceTranscriptSegment((event as CustomEvent<string>).detail, { requireVoiceEnabled: false });
+    };
+    window.addEventListener(ASSISTANT_DESKTOP_VOICE_TRANSCRIPT_SEGMENT_EVENT, handler);
+    return () => window.removeEventListener(ASSISTANT_DESKTOP_VOICE_TRANSCRIPT_SEGMENT_EVENT, handler);
+  }, [appendVoiceTranscriptSegment]);
 
   const scheduleAssistantEventRefresh = React.useCallback(() => {
     if (typeof window === 'undefined') return;
@@ -3272,6 +3355,8 @@ export function AssistantDock() {
           onDeleteThread={(thread) => void deleteThread(thread)}
           onModeChange={setAssistantPanelMode}
           onOpenPairing={() => void openVoicePairing()}
+          desktopVoiceStatus={desktopVoiceStatus}
+          onToggleDesktopVoice={dispatchAssistantDesktopVoiceToggle}
           onCollapse={() => setThreadSidebarOpen(false)}
         />
       ) : null}
@@ -3331,6 +3416,33 @@ export function AssistantDock() {
                     <path d="M12 18v3" />
                     <path d="M8 21h8" />
                   </svg>
+                </span>
+              ) : null}
+              {desktopVoiceStatus.mode !== 'off' ? (
+                <span
+                  className={`inline-flex h-5 flex-shrink-0 items-center gap-1 rounded-full border px-1.5 text-[9px] font-semibold ${
+                    desktopVoiceStatus.mode === 'error'
+                      ? 'border-[rgba(255,90,90,.35)] bg-[rgba(255,90,90,.08)] text-[var(--red)]'
+                      : desktopVoiceStatus.mode === 'locked'
+                        ? 'border-[rgba(255,200,80,.32)] bg-[rgba(255,200,80,.08)] text-[var(--yellow)]'
+                      : desktopVoiceStatus.mode === 'recording' || desktopVoiceStatus.mode === 'transcribing'
+                        ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
+                        : 'border-[rgba(74,222,128,.32)] bg-[rgba(74,222,128,.08)] text-[var(--green)]'
+                  }`}
+                  title={desktopVoiceStatus.message}
+                >
+                  <span
+                    className={`h-1.5 w-1.5 rounded-full ${
+                      desktopVoiceStatus.mode === 'recording' || desktopVoiceStatus.mode === 'transcribing'
+                        ? 'animate-pulse bg-[var(--accent)]'
+                        : desktopVoiceStatus.mode === 'error'
+                          ? 'bg-[var(--red)]'
+                          : desktopVoiceStatus.mode === 'locked'
+                            ? 'bg-[var(--yellow)]'
+                          : 'bg-[var(--green)]'
+                    }`}
+                  />
+                  Desktop
                 </span>
               ) : null}
             </div>

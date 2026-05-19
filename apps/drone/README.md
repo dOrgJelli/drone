@@ -197,6 +197,21 @@ drone hub restart
 
 When the Hub starts Voice Stream, it passes the GROQ API key saved in Drone Hub settings to the Voice Stream process. Saving or clearing the Hub GROQ key restarts the Voice Stream process so the key change takes effect. Standalone Voice Stream runs still read `GROQ_API_KEY` / `GROQ_TTS_API_KEY` from the environment.
 
+### Desktop assistant voice
+
+Drone Hub desktop voice uses the host microphone from the Node.js Hub process. Local wake, sleep, and approval-code recognition uses the same bundled Vosk constrained-grammar model as the Android app, so it does not need an API key or a paid service. Assistant prompt transcription still uses the GROQ key saved in Hub settings.
+
+The bundled Android Vosk model is copied into the Hub build. To override it before starting the Hub:
+
+```bash
+export DRONE_DESKTOP_VOICE_VOSK_MODEL_DIR=/path/to/vosk-model-en-us
+drone hub restart
+```
+
+The model directory should match the Android Vosk asset layout and include `am/final.mdl`, `graph/HCLr.fst`, `graph/Gr.fst`, and `conf/model.conf`.
+
+Host microphone capture uses `parecord`, `arecord`, or PulseAudio `ffmpeg` on Linux, and AVFoundation `ffmpeg` on macOS. Override capture with `DRONE_DESKTOP_VOICE_CAPTURE_CMD` if the default input selection is wrong.
+
 ### Drone Hub grouping
 
 The Drone Hub sidebar shows drones **grouped into folder-like sections by default** (using each drone’s `group` in the drone registry file). You can toggle to a **flat list** using the switch in the sidebar header.

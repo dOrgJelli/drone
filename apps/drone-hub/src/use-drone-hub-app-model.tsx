@@ -47,6 +47,7 @@ import { useUiPreferencesSettings } from './droneHub/app/use-ui-preferences-sett
 import { removeDroneIdsFromSidebarNodeOrderByParent } from './droneHub/app/sidebar-node-order';
 import { useDeleteActionSettings } from './droneHub/app/use-delete-action-settings';
 import { useFilesystemSettings } from './droneHub/app/use-filesystem-settings';
+import { useDesktopVoiceModelSettings } from './droneHub/app/use-desktop-voice-model-settings';
 import { useAgentMessageAutoContinueSettings } from './droneHub/app/use-agent-message-auto-continue-settings';
 import { useAgentSuggestionSettings } from './droneHub/app/use-agent-suggestion-settings';
 import { useGithubSettings } from './droneHub/app/use-github-settings';
@@ -588,6 +589,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
   const githubSettingsState = useGithubSettings(requestJson);
   const agentsSettingsState = useAgentsSettings(requestJson);
   const filesystemSettingsState = useFilesystemSettings(requestJson);
+  const desktopVoiceModelSettingsState = useDesktopVoiceModelSettings(requestJson);
   const agentMessageAutoContinueSettingsState = useAgentMessageAutoContinueSettings(requestJson);
   const agentSuggestionSettingsState = useAgentSuggestionSettings(requestJson);
   const syncSetsState = useSyncSets(requestJson);
@@ -3300,6 +3302,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
     agentsSettingsState,
     deleteActionSettingsState,
     filesystemSettingsState,
+    desktopVoiceModelSettingsState,
     agentMessageAutoContinueSettingsState,
     agentSuggestionSettingsState,
     syncSetsState,

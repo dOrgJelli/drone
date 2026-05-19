@@ -168,6 +168,9 @@ import { isHubApiAuthorized, isHubApiAuthorizedForWebSocket, rejectWebSocketUpgr
 import { bashQuote, encodeRemotePath, hexEncodeUtf8, normalizeContainerPath, parseBoolParam, shellQuoteIfNeeded } from './hub-format';
 import { readJsonBody, readRawBody, withCors } from './hub-http';
 import { GROQ_TRANSCRIPTION_MAX_BYTES, transcribeAudioWithGroq } from './groq-transcription';
+import { DesktopVoiceService } from './desktop-voice-service';
+import { desktopVoiceModelStatus, removeDesktopVoiceModel, startDesktopVoiceModelInstall } from './desktop-voice-models';
+import { assertDroneDaemonRuntimeReady, resolveDroneDaemonRuntimeDir } from './drone-daemon-runtime';
 import {
   createHubShellSessionName,
   hubChatSessionName,
@@ -8640,27 +8643,49 @@ function resolveDroneCliPath(): string {
   return path.resolve(__dirname, '..', 'cli.ts');
 }
 
-function resolveDroneDaemonJsPath(): string {
-  // dist/hub -> dist/daemon.js
-  return path.resolve(__dirname, '..', 'daemon.js');
-}
-
-function resolveDroneDaemonRuntimeDir(): string {
-  return path.dirname(resolveDroneDaemonJsPath());
-}
-
 function isNotFoundErrorMessage(msg: string): boolean {
   const s = String(msg ?? '').trim().toLowerCase();
   return s.startsWith('404') || s === 'not found' || s.includes('not found');
 }
 
 async function upgradeDroneDaemonInContainer(opts: { containerName: string; containerPort: number }) {
-  // Install the built daemon runtime tree so relative requires continue to resolve.
-  const clearDaemonRuntime = await dvmExec(opts.containerName, 'bash', ['-lc', 'mkdir -p /dvm-data/drone && rm -rf /dvm-data/drone/dist']);
-  if (clearDaemonRuntime.code !== 0) {
-    throw new Error(clearDaemonRuntime.stderr || clearDaemonRuntime.stdout || 'failed clearing daemon runtime in container');
+  // Stage the built daemon runtime first. Do not remove the active runtime until
+  // the replacement has a runnable daemon.js.
+  const runtimeDir = resolveDroneDaemonRuntimeDir();
+  await assertDroneDaemonRuntimeReady(runtimeDir);
+
+  const clearStagedDaemonRuntime = await dvmExec(opts.containerName, 'bash', [
+    '-lc',
+    'mkdir -p /dvm-data/drone && rm -rf /dvm-data/drone/dist.next',
+  ]);
+  if (clearStagedDaemonRuntime.code !== 0) {
+    throw new Error(clearStagedDaemonRuntime.stderr || clearStagedDaemonRuntime.stdout || 'failed clearing staged daemon runtime in container');
   }
-  await dvmCopyToContainer(opts.containerName, resolveDroneDaemonRuntimeDir(), '/dvm-data/drone/dist', { clean: false });
+  await dvmCopyToContainer(opts.containerName, runtimeDir, '/dvm-data/drone/dist.next', { clean: false });
+  const verifyStagedDaemonRuntime = await dvmExec(opts.containerName, 'bash', [
+    '-lc',
+    'test -f /dvm-data/drone/dist.next/daemon.js || { echo "staged daemon runtime is missing /dvm-data/drone/dist.next/daemon.js" 1>&2; exit 1; }',
+  ]);
+  if (verifyStagedDaemonRuntime.code !== 0) {
+    throw new Error(verifyStagedDaemonRuntime.stderr || verifyStagedDaemonRuntime.stdout || 'staged daemon runtime verification failed');
+  }
+  const activateStagedDaemonRuntime = await dvmExec(opts.containerName, 'bash', [
+    '-lc',
+    [
+      'set -euo pipefail',
+      'cd /dvm-data/drone',
+      'rm -rf dist.prev',
+      'if [ -d dist ]; then mv dist dist.prev; fi',
+      'if ! mv dist.next dist; then',
+      '  if [ -d dist.prev ] && [ ! -d dist ]; then mv dist.prev dist; fi',
+      '  exit 1',
+      'fi',
+      'rm -rf dist.prev',
+    ].join('\n'),
+  ]);
+  if (activateStagedDaemonRuntime.code !== 0) {
+    throw new Error(activateStagedDaemonRuntime.stderr || activateStagedDaemonRuntime.stdout || 'failed activating staged daemon runtime in container');
+  }
   const installFleetCli = await dvmExec(opts.containerName, 'bash', ['-lc', installFleetCliScript()]);
   if (installFleetCli.code !== 0) {
     throw new Error(installFleetCli.stderr || installFleetCli.stdout || 'failed installing fleet CLI in container');
@@ -11131,6 +11156,16 @@ export async function startDroneHubApiServer(opts: {
     runDroneBash: async ({ droneId, command, cwd, timeoutMs }) => await assistantRunDroneBash({ droneId, command, cwd, timeoutMs }),
     listDroneChangedFiles: async ({ droneId }) => await assistantListDroneChangedFiles({ droneId }),
   });
+  const desktopVoiceService = new DesktopVoiceService({
+    transcribeWav: async (wav) => {
+      const groqSettings = await resolveGroqApiKeySettings();
+      if (!groqSettings.apiKey) throw new Error('GROQ API key is not configured. Add it in Drone Hub settings.');
+      return await transcribeAudioWithGroq({ audio: wav, apiKey: groqSettings.apiKey, mimeType: 'audio/wav' });
+    },
+    submitAssistantPrompt: async (prompt) => {
+      await assistantService.submitVoicePrompt({ prompt, title: 'Desktop voice thread' });
+    },
+  });
 
   function writeAssistantSseEvent(res: http.ServerResponse, event: string, data: any): void {
     if (res.destroyed || res.writableEnded) return;
@@ -11218,6 +11253,68 @@ export async function startDroneHubApiServer(opts: {
           const status = /too large/i.test(message) ? 413 : /GROQ API key is not configured/i.test(message) ? 400 : 502;
           json(res, status, { ok: false, error: message });
         }
+        return;
+      }
+
+      if (pathname === '/api/assistant/desktop-voice/status' && method === 'GET') {
+        json(res, 200, desktopVoiceService.snapshot());
+        return;
+      }
+
+      if (pathname === '/api/assistant/desktop-voice/toggle' && method === 'POST') {
+        try {
+          json(res, 200, desktopVoiceService.toggle());
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+        }
+        return;
+      }
+
+      if (pathname === '/api/assistant/desktop-voice/clipboard-toggle' && method === 'POST') {
+        try {
+          json(res, 200, await desktopVoiceService.toggleClipboardRecording());
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+        }
+        return;
+      }
+
+      if (pathname === '/api/assistant/desktop-voice/stop' && method === 'POST') {
+        json(res, 200, desktopVoiceService.stop());
+        return;
+      }
+
+      if (pathname === '/api/assistant/desktop-voice/events' && method === 'GET') {
+        res.statusCode = 200;
+        res.setHeader('content-type', 'text/event-stream; charset=utf-8');
+        res.setHeader('cache-control', 'no-cache, no-transform');
+        res.setHeader('connection', 'keep-alive');
+        req.socket.setTimeout(0);
+        (res as any).flushHeaders?.();
+        writeAssistantSseEvent(res, 'connected', { ok: true, at: new Date().toISOString() });
+        const unsubscribe = desktopVoiceService.subscribe((event) => {
+          if (event.type === 'desktop_voice_clipboard_result') {
+            writeAssistantSseEvent(res, event.type, { text: event.text });
+          } else if (event.type === 'desktop_voice_transcript_segment') {
+            writeAssistantSseEvent(res, event.type, { text: event.text });
+          } else {
+            writeAssistantSseEvent(res, event.type, event.status);
+          }
+        });
+        const keepAlive = setInterval(() => {
+          if (res.destroyed || res.writableEnded) return;
+          res.write(': keepalive\n\n');
+        }, 25_000);
+        (keepAlive as any).unref?.();
+        let cleanedUp = false;
+        const cleanup = () => {
+          if (cleanedUp) return;
+          cleanedUp = true;
+          clearInterval(keepAlive);
+          unsubscribe();
+        };
+        req.on('close', cleanup);
+        res.on('close', cleanup);
         return;
       }
 
@@ -11788,6 +11885,41 @@ export async function startDroneHubApiServer(opts: {
             ok: true,
             ...voiceStreamPairingPasswordSettingsResponse(resolved),
           });
+          return;
+        }
+      }
+
+      if (pathname === '/api/settings/desktop-voice/model') {
+        if (method === 'GET') {
+          json(res, 200, desktopVoiceModelStatus());
+          return;
+        }
+        if (method === 'POST') {
+          let body: any = null;
+          try {
+            body = await readJsonBody(req);
+          } catch {
+            body = {};
+          }
+          try {
+            json(res, 202, await startDesktopVoiceModelInstall(String(body?.modelId ?? '').trim() || undefined));
+          } catch (e: any) {
+            json(res, 400, { ok: false, error: e?.message ?? String(e) });
+          }
+          return;
+        }
+        if (method === 'DELETE') {
+          try {
+            let body: any = null;
+            try {
+              body = await readJsonBody(req);
+            } catch {
+              body = {};
+            }
+            json(res, 200, await removeDesktopVoiceModel(String(body?.modelId ?? '').trim() || undefined));
+          } catch (e: any) {
+            json(res, 400, { ok: false, error: e?.message ?? String(e) });
+          }
           return;
         }
       }

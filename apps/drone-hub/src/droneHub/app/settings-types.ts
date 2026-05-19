@@ -47,6 +47,34 @@ export type VoiceStreamPairingPasswordSettingsResponse = {
   password?: string | null;
 };
 
+export type DesktopVoiceModelCatalogEntry = {
+  id: string;
+  label: string;
+  language: string;
+  size: string;
+  bundled: boolean;
+  url: string;
+  archiveName: string;
+  extractedDirName: string;
+  sourceUrl: string;
+};
+
+export type DesktopVoiceModelSettingsResponse = {
+  ok: true;
+  state: 'missing' | 'installed' | 'installing' | 'error';
+  installed: boolean;
+  modelDir: string | null;
+  message: string;
+  error: string | null;
+  installing: boolean;
+  installingModelId: string | null;
+  selectedModelId: string;
+  effectiveModelId: string | null;
+  startedAt: string | null;
+  updatedAt: string | null;
+  catalog: DesktopVoiceModelCatalogEntry[];
+};
+
 export type HubLogsResponse = {
   ok: true;
   logPath: string;

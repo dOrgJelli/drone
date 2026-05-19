@@ -16,6 +16,7 @@ import type { UseDeleteActionSettingsResult } from './use-delete-action-settings
 import type { UseAgentsSettingsResult } from './use-agents-settings';
 import type { UseAgentMessageAutoContinueSettingsResult } from './use-agent-message-auto-continue-settings';
 import type { UseAgentSuggestionSettingsResult } from './use-agent-suggestion-settings';
+import type { UseDesktopVoiceModelSettingsResult } from './use-desktop-voice-model-settings';
 import type { UseFilesystemSettingsResult } from './use-filesystem-settings';
 import type { UseGithubSettingsResult } from './use-github-settings';
 import type { UseHubLogsResult } from './use-hub-logs';
@@ -33,6 +34,7 @@ type SettingsViewProps = {
   skillLibrary: UseSkillLibraryResult;
   deleteAction: UseDeleteActionSettingsResult;
   filesystem: UseFilesystemSettingsResult;
+  desktopVoiceModel: UseDesktopVoiceModelSettingsResult;
   syncSets: UseSyncSetsResult;
   profile: UseProfileSettingsResult;
   hubLogsState: UseHubLogsResult;
@@ -64,6 +66,7 @@ export function SettingsView({
   skillLibrary,
   deleteAction,
   filesystem,
+  desktopVoiceModel,
   syncSets,
   profile,
   hubLogsState,
@@ -89,6 +92,7 @@ export function SettingsView({
     agentSuggestion.agentSuggestionSettingsLoading ||
     deleteAction.deleteSettingsLoading ||
     filesystem.filesystemSettingsLoading ||
+    desktopVoiceModel.desktopVoiceModelSettingsLoading ||
     syncSets.syncSetsLoading ||
     profile.profileSettingsLoading ||
     deleteAction.archivedDronesLoading ||
@@ -114,6 +118,8 @@ export function SettingsView({
     skillLibrary.skillsDeleting ||
     deleteAction.savingDeleteSettings ||
     filesystem.savingFilesystemSettings ||
+    desktopVoiceModel.installingDesktopVoiceModel ||
+    desktopVoiceModel.removingDesktopVoiceModel ||
     syncSets.creatingSyncSet ||
     Boolean(syncSets.savingSyncSetId) ||
     Boolean(syncSets.deletingSyncSetId) ||
@@ -154,6 +160,7 @@ export function SettingsView({
     void github.loadGithubSettings();
     void deleteAction.loadDeleteSettings();
     void filesystem.loadFilesystemSettings();
+    void desktopVoiceModel.loadDesktopVoiceModelSettings();
     void syncSets.loadSyncSets();
     void agents.loadAgentsSettings();
     void deleteAction.loadArchivedDrones();
@@ -162,7 +169,7 @@ export function SettingsView({
     void hubLogsState.loadHubLogs();
     void skillLibrary.loadSkills();
     void skillLibrary.loadSkillSources();
-  }, [agentMessageAutoContinue, agentSuggestion, agents, agentsDraftDirty, deleteAction, filesystem, github, hubLogsState, llm, profile, skillLibrary, syncSets]);
+  }, [agentMessageAutoContinue, agentSuggestion, agents, agentsDraftDirty, deleteAction, desktopVoiceModel, filesystem, github, hubLogsState, llm, profile, skillLibrary, syncSets]);
 
   const renderActiveTab = () => {
     if (activeTab === 'general') {
@@ -171,6 +178,7 @@ export function SettingsView({
           github={github}
           llm={llm}
           filesystem={filesystem}
+          desktopVoiceModel={desktopVoiceModel}
           agentMessageAutoContinue={agentMessageAutoContinue}
           agentSuggestion={agentSuggestion}
           transcriptInlineImages={transcriptInlineImages}

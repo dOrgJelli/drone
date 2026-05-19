@@ -160,6 +160,10 @@ type DroneRegistryV1 = {
       pairingPassword?: string;
       updatedAt?: string;
     };
+    desktopVoice?: {
+      modelId?: string;
+      updatedAt?: string;
+    };
     filesystem?: {
       uploadMaxBytes?: number;
       updatedAt?: string;
