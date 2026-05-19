@@ -34,7 +34,14 @@ import { profileStorageKey } from '../../profile-storage';
 
 type Updater<T> = T | ((prev: T) => T);
 
-type NameSuggestToast = null | { id: string; title?: string; message: string; tone?: 'success' | 'error' };
+type NameSuggestToast = null | {
+  id: string;
+  title?: string;
+  message: string;
+  tone?: 'success' | 'error';
+  voiceLevel?: number;
+  voiceActive?: boolean;
+};
 type ViewMode = 'grouped' | 'flat';
 type SidebarGroupingMode = 'groups' | 'repos';
 type FsExplorerView = 'list' | 'thumb';

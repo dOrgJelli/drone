@@ -29,6 +29,32 @@ describe('editable shortcut dispatch', () => {
     expect(out).toBe(false);
   });
 
+  test('allows voice transcription shortcut from chat inputs', () => {
+    expect(
+      shouldDispatchEditableShortcutAction({
+        matchedActionId: 'toggleVoiceClipboardRecording',
+        targetInPrimaryChatInput: true,
+        targetInCanvasMessageInput: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldDispatchEditableShortcutAction({
+        matchedActionId: 'toggleVoiceClipboardRecording',
+        targetInPrimaryChatInput: false,
+        targetInCanvasMessageInput: true,
+      }),
+    ).toBe(true);
+  });
+
+  test('does not allow voice transcription shortcut from unrelated editable inputs', () => {
+    const out = shouldDispatchEditableShortcutAction({
+      matchedActionId: 'toggleVoiceClipboardRecording',
+      targetInPrimaryChatInput: false,
+      targetInCanvasMessageInput: false,
+    });
+    expect(out).toBe(false);
+  });
+
   test('does not allow create-chat shortcut from chat inputs', () => {
     expect(
       shouldDispatchEditableShortcutAction({

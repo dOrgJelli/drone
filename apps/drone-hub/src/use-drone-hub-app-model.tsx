@@ -864,14 +864,42 @@ export function useDroneHubAppModel(): DroneHubAppModel {
   }, []);
 
   const showShortcutToast = React.useCallback(
-    (message: string, title: string, tone: 'success' | 'error' = 'error') => {
+    (
+      message: string,
+      title: string,
+      tone: 'success' | 'error' = 'error',
+      opts: { voiceActive?: boolean; voiceLevel?: number; autoDismissMs?: number | null } = {},
+    ) => {
       const text = String(message ?? '').trim();
-      if (!text) return;
+      if (!text) return null;
       const id = makeId();
-      setNameSuggestToast({ id, title, message: text, tone });
-      window.setTimeout(() => {
-        setNameSuggestToast((current) => (current?.id === id ? null : current));
-      }, 5000);
+      setNameSuggestToast({
+        id,
+        title,
+        message: text,
+        tone,
+        voiceActive: opts.voiceActive,
+        voiceLevel: opts.voiceLevel,
+      });
+      if (opts.autoDismissMs !== null) {
+        window.setTimeout(() => {
+          setNameSuggestToast((current) => (current?.id === id ? null : current));
+        }, opts.autoDismissMs ?? 5000);
+      }
+      return id;
+    },
+    [setNameSuggestToast],
+  );
+  const updateShortcutVoiceToast = React.useCallback(
+    (id: string, voiceLevel: number, patch: { message?: string; title?: string; tone?: 'success' | 'error'; voiceActive?: boolean } = {}) => {
+      setNameSuggestToast((current) => {
+        if (!current || current.id !== id) return current;
+        return {
+          ...current,
+          ...patch,
+          voiceLevel: Math.max(0, Math.min(1, Number(voiceLevel) || 0)),
+        };
+      });
     },
     [setNameSuggestToast],
   );
@@ -879,6 +907,7 @@ export function useDroneHubAppModel(): DroneHubAppModel {
   const { toggleVoiceClipboardRecording } = useVoiceClipboardRecorder({
     requestJson,
     showToast: showShortcutToast,
+    updateVoiceToast: updateShortcutVoiceToast,
   });
   const {
     deletingDrones,

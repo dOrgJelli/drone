@@ -72,7 +72,7 @@ export function computeTranscriptAutoScrollDecision({
 
 export function shouldDispatchEditableShortcutAction(_args: EditableShortcutDispatchArgs): boolean {
   const { matchedActionId, targetInPrimaryChatInput, targetInCanvasMessageInput } = _args;
-  if (matchedActionId === 'createDraftDrone') {
+  if (matchedActionId === 'createDraftDrone' || matchedActionId === 'toggleVoiceClipboardRecording') {
     return targetInPrimaryChatInput || targetInCanvasMessageInput;
   }
   return false;
