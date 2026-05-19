@@ -74,11 +74,17 @@ type DesktopVoiceEvent = {
 } | {
   type: 'desktop_voice_speak';
   text: string;
+} | {
+  type: 'desktop_voice_speak_audio';
+  text: string;
+  contentType: 'audio/wav';
+  audioBase64: string;
 };
 
 type DesktopVoiceServiceOptions = {
   transcribeWav: (wav: Buffer) => Promise<{ text: string; model: string }>;
   submitAssistantPrompt: (prompt: string) => Promise<void>;
+  synthesizeSpeechWav?: (text: string) => Promise<Buffer>;
 };
 
 const VOSK_WAKE_GRAMMAR = [
@@ -583,9 +589,19 @@ export class DesktopVoiceService {
     };
   }
 
-  speak(text: string): boolean {
+  async speak(text: string): Promise<boolean> {
     const trimmed = String(text ?? '').trim();
     if (!trimmed || this.desktopSubscriberCount <= 0) return false;
+    if (this.opts.synthesizeSpeechWav) {
+      const wav = await this.opts.synthesizeSpeechWav(trimmed);
+      this.events.emit('event', {
+        type: 'desktop_voice_speak_audio',
+        text: trimmed,
+        contentType: 'audio/wav',
+        audioBase64: wav.toString('base64'),
+      } satisfies DesktopVoiceEvent);
+      return true;
+    }
     this.events.emit('event', { type: 'desktop_voice_speak', text: trimmed } satisfies DesktopVoiceEvent);
     return true;
   }
@@ -856,21 +872,21 @@ export class DesktopVoiceService {
   }
 
   private async finishAssistantPromptRecordingFromTranscript(): Promise<void> {
+    const text = this.promptTranscriptText.trim();
     this.promptChunks = [];
     this.promptSegments = [];
     this.promptSegmenter.reset();
-    this.mode = 'transcribing';
-    this.message = 'Sending assistant voice prompt.';
+    this.mode = 'sleeping';
+    this.message = text ? 'Asleep: sending assistant voice prompt.' : 'Asleep: no assistant prompt detected.';
+    this.promptTranscribing = false;
     this.touch();
     this.emitChange();
+    if (!text) return;
     try {
-      const text = this.promptTranscriptText.trim();
-      if (text) await this.opts.submitAssistantPrompt(text);
-      this.mode = 'sleeping';
-      this.message = text ? 'Asleep: sent assistant voice prompt.' : 'Asleep: no assistant prompt detected.';
+      await this.opts.submitAssistantPrompt(text);
+      if (this.mode === 'sleeping') this.message = 'Asleep: sent assistant voice prompt.';
     } catch (error: any) {
-      this.mode = 'sleeping';
-      this.message = `Assistant voice prompt failed: ${error?.message ?? String(error)}`;
+      if (this.mode === 'sleeping') this.message = `Assistant voice prompt failed: ${error?.message ?? String(error)}`;
     }
     this.promptTranscribing = false;
     this.touch();

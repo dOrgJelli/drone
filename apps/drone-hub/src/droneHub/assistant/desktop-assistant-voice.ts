@@ -44,6 +44,7 @@ let lastCueKey = '';
 let lastCueAt = 0;
 let toggleInFlight = false;
 let lastToggleAt = 0;
+let currentSpeechAudio: HTMLAudioElement | null = null;
 
 function cueForTransition(previous: DesktopAssistantVoiceStatus | null, next: DesktopAssistantVoiceStatus): LocalVoiceCue | null {
   if (!previous) return null;
@@ -76,10 +77,28 @@ function speakDesktopVoiceText(text: string): void {
   if (typeof window === 'undefined' || !('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') return;
   const trimmed = text.trim();
   if (!trimmed) return;
+  currentSpeechAudio?.pause();
+  currentSpeechAudio = null;
   window.speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(trimmed);
   utterance.lang = 'en-US';
   window.speechSynthesis.speak(utterance);
+}
+
+function speakDesktopVoiceAudio(audioBase64: string, contentType = 'audio/wav'): void {
+  if (typeof window === 'undefined' || typeof Audio === 'undefined') return;
+  const trimmed = audioBase64.trim();
+  if (!trimmed) return;
+  if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+  currentSpeechAudio?.pause();
+  const audio = new Audio(`data:${contentType};base64,${trimmed}`);
+  currentSpeechAudio = audio;
+  audio.addEventListener('ended', () => {
+    if (currentSpeechAudio === audio) currentSpeechAudio = null;
+  });
+  audio.play().catch(() => {
+    if (currentSpeechAudio === audio) currentSpeechAudio = null;
+  });
 }
 
 async function requestDesktopVoiceToggle(): Promise<void> {
@@ -154,6 +173,16 @@ export function subscribeAssistantDesktopVoiceStatus(listener: (status: DesktopA
         const data = JSON.parse((event as MessageEvent).data);
         const text = String(data?.text ?? '').trim();
         if (text) speakDesktopVoiceText(text);
+      } catch {
+        // Ignore malformed event payloads.
+      }
+    });
+    source.addEventListener('desktop_voice_speak_audio', (event) => {
+      try {
+        const data = JSON.parse((event as MessageEvent).data);
+        const audioBase64 = String(data?.audioBase64 ?? '').trim();
+        const contentType = String(data?.contentType ?? 'audio/wav').trim() || 'audio/wav';
+        if (audioBase64) speakDesktopVoiceAudio(audioBase64, contentType);
       } catch {
         // Ignore malformed event payloads.
       }
