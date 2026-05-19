@@ -50,4 +50,39 @@ describe('DesktopVoiceService', () => {
     expect(speakEvent?.contentType).toBe('audio/wav');
     expect(speakEvent?.audioBase64).toBe(Buffer.from('wav-bytes').toString('base64'));
   });
+
+  test('cancels clipboard recording without transcribing buffered audio', () => {
+    let transcribeCalls = 0;
+    const service = new DesktopVoiceService({
+      transcribeWav: async () => {
+        transcribeCalls += 1;
+        return { text: 'ignored', model: 'test' };
+      },
+      submitAssistantPrompt: async () => {},
+    });
+
+    (service as any).clipboardMode = 'recording';
+    (service as any).clipboardMessage = 'Voice transcription recording.';
+    (service as any).clipboardChunks = [Buffer.from([1, 2, 3, 4])];
+
+    const status = service.cancelClipboardRecording();
+
+    expect(status.clipboard.mode).toBe('idle');
+    expect(status.clipboard.message).toBe('Voice transcription cancelled.');
+    expect((service as any).clipboardChunks).toEqual([]);
+    expect(transcribeCalls).toBe(0);
+  });
+
+  test('suppresses a late clipboard start after cancel', async () => {
+    const service = new DesktopVoiceService({
+      transcribeWav: async () => ({ text: 'ignored', model: 'test' }),
+      submitAssistantPrompt: async () => {},
+    });
+
+    service.cancelClipboardRecording();
+    const status = await service.toggleClipboardRecording();
+
+    expect(status.clipboard.mode).toBe('idle');
+    expect(status.capture.active).toBe(false);
+  });
 });

@@ -11323,6 +11323,15 @@ export async function startDroneHubApiServer(opts: {
         return;
       }
 
+      if (pathname === '/api/assistant/desktop-voice/clipboard-cancel' && method === 'POST') {
+        try {
+          json(res, 200, desktopVoiceService.cancelClipboardRecording());
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+        }
+        return;
+      }
+
       if (pathname === '/api/assistant/desktop-voice/stop' && method === 'POST') {
         json(res, 200, desktopVoiceService.stop());
         return;

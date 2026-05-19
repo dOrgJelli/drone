@@ -30,8 +30,11 @@ type DesktopVoiceStatus = {
 };
 
 async function toggleHostClipboardRecording(): Promise<DesktopVoiceStatus> {
+  const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
   const response = await fetch('/api/assistant/desktop-voice/clipboard-toggle', { method: 'POST' });
   const text = await response.text();
+  const elapsedMs = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt);
+  console.debug('[voice-clipboard] clipboard-toggle response', { elapsedMs, ok: response.ok });
   let data: any = null;
   if (text) {
     try {
@@ -42,6 +45,13 @@ async function toggleHostClipboardRecording(): Promise<DesktopVoiceStatus> {
   }
   if (!response.ok) throw new Error(String(data?.error ?? `${response.status} ${response.statusText}`));
   return data as DesktopVoiceStatus;
+}
+
+async function cancelHostClipboardRecording(): Promise<void> {
+  const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+  const response = await fetch('/api/assistant/desktop-voice/clipboard-cancel', { method: 'POST' });
+  const elapsedMs = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt);
+  console.debug('[voice-clipboard] clipboard-cancel response', { elapsedMs, ok: response.ok });
 }
 
 export function useVoiceClipboardRecorder(opts: {
@@ -107,12 +117,14 @@ export function useVoiceClipboardRecorder(opts: {
     if (pendingSinglePressTimerRef.current != null) {
       clearPendingSinglePress();
       recordingToastIdRef.current = null;
+      void cancelHostClipboardRecording();
       dispatchAssistantDesktopVoiceToggle();
       showToast('Toggled desktop assistant voice.', 'Desktop voice', 'success');
       return true;
     }
+    void runSinglePressAction();
     pendingSinglePressTimerRef.current = window.setTimeout(() => {
-      void runSinglePressAction();
+      pendingSinglePressTimerRef.current = null;
     }, DOUBLE_PRESS_MS);
     return true;
   }, [clearPendingSinglePress, runSinglePressAction, showToast]);

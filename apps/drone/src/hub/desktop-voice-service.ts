@@ -358,6 +358,7 @@ class HostMicrophoneCapture extends EventEmitter {
   private startupTimer: NodeJS.Timeout | null = null;
   private candidates: CaptureCommand[] = [];
   private candidateIndex = 0;
+  private candidateStartedAt = 0;
 
   snapshot(): DesktopVoiceStatus['capture'] {
     return {
@@ -426,12 +427,20 @@ class HostMicrophoneCapture extends EventEmitter {
     }
     this.candidateIndex += 1;
     this.backend = candidate.label;
+    this.candidateStartedAt = Date.now();
     let stderr = '';
     let receivedAudio = false;
     try {
       const child = spawn(candidate.command, candidate.args, { stdio: ['ignore', 'pipe', 'pipe'] });
       this.child = child;
       child.stdout?.on('data', (chunk: Buffer) => {
+        if (!receivedAudio) {
+          desktopVoiceLog('host mic capture first audio', {
+            backend: candidate.label,
+            elapsedMs: Date.now() - this.candidateStartedAt,
+            bytes: chunk.length,
+          });
+        }
         receivedAudio = true;
         this.bytes += chunk.length;
         this.level = normalizeLevel(pcm16leRms(chunk));
@@ -515,6 +524,7 @@ export class DesktopVoiceService {
   private clipboardError: string | null = null;
   private clipboardChunks: Buffer[] = [];
   private clipboardStartedCapture = false;
+  private clipboardStartSuppressedUntil = 0;
 
   constructor(private readonly opts: DesktopVoiceServiceOptions) {
     this.capture.on('change', () => this.emitChange());
@@ -660,6 +670,11 @@ export class DesktopVoiceService {
       return this.snapshot();
     }
     if (this.clipboardMode === 'transcribing') return this.snapshot();
+    if (Date.now() < this.clipboardStartSuppressedUntil) {
+      desktopVoiceLog('voice clipboard recording start suppressed after cancel');
+      return this.snapshot();
+    }
+    const requestedAt = Date.now();
     desktopVoiceLog('voice clipboard recording start requested');
     this.clipboardMode = 'recording';
     this.clipboardMessage = 'Voice transcription recording.';
@@ -667,6 +682,31 @@ export class DesktopVoiceService {
     this.clipboardChunks = [];
     this.clipboardStartedCapture = !this.capture.snapshot().active;
     if (this.clipboardStartedCapture) this.capture.start();
+    desktopVoiceLog('voice clipboard recording armed', {
+      startedCapture: this.clipboardStartedCapture,
+      elapsedMs: Date.now() - requestedAt,
+      capture: this.capture.snapshot(),
+    });
+    this.touch();
+    this.emitChange();
+    return this.snapshot();
+  }
+
+  cancelClipboardRecording(message = 'Voice transcription cancelled.'): DesktopVoiceStatus {
+    this.clipboardStartSuppressedUntil = Date.now() + 800;
+    if (this.clipboardMode !== 'recording') return this.snapshot();
+    desktopVoiceLog('voice clipboard recording cancelled', {
+      chunks: this.clipboardChunks.length,
+      bytes: this.clipboardChunks.reduce((total, chunk) => total + chunk.byteLength, 0),
+      startedCapture: this.clipboardStartedCapture,
+    });
+    const shouldStopCapture = this.clipboardStartedCapture && this.mode === 'off';
+    this.clipboardChunks = [];
+    this.clipboardMode = 'idle';
+    this.clipboardMessage = message;
+    this.clipboardError = null;
+    this.clipboardStartedCapture = false;
+    if (shouldStopCapture) this.capture.stop();
     this.touch();
     this.emitChange();
     return this.snapshot();
