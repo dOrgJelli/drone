@@ -551,6 +551,16 @@ export function stripTranscriptCommands(text: string): {
     return " ";
   });
 
+  cleaned = cleaned.replace(/\bcan\s+you\s+transcribe\b[\s,.:;!?-]*/gi, () => {
+    wakeDetected = true;
+    return " ";
+  });
+
+  cleaned = cleaned.replace(/\btranscribe\b[\s,.:;!?-]*/gi, () => {
+    wakeDetected = true;
+    return " ";
+  });
+
   cleaned = cleaned.replace(/\b(?:that's|thats|that\s+is)\s+it\b[\s,.:;!?-]*/gi, (match) => {
     sleepDetected = true;
     sleepPhrase = match.trim();

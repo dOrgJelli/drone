@@ -167,6 +167,8 @@ class VoskWakeWordDetector(
             "hay",
             "sebastian",
             "patch me in",
+            "can you transcribe",
+            "transcribe",
             "status",
             "state us",
             "state is",
