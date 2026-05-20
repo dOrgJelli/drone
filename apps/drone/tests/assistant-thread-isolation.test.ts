@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { HubAssistantService } from '../src/hub/assistant';
+import { updateRegistry } from '../src/host/registry';
 import { withTempDroneDataDir } from './test-helpers';
 
 function deferred<T = void>(): {
@@ -104,6 +105,24 @@ function makeService(): HubAssistantService {
   });
 }
 
+async function markDroneReady(input: { id: string; name: string; runtime?: string; group?: string | null; repoPath?: string }): Promise<void> {
+  const now = new Date().toISOString();
+  await updateRegistry((reg: any) => {
+    reg.pending = reg.pending ?? {};
+    delete reg.pending[input.id];
+    reg.drones = reg.drones ?? {};
+    reg.drones[input.id] = {
+      id: input.id,
+      name: input.name,
+      group: input.group ?? undefined,
+      runtime: input.runtime ?? 'container',
+      repoPath: input.repoPath ?? '',
+      createdAt: now,
+      chats: { default: { createdAt: now, turns: [] } },
+    };
+  });
+}
+
 describe('assistant thread isolation', () => {
   test('defaults new assistant threads to OpenAI when Codex is not connected', async () => {
     await withTempDroneDataDir('assistant-default-openai-', async (droneDataDir) => {
@@ -194,7 +213,10 @@ describe('assistant thread isolation', () => {
     await withTempDroneDataDir('assistant-created-drone-scope-', async () => {
       const service = new HubAssistantService({
         listDrones: async () => [],
-        createDrone: async () => ({ id: 'drone-new', name: 'Drone New', runtime: 'container' }),
+        createDrone: async () => {
+          await markDroneReady({ id: 'drone-new', name: 'Drone New' });
+          return { id: 'drone-new', name: 'Drone New', runtime: 'container' };
+        },
         setDroneGroup: async () => {
           throw new Error('not implemented');
         },
@@ -221,6 +243,169 @@ describe('assistant thread isolation', () => {
       const snapshot = await service.snapshot();
       const thread = snapshot.threads.find((item) => item.id === threadId) as any;
       expect(thread.accessScope).toMatchObject({ readMode: 'selected', writeMode: 'selected', droneIds: ['drone-new'] });
+    });
+  });
+
+  test('creates assistant drones without approval and forces container runtime', async () => {
+    await withTempDroneDataDir('assistant-create-drone-container-', async () => {
+      const now = new Date().toISOString();
+      await updateRegistry((reg: any) => {
+        reg.drones = {
+          'source-host': {
+            id: 'source-host',
+            name: 'Source Host',
+            group: 'Review',
+            runtime: 'host',
+            repoPath: '/tmp/source-host',
+            createdAt: now,
+            chats: {
+              default: {
+                createdAt: now,
+                agent: { kind: 'builtin', id: 'codex' },
+                model: 'gpt-5.5',
+                turns: [],
+              },
+            },
+          },
+        };
+      });
+      const requests: any[] = [];
+      const service = new HubAssistantService({
+        listDrones: async () => [{ id: 'source-host', name: 'Source Host', group: 'Review', runtime: 'host', repoPath: '/tmp/source-host', status: 'ready', chats: ['default'] }],
+        createDrone: async (request) => {
+          requests.push(request);
+          setTimeout(() => {
+            void markDroneReady({ id: 'drone-new', name: request.name, runtime: request.runtime, group: 'Review', repoPath: '/tmp/source-host' });
+          }, 10);
+          return { id: 'drone-new', name: request.name, runtime: request.runtime, phase: 'starting' };
+        },
+        setDroneGroup: async () => {
+          throw new Error('not implemented');
+        },
+        messageDrone: async () => {
+          throw new Error('not implemented');
+        },
+      });
+      installFakeRuntime(service, {});
+      service.updateAppContext({ activeDroneId: 'source-host', activeDroneName: 'Source Host', activeChatName: 'default', appView: 'workspace' });
+      const snapshot = await service.createThread({ title: 'create container' });
+      const threadId = snapshot.activeThreadId;
+      const approvals: any[] = [];
+
+      const preflight = await (service as any).beforeToolCall(
+        threadId,
+        { toolCall: { id: 'create-call', name: 'create_drone' }, args: { name: 'New Drone' } },
+        async (event: any) => {
+          if (event.type === 'approval_pending') approvals.push(event.approval);
+        },
+      );
+      const runtime = await (service as any).runtime();
+      const tools = (service as any).buildTools(runtime, threadId, null);
+      const createDrone = tools.find((tool: any) => tool.name === 'create_drone');
+      const result = await createDrone.execute('create-call', { name: 'New Drone' });
+
+      expect(preflight).toBeUndefined();
+      expect(approvals).toHaveLength(0);
+      expect(requests[0]).toMatchObject({
+        name: 'New Drone',
+        runtime: 'container',
+        group: 'Review',
+        repoPath: '/tmp/source-host',
+        seedAgent: { kind: 'builtin', id: 'codex' },
+        seedModel: 'gpt-5.5',
+      });
+      expect(result.details).toMatchObject({ phase: 'ready', ready: { id: 'drone-new', name: 'New Drone', runtime: 'container' } });
+      await expect(createDrone.execute('create-host', { name: 'Host Drone', runtime: 'host' })).rejects.toThrow('assistant-created drones must use container runtime');
+    });
+  });
+
+  test('clones container drones without approval and rejects host clone sources', async () => {
+    await withTempDroneDataDir('assistant-clone-drone-', async () => {
+      const now = new Date().toISOString();
+      await updateRegistry((reg: any) => {
+        reg.drones = {
+          'source-container': {
+            id: 'source-container',
+            name: 'Source Container',
+            group: 'Build',
+            runtime: 'container',
+            repoPath: '/tmp/source-container',
+            createdAt: now,
+            chats: { default: { createdAt: now, turns: [] } },
+          },
+          'source-host': {
+            id: 'source-host',
+            name: 'Source Host',
+            group: 'Build',
+            runtime: 'host',
+            repoPath: '/tmp/source-host',
+            createdAt: now,
+            chats: { default: { createdAt: now, turns: [] } },
+          },
+        };
+        reg.pending = {
+          'source-pending': {
+            id: 'source-pending',
+            name: 'Source Pending',
+            group: 'Build',
+            runtime: 'container',
+            repoPath: '/tmp/source-pending',
+            createdAt: now,
+            phase: 'starting',
+          },
+        };
+      });
+      const requests: any[] = [];
+      const service = new HubAssistantService({
+        listDrones: async () => [
+          { id: 'source-container', name: 'Source Container', group: 'Build', runtime: 'container', repoPath: '/tmp/source-container', status: 'ready', chats: ['default'] },
+          { id: 'source-host', name: 'Source Host', group: 'Build', runtime: 'host', repoPath: '/tmp/source-host', status: 'ready', chats: ['default'] },
+        ],
+        createDrone: async (request) => {
+          requests.push(request);
+          await markDroneReady({ id: 'clone-new', name: request.name, runtime: request.runtime, group: 'Build', repoPath: '/tmp/source-container' });
+          return { id: 'clone-new', name: request.name, runtime: request.runtime, phase: 'starting' };
+        },
+        setDroneGroup: async () => {
+          throw new Error('not implemented');
+        },
+        messageDrone: async () => {
+          throw new Error('not implemented');
+        },
+      });
+      installFakeRuntime(service, {});
+      const snapshot = await service.createThread({ title: 'clone container' });
+      const threadId = snapshot.activeThreadId;
+      const approvals: any[] = [];
+
+      const preflight = await (service as any).beforeToolCall(
+        threadId,
+        { toolCall: { id: 'clone-call', name: 'clone_drone' }, args: { sourceDroneId: 'source-container', name: 'Clone New' } },
+        async (event: any) => {
+          if (event.type === 'approval_pending') approvals.push(event.approval);
+        },
+      );
+      const runtime = await (service as any).runtime();
+      const tools = (service as any).buildTools(runtime, threadId, null);
+      const cloneDrone = tools.find((tool: any) => tool.name === 'clone_drone');
+      const result = await cloneDrone.execute('clone-call', { sourceDroneId: 'source-container', name: 'Clone New' });
+
+      expect(preflight).toBeUndefined();
+      expect(approvals).toHaveLength(0);
+      expect(requests[0]).toMatchObject({
+        name: 'Clone New',
+        runtime: 'container',
+        cloneFrom: 'source-container',
+        cloneChats: true,
+        group: 'Build',
+      });
+      expect(result.details).toMatchObject({ phase: 'ready', ready: { id: 'clone-new', name: 'Clone New', runtime: 'container' } });
+      await expect(cloneDrone.execute('clone-host', { sourceDroneId: 'source-host', name: 'Clone Host' })).rejects.toThrow(
+        'clone source must use container runtime: source-host',
+      );
+      await expect(cloneDrone.execute('clone-pending', { sourceDroneId: 'source-pending', name: 'Clone Pending' })).rejects.toThrow(
+        'clone source must be a ready drone: source-pending',
+      );
     });
   });
 

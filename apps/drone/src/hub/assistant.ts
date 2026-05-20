@@ -538,6 +538,8 @@ const CHAT_IDLE_DEFAULT_IDLE_FOR_MS = 1000;
 const CHAT_IDLE_SUBSCRIPTION_EXPIRES_AFTER_MS = 24 * 60 * 60 * 1000;
 const CHAT_IDLE_MAX_SUBSCRIPTIONS = 200;
 const CHAT_IDLE_MAX_TARGETS = 20;
+const DRONE_READY_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
+const DRONE_READY_POLL_INTERVAL_MS = 250;
 const ASSISTANT_BASH_DEFAULT_TIMEOUT_MS = 30_000;
 const ASSISTANT_BASH_MAX_TIMEOUT_MS = 120_000;
 const ASSISTANT_SEARCH_MAX_CONTEXT_LINES = 10;
@@ -565,11 +567,12 @@ const ASSISTANT_SYSTEM_PROMPT_DEFAULT = [
   'Chat timelines contain user messages and agent messages. Queued or pending user messages appear in the same timeline with a non-completed status.',
   'When you send a drone chat message and need the result later, call subscribe_to_chats_idle on the target chat. This returns immediately so you can continue other work. If there is nothing else to do, end your turn; the system will resume this thread when the subscribed chats become idle.',
   'Do not load more chat pages than needed. Start with the latest page.',
-  'Creating drones, changing drone groups, sending a user message to a drone, and running bash in a drone are actions that require user approval; explain briefly what you intend to do.',
+  'Creating or cloning drones does not require approval, and assistant-created drones must use the container (Docker) runtime. Changing drone groups, sending a user message to a drone, and running bash in a drone require user approval; explain briefly what you intend to do.',
   'File write tools require write access to the target drone and should be used carefully for concrete code or content edits.',
   'If an approval-gated write tool returns successfully, the user already approved that action. Do not ask for the same approval again.',
   'Voice threads can use speak to send short spoken replies back to the voice device that started the request.',
-  'When creating a drone, omit fields you want inherited from the current open drone. Only set repoBranchSource=remote when the user asked for a remote branch and you have a remoteBranch value.',
+  'When creating a drone, omit fields you want inherited from the current open drone. Runtime is always container even if the source drone uses host runtime. Only set repoBranchSource=remote when the user asked for a remote branch and you have a remoteBranch value.',
+  'Use clone_drone when the user asks for a copy of an existing ready container drone. Create and clone return after the new drone is ready; if you provided an initial message, subscribe to the new drone default chat when you need to resume after the drone responds.',
   'Do not claim a drone completed work unless the drone transcript or user says so.',
   'Keep responses practical and short.',
 ].join('\n');
@@ -594,7 +597,8 @@ const ASSISTANT_TOOL_SUMMARIES: AssistantToolSummary[] = [
   { name: 'search_chat_messages', label: 'Search chat messages', category: 'chats', description: 'Search user and agent messages across drone chats.' },
   { name: 'subscribe_to_chats_idle', label: 'Subscribe to chats idle', category: 'chats', description: 'Resume this thread when subscribed drone chats become idle.' },
   { name: 'speak', label: 'Speak', category: 'actions', description: 'Send a short spoken reply to the connected Android or desktop voice device.' },
-  { name: 'create_drone', label: 'Create drone', category: 'actions', description: 'Create a new drone after user approval.' },
+  { name: 'create_drone', label: 'Create drone', category: 'actions', description: 'Create a new container drone.' },
+  { name: 'clone_drone', label: 'Clone drone', category: 'actions', description: 'Clone an existing container drone into a new container drone.' },
   { name: 'set_drone_group', label: 'Set drone group', category: 'actions', description: 'Move drones to a group after user approval.' },
   { name: 'message_drone', label: 'Send user message to drone', category: 'actions', description: 'Send a user message to a drone chat after approval.' },
 ];
@@ -841,17 +845,30 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-function droneEntryByAssistantId(regAny: any, droneIdRaw: unknown): { id: string; drone: any } {
+function droneEntryInAssistantCollection(collection: any, droneIdRaw: unknown): { id: string; key: string; drone: any } | null {
   const droneId = String(droneIdRaw ?? '').trim();
-  const drones = regAny?.drones && typeof regAny.drones === 'object' ? regAny.drones : {};
+  const drones = collection && typeof collection === 'object' ? collection : {};
   const direct = drones[droneId];
-  if (direct) return { id: droneId, drone: direct };
+  if (direct) return { id: String((direct as any)?.id ?? droneId).trim() || droneId, key: droneId, drone: direct };
   for (const [id, drone] of Object.entries(drones) as any[]) {
     const stableId = String((drone as any)?.id ?? id).trim();
     const name = String((drone as any)?.name ?? '').trim();
-    if (stableId === droneId || name === droneId) return { id: stableId || id, drone };
+    if (stableId === droneId || name === droneId) return { id: stableId || id, key: id, drone };
   }
-  throw new Error(`unknown drone: ${droneId}`);
+  return null;
+}
+
+function droneEntryByAssistantId(regAny: any, droneIdRaw: unknown): { id: string; drone: any } {
+  for (const collection of [regAny?.drones, regAny?.pending]) {
+    const found = droneEntryInAssistantCollection(collection, droneIdRaw);
+    if (found) return { id: found.id, drone: found.drone };
+  }
+  throw new Error(`unknown drone: ${String(droneIdRaw ?? '').trim()}`);
+}
+
+function realDroneEntryByAssistantId(regAny: any, droneIdRaw: unknown): { id: string; drone: any } | null {
+  const found = droneEntryInAssistantCollection(regAny?.drones, droneIdRaw);
+  return found ? { id: found.id, drone: found.drone } : null;
 }
 
 function droneIdByAssistantRef(regAny: any, droneIdRaw: unknown): string {
@@ -873,6 +890,12 @@ function droneIdByAssistantRef(regAny: any, droneIdRaw: unknown): string {
 function normalizeAssistantRuntime(raw: unknown, fallbackRaw: unknown): 'container' | 'host' {
   const value = String(raw ?? fallbackRaw ?? '').trim().toLowerCase();
   return value === 'host' ? 'host' : 'container';
+}
+
+function normalizeAssistantCreateRuntime(raw: unknown): 'container' {
+  const value = String(raw ?? '').trim().toLowerCase();
+  if (!value || value === 'container' || value === 'docker') return 'container';
+  throw new Error('assistant-created drones must use container runtime');
 }
 
 function normalizeAssistantRepoBranchSource(raw: unknown): 'host' | 'remote' {
@@ -1166,7 +1189,22 @@ function buildChatTimelineMessages(
   const { id: droneId, drone } = droneEntryByAssistantId(regAny, opts.droneId);
   const chatName = normalizeChatNameForAssistant(opts.chatName);
   const chat = drone?.chats?.[chatName] ?? (chatName === 'default' ? drone?.chats?.default : null);
+  const pendingSeedPrompt = chatName === 'default' ? cleanOptionalString(drone?.seed?.prompt) : '';
   if (!chat) {
+    if (pendingSeedPrompt) {
+      return [
+        {
+          id: 'user:startup-seed',
+          role: 'user',
+          status: 'queued',
+          text: pendingSeedPrompt,
+          at: safeMessageAt(drone?.updatedAt ?? drone?.createdAt, nowIso()),
+          droneId,
+          chatName,
+          turnId: 'startup-seed',
+        },
+      ];
+    }
     if (options?.requireChat) throw new Error(`unknown chat: ${droneId}/${chatName}`);
     return [];
   }
@@ -1338,6 +1376,50 @@ export async function waitForAssistantChatIdle(opts: {
     }
     const idleRemainingMs = allIdle && idleSince != null ? Math.max(0, idleForMs - (now - idleSince)) : pollIntervalMs;
     await sleep(Math.max(1, Math.min(pollIntervalMs, idleRemainingMs || pollIntervalMs, deadline - now)), opts.signal);
+  }
+}
+
+async function waitForAssistantDroneReady(opts: {
+  droneId: string;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}): Promise<AssistantDroneSummary> {
+  const droneId = cleanOptionalString(opts.droneId);
+  if (!droneId) throw new Error('missing drone id');
+  const timeoutMs = Number.isFinite(opts.timeoutMs) ? Math.max(1000, Number(opts.timeoutMs)) : DRONE_READY_DEFAULT_TIMEOUT_MS;
+  const startedAt = Date.now();
+  const deadline = startedAt + timeoutMs;
+
+  while (true) {
+    throwIfAborted(opts.signal);
+    const regAny: any = await loadRegistry();
+    const real = droneEntryInAssistantCollection(regAny?.drones, droneId);
+    const pending = droneEntryInAssistantCollection(regAny?.pending, droneId);
+    const realError = cleanOptionalString(real?.drone?.hub?.phase).toLowerCase() === 'error'
+      ? cleanOptionalString(real?.drone?.hub?.message) || 'drone provisioning failed'
+      : '';
+    const pendingError = cleanOptionalString(pending?.drone?.phase).toLowerCase() === 'error'
+      ? cleanOptionalString(pending?.drone?.error ?? pending?.drone?.message) || 'drone provisioning failed'
+      : '';
+    if (realError || pendingError) throw new Error(realError || pendingError);
+    if (real && !pending) {
+      const chatObj = real.drone?.chats && typeof real.drone.chats === 'object' ? real.drone.chats : {};
+      const chats = Object.keys(chatObj);
+      if (chats.length === 0) chats.push('default');
+      return {
+        id: real.id,
+        name: cleanOptionalString(real.drone?.name) || real.id,
+        group: cleanOptionalString(real.drone?.group) || null,
+        runtime: normalizeAssistantRuntime(real.drone?.runtime, 'container'),
+        repoPath: cleanOptionalString(real.drone?.repoPath),
+        status: cleanOptionalString(real.drone?.hub?.phase) || 'ready',
+        chats,
+      };
+    }
+
+    const now = Date.now();
+    if (now >= deadline) throw new Error(`timed out waiting for drone to be ready: ${droneId}`);
+    await sleep(Math.min(DRONE_READY_POLL_INTERVAL_MS, Math.max(1, deadline - now)), opts.signal);
   }
 }
 
@@ -2192,7 +2274,7 @@ export class HubAssistantService {
 
     const name = cleanOptionalString(params?.name);
     if (!name) throw new Error('missing name');
-    const runtime = normalizeAssistantRuntime(params?.runtime, source?.drone?.runtime);
+    const runtime = normalizeAssistantCreateRuntime(params?.runtime);
     const sourceGroup = cleanOptionalString(source?.drone?.group);
     const group = hasParam('group') ? cleanOptionalString(params?.group) : sourceGroup;
     const sourceRepoPath = cleanOptionalString(source?.drone?.repoPath);
@@ -2219,6 +2301,35 @@ export class HubAssistantService {
       ...(initialMessage ? { seedPrompt: initialMessage } : {}),
     };
     return request;
+  }
+
+  private async buildCloneDroneRequest(params: any, threadId?: string): Promise<any> {
+    const regAny: any = await loadRegistry();
+    const hasParam = (key: string) => Object.prototype.hasOwnProperty.call(params ?? {}, key);
+    const sourceRef = cleanOptionalString(params?.sourceDroneId ?? params?.sourceDrone ?? params?.droneId ?? params?.source);
+    if (!sourceRef) throw new Error('missing sourceDroneId');
+    const sourceId = await this.requireDroneInScope(sourceRef, 'read', threadId);
+    const source = realDroneEntryByAssistantId(regAny, sourceId);
+    if (!source) throw new Error(`clone source must be a ready drone: ${sourceRef}`);
+    if (normalizeAssistantRuntime(source.drone?.runtime, 'container') !== 'container') {
+      throw new Error(`clone source must use container runtime: ${sourceRef}`);
+    }
+
+    const name = cleanOptionalString(params?.name);
+    if (!name) throw new Error('missing name');
+    normalizeAssistantCreateRuntime(params?.runtime);
+    const sourceGroup = cleanOptionalString(source.drone?.group);
+    const group = hasParam('group') ? cleanOptionalString(params?.group) : sourceGroup;
+    const initialMessage = cleanOptionalString(params?.initialMessage ?? params?.seedPrompt ?? params?.message);
+    return {
+      name,
+      runtime: 'container',
+      cloneFrom: source.id,
+      cloneChats: params?.cloneChats !== false,
+      ...(group ? { group } : {}),
+      seedChat: 'default',
+      ...(initialMessage ? { seedPrompt: initialMessage } : {}),
+    };
   }
 
   async snapshot(): Promise<AssistantSnapshot> {
@@ -3602,30 +3713,61 @@ export class HubAssistantService {
         name: 'create_drone',
         label: 'Create drone',
         description:
-          'Create a new drone. This requires user approval. By default it inherits runtime, repo path, group, agent, and model from the current/open drone and chat; repoBranchSource and remoteBranch can override branch seeding.',
+          'Create a new container (Docker) drone and wait until it is ready. This does not require user approval. By default it inherits repo path, group, agent, and model from the current/open drone and chat; repoBranchSource and remoteBranch can override branch seeding.',
         parameters: Type.Object({
           name: Type.String({ description: 'Display name for the new drone.' }),
           sourceDroneId: Type.Optional(Type.String({ description: 'Optional source drone id or name for inherited defaults. Defaults to the currently open drone.' })),
           group: Type.Optional(Type.String({ description: 'Optional group override. Omit to inherit the source drone group; pass an empty string for no group.' })),
-          runtime: Type.Optional(Type.String({ description: 'Optional runtime override: container or host. Omit to inherit from the source drone.' })),
+          runtime: Type.Optional(Type.String({ description: 'Optional runtime alias. Only container/docker is allowed.' })),
           repoPath: Type.Optional(Type.String({ description: 'Optional repo path override. Omit to inherit source repo path; pass an empty string for a non-repo drone.' })),
           repoBranchSource: Type.Optional(Type.String({ description: 'host or remote. Defaults to host when repoPath is set.' })),
           remoteBranch: Type.Optional(Type.String({ description: 'Remote branch name when repoBranchSource is remote.' })),
           pullHostBranchBeforeCreate: Type.Optional(Type.Boolean({ description: 'Whether to pull the host branch before creating from host branch. Defaults to hub behavior.' })),
           initialMessage: Type.Optional(Type.String({ description: 'Optional first user message to seed into the new drone default chat.' })),
         }),
+        executionMode: 'sequential',
         execute: async (_toolCallId: string, params: any) => {
           const request = await this.buildCreateDroneRequest(params ?? {}, threadId);
           const result = await this.tools.createDrone(request);
           this.addDroneToSelectedAccessScope(threadId, result.id);
+          const ready = await waitForAssistantDroneReady({ droneId: result.id });
           return {
             content: [
               {
                 type: 'text',
-                text: `Approved and queued drone ${result.name} (${result.id}) with ${result.runtime} runtime.`,
+                text: `Created container drone ${ready.name} (${ready.id}).`,
               },
             ],
-            details: result,
+            details: { ...result, phase: 'ready', ready },
+          };
+        },
+      },
+      {
+        name: 'clone_drone',
+        label: 'Clone drone',
+        description:
+          'Clone an existing ready container (Docker) drone into a new container drone and wait until it is ready. This does not require user approval. The source drone must be visible to this assistant thread.',
+        parameters: Type.Object({
+          sourceDroneId: Type.String({ description: 'Source container drone id or visible name.' }),
+          name: Type.String({ description: 'Display name for the cloned drone.' }),
+          group: Type.Optional(Type.String({ description: 'Optional group override. Omit to inherit the source drone group; pass an empty string for no group.' })),
+          cloneChats: Type.Optional(Type.Boolean({ description: 'Whether to clone chats from the source drone. Defaults to true.' })),
+          initialMessage: Type.Optional(Type.String({ description: 'Optional first user message to seed into the cloned drone default chat.' })),
+        }),
+        executionMode: 'sequential',
+        execute: async (_toolCallId: string, params: any) => {
+          const request = await this.buildCloneDroneRequest(params ?? {}, threadId);
+          const result = await this.tools.createDrone(request);
+          this.addDroneToSelectedAccessScope(threadId, result.id);
+          const ready = await waitForAssistantDroneReady({ droneId: result.id });
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Cloned container drone ${ready.name} (${ready.id}) from ${request.cloneFrom}.`,
+              },
+            ],
+            details: { ...result, phase: 'ready', ready },
           };
         },
       },
@@ -3699,12 +3841,10 @@ export class HubAssistantService {
     signal?: AbortSignal,
   ): Promise<{ block?: boolean; reason?: string } | undefined> {
     const toolName = String(ctx?.toolCall?.name ?? '').trim();
-    if (toolName !== 'message_drone' && toolName !== 'create_drone' && toolName !== 'set_drone_group' && toolName !== 'bash') return undefined;
+    if (toolName !== 'message_drone' && toolName !== 'set_drone_group' && toolName !== 'bash') return undefined;
     if (this.getThread(threadId).autoApprove) return undefined;
     const label =
-      toolName === 'create_drone'
-        ? 'Create drone'
-        : toolName === 'set_drone_group'
+      toolName === 'set_drone_group'
           ? 'Set drone group'
           : toolName === 'bash'
             ? 'Run bash in drone'
@@ -3734,12 +3874,7 @@ export class HubAssistantService {
       };
     } else {
       try {
-        if (toolName === 'create_drone') {
-          approvalArgs = {
-            requested: ctx?.args ?? {},
-            resolvedRequest: await this.buildCreateDroneRequest(ctx?.args ?? {}, threadId),
-          };
-        } else if (toolName === 'set_drone_group') {
+        if (toolName === 'set_drone_group') {
           const regAny: any = await loadRegistry();
           const rawList = Array.isArray(ctx?.args?.droneIds) ? ctx.args.droneIds : [];
           const drones = await this.tools.listDrones();
