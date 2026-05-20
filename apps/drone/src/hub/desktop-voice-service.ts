@@ -947,6 +947,7 @@ export class DesktopVoiceService {
   private readonly approvalRecognizer = new ApprovalCodeRecognizer();
   private approvalFinalizeTimer: NodeJS.Timeout | null = null;
   private desktopSubscriberCount = 0;
+  private desktopStartSessionId = 0;
   private mode: DesktopVoiceMode = 'off';
   private message = 'Desktop voice is off.';
   private updatedAt = new Date().toISOString();
@@ -1090,18 +1091,23 @@ export class DesktopVoiceService {
 
   start(): DesktopVoiceStatus {
     desktopVoiceLog('desktop voice start requested');
+    const sessionId = ++this.desktopStartSessionId;
     this.mode = 'locked';
     this.message = 'Locked: starting host microphone and local wake model.';
     this.resetApprovalCollection();
     this.touch();
-    this.recognizer.start();
-    this.capture.start();
     this.emitChange();
+    setImmediate(() => {
+      if (this.desktopStartSessionId !== sessionId || this.mode === 'off' || this.mode === 'error') return;
+      this.recognizer.start();
+      this.capture.start();
+    });
     return this.snapshot();
   }
 
   stop(message = 'Desktop voice is off.'): DesktopVoiceStatus {
     desktopVoiceLog('desktop voice stop requested', { message });
+    this.desktopStartSessionId += 1;
     this.capture.stop();
     this.recognizer.stop();
     this.mode = 'off';
