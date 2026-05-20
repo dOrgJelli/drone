@@ -30,11 +30,20 @@ type DesktopVoiceStatus = {
 };
 
 async function toggleHostClipboardRecording(): Promise<DesktopVoiceStatus> {
+  const requestId = createVoiceClipboardRequestId();
   const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
-  const response = await fetch('/api/assistant/desktop-voice/clipboard-toggle', { method: 'POST' });
+  const clientUnixMs = Date.now();
+  console.debug('[voice-clipboard] clipboard-toggle request', { requestId, clientUnixMs });
+  const response = await fetch('/api/assistant/desktop-voice/clipboard-toggle', {
+    method: 'POST',
+    headers: {
+      'x-drone-voice-clipboard-request-id': requestId,
+      'x-drone-voice-clipboard-client-unix-ms': String(clientUnixMs),
+    },
+  });
   const text = await response.text();
   const elapsedMs = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt);
-  console.debug('[voice-clipboard] clipboard-toggle response', { elapsedMs, ok: response.ok });
+  console.debug('[voice-clipboard] clipboard-toggle response', { requestId, elapsedMs, ok: response.ok });
   let data: any = null;
   if (text) {
     try {
@@ -48,10 +57,23 @@ async function toggleHostClipboardRecording(): Promise<DesktopVoiceStatus> {
 }
 
 async function cancelHostClipboardRecording(): Promise<void> {
+  const requestId = createVoiceClipboardRequestId();
   const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
-  const response = await fetch('/api/assistant/desktop-voice/clipboard-cancel', { method: 'POST' });
+  const clientUnixMs = Date.now();
+  console.debug('[voice-clipboard] clipboard-cancel request', { requestId, clientUnixMs });
+  const response = await fetch('/api/assistant/desktop-voice/clipboard-cancel', {
+    method: 'POST',
+    headers: {
+      'x-drone-voice-clipboard-request-id': requestId,
+      'x-drone-voice-clipboard-client-unix-ms': String(clientUnixMs),
+    },
+  });
   const elapsedMs = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt);
-  console.debug('[voice-clipboard] clipboard-cancel response', { elapsedMs, ok: response.ok });
+  console.debug('[voice-clipboard] clipboard-cancel response', { requestId, elapsedMs, ok: response.ok });
+}
+
+function createVoiceClipboardRequestId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 export function useVoiceClipboardRecorder(opts: {
@@ -86,6 +108,7 @@ export function useVoiceClipboardRecorder(opts: {
 
   const runSinglePressAction = React.useCallback(async () => {
     pendingSinglePressTimerRef.current = null;
+    console.debug('[voice-clipboard] single-press action started', { clientUnixMs: Date.now() });
     try {
       const status = await toggleHostClipboardRecording();
       const mode = status.clipboard?.mode ?? 'idle';

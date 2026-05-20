@@ -1,9 +1,9 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import os from 'node:os';
 import { EventEmitter } from 'node:events';
 import path from 'node:path';
 import { createRequire } from 'node:module';
-import { existsSync } from 'node:fs';
+import { existsSync, promises as fs } from 'node:fs';
 
 import { DESKTOP_VOICE_CODES, type DesktopVoiceClipboardMode, type DesktopVoiceMode } from './desktop-voice-behavior';
 import { managedDesktopVoiceModelDirSync } from './desktop-voice-models';
@@ -22,6 +22,35 @@ type CaptureCommand = {
   label: string;
   command: string;
   args: string[];
+};
+
+type ClipboardRecorderKind = 'arecord' | 'pw-record' | 'ffmpeg';
+
+type ClipboardRecorderCommand = CaptureCommand & {
+  kind: ClipboardRecorderKind;
+  tmp: string;
+};
+
+type ClipboardAudioRecorderSnapshot = {
+  active: boolean;
+  backend: string | null;
+  tmp: string | null;
+  error: string | null;
+  firstDataElapsedMs?: number | null;
+  lastObservedSize?: number | null;
+};
+
+type ClipboardAudioRecorder = {
+  snapshot: () => ClipboardAudioRecorderSnapshot;
+  start: () => Promise<void>;
+  stop: (tailPadMs: number) => Promise<Buffer>;
+  cancel: () => void;
+};
+
+type VoiceClipboardTrace = {
+  requestId?: string;
+  clientUnixMs?: number;
+  apiReceivedUnixMs?: number;
 };
 
 type DesktopVoiceStatus = {
@@ -85,6 +114,7 @@ type DesktopVoiceServiceOptions = {
   transcribeWav: (wav: Buffer) => Promise<{ text: string; model: string }>;
   submitAssistantPrompt: (prompt: string) => Promise<void>;
   synthesizeSpeechWav?: (text: string) => Promise<Buffer>;
+  clipboardRecorder?: ClipboardAudioRecorder;
 };
 
 const VOSK_WAKE_GRAMMAR = [
@@ -137,6 +167,135 @@ function defaultCaptureCommands(): CaptureCommand[] {
     ];
   }
   return [];
+}
+
+function commandAvailable(command: string, args: string[] = ['--version']): boolean {
+  const result = spawnSync(command, args, { stdio: 'ignore' });
+  return !result.error;
+}
+
+function positiveIntEnvValue(name: string, fallback: number): number {
+  const parsed = Number.parseInt(String(process.env[name] ?? ''), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function clipboardTailPadMs(): number {
+  return positiveIntEnvValue('DRONE_DESKTOP_VOICE_CLIPBOARD_TAIL_PAD_MS', 400);
+}
+
+function clipboardMinWavBytes(): number {
+  return positiveIntEnvValue('DRONE_DESKTOP_VOICE_CLIPBOARD_MIN_WAV_BYTES', 2_000);
+}
+
+function clipboardPrewarmEnabled(): boolean {
+  const raw = String(process.env.DRONE_DESKTOP_VOICE_CLIPBOARD_PREWARM ?? '1').trim().toLowerCase();
+  return raw !== '0' && raw !== 'false' && raw !== 'no';
+}
+
+function clipboardPreRollMs(): number {
+  return positiveIntEnvValue('DRONE_DESKTOP_VOICE_CLIPBOARD_PREROLL_MS', 1_200);
+}
+
+function pcmBytesForMs(ms: number, sampleRateHz = 16_000, channels = 1): number {
+  return Math.max(0, Math.round(sampleRateHz * channels * 2 * ms / 1000));
+}
+
+function wavDurationMs(wav: Buffer): number {
+  if (wav.byteLength <= 44) return 0;
+  return Math.round(((wav.byteLength - 44) / (16_000 * 2)) * 1000);
+}
+
+async function fileSizeOrNull(filePath: string): Promise<number | null> {
+  try {
+    return (await fs.stat(filePath)).size;
+  } catch {
+    return null;
+  }
+}
+
+function clipboardRecorderStartDelayMs(kind: ClipboardRecorderKind): number {
+  if (kind === 'ffmpeg') return 200;
+  return 150;
+}
+
+function selectedClipboardRecorder(): ClipboardRecorderKind {
+  const raw = String(process.env.DRONE_DESKTOP_VOICE_CLIPBOARD_RECORDER ?? '').trim().toLowerCase();
+  if (raw === 'pw' || raw === 'pipewire') return 'pw-record';
+  if (raw === 'pw-record' || raw === 'arecord' || raw === 'ffmpeg') return raw;
+  if (process.platform === 'linux') {
+    if (commandAvailable('ffmpeg')) return 'ffmpeg';
+    if (commandAvailable('pw-record', ['--help'])) return 'pw-record';
+    if (commandAvailable('arecord')) return 'arecord';
+  }
+  return 'ffmpeg';
+}
+
+function buildClipboardRecorderCommand(tmp: string): ClipboardRecorderCommand {
+  const kind = selectedClipboardRecorder();
+  if (process.platform === 'linux' && kind === 'arecord') {
+    const device = String(process.env.DRONE_DESKTOP_VOICE_CLIPBOARD_ALSA_DEVICE ?? process.env.SUPASCRIBE_ALSA_DEVICE ?? 'default');
+    return {
+      kind,
+      label: 'clipboard-arecord',
+      command: 'arecord',
+      args: ['-D', device, '-f', 'S16_LE', '-r', '16000', '-c', '1', '-t', 'wav', tmp],
+      tmp,
+    };
+  }
+  if (process.platform === 'linux' && kind === 'pw-record') {
+    const target = String(process.env.DRONE_DESKTOP_VOICE_CLIPBOARD_PW_TARGET ?? '').trim();
+    return {
+      kind,
+      label: 'clipboard-pw-record',
+      command: 'pw-record',
+      args: [...(target ? ['--target', target] : []), '--rate', '16000', '--channels', '1', tmp],
+      tmp,
+    };
+  }
+
+  const loglevel = desktopVoiceDebugEnabled() ? 'info' : 'error';
+  const common = ['-y', '-hide_banner', '-loglevel', loglevel, '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', '-f', 'wav', tmp];
+  if (process.platform === 'darwin') {
+    return {
+      kind: 'ffmpeg',
+      label: 'clipboard-ffmpeg-avfoundation',
+      command: 'ffmpeg',
+      args: ['-f', 'avfoundation', '-i', ':0', ...common],
+      tmp,
+    };
+  }
+  if (process.platform === 'win32') {
+    const device = String(process.env.DRONE_DESKTOP_VOICE_CLIPBOARD_DSHOW_DEVICE ?? 'audio=default');
+    return {
+      kind: 'ffmpeg',
+      label: 'clipboard-ffmpeg-dshow',
+      command: 'ffmpeg',
+      args: ['-f', 'dshow', '-i', device, ...common],
+      tmp,
+    };
+  }
+  if (process.platform === 'linux') {
+    const input = String(process.env.DRONE_DESKTOP_VOICE_CLIPBOARD_FFMPEG_INPUT ?? 'pulse').trim() || 'pulse';
+    if (input === 'alsa') {
+      const device = String(process.env.DRONE_DESKTOP_VOICE_CLIPBOARD_ALSA_DEVICE ?? process.env.SUPASCRIBE_ALSA_DEVICE ?? 'default');
+      return {
+        kind: 'ffmpeg',
+        label: 'clipboard-ffmpeg-alsa',
+        command: 'ffmpeg',
+        args: ['-f', 'alsa', '-thread_queue_size', '4096', '-ar', '16000', '-i', device, ...common],
+        tmp,
+      };
+    }
+    const source = String(process.env.DRONE_DESKTOP_VOICE_CLIPBOARD_PULSE_SOURCE ?? process.env.SUPASCRIBE_PULSE_SOURCE ?? 'default');
+    return {
+      kind: 'ffmpeg',
+      label: 'clipboard-ffmpeg-pulse',
+      command: 'ffmpeg',
+      args: ['-f', input, '-thread_queue_size', '4096', '-ar', '16000', '-i', source, ...common],
+      tmp,
+    };
+  }
+  throw new Error(`No clipboard recorder is configured for ${process.platform}.`);
 }
 
 function commandDisplay(command: CaptureCommand): string {
@@ -500,6 +659,234 @@ class HostMicrophoneCapture extends EventEmitter {
   }
 }
 
+class ClipboardWavRecorder implements ClipboardAudioRecorder {
+  private child: ChildProcess | null = null;
+  private command: ClipboardRecorderCommand | null = null;
+  private error: string | null = null;
+  private stderr = '';
+  private startedAtMs = 0;
+  private firstDataElapsedMs: number | null = null;
+  private firstDataProbeTimer: NodeJS.Timeout | null = null;
+  private lastObservedSize: number | null = null;
+
+  snapshot(): ClipboardAudioRecorderSnapshot {
+    return {
+      active: Boolean(this.child),
+      backend: this.command?.label ?? null,
+      tmp: this.command?.tmp ?? null,
+      error: this.error,
+      firstDataElapsedMs: this.firstDataElapsedMs,
+      lastObservedSize: this.lastObservedSize,
+    };
+  }
+
+  async start(): Promise<void> {
+    if (this.child) return;
+    const tmp = path.join(os.tmpdir(), `drone-voice-clipboard-${process.pid}-${Date.now()}.wav`);
+    const command = buildClipboardRecorderCommand(tmp);
+    this.command = command;
+    this.stderr = '';
+    this.error = null;
+    this.startedAtMs = Date.now();
+    this.firstDataElapsedMs = null;
+    this.lastObservedSize = null;
+    desktopVoiceLog('clipboard wav recorder start requested', {
+      backend: command.label,
+      command: commandDisplay(command),
+    });
+    this.startFirstDataProbe(command);
+
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        if (error) reject(error);
+        else resolve();
+      };
+      const child = spawn(command.command, command.args, {
+        stdio: [command.kind === 'ffmpeg' ? 'pipe' : 'ignore', 'ignore', 'pipe'],
+      });
+      this.child = child;
+      child.stderr?.on('data', (chunk: Buffer) => {
+        const text = chunk.toString('utf8');
+        if (desktopVoiceDebugEnabled()) process.stderr.write(`[${command.label}] ${text}`);
+        this.stderr += text;
+        if (this.stderr.length > 4_000) this.stderr = this.stderr.slice(-4_000);
+      });
+      child.on('error', (error) => {
+        this.child = null;
+        this.error = `${command.label}: ${error.message}`;
+        finish(new Error(this.error));
+      });
+      child.on('exit', (code, signal) => {
+        if (this.child !== child) return;
+        this.child = null;
+        const detail = this.stderr.trim() || `exit ${code ?? signal ?? 'unknown'}`;
+        this.error = `${command.label}: ${detail}`;
+        if (settled) {
+          desktopVoiceWarn('clipboard wav recorder exited before stop', { backend: command.label, detail });
+          return;
+        }
+        finish(new Error(`Clipboard recorder failed to start: ${detail}`));
+      });
+      setTimeout(() => {
+        if (settled) return;
+        if (child.exitCode !== null) {
+          const detail = this.stderr.trim() || `exit ${child.exitCode}`;
+          this.child = null;
+          this.error = `${command.label}: ${detail}`;
+          finish(new Error(`Clipboard recorder failed to start: ${detail}`));
+          return;
+        }
+        desktopVoiceLog('clipboard wav recorder started', {
+          backend: command.label,
+          elapsedMs: Date.now() - this.startedAtMs,
+          file: command.tmp,
+        });
+        finish();
+      }, clipboardRecorderStartDelayMs(command.kind)).unref();
+    });
+  }
+
+  async stop(tailPadMs: number): Promise<Buffer> {
+    const child = this.child;
+    const command = this.command;
+    if (!child || !command) throw new Error('Clipboard recorder is not active.');
+    const stoppedAt = Date.now();
+    this.child = null;
+    try {
+      await this.stopChild(child, command, tailPadMs);
+      const stat = await fs.stat(command.tmp);
+      if (!stat.size || stat.size < clipboardMinWavBytes()) {
+        throw new Error(`Recorded WAV was too small (${stat.size} bytes).`);
+      }
+      const wav = await fs.readFile(command.tmp);
+      desktopVoiceLog('clipboard wav recorder stopped', {
+        backend: command.label,
+        elapsedMs: Date.now() - stoppedAt,
+        recordingWallMs: this.startedAtMs ? Date.now() - this.startedAtMs : null,
+        wavDurationMs: wavDurationMs(wav),
+        bytes: wav.byteLength,
+      });
+      return wav;
+    } finally {
+      await fs.unlink(command.tmp).catch(() => {});
+      this.command = null;
+      this.stderr = '';
+      this.startedAtMs = 0;
+      this.stopFirstDataProbe();
+    }
+  }
+
+  cancel(): void {
+    const child = this.child;
+    const command = this.command;
+    this.child = null;
+    this.command = null;
+    this.stderr = '';
+    this.startedAtMs = 0;
+    this.firstDataElapsedMs = null;
+    this.lastObservedSize = null;
+    this.stopFirstDataProbe();
+    this.error = null;
+    if (!child || !command) return;
+    desktopVoiceLog('clipboard wav recorder cancelled', { backend: command.label, file: command.tmp });
+    child.removeAllListeners('error');
+    child.removeAllListeners('exit');
+    child.removeAllListeners('close');
+    try {
+      child.kill('SIGINT');
+    } catch {
+      // ignore
+    }
+    setTimeout(() => {
+      if (!child.killed) {
+        try {
+          child.kill('SIGTERM');
+        } catch {
+          // ignore
+        }
+      }
+    }, 500).unref();
+    void fs.unlink(command.tmp).catch(() => {});
+  }
+
+  private async stopChild(child: ChildProcess, command: ClipboardRecorderCommand, tailPadMs: number): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        if (error) reject(error);
+        else resolve();
+      };
+      child.on('close', (code, signal) => {
+        const detail = this.stderr.trim() || `exit ${code ?? signal ?? 'unknown'}`;
+        if (code === 0) return finish();
+        if (command.kind === 'arecord' && /Interrupted system call|Aborted by signal|SIGINT|terminated/i.test(detail)) return finish();
+        if (command.kind === 'pw-record' && /interrupted|SIGINT|terminated|ctrl\+c/i.test(detail)) return finish();
+        if (command.kind === 'ffmpeg' && (/Output #0/i.test(detail) || /size=/i.test(detail))) return finish();
+        return finish(new Error(`${command.label} exited ${code ?? signal ?? 'unknown'}: ${detail}`));
+      });
+
+      const sendStop = () => {
+        if (command.kind === 'ffmpeg' && child.stdin && !child.stdin.destroyed) {
+          try {
+            child.stdin.write('q');
+            child.stdin.end();
+            return;
+          } catch {
+            // fall through to signal
+          }
+        }
+        try {
+          child.kill('SIGINT');
+        } catch {
+          // ignore
+        }
+      };
+      setTimeout(sendStop, Math.max(0, tailPadMs)).unref();
+      setTimeout(() => {
+        if (settled || child.exitCode !== null) return;
+        try {
+          child.kill('SIGTERM');
+        } catch {
+          // ignore
+        }
+      }, Math.max(0, tailPadMs) + 2_000).unref();
+    });
+  }
+
+  private startFirstDataProbe(command: ClipboardRecorderCommand): void {
+    this.stopFirstDataProbe();
+    const startedAtMs = this.startedAtMs;
+    const probe = async () => {
+      if (this.command !== command || this.firstDataElapsedMs != null) return;
+      const size = await fileSizeOrNull(command.tmp);
+      this.lastObservedSize = size;
+      if (size != null && size > 44) {
+        this.firstDataElapsedMs = Date.now() - startedAtMs;
+        desktopVoiceLog('clipboard wav recorder first file data', {
+          backend: command.label,
+          elapsedMs: this.firstDataElapsedMs,
+          size,
+          file: command.tmp,
+        });
+      }
+    };
+    this.firstDataProbeTimer = setInterval(() => void probe(), 25);
+    this.firstDataProbeTimer.unref?.();
+    void probe();
+  }
+
+  private stopFirstDataProbe(): void {
+    if (!this.firstDataProbeTimer) return;
+    clearInterval(this.firstDataProbeTimer);
+    this.firstDataProbeTimer = null;
+  }
+}
+
 export class DesktopVoiceService {
   private readonly events = new EventEmitter();
   private readonly capture = new HostMicrophoneCapture();
@@ -519,14 +906,21 @@ export class DesktopVoiceService {
   private promptTranscriptText = '';
   private promptTranscriptError: string | null = null;
   private promptTranscriptUpdatedAt: string | null = null;
+  private readonly clipboardRecorder: ClipboardAudioRecorder;
+  private clipboardSessionId = 0;
+  private clipboardRecordingStartedAtMs = 0;
+  private clipboardRecordingRequestId: string | null = null;
+  private clipboardChunks: Buffer[] = [];
+  private clipboardStartedCapture = false;
+  private clipboardPreRollChunks: Buffer[] = [];
+  private clipboardPreRollBytes = 0;
   private clipboardMode: DesktopVoiceClipboardMode = 'idle';
   private clipboardMessage = 'Voice transcription is idle.';
   private clipboardError: string | null = null;
-  private clipboardChunks: Buffer[] = [];
-  private clipboardStartedCapture = false;
   private clipboardStartSuppressedUntil = 0;
 
   constructor(private readonly opts: DesktopVoiceServiceOptions) {
+    this.clipboardRecorder = opts.clipboardRecorder ?? new ClipboardWavRecorder();
     this.capture.on('change', () => this.emitChange());
     this.capture.on('audio', (chunk: Buffer) => this.handleAudio(chunk));
     this.capture.on('error-state', (message) => {
@@ -647,7 +1041,14 @@ export class DesktopVoiceService {
     return this.snapshot();
   }
 
-  async toggleClipboardRecording(): Promise<DesktopVoiceStatus> {
+  async toggleClipboardRecording(trace: VoiceClipboardTrace = {}): Promise<DesktopVoiceStatus> {
+    const serviceReceivedAtMs = Date.now();
+    desktopVoiceLog('voice clipboard toggle entered service', {
+      requestId: trace.requestId ?? null,
+      mode: this.clipboardMode,
+      clientToServiceMs: trace.clientUnixMs ? serviceReceivedAtMs - trace.clientUnixMs : null,
+      apiToServiceMs: trace.apiReceivedUnixMs ? serviceReceivedAtMs - trace.apiReceivedUnixMs : null,
+    });
     if (this.mode === 'recording' || this.mode === 'transcribing') {
       this.clipboardMode = 'error';
       this.clipboardError = 'Desktop assistant voice is actively streaming.';
@@ -657,11 +1058,10 @@ export class DesktopVoiceService {
       return this.snapshot();
     }
     if (this.clipboardMode === 'recording') {
-      if (!this.capture.snapshot().active && this.clipboardChunks.length === 0) {
+      if (!this.clipboardRecorder.snapshot().active) {
         this.clipboardMode = 'error';
-        this.clipboardError = 'Host microphone capture is not active.';
+        this.clipboardError = 'Clipboard microphone recorder is not active.';
         this.clipboardMessage = `Voice transcription failed: ${this.clipboardError}`;
-        this.clipboardStartedCapture = false;
         this.touch();
         this.emitChange();
         return this.snapshot();
@@ -675,38 +1075,54 @@ export class DesktopVoiceService {
       return this.snapshot();
     }
     const requestedAt = Date.now();
-    desktopVoiceLog('voice clipboard recording start requested');
-    this.clipboardMode = 'recording';
-    this.clipboardMessage = 'Voice transcription recording.';
-    this.clipboardError = null;
-    this.clipboardChunks = [];
-    this.clipboardStartedCapture = !this.capture.snapshot().active;
-    if (this.clipboardStartedCapture) this.capture.start();
-    desktopVoiceLog('voice clipboard recording armed', {
-      startedCapture: this.clipboardStartedCapture,
-      elapsedMs: Date.now() - requestedAt,
-      capture: this.capture.snapshot(),
+    const sessionId = ++this.clipboardSessionId;
+    this.clipboardRecordingRequestId = trace.requestId ?? null;
+    desktopVoiceLog('voice clipboard recording start requested', {
+      requestId: trace.requestId ?? null,
+      clientToStartMs: trace.clientUnixMs ? requestedAt - trace.clientUnixMs : null,
     });
+    this.clipboardMode = 'recording';
+    this.clipboardMessage = 'Starting voice transcription recorder.';
+    this.clipboardError = null;
     this.touch();
     this.emitChange();
+    try {
+      await this.clipboardRecorder.start();
+      if (this.clipboardSessionId !== sessionId || this.clipboardMode !== 'recording') return this.snapshot();
+      this.clipboardMessage = 'Voice transcription recording.';
+      this.clipboardRecordingStartedAtMs = Date.now();
+      desktopVoiceLog('voice clipboard recording armed', {
+        requestId: trace.requestId ?? null,
+        elapsedMs: Date.now() - requestedAt,
+        clientToArmedMs: trace.clientUnixMs ? Date.now() - trace.clientUnixMs : null,
+        recorder: this.clipboardRecorder.snapshot(),
+      });
+      this.touch();
+      this.emitChange();
+    } catch (error: any) {
+      if (this.clipboardSessionId !== sessionId) return this.snapshot();
+      this.clipboardMode = 'error';
+      this.clipboardError = error?.message ?? String(error);
+      this.clipboardMessage = `Voice transcription failed: ${this.clipboardError}`;
+      this.touch();
+      this.emitChange();
+    }
     return this.snapshot();
   }
 
   cancelClipboardRecording(message = 'Voice transcription cancelled.'): DesktopVoiceStatus {
+    this.clipboardSessionId += 1;
+    this.clipboardRecordingStartedAtMs = 0;
+    this.clipboardRecordingRequestId = null;
     this.clipboardStartSuppressedUntil = Date.now() + 800;
     if (this.clipboardMode !== 'recording') return this.snapshot();
     desktopVoiceLog('voice clipboard recording cancelled', {
-      chunks: this.clipboardChunks.length,
-      bytes: this.clipboardChunks.reduce((total, chunk) => total + chunk.byteLength, 0),
-      startedCapture: this.clipboardStartedCapture,
+      recorder: this.clipboardRecorder.snapshot(),
     });
-    const shouldStopCapture = this.clipboardStartedCapture && this.mode === 'off';
-    this.clipboardChunks = [];
+    this.clipboardRecorder.cancel();
     this.clipboardMode = 'idle';
     this.clipboardMessage = message;
     this.clipboardError = null;
-    this.clipboardStartedCapture = false;
-    if (shouldStopCapture) this.capture.stop();
     this.touch();
     this.emitChange();
     return this.snapshot();
@@ -719,7 +1135,6 @@ export class DesktopVoiceService {
       this.enqueuePromptSegments(this.promptSegmenter.append(chunk));
       if (this.promptSegmenter.hasOpenSpeech) this.emitChange();
     }
-    if (this.clipboardMode === 'recording') this.clipboardChunks.push(chunk);
   }
 
   private handleRecognizedText(text: string, _final: boolean): void {
@@ -963,27 +1378,39 @@ export class DesktopVoiceService {
   }
 
   private async stopClipboardRecording(): Promise<void> {
-    const pcm = Buffer.concat(this.clipboardChunks);
-    this.clipboardChunks = [];
+    const sessionId = this.clipboardSessionId;
+    const stopRequestedAtMs = Date.now();
     this.clipboardMode = 'transcribing';
     this.clipboardMessage = 'Transcribing voice recording.';
     this.clipboardError = null;
     this.touch();
     this.emitChange();
     try {
-      const result = await this.opts.transcribeWav(pcm16leToWav(pcm));
+      const wav = await this.clipboardRecorder.stop(clipboardTailPadMs());
+      if (this.clipboardSessionId !== sessionId) return;
+      desktopVoiceLog('voice clipboard recording wav ready', {
+        requestId: this.clipboardRecordingRequestId,
+        stopElapsedMs: Date.now() - stopRequestedAtMs,
+        armedToStopMs: this.clipboardRecordingStartedAtMs ? stopRequestedAtMs - this.clipboardRecordingStartedAtMs : null,
+        bytes: wav.byteLength,
+        wavDurationMs: wavDurationMs(wav),
+      });
+      const result = await this.opts.transcribeWav(wav);
       const text = result.text.trim();
       if (!text) throw new Error('The transcription was empty.');
       this.clipboardMode = 'idle';
       this.clipboardMessage = `Transcribed ${text.length.toLocaleString()} characters.`;
+      this.clipboardRecordingStartedAtMs = 0;
+      this.clipboardRecordingRequestId = null;
       this.events.emit('event', { type: 'desktop_voice_clipboard_result', text } satisfies DesktopVoiceEvent);
     } catch (error: any) {
+      if (this.clipboardSessionId !== sessionId) return;
       this.clipboardMode = 'error';
       this.clipboardError = error?.message ?? String(error);
       this.clipboardMessage = `Voice transcription failed: ${this.clipboardError}`;
+      this.clipboardRecordingStartedAtMs = 0;
+      this.clipboardRecordingRequestId = null;
     } finally {
-      if (this.clipboardStartedCapture && this.mode === 'off') this.capture.stop();
-      this.clipboardStartedCapture = false;
       this.touch();
       this.emitChange();
     }

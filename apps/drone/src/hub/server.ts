@@ -11315,8 +11315,23 @@ export async function startDroneHubApiServer(opts: {
       }
 
       if (pathname === '/api/assistant/desktop-voice/clipboard-toggle' && method === 'POST') {
+        const apiReceivedUnixMs = Date.now();
+        const requestId = String(req.headers['x-drone-voice-clipboard-request-id'] ?? '').trim() || undefined;
+        const clientUnixMsRaw = Number.parseInt(String(req.headers['x-drone-voice-clipboard-client-unix-ms'] ?? ''), 10);
+        const clientUnixMs = Number.isFinite(clientUnixMsRaw) ? clientUnixMsRaw : undefined;
+        console.log('[desktop-voice] clipboard-toggle api received', {
+          requestId: requestId ?? null,
+          clientToApiMs: clientUnixMs ? apiReceivedUnixMs - clientUnixMs : null,
+        });
         try {
-          json(res, 200, await desktopVoiceService.toggleClipboardRecording());
+          const status = await desktopVoiceService.toggleClipboardRecording({ requestId, clientUnixMs, apiReceivedUnixMs });
+          console.log('[desktop-voice] clipboard-toggle api responding', {
+            requestId: requestId ?? null,
+            elapsedMs: Date.now() - apiReceivedUnixMs,
+            mode: status.clipboard.mode,
+            message: status.clipboard.message,
+          });
+          json(res, 200, status);
         } catch (e: any) {
           json(res, 400, { ok: false, error: e?.message ?? String(e) });
         }
@@ -11324,8 +11339,22 @@ export async function startDroneHubApiServer(opts: {
       }
 
       if (pathname === '/api/assistant/desktop-voice/clipboard-cancel' && method === 'POST') {
+        const apiReceivedUnixMs = Date.now();
+        const requestId = String(req.headers['x-drone-voice-clipboard-request-id'] ?? '').trim() || undefined;
+        const clientUnixMsRaw = Number.parseInt(String(req.headers['x-drone-voice-clipboard-client-unix-ms'] ?? ''), 10);
+        const clientUnixMs = Number.isFinite(clientUnixMsRaw) ? clientUnixMsRaw : undefined;
+        console.log('[desktop-voice] clipboard-cancel api received', {
+          requestId: requestId ?? null,
+          clientToApiMs: clientUnixMs ? apiReceivedUnixMs - clientUnixMs : null,
+        });
         try {
-          json(res, 200, desktopVoiceService.cancelClipboardRecording());
+          const status = desktopVoiceService.cancelClipboardRecording();
+          console.log('[desktop-voice] clipboard-cancel api responding', {
+            requestId: requestId ?? null,
+            elapsedMs: Date.now() - apiReceivedUnixMs,
+            mode: status.clipboard.mode,
+          });
+          json(res, 200, status);
         } catch (e: any) {
           json(res, 400, { ok: false, error: e?.message ?? String(e) });
         }

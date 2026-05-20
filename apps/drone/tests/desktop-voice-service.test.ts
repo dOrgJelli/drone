@@ -1,8 +1,52 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 
 import { DesktopVoiceService } from '../src/hub/desktop-voice-service';
 
+function createFakeClipboardRecorder(opts: {
+  start?: () => Promise<void>;
+  stop?: (tailPadMs: number) => Promise<Buffer>;
+  cancel?: () => void;
+  active?: boolean;
+} = {}) {
+  let active = opts.active ?? false;
+  return {
+    recorder: {
+      snapshot: () => ({
+        active,
+        backend: 'fake',
+        tmp: active ? '/tmp/fake.wav' : null,
+        error: null,
+        firstDataElapsedMs: active ? 0 : null,
+        lastObservedSize: active ? 128 : null,
+      }),
+      start: async () => {
+        await opts.start?.();
+        active = true;
+      },
+      stop: async (tailPadMs: number) => {
+        active = false;
+        return opts.stop ? await opts.stop(tailPadMs) : Buffer.from('wav-bytes');
+      },
+      cancel: () => {
+        active = false;
+        opts.cancel?.();
+      },
+    },
+  };
+}
+
 describe('DesktopVoiceService', () => {
+  const originalClipboardPrewarm = process.env.DRONE_DESKTOP_VOICE_CLIPBOARD_PREWARM;
+
+  beforeEach(() => {
+    process.env.DRONE_DESKTOP_VOICE_CLIPBOARD_PREWARM = '0';
+  });
+
+  afterEach(() => {
+    if (originalClipboardPrewarm == null) delete process.env.DRONE_DESKTOP_VOICE_CLIPBOARD_PREWARM;
+    else process.env.DRONE_DESKTOP_VOICE_CLIPBOARD_PREWARM = originalClipboardPrewarm;
+  });
+
   test('returns to sleeping immediately when transcript sleep command finishes recording', async () => {
     let resolveSubmit!: () => void;
     const submitPromise = new Promise<void>((resolve) => {
@@ -53,36 +97,77 @@ describe('DesktopVoiceService', () => {
 
   test('cancels clipboard recording without transcribing buffered audio', () => {
     let transcribeCalls = 0;
+    let cancelCalls = 0;
+    const fake = createFakeClipboardRecorder({
+      active: true,
+      cancel: () => {
+        cancelCalls += 1;
+      },
+    });
     const service = new DesktopVoiceService({
       transcribeWav: async () => {
         transcribeCalls += 1;
         return { text: 'ignored', model: 'test' };
       },
       submitAssistantPrompt: async () => {},
+      clipboardRecorder: fake.recorder,
     });
 
     (service as any).clipboardMode = 'recording';
     (service as any).clipboardMessage = 'Voice transcription recording.';
-    (service as any).clipboardChunks = [Buffer.from([1, 2, 3, 4])];
 
     const status = service.cancelClipboardRecording();
 
     expect(status.clipboard.mode).toBe('idle');
     expect(status.clipboard.message).toBe('Voice transcription cancelled.');
-    expect((service as any).clipboardChunks).toEqual([]);
+    expect(cancelCalls).toBe(1);
     expect(transcribeCalls).toBe(0);
   });
 
   test('suppresses a late clipboard start after cancel', async () => {
+    let startCalls = 0;
+    const fake = createFakeClipboardRecorder({
+      start: async () => {
+        startCalls += 1;
+      },
+    });
     const service = new DesktopVoiceService({
       transcribeWav: async () => ({ text: 'ignored', model: 'test' }),
       submitAssistantPrompt: async () => {},
+      clipboardRecorder: fake.recorder,
     });
 
     service.cancelClipboardRecording();
     const status = await service.toggleClipboardRecording();
 
     expect(status.clipboard.mode).toBe('idle');
-    expect(status.capture.active).toBe(false);
+    expect(startCalls).toBe(0);
+  });
+
+  test('clipboard recording transcribes recorder wav bytes with tail padding', async () => {
+    let transcribed: Buffer | null = null;
+    let tailPadMs = 0;
+    const fake = createFakeClipboardRecorder({
+      stop: async (nextTailPadMs) => {
+        tailPadMs = nextTailPadMs;
+        return Buffer.from('fake-wav');
+      },
+    });
+    const service = new DesktopVoiceService({
+      transcribeWav: async (wav) => {
+        transcribed = wav;
+        return { text: 'hello world', model: 'test' };
+      },
+      submitAssistantPrompt: async () => {},
+      clipboardRecorder: fake.recorder,
+    });
+
+    await service.toggleClipboardRecording();
+    const status = await service.toggleClipboardRecording();
+
+    expect(status.clipboard.mode).toBe('idle');
+    expect(status.clipboard.message).toBe('Transcribed 11 characters.');
+    expect(transcribed?.toString('utf8')).toBe('fake-wav');
+    expect(tailPadMs).toBe(400);
   });
 });
