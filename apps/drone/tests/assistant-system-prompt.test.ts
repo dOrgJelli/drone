@@ -105,4 +105,28 @@ describe('assistant system prompt settings', () => {
       expect(tools.map((tool: any) => tool.name)).toEqual(['get_system_prompt']);
     });
   });
+
+  test('set thinking level tool is opt-in for normal threads and updates the current model level', async () => {
+    await withTempDroneDataDir('assistant-thinking-level-tool-', async () => {
+      const service = makeAssistantService();
+      const snapshot = await service.createThread({ title: 'thinking', provider: 'openai', model: 'gpt-5.5' });
+      const threadId = snapshot.activeThreadId;
+      let tools = (service as any).buildTools({ Type }, threadId);
+      expect(snapshot.availableTools.some((tool) => tool.name === 'set_thinking_level')).toBe(true);
+      expect(tools.some((tool: any) => tool.name === 'set_thinking_level')).toBe(false);
+
+      await service.updateThread(threadId, { enabledTools: ['set_thinking_level'] });
+      tools = (service as any).buildTools({ Type }, threadId);
+      const setThinkingLevel = tools.find((tool: any) => tool.name === 'set_thinking_level');
+      const result = await setThinkingLevel.execute('call-thinking', { level: 'high' });
+      expect(result.details.thinkingLevel).toBe('high');
+
+      const next = await service.snapshot();
+      const thread = next.threads.find((item) => item.id === threadId) as any;
+      expect(thread.model).toBe('gpt-5.5');
+      expect(thread.thinkingLevel).toBe('high');
+
+      await expect(setThinkingLevel.execute('call-thinking-bad', { level: 'xhigh' })).rejects.toThrow(/not supported/);
+    });
+  });
 });

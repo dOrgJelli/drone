@@ -3243,7 +3243,7 @@ export function AssistantDock() {
     if (!activeThread) return [];
     const configured = Array.isArray(activeThread.enabledTools)
       ? activeThread.enabledTools
-      : toolNames.filter((name) => name !== 'get_system_prompt' && name !== 'update_system_prompt');
+      : toolNames.filter((name) => name !== 'get_system_prompt' && name !== 'update_system_prompt' && name !== 'set_thinking_level' && name !== 'speak');
     return configured.filter((name) => toolNames.includes(name));
   }, [activeThread, availableTools]);
   const availableToolNamesKey = React.useMemo(() => availableTools.map((tool) => tool.name).join('\u0000'), [availableTools]);
