@@ -1503,13 +1503,18 @@ function makeAssistantAccessScope(input?: { readMode?: unknown; writeMode?: unkn
   const writeMode = String(input?.writeMode ?? '').trim().toLowerCase() === 'selected' ? 'selected' : 'all';
   const rawIds = Array.isArray(input?.droneIds) ? input.droneIds : [];
   const droneIds = Array.from(new Set(rawIds.map((item) => cleanOptionalString(item)).filter(Boolean))).slice(0, 100);
-  const selected = droneIds.length > 0;
   return {
-    readMode: readMode === 'selected' && selected ? 'selected' : 'all',
-    writeMode: writeMode === 'selected' && selected ? 'selected' : 'all',
-    droneIds: selected && (readMode === 'selected' || writeMode === 'selected') ? droneIds : [],
+    readMode,
+    writeMode,
+    droneIds: readMode === 'selected' || writeMode === 'selected' ? droneIds : [],
     updatedAt: String(input?.updatedAt ?? '').trim() || nowIso(),
   };
+}
+
+function describeAssistantAccessMode(mode: AssistantAccessScope['readMode'], droneIds: string[]): string {
+  if (mode === 'all') return 'all drones';
+  if (droneIds.length === 0) return 'no selected drones';
+  return `selected drones (${droneIds.join(', ')})`;
 }
 
 function normalizeQueuedPrompt(raw: any, fallback: { provider: LlmProviderId; model: string; thinkingLevel?: AssistantThinkingLevel }): AssistantQueuedPrompt | null {
@@ -1937,6 +1942,22 @@ export class HubAssistantService {
     await this.persist();
   }
 
+  private addDroneToSelectedAccessScope(threadId: string, droneIdRaw: unknown): void {
+    const droneId = cleanOptionalString(droneIdRaw);
+    if (!droneId) return;
+    const thread = this.getThread(threadId);
+    const accessScope = thread.accessScope ?? makeAssistantAccessScope();
+    if (accessScope.readMode !== 'selected' && accessScope.writeMode !== 'selected') return;
+    if (accessScope.droneIds.includes(droneId)) return;
+    thread.accessScope = makeAssistantAccessScope({
+      readMode: accessScope.readMode,
+      writeMode: accessScope.writeMode,
+      droneIds: [...accessScope.droneIds, droneId],
+      updatedAt: nowIso(),
+    });
+    thread.updatedAt = nowIso();
+  }
+
   private activeAccessScope(threadId?: string): AssistantAccessScope {
     const id = cleanOptionalString(threadId);
     if (id) {
@@ -2201,12 +2222,13 @@ export class HubAssistantService {
     await this.ensureLoaded();
     const explicitProvider = String(input?.provider ?? '').trim();
     const provider = explicitProvider ? normalizeProvider(explicitProvider) : await defaultAssistantProvider();
+    const voiceEnabled = normalizeAssistantVoiceEnabled(input?.voiceEnabled);
     const thread = this.makeThread({
       provider,
       model: String(input?.model ?? '').trim() || defaultModelForProvider(provider),
       title: String(input?.title ?? '').trim() || DEFAULT_THREAD_TITLE,
-      accessScope: this.defaultAccessScopeForNewThread(input),
-      voiceEnabled: normalizeAssistantVoiceEnabled(input?.voiceEnabled),
+      accessScope: this.defaultAccessScopeForNewThread({ ...input, voiceEnabled }),
+      voiceEnabled,
     });
     this.threads = [thread, ...this.threads].slice(0, ASSISTANT_REGISTRY_MAX_THREADS);
     this.activeThreadId = thread.id;
@@ -2229,6 +2251,7 @@ export class HubAssistantService {
       model: defaultModelForProvider(provider),
       title: String(input?.title ?? '').trim() || 'Voice thread',
       voiceEnabled: true,
+      accessScope: this.defaultAccessScopeForNewThread({ voiceEnabled: true }),
     });
     this.threads = [thread, ...this.threads].slice(0, ASSISTANT_REGISTRY_MAX_THREADS);
     this.activeThreadId = thread.id;
@@ -2875,12 +2898,15 @@ export class HubAssistantService {
     this.ensureChatIdleSubscriptionMonitor();
   }
 
-  private defaultAccessScopeForNewThread(input?: { activeDroneId?: unknown; activeChatName?: unknown }): AssistantAccessScope {
+  private defaultAccessScopeForNewThread(input?: { activeDroneId?: unknown; activeChatName?: unknown; voiceEnabled?: unknown }): AssistantAccessScope {
+    if (normalizeAssistantVoiceEnabled(input?.voiceEnabled)) {
+      return makeAssistantAccessScope({ readMode: 'all', writeMode: 'selected', droneIds: [] });
+    }
     const hasInputDrone = Object.prototype.hasOwnProperty.call(input ?? {}, 'activeDroneId');
     const hasInputChat = Object.prototype.hasOwnProperty.call(input ?? {}, 'activeChatName');
     const activeDroneId = hasInputDrone ? cleanOptionalString(input?.activeDroneId) : cleanOptionalString(this.appContext.activeDroneId);
     const activeChatName = hasInputChat ? cleanOptionalString(input?.activeChatName) : cleanOptionalString(this.appContext.activeChatName);
-    if (!activeDroneId || !activeChatName) return makeAssistantAccessScope();
+    if (!activeDroneId || !activeChatName) return makeAssistantAccessScope({ readMode: 'all', writeMode: 'selected', droneIds: [] });
     return makeAssistantAccessScope({ readMode: 'all', writeMode: 'selected', droneIds: [activeDroneId] });
   }
 
@@ -2901,7 +2927,7 @@ export class HubAssistantService {
       systemPrompt: normalizeAssistantSystemPrompt(input?.systemPrompt) || this.defaultSystemPrompt,
       systemPromptUpdatedAt: null,
       enabledTools: [...(voiceEnabled ? ASSISTANT_VOICE_DEFAULT_ENABLED_TOOL_NAMES : ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES)],
-      accessScope: input?.accessScope ?? makeAssistantAccessScope(),
+      accessScope: input?.accessScope ?? this.defaultAccessScopeForNewThread({ voiceEnabled }),
       autoApprove: false,
       promptDeliveryMode: 'queue',
       messages: [],
@@ -3497,6 +3523,7 @@ export class HubAssistantService {
         execute: async (_toolCallId: string, params: any) => {
           const request = await this.buildCreateDroneRequest(params ?? {}, threadId);
           const result = await this.tools.createDrone(request);
+          this.addDroneToSelectedAccessScope(threadId, result.id);
           return {
             content: [
               {
@@ -3769,7 +3796,7 @@ export class HubAssistantService {
       `Updated at: ${thread.updatedAt}`,
       `Model: ${thread.provider}/${thread.model} (${thread.thinkingLevel})`,
       runningModel ? `Running model: ${runningModel.provider}/${runningModel.model} (${runningModel.thinkingLevel}), started ${runningModel.startedAt}` : null,
-      `Access: read=${accessScope.readMode}${accessScope.droneIds.length ? ` (${accessScope.droneIds.join(', ')})` : ''}; write=${accessScope.writeMode}${accessScope.droneIds.length ? ` (${accessScope.droneIds.join(', ')})` : ''}`,
+      `Access: read=${describeAssistantAccessMode(accessScope.readMode, accessScope.droneIds)}; write=${describeAssistantAccessMode(accessScope.writeMode, accessScope.droneIds)}`,
       queuedPrompts.length > 0
         ? `Queued prompts:\n${queuedPrompts
             .map((prompt, index) => `${index + 1}. ${clipAssistantOverviewText(prompt.prompt, 700)} (${prompt.deliveryMode ?? 'queue'}, ${prompt.createdAt})`)
@@ -3868,8 +3895,8 @@ export class HubAssistantService {
   private systemPrompt(threadId?: string): string {
     const thread = threadId ? this.threads.find((item) => item.id === threadId) : null;
     const accessScope = this.activeAccessScope(threadId);
-    const readScope = accessScope.readMode === 'selected' ? `selected drones (${accessScope.droneIds.join(', ')})` : 'all drones';
-    const writeScope = accessScope.writeMode === 'selected' ? `selected drones (${accessScope.droneIds.join(', ')})` : 'all drones';
+    const readScope = describeAssistantAccessMode(accessScope.readMode, accessScope.droneIds);
+    const writeScope = describeAssistantAccessMode(accessScope.writeMode, accessScope.droneIds);
     const scopeText = `Current access scope: read=${readScope}; write=${writeScope}. Do not claim read or write access outside those scopes.`;
     const basePrompt = normalizeAssistantSystemPrompt(thread?.systemPrompt) || this.defaultSystemPrompt;
     return [basePrompt, scopeText].join('\n\n');

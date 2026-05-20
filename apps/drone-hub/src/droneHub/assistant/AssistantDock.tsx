@@ -1564,12 +1564,10 @@ function AssistantThreadSidebar({
 function ScopeModeControl({
   label,
   mode,
-  selectedDisabled,
   onChange,
 }: {
   label: string;
   mode: AssistantScopeMode;
-  selectedDisabled: boolean;
   onChange: (mode: AssistantScopeMode) => void;
 }) {
   return (
@@ -1592,8 +1590,7 @@ function ScopeModeControl({
       <button
         type="button"
         onClick={() => onChange('selected')}
-        disabled={selectedDisabled}
-        className={`h-5 rounded px-1.5 text-[9px] font-semibold uppercase tracking-wide disabled:opacity-45 ${
+        className={`h-5 rounded px-1.5 text-[9px] font-semibold uppercase tracking-wide ${
           mode === 'selected'
             ? 'bg-[var(--accent-subtle)] text-[var(--accent)]'
             : 'text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)]'
@@ -2837,8 +2834,8 @@ export function AssistantDock() {
     if (!scope) return;
     let cancelled = false;
     const ids = Array.from(new Set((Array.isArray(scope.droneIds) ? scope.droneIds : []).map((id) => String(id ?? '').trim()).filter(Boolean)));
-    const readMode: AssistantScopeMode = scope.readMode === 'selected' && ids.length > 0 ? 'selected' : 'all';
-    const writeMode: AssistantScopeMode = scope.writeMode === 'selected' && ids.length > 0 ? 'selected' : 'all';
+    const readMode: AssistantScopeMode = scope.readMode === 'selected' ? 'selected' : 'all';
+    const writeMode: AssistantScopeMode = scope.writeMode === 'selected' ? 'selected' : 'all';
     lastSyncedScopeKeyRef.current = assistantScopeSyncKey(readMode, writeMode, ids);
     setScopeSyncReady(false);
     setScopeReadMode(readMode);
@@ -2881,14 +2878,7 @@ export function AssistantDock() {
   }, []);
 
   const removeScopeDrone = React.useCallback((droneId: string) => {
-    setScopeDrones((prev) => {
-      const next = prev.filter((drone) => drone.id !== droneId);
-      if (next.length === 0) {
-        setScopeReadMode('all');
-        setScopeWriteMode('all');
-      }
-      return next;
-    });
+    setScopeDrones((prev) => prev.filter((drone) => drone.id !== droneId));
   }, []);
 
   const syncScopeToBackend = React.useCallback(async (): Promise<boolean> => {
@@ -3213,7 +3203,6 @@ export function AssistantDock() {
   }, [activeThread, modelOptions]);
   const activeProviderMeta = providerOptions.find((provider) => provider.id === activeProvider) ?? ASSISTANT_PROVIDERS[0];
   const activeRunningModelLabel = activeRunningModel ? modelSelectionLabel(activeRunningModel, modelOptions) : '';
-  const selectedScopeDisabled = scopeDrones.length === 0;
   const availableTools = snapshot?.availableTools ?? [];
   const snapshotEnabledToolNames = React.useMemo(() => {
     const toolNames = availableTools.map((tool) => tool.name);
@@ -3570,12 +3559,16 @@ export function AssistantDock() {
             Access
           </div>
           <div className="flex flex-shrink-0 items-center gap-1">
-            <ScopeModeControl label="R" mode={scopeReadMode} selectedDisabled={selectedScopeDisabled} onChange={setScopeReadMode} />
-            <ScopeModeControl label="W" mode={scopeWriteMode} selectedDisabled={selectedScopeDisabled} onChange={setScopeWriteMode} />
+            <ScopeModeControl label="R" mode={scopeReadMode} onChange={setScopeReadMode} />
+            <ScopeModeControl label="W" mode={scopeWriteMode} onChange={setScopeWriteMode} />
           </div>
           <div className="min-w-[120px] flex-1 overflow-hidden">
             {scopeDrones.length === 0 ? (
-              <div className="truncate text-[10px] text-[var(--muted-dim)]">Drop drones here to limit access.</div>
+              <div className="truncate text-[10px] text-[var(--muted-dim)]">
+                {scopeReadMode === 'selected' || scopeWriteMode === 'selected'
+                  ? 'No selected drones. Drop drones here to allow access.'
+                  : 'Drop drones here to limit access.'}
+              </div>
             ) : (
               <div className="flex min-w-0 gap-1 overflow-x-auto no-scrollbar">
                 {scopeDrones.map((drone) => (
