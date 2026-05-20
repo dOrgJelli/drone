@@ -11230,6 +11230,7 @@ export async function startDroneHubApiServer(opts: {
     runDroneBash: async ({ droneId, command, cwd, timeoutMs }) => await assistantRunDroneBash({ droneId, command, cwd, timeoutMs }),
     listDroneChangedFiles: async ({ droneId }) => await assistantListDroneChangedFiles({ droneId }),
   });
+  let desktopVoicePatchSessionId: string | null = null;
   desktopVoiceService = new DesktopVoiceService({
     transcribeWav: async (wav) => {
       const groqSettings = await resolveGroqApiKeySettings();
@@ -11240,13 +11241,17 @@ export async function startDroneHubApiServer(opts: {
       await assistantService.submitVoicePrompt({ prompt, title: 'Desktop voice thread', source: 'desktop' });
     },
     startChatPatch: async () => {
-      beginVoicePatchSession('desktop');
+      desktopVoicePatchSessionId = beginVoicePatchSession('desktop').sessionId;
     },
     submitChatPatch: async (prompt) => {
-      await submitVoicePatchPrompt(prompt, 'desktop');
+      const sessionId = desktopVoicePatchSessionId;
+      desktopVoicePatchSessionId = null;
+      await submitVoicePatchPrompt(prompt, 'desktop', sessionId);
     },
     abortChatPatch: async () => {
-      endVoicePatchSession('desktop', 'aborted');
+      const sessionId = desktopVoicePatchSessionId;
+      desktopVoicePatchSessionId = null;
+      endVoicePatchSession('desktop', 'aborted', sessionId);
     },
     synthesizeSpeechWav: async (text) => {
       const groqSettings = await resolveGroqApiKeySettings();
@@ -11296,6 +11301,7 @@ export async function startDroneHubApiServer(opts: {
     updatedAt: nowIso(),
     message: 'Voice patch is idle.',
   };
+  const voicePatchSessions = new Map<string, VoicePatchState>();
   const voicePatchSubscribers = new Set<http.ServerResponse>();
 
   function emitVoicePatchState(): void {
@@ -11315,6 +11321,14 @@ export async function startDroneHubApiServer(opts: {
     return voicePatchState;
   }
 
+  function latestVoicePatchSession(): VoicePatchState | null {
+    let latest: VoicePatchState | null = null;
+    for (const session of voicePatchSessions.values()) {
+      latest = session;
+    }
+    return latest;
+  }
+
   function beginVoicePatchSession(sourceRaw: unknown, sessionIdRaw?: unknown): VoicePatchState {
     const droneId = String(activeAssistantContext.activeDroneId ?? '').trim();
     const droneName = String(activeAssistantContext.activeDroneName ?? '').trim();
@@ -11323,7 +11337,7 @@ export async function startDroneHubApiServer(opts: {
     const source = String(sourceRaw ?? '').trim() || 'unknown';
     const sessionId = String(sessionIdRaw ?? '').trim() || crypto.randomUUID();
     const at = nowIso();
-    return setVoicePatchState({
+    const next = {
       active: true,
       sessionId,
       source,
@@ -11333,24 +11347,34 @@ export async function startDroneHubApiServer(opts: {
       startedAt: at,
       updatedAt: at,
       message: `Patching into ${droneName || droneId} / ${chatName}.`,
-    });
+    };
+    voicePatchSessions.set(sessionId, next);
+    return setVoicePatchState(next);
   }
 
   function endVoicePatchSession(sourceRaw: unknown, reason = 'idle', sessionIdRaw?: unknown): VoicePatchState {
     const sessionId = String(sessionIdRaw ?? '').trim();
-    if (sessionId && voicePatchState.sessionId && sessionId !== voicePatchState.sessionId) {
+    const target = sessionId ? voicePatchSessions.get(sessionId) : voicePatchState;
+    if (sessionId) {
+      voicePatchSessions.delete(sessionId);
+    } else if (voicePatchState.sessionId) {
+      voicePatchSessions.delete(voicePatchState.sessionId);
+    }
+    if (sessionId && voicePatchState.sessionId !== sessionId) {
       return voicePatchState;
     }
-    const source = String(sourceRaw ?? '').trim() || voicePatchState.source || 'unknown';
+    const remainingActive = latestVoicePatchSession();
+    if (remainingActive) return setVoicePatchState(remainingActive);
+    const source = String(sourceRaw ?? '').trim() || target?.source || voicePatchState.source || 'unknown';
     const at = nowIso();
     return setVoicePatchState({
       active: false,
-      sessionId: voicePatchState.sessionId,
+      sessionId: target?.sessionId ?? voicePatchState.sessionId,
       source,
-      droneId: voicePatchState.droneId,
-      droneName: voicePatchState.droneName,
-      chatName: voicePatchState.chatName,
-      startedAt: voicePatchState.startedAt,
+      droneId: target?.droneId ?? voicePatchState.droneId,
+      droneName: target?.droneName ?? voicePatchState.droneName,
+      chatName: target?.chatName ?? voicePatchState.chatName,
+      startedAt: target?.startedAt ?? voicePatchState.startedAt,
       updatedAt: at,
       message:
         reason === 'sent'
@@ -11367,12 +11391,12 @@ export async function startDroneHubApiServer(opts: {
     const prompt = String(promptRaw ?? '').trim();
     if (!prompt) throw new Error('Patch transcript is empty.');
     const sessionId = String(sessionIdRaw ?? '').trim();
-    const canUseExistingTarget =
-      Boolean(voicePatchState.droneId) &&
-      (!sessionId || !voicePatchState.sessionId || voicePatchState.sessionId === sessionId);
-    const target = canUseExistingTarget
-      ? voicePatchState
-      : beginVoicePatchSession(sourceRaw, sessionId);
+    const target = sessionId
+      ? voicePatchSessions.get(sessionId)
+      : voicePatchState.active
+        ? voicePatchState
+        : null;
+    if (!target) throw new Error('Voice patch session is no longer active.');
     const droneId = String(target.droneId ?? '').trim();
     const chatName = String(target.chatName ?? '').trim() || 'default';
     if (!droneId) throw new Error('No active drone chat is open.');
@@ -11846,9 +11870,10 @@ export async function startDroneHubApiServer(opts: {
         try {
           const active = Boolean(body?.active);
           const reason = String(body?.reason ?? '').trim() || 'aborted';
+          const sessionId = String(body?.sessionId ?? '').trim();
           const patch = active
             ? beginVoicePatchSession(body?.source, body?.sessionId)
-            : voicePatchState.active
+            : sessionId || voicePatchState.active
               ? endVoicePatchSession(body?.source, reason, body?.sessionId)
               : voicePatchState;
           json(res, 200, { ok: true, ...patch });
