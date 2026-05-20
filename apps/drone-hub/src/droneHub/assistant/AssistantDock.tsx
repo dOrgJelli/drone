@@ -9,8 +9,13 @@ import { UiMenuSelect, type UiMenuSelectEntry } from '../../ui/menuSelect';
 import { IconFile, iconForFilePath } from '../icons';
 import {
   ASSISTANT_DESKTOP_VOICE_TRANSCRIPT_SEGMENT_EVENT,
+  desktopAssistantVoiceControlLabel,
+  desktopAssistantVoiceControlTitle,
+  desktopAssistantVoiceHeardText,
   dispatchAssistantDesktopVoiceToggle,
   dispatchAssistantDesktopVoiceStop,
+  isDesktopAssistantVoiceActive,
+  isDesktopAssistantVoiceBusy,
   subscribeAssistantDesktopVoiceStatus,
   type DesktopAssistantVoiceStatus,
 } from './desktop-assistant-voice';
@@ -1365,33 +1370,11 @@ function AssistantThreadSidebar({
   onCollapse: () => void;
 }) {
   const voiceMode = mode === 'voice';
-  const desktopVoiceActive = desktopVoiceStatus.mode !== 'off' && desktopVoiceStatus.mode !== 'error';
-  const desktopVoiceBusy = desktopVoiceStatus.mode === 'recording' || desktopVoiceStatus.mode === 'transcribing';
-  const desktopVoiceHeardText = String(desktopVoiceStatus.recognizer?.text ?? desktopVoiceStatus.recognizer?.finalText ?? '').trim();
-  const desktopVoiceLabel =
-    desktopVoiceStatus.mode === 'off'
-      ? 'Start voice'
-      : desktopVoiceStatus.mode === 'error'
-        ? 'Voice error'
-      : desktopVoiceStatus.mode === 'locked'
-        ? 'Locked'
-      : desktopVoiceStatus.mode === 'dormant'
-        ? 'Sleep'
-      : desktopVoiceStatus.mode === 'sleeping'
-        ? 'Awake'
-        : desktopVoiceStatus.mode === 'recording'
-          ? 'Recording'
-          : desktopVoiceStatus.mode === 'transcribing'
-            ? 'Transcribing'
-            : 'Voice';
-  const desktopVoiceMainTitle =
-    desktopVoiceStatus.mode === 'off' || desktopVoiceStatus.mode === 'error'
-      ? 'Start desktop assistant voice'
-      : desktopVoiceStatus.mode === 'recording' || desktopVoiceStatus.mode === 'transcribing'
-        ? 'Stop recording'
-        : desktopVoiceStatus.mode === 'dormant'
-          ? 'Wake desktop assistant voice'
-          : 'Sleep desktop assistant voice';
+  const desktopVoiceActive = isDesktopAssistantVoiceActive(desktopVoiceStatus);
+  const desktopVoiceBusy = isDesktopAssistantVoiceBusy(desktopVoiceStatus);
+  const desktopVoiceHeardText = desktopAssistantVoiceHeardText(desktopVoiceStatus);
+  const desktopVoiceLabel = desktopAssistantVoiceControlLabel(desktopVoiceStatus);
+  const desktopVoiceMainTitle = desktopAssistantVoiceControlTitle(desktopVoiceStatus);
   return (
     <aside className="flex w-52 max-w-[46%] min-w-0 flex-shrink-0 flex-col border-r border-[var(--border)] bg-[rgba(0,0,0,.14)]">
       <div className="flex h-11 flex-shrink-0 items-center gap-2 border-b border-[var(--border)] px-2">
