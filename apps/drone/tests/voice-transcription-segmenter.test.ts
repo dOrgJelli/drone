@@ -19,6 +19,13 @@ describe('voice transcription command stripping', () => {
     }
   });
 
+  test('detects lock phrase separately from prompt sleep commands', () => {
+    const command = stripCommands('go to sleep');
+    expect(command.lock).toBe(true);
+    expect(command.sleep).toBe(false);
+    expect(command.text).toBe('');
+  });
+
   test('does not treat common non-command text as sleep in the shared stripper', () => {
     const command = stripCommands('thank you');
     expect(command.sleep).toBe(false);

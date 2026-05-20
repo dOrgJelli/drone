@@ -3,6 +3,7 @@ export type TranscriptCommandResult = {
   wake: boolean;
   patch: boolean;
   clipboard: boolean;
+  lock: boolean;
   sleep: boolean;
   abort: boolean;
   status: boolean;
@@ -22,6 +23,7 @@ export function stripCommands(text: string): TranscriptCommandResult {
   let wake = false;
   let patch = false;
   let clipboard = false;
+  let lock = false;
   let sleep = false;
   let abort = false;
   cleaned = cleaned.replace(/\b(?:hey|hay)\s+sebastian\b[\s,.:;!?-]*/gi, () => {
@@ -34,6 +36,10 @@ export function stripCommands(text: string): TranscriptCommandResult {
   });
   cleaned = cleaned.replace(/\bcan\s+you\s+transcribe\b[\s,.:;!?-]*/gi, () => {
     clipboard = true;
+    return ' ';
+  });
+  cleaned = cleaned.replace(/\bgo\s+to\s+sleep\b[\s,.:;!?-]*/gi, () => {
+    lock = true;
     return ' ';
   });
   cleaned = cleaned.replace(/\b(?:that's|thats|that\s+is)\s+it\b[\s,.:;!?-]*/gi, () => {
@@ -52,6 +58,7 @@ export function stripCommands(text: string): TranscriptCommandResult {
     wake,
     patch,
     clipboard,
+    lock,
     sleep,
     abort,
     status,

@@ -16,7 +16,7 @@ export const SETTINGS_TABS: Array<{
     id: 'voice',
     label: 'Voice',
     title: 'Voice approval',
-    description: 'Tune approval phrase, lock codes, and collection timing for desktop and Android voice.',
+    description: 'Tune approval phrase, unlock/off codes, and collection timing for desktop and Android voice.',
   },
   {
     id: 'sync',
