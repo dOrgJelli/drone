@@ -106,6 +106,63 @@ describe('DesktopVoiceService', () => {
     expect(captureStarted).toBe(true);
   });
 
+  test('go to sleep locks desktop voice while awake', () => {
+    const service = new DesktopVoiceService({
+      transcribeWav: async () => ({ text: '', model: 'test' }),
+      submitAssistantPrompt: async () => {},
+    });
+
+    (service as any).mode = 'sleeping';
+    (service as any).handleRecognizedText('go to sleep', true);
+
+    expect(service.snapshot().mode).toBe('locked');
+    expect(service.snapshot().message).toContain('Locked:');
+  });
+
+  test('awake approval lock code no longer locks desktop voice', () => {
+    const service = new DesktopVoiceService({
+      transcribeWav: async () => ({ text: '', model: 'test' }),
+      submitAssistantPrompt: async () => {},
+    });
+
+    (service as any).mode = 'sleeping';
+    (service as any).handleApprovalCode(VOICE_APPROVAL_SETTINGS_DEFAULT.lockCode);
+
+    expect(service.snapshot().mode).toBe('sleeping');
+    expect(service.snapshot().message).toBe(`Approval code detected: ${VOICE_APPROVAL_SETTINGS_DEFAULT.lockCode}`);
+  });
+
+  test('awake off code turns desktop voice off', () => {
+    const service = new DesktopVoiceService({
+      transcribeWav: async () => ({ text: '', model: 'test' }),
+      submitAssistantPrompt: async () => {},
+    });
+
+    (service as any).mode = 'sleeping';
+    (service as any).handleApprovalCode(VOICE_APPROVAL_SETTINGS_DEFAULT.lockedOffCode);
+
+    expect(service.snapshot().mode).toBe('off');
+    expect(service.snapshot().message).toBe('Desktop voice is off.');
+  });
+
+  test('go to sleep locks desktop voice from full prompt transcription', async () => {
+    let submittedPrompt = '';
+    const service = new DesktopVoiceService({
+      transcribeWav: async () => ({ text: 'go to sleep', model: 'test' }),
+      submitAssistantPrompt: async (prompt) => {
+        submittedPrompt = prompt;
+      },
+    });
+
+    (service as any).mode = 'recording';
+    (service as any).promptChunks = [Buffer.alloc(2)];
+
+    await (service as any).finishAssistantPromptRecording();
+
+    expect(service.snapshot().mode).toBe('locked');
+    expect(submittedPrompt).toBe('');
+  });
+
   test('does not start deferred capture backends after immediate stop', async () => {
     const service = new DesktopVoiceService({
       transcribeWav: async () => ({ text: '', model: 'test' }),

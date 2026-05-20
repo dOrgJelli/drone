@@ -17,6 +17,9 @@ object WakePhraseMatcher {
         val hasClipboard = words.windowed(3).any { triple ->
             triple[0] == "can" && triple[1] == "you" && triple[2] == "transcribe"
         } || words.any { it == "transcribe" }
+        val hasSleep = words.windowed(3).any { triple ->
+            triple[0] == "go" && triple[1] == "to" && triple[2] == "sleep"
+        }
         val compact = words.joinToString("")
         val hasStatus = words.any { it == "status" } ||
             compact == "stateus" ||
@@ -26,6 +29,7 @@ object WakePhraseMatcher {
             compact == "checkstatus"
 
         return when {
+            hasSleep -> WakePhrase.SLEEP
             hasStart -> WakePhrase.START
             hasPatch -> WakePhrase.PATCH
             hasClipboard -> WakePhrase.CLIPBOARD
@@ -39,6 +43,7 @@ enum class WakePhrase {
     START,
     PATCH,
     CLIPBOARD,
+    SLEEP,
     STATUS;
 
     val hasStart: Boolean
@@ -49,6 +54,9 @@ enum class WakePhrase {
 
     val hasClipboard: Boolean
         get() = this == CLIPBOARD
+
+    val hasSleep: Boolean
+        get() = this == SLEEP
 
     val hasStatus: Boolean
         get() = this == STATUS

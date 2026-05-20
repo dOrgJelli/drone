@@ -134,6 +134,10 @@ const VOSK_WAKE_GRAMMAR = [
   'patch',
   'can you transcribe',
   'transcribe',
+  'go to sleep',
+  'go',
+  'to',
+  'sleep',
   'status',
   'state us',
   'state is',
@@ -1275,6 +1279,10 @@ export class DesktopVoiceService {
     ) {
       return;
     }
+    if (command.lock && this.mode === 'sleeping' && this.shouldAcceptCommand('lock:phrase', 1800)) {
+      this.enterLockedMode();
+      return;
+    }
     if (command.status && this.mode === 'sleeping' && this.shouldAcceptCommand('status', 1000)) {
       this.message = 'Awake: status OK.';
       this.touch();
@@ -1351,18 +1359,23 @@ export class DesktopVoiceService {
       this.emitChange();
       return;
     }
-    if ((this.mode === 'sleeping' || this.mode === 'recording') && code === this.approvalSettings.lockCode) {
-      this.mode = 'locked';
-      this.message = this.lockedMessage();
-      this.promptChunks = [];
-      this.resetApprovalCollection();
-      this.resetPromptTranscription();
-      this.promptCaptureTarget = null;
-      this.touch();
-      this.emitChange();
+    if (code === this.approvalSettings.lockedOffCode) {
+      this.stop('Desktop voice is off.');
       return;
     }
     this.message = `Approval code detected: ${code}`;
+    this.touch();
+    this.emitChange();
+  }
+
+  private enterLockedMode(): void {
+    this.mode = 'locked';
+    this.message = this.lockedMessage();
+    this.promptChunks = [];
+    this.promptSegments = [];
+    this.resetApprovalCollection();
+    this.resetPromptTranscription();
+    this.promptCaptureTarget = null;
     this.touch();
     this.emitChange();
   }
@@ -1456,6 +1469,12 @@ export class DesktopVoiceService {
         this.promptTranscriptError = null;
         this.promptTranscribing = false;
         await this.abortPromptRecordingFromTranscript();
+        return;
+      }
+      if (command.lock && this.mode === 'recording' && this.shouldAcceptCommand('lock:phrase', 1800)) {
+        this.promptTranscriptError = null;
+        this.promptTranscribing = false;
+        this.enterLockedMode();
         return;
       }
       if (hasTranscriptContent(text)) {
@@ -1606,7 +1625,12 @@ export class DesktopVoiceService {
     this.emitChange();
     try {
       const result = await this.opts.transcribeWav(pcm16leToWav(pcm));
-      const text = stripCommands(result.text).text.trim();
+      const command = stripCommands(result.text);
+      if (command.lock && this.shouldAcceptCommand('lock:phrase', 1800)) {
+        this.enterLockedMode();
+        return;
+      }
+      const text = command.text.trim();
       if (text) await this.opts.submitAssistantPrompt(text);
       this.mode = 'sleeping';
       this.message = text ? 'Awake: sent assistant voice prompt.' : 'Awake: no assistant prompt detected.';

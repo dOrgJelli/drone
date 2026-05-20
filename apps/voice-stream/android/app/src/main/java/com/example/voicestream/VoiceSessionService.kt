@@ -454,6 +454,17 @@ class VoiceSessionService : Service() {
                 publishTemporaryStatus("Awake: status OK")
                 cuePlayer.play(LocalCue.STATUS)
             }
+            WakeAction.LOCK_LISTENING -> {
+                wakeDetector?.reset()
+                DroneLog.i("Wake", "Sleep phrase detected; locking listening mode")
+                cuePlayer.play(LocalCue.LOCK)
+                publishApprovalStatus("Locked")
+                if (streaming.get()) {
+                    endStreaming(lockedStatus(), returnToListening = true)
+                } else {
+                    publishState(lockedStatus(), Constants.MODE_LOCKED)
+                }
+            }
             WakeAction.STOP_STREAMING,
             WakeAction.NONE -> Unit
         }
@@ -509,15 +520,11 @@ class VoiceSessionService : Service() {
                 lastApprovalStatus = ""
                 broadcastState()
             }
-            !isLocked() && code == approvalSettings.lockCode -> {
-                wakeController.lockListening()
-                cuePlayer.play(LocalCue.LOCK)
-                publishApprovalStatus("Locked")
-                if (streaming.get()) {
-                    endStreaming(lockedStatus(), returnToListening = true)
-                } else {
-                    publishState(lockedStatus(), Constants.MODE_LOCKED)
-                }
+            code == approvalSettings.lockedOffCode -> {
+                DroneLog.i("Approval", "Awake off code detected; stopping listening mode")
+                cuePlayer.play(LocalCue.LOCKED_OFF)
+                publishApprovalStatus("Turning off")
+                stopListeningMode()
             }
             else -> {
                 cuePlayer.play(LocalCue.STATUS)
