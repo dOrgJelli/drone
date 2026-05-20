@@ -560,6 +560,7 @@ const ASSISTANT_SYSTEM_PROMPT_DEFAULT = [
   'Use list_changed_files as a read-only review helper to inspect repo working tree status before reviewing or editing; it only works for repo-attached drones.',
   'Use read_file line ranges and search_files context when you only need a focused section of a file.',
   'Use bash only when a command is the right tool for inspection, tests, builds, or small scripted checks in an accessible container drone. Bash is approval-gated, non-interactive, and not for background processes.',
+  'Use set_thinking_level when the user asks to change how much the assistant thinks. It changes this assistant thread to another supported thinking level for the same selected model and does not require approval.',
   'File paths are interpreted by drone id plus path. Relative paths resolve inside the target drone workspace, usually the repo root for repo-backed drones.',
   'Chat timelines contain user messages and agent messages. Queued or pending user messages appear in the same timeline with a non-completed status.',
   'When you send a drone chat message and need the result later, call subscribe_to_chats_idle on the target chat. This returns immediately so you can continue other work. If there is nothing else to do, end your turn; the system will resume this thread when the subscribed chats become idle.',
@@ -578,6 +579,7 @@ const ASSISTANT_TOOL_SUMMARIES: AssistantToolSummary[] = [
   { name: 'assistant_files', label: 'Assistant files', category: 'files', description: 'Maintain private Markdown or text artifacts for this thread.' },
   { name: 'get_system_prompt', label: 'Get system prompt', category: 'prompts', description: 'Read the global and current thread system prompts.' },
   { name: 'update_system_prompt', label: 'Update system prompt', category: 'prompts', description: 'Update only this thread system prompt.' },
+  { name: 'set_thinking_level', label: 'Set thinking level', category: 'actions', description: 'Change this assistant thread to a supported thinking level for its current model.' },
   { name: 'inspect_drone', label: 'Inspect drone', category: 'drones', description: 'Inspect one drone by id or name.' },
   { name: 'list_files', label: 'List files', category: 'files', description: 'List files and folders in one drone.' },
   { name: 'list_changed_files', label: 'List changed files', category: 'files', description: 'List changed files in one repo-attached drone.' },
@@ -598,11 +600,9 @@ const ASSISTANT_TOOL_SUMMARIES: AssistantToolSummary[] = [
 ];
 const ASSISTANT_ALL_TOOL_NAMES = ASSISTANT_TOOL_SUMMARIES.map((tool) => tool.name);
 const ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES = ASSISTANT_ALL_TOOL_NAMES.filter(
-  (name) => name !== 'get_system_prompt' && name !== 'update_system_prompt' && name !== 'speak',
+  (name) => name !== 'get_system_prompt' && name !== 'update_system_prompt' && name !== 'set_thinking_level' && name !== 'speak',
 );
-const ASSISTANT_VOICE_DEFAULT_ENABLED_TOOL_NAMES = ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES.includes('speak')
-  ? ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES
-  : [...ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES, 'speak'];
+const ASSISTANT_VOICE_DEFAULT_ENABLED_TOOL_NAMES = [...ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES, 'set_thinking_level', 'speak'];
 const ASSISTANT_OVERVIEW_PROMPT_DEFAULT = [
   'You write a concise Markdown status overview for an assistant thread in Drone Hub.',
   'Focus on the current state of the work, recent actions, tool calls, approvals, blockers, and next likely step.',
@@ -618,9 +618,11 @@ const ASSISTANT_MODEL_OPTIONS: Array<{
   thinkingLevel: AssistantThinkingLevel;
 }> = [
   { provider: 'openai', id: 'gpt-5.5', name: 'GPT-5.5 Instant', thinkingLevel: 'off' },
+  { provider: 'openai', id: 'gpt-5.5', name: 'GPT-5.5 Low', thinkingLevel: 'low' },
   { provider: 'openai', id: 'gpt-5.5', name: 'GPT-5.5 Medium', thinkingLevel: 'medium' },
   { provider: 'openai', id: 'gpt-5.5', name: 'GPT-5.5 High', thinkingLevel: 'high' },
   { provider: 'codex', id: 'gpt-5.5', name: 'GPT-5.5 Instant', thinkingLevel: 'off' },
+  { provider: 'codex', id: 'gpt-5.5', name: 'GPT-5.5 Low', thinkingLevel: 'low' },
   { provider: 'codex', id: 'gpt-5.5', name: 'GPT-5.5 Medium', thinkingLevel: 'medium' },
   { provider: 'codex', id: 'gpt-5.5', name: 'GPT-5.5 High', thinkingLevel: 'high' },
   { provider: 'gemini', id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash', thinkingLevel: 'medium' },
@@ -673,8 +675,20 @@ function allowedThinkingLevelForModel(provider: LlmProviderId, model: string, ra
   return ASSISTANT_MODEL_OPTIONS.find((option) => option.provider === provider && option.id === model)?.thinkingLevel ?? 'off';
 }
 
+function supportedThinkingLevelsForModel(provider: LlmProviderId, model: string): AssistantThinkingLevel[] {
+  const seen = new Set<AssistantThinkingLevel>();
+  const levels: AssistantThinkingLevel[] = [];
+  for (const option of ASSISTANT_MODEL_OPTIONS) {
+    if (option.provider !== provider || option.id !== model || seen.has(option.thinkingLevel)) continue;
+    seen.add(option.thinkingLevel);
+    levels.push(option.thinkingLevel);
+  }
+  return levels.length > 0 ? levels : ['off'];
+}
+
 function normalizeThinkingLevel(raw: unknown): AssistantThinkingLevel {
   const value = String(raw ?? '').trim().toLowerCase();
+  if (value === 'instant' || value === 'none') return 'off';
   if (value === 'minimal' || value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh') return value;
   return 'off';
 }
@@ -1043,7 +1057,7 @@ function normalizeAssistantVoiceSource(raw: unknown): AssistantVoiceSource | nul
 function enabledToolsForVoiceMode(enabledTools: string[], voiceEnabled: boolean): string[] {
   const base = normalizeAssistantEnabledTools(enabledTools);
   if (!voiceEnabled) return base.filter((name) => name !== 'speak');
-  return normalizeAssistantEnabledTools([...base, 'speak'], ASSISTANT_VOICE_DEFAULT_ENABLED_TOOL_NAMES);
+  return normalizeAssistantEnabledTools([...base, 'set_thinking_level', 'speak'], ASSISTANT_VOICE_DEFAULT_ENABLED_TOOL_NAMES);
 }
 
 function normalizeAssistantSystemPromptPatches(raw: unknown): Array<{ oldText: string; newText: string }> {
@@ -2479,6 +2493,47 @@ export class HubAssistantService {
     return await this.snapshot();
   }
 
+  private async setThreadThinkingLevel(threadId: string, rawLevel: unknown): Promise<{
+    ok: true;
+    provider: LlmProviderId;
+    model: string;
+    previousThinkingLevel: AssistantThinkingLevel;
+    thinkingLevel: AssistantThinkingLevel;
+    supportedThinkingLevels: AssistantThinkingLevel[];
+  }> {
+    await this.ensureLoaded();
+    const thread = this.getThread(threadId);
+    const requested = normalizeThinkingLevel(rawLevel);
+    const supportedThinkingLevels = supportedThinkingLevelsForModel(thread.provider, thread.model);
+    if (!supportedThinkingLevels.includes(requested)) {
+      throw new Error(
+        `thinking level "${requested}" is not supported by ${thread.provider}/${thread.model}. Supported levels: ${supportedThinkingLevels.join(', ')}`,
+      );
+    }
+
+    const previousThinkingLevel = thread.thinkingLevel;
+    thread.thinkingLevel = requested;
+    thread.updatedAt = nowIso();
+
+    const activeAgent = this.activeAgents.get(thread.id);
+    if (activeAgent?.state && typeof activeAgent.state === 'object') {
+      activeAgent.state.thinkingLevel = requested;
+    }
+    const runningModel = this.runningModels.get(thread.id);
+    if (runningModel) runningModel.thinkingLevel = requested;
+
+    await this.persist();
+    this.emitChange('thinking_level_changed', thread.id);
+    return {
+      ok: true,
+      provider: thread.provider,
+      model: thread.model,
+      previousThinkingLevel,
+      thinkingLevel: thread.thinkingLevel,
+      supportedThinkingLevels,
+    };
+  }
+
   async stopThread(threadId: string): Promise<AssistantSnapshot> {
     await this.ensureLoaded();
     this.activeAgents.get(threadId)?.abort?.();
@@ -3005,6 +3060,8 @@ export class HubAssistantService {
     onEvent?: (event: AssistantPromptEvent) => void | Promise<void>,
   ): any[] {
     const Type = runtime.Type;
+    const thread = this.getThread(threadId);
+    const supportedThinkingLevels = supportedThinkingLevelsForModel(thread.provider, thread.model);
     const tools = [
       {
         name: 'list_drones',
@@ -3128,6 +3185,31 @@ export class HubAssistantService {
               },
             ],
             details: settings,
+          };
+        },
+      },
+      {
+        name: 'set_thinking_level',
+        label: 'Set thinking level',
+        description:
+          `Change this assistant thread's thinking level for the currently selected model (${thread.provider}/${thread.model}). Supported levels for this model: ${supportedThinkingLevels.join(', ')}. This keeps the same model and does not require user approval.`,
+        parameters: Type.Object({
+          level: Type.String({ description: `Thinking level to use. Supported for the current model: ${supportedThinkingLevels.join(', ')}.` }),
+        }),
+        executionMode: 'sequential',
+        execute: async (_toolCallId: string, params: any) => {
+          const result = await this.setThreadThinkingLevel(threadId, params?.level ?? params?.thinkingLevel);
+          return {
+            content: [
+              {
+                type: 'text',
+                text:
+                  result.previousThinkingLevel === result.thinkingLevel
+                    ? `Thinking level is already ${result.thinkingLevel} for ${result.provider}/${result.model}.`
+                    : `Changed thinking level from ${result.previousThinkingLevel} to ${result.thinkingLevel} for ${result.provider}/${result.model}.`,
+              },
+            ],
+            details: result,
           };
         },
       },
@@ -3567,7 +3649,7 @@ export class HubAssistantService {
         },
       },
     ];
-    const enabled = new Set(normalizeAssistantEnabledTools(this.getThread(threadId).enabledTools));
+    const enabled = new Set(normalizeAssistantEnabledTools(thread.enabledTools));
     return tools.filter((tool) => enabled.has(String(tool.name ?? '')));
   }
 

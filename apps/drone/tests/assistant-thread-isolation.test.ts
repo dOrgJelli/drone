@@ -153,11 +153,13 @@ describe('assistant thread isolation', () => {
       let thread = normal.threads.find((item) => item.id === normal.activeThreadId) as any;
       expect(thread.voiceEnabled).toBe(false);
       expect(thread.enabledTools).not.toContain('speak');
+      expect(thread.enabledTools).not.toContain('set_thinking_level');
 
       const voice = await service.ensureLatestVoiceThread();
       expect(voice.created).toBe(true);
       expect(voice.thread.voiceEnabled).toBe(true);
       expect(voice.thread.enabledTools).toContain('speak');
+      expect(voice.thread.enabledTools).toContain('set_thinking_level');
 
       const reused = await service.ensureLatestVoiceThread();
       expect(reused.created).toBe(false);
@@ -379,6 +381,7 @@ describe('assistant thread isolation', () => {
       expect(thread.thinkingLevel).toBe('off');
       expect(codexOptions.map((option) => `${option.id}:${option.thinkingLevel}`)).toEqual([
         'gpt-5.5:off',
+        'gpt-5.5:low',
         'gpt-5.5:medium',
         'gpt-5.5:high',
       ]);
