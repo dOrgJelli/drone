@@ -99,6 +99,9 @@ type DesktopVoiceEvent = {
   type: 'desktop_voice_status';
   status: DesktopVoiceStatus;
 } | {
+  type: 'desktop_voice_local_cue';
+  cue: 'status';
+} | {
   type: 'desktop_voice_clipboard_result';
   text: string;
 } | {
@@ -1279,6 +1282,7 @@ export class DesktopVoiceService {
       this.message = 'Awake: status OK.';
       this.touch();
       this.emitChange();
+      this.events.emit('event', { type: 'desktop_voice_local_cue', cue: 'status' } satisfies DesktopVoiceEvent);
       return;
     }
     if (command.wake && this.mode === 'sleeping' && this.shouldAcceptCommand('wake', 1500)) {

@@ -89,7 +89,6 @@ function cueForTransition(previous: DesktopAssistantVoiceStatus | null, next: De
   if ((previous.mode === 'sleeping' || previous.mode === 'recording') && next.mode === 'locked') return 'lock';
   if (previous.mode === 'sleeping' && next.mode === 'recording') return 'wake';
   if ((previous.mode === 'recording' || previous.mode === 'transcribing') && next.mode === 'sleeping') return 'sleep';
-  if (next.mode === 'sleeping' && next.message.toLowerCase().includes('status ok')) return 'status';
   return null;
 }
 
@@ -97,7 +96,7 @@ function playCueForStatus(status: DesktopAssistantVoiceStatus): void {
   const cue = cueForTransition(latestStatus, status);
   latestStatus = status;
   if (!cue) return;
-  const cueKey = `${cue}:${status.updatedAt ?? ''}:${status.mode}:${status.message}`;
+  const cueKey = `${cue}:${status.mode}:${status.message}`;
   const now = Date.now();
   if (cueKey === lastCueKey && now - lastCueAt < 250) return;
   lastCueKey = cueKey;
@@ -241,6 +240,15 @@ export function subscribeAssistantDesktopVoiceStatus(listener: (status: DesktopA
         const data = JSON.parse((event as MessageEvent).data);
         const text = String(data?.text ?? '').trim();
         if (text) dispatchAssistantDesktopVoiceTranscriptSegment(text);
+      } catch {
+        // Ignore malformed event payloads.
+      }
+    });
+    source.addEventListener('desktop_voice_local_cue', (event) => {
+      try {
+        const data = JSON.parse((event as MessageEvent).data);
+        const cue = String(data?.cue ?? '').trim();
+        if (cue === 'status') playLocalVoiceCue(cue);
       } catch {
         // Ignore malformed event payloads.
       }

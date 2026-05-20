@@ -11577,7 +11577,9 @@ export async function startDroneHubApiServer(opts: {
         (res as any).flushHeaders?.();
         writeAssistantSseEvent(res, 'connected', { ok: true, at: new Date().toISOString() });
         const unsubscribe = desktopVoiceService.subscribe((event) => {
-          if (event.type === 'desktop_voice_clipboard_result') {
+          if (event.type === 'desktop_voice_local_cue') {
+            writeAssistantSseEvent(res, event.type, { cue: event.cue });
+          } else if (event.type === 'desktop_voice_clipboard_result') {
             writeAssistantSseEvent(res, event.type, { text: event.text });
           } else if (event.type === 'desktop_voice_transcript_segment') {
             writeAssistantSseEvent(res, event.type, { text: event.text });
