@@ -52,7 +52,11 @@ import { ensureHubSetupState } from './host/setup-state';
 import { resolveDetachedCliLaunchSpec } from './hub/hub-launch';
 import { parseHubRunnerProcessesFromPsOutput, selectHubRunnerPidsToStop } from './hub/orphan-hub-runners';
 import { startDroneHubApiServer } from './hub/server';
-import { resolveGroqApiKeySettings, resolveVoiceStreamPairingPasswordSettings } from './hub/hub-settings';
+import {
+  resolveEffectiveVoiceTranscriptionSettings,
+  resolveGroqApiKeySettings,
+  resolveVoiceStreamPairingPasswordSettings,
+} from './hub/hub-settings';
 import { buildVoiceStreamProcessEnv } from './hub/voice-stream-launch';
 
 function sleep(ms: number) {
@@ -414,9 +418,10 @@ async function startVoiceStreamServer(
     return null;
   }
 
-  const [groqSettings, pairingPasswordSettings] = await Promise.all([
+  const [groqSettings, pairingPasswordSettings, voiceTranscriptionSettings] = await Promise.all([
     resolveGroqApiKeySettings(),
     resolveVoiceStreamPairingPasswordSettings(),
+    resolveEffectiveVoiceTranscriptionSettings(),
   ]);
   const child = spawn('bun', ['run', 'dev'], {
     cwd: voiceStreamDir,
@@ -425,6 +430,7 @@ async function startVoiceStreamServer(
       port,
       groqApiKey: groqSettings.apiKey,
       pairingPassword: pairingPasswordSettings.password,
+      finalTranscriptionMode: voiceTranscriptionSettings.finalMode,
       hubApiUrl: hubApi.url,
       hubApiToken: hubApi.token,
     }),
@@ -1961,6 +1967,7 @@ async function hubRun(options: any) {
     onGroqApiKeySettingsChanged: restartVoiceStreamForSettings,
     onVoiceStreamPairingPasswordSettingsChanged: restartVoiceStreamForSettings,
     onVoiceApprovalSettingsChanged: reloadVoiceStreamApprovalSettings,
+    onVoiceTranscriptionSettingsChanged: restartVoiceStreamForSettings,
   });
 
   const voiceStream = voiceStreamEnabled

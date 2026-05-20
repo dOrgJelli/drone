@@ -247,6 +247,7 @@ import {
   resolveEffectiveDeleteActionSettings,
   resolveEffectiveLlmProvider,
   resolveEffectiveVoiceApprovalSettings,
+  resolveEffectiveVoiceTranscriptionSettings,
   resolveFilesystemSettingsResponse,
   resolveEffectiveProviderApiKeySettings,
   resolveGroqApiKeySettings,
@@ -263,6 +264,7 @@ import {
   upsertStoredLlmProvider,
   upsertStoredProviderApiKey,
   upsertStoredVoiceApprovalSettings,
+  upsertStoredVoiceTranscriptionSettings,
   upsertVoiceStreamPairingPassword,
   upsertStoredTaskPlaybookButtonSettings,
   upsertStoredUiPreferencesSettings,
@@ -10606,6 +10608,7 @@ export async function startDroneHubApiServer(opts: {
   onGroqApiKeySettingsChanged?: () => void | Promise<void>;
   onVoiceStreamPairingPasswordSettingsChanged?: () => void | Promise<void>;
   onVoiceApprovalSettingsChanged?: () => void | Promise<void>;
+  onVoiceTranscriptionSettingsChanged?: () => void | Promise<void>;
 }) {
   for (const timer of RECONCILE_RETRY_TIMERS.values()) {
     try {
@@ -10644,6 +10647,14 @@ export async function startDroneHubApiServer(opts: {
     if (!opts.onVoiceApprovalSettingsChanged) return;
     void Promise.resolve(opts.onVoiceApprovalSettingsChanged()).catch((error: any) => {
       hubLog('warn', 'Voice approval settings change hook failed', {
+        error: String(error?.message ?? error ?? ''),
+      });
+    });
+  };
+  const notifyVoiceTranscriptionSettingsChanged = () => {
+    if (!opts.onVoiceTranscriptionSettingsChanged) return;
+    void Promise.resolve(opts.onVoiceTranscriptionSettingsChanged()).catch((error: any) => {
+      hubLog('warn', 'Voice transcription settings change hook failed', {
         error: String(error?.message ?? error ?? ''),
       });
     });
@@ -11263,8 +11274,14 @@ export async function startDroneHubApiServer(opts: {
   const reloadDesktopVoiceApprovalSettings = async () => {
     desktopVoiceService.setApprovalSettings(await resolveEffectiveVoiceApprovalSettings());
   };
+  const reloadDesktopVoiceTranscriptionSettings = async () => {
+    desktopVoiceService.setVoiceTranscriptionSettings(await resolveEffectiveVoiceTranscriptionSettings());
+  };
   void reloadDesktopVoiceApprovalSettings().catch((error: any) => {
     hubLog('warn', 'Failed to apply desktop voice approval settings', { error: String(error?.message ?? error ?? '') });
+  });
+  void reloadDesktopVoiceTranscriptionSettings().catch((error: any) => {
+    hubLog('warn', 'Failed to apply desktop voice transcription settings', { error: String(error?.message ?? error ?? '') });
   });
 
   type VoicePatchState = {
@@ -12421,9 +12438,20 @@ export async function startDroneHubApiServer(opts: {
             return;
           }
           try {
-            await upsertStoredVoiceApprovalSettings(body?.voiceApproval ?? body);
-            await reloadDesktopVoiceApprovalSettings();
-            notifyVoiceApprovalSettingsChanged();
+            const voiceApprovalPayload = body?.voiceApproval ?? (body?.voiceTranscription == null ? body : null);
+            if (voiceApprovalPayload != null) {
+              await upsertStoredVoiceApprovalSettings(voiceApprovalPayload);
+              await reloadDesktopVoiceApprovalSettings();
+              notifyVoiceApprovalSettingsChanged();
+            }
+            if (body?.voiceTranscription != null) {
+              await upsertStoredVoiceTranscriptionSettings(body.voiceTranscription);
+              await reloadDesktopVoiceTranscriptionSettings();
+              notifyVoiceTranscriptionSettingsChanged();
+            }
+            if (voiceApprovalPayload == null && body?.voiceTranscription == null) {
+              throw new Error('No voice settings payload provided');
+            }
             json(res, 200, await resolveVoiceApprovalSettingsResponse());
           } catch (e: any) {
             json(res, 400, { ok: false, error: e?.message ?? String(e) });

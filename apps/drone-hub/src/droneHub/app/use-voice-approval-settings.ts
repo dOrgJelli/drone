@@ -1,5 +1,5 @@
 import React from 'react';
-import type { VoiceApprovalSettings, VoiceApprovalSettingsResponse } from './settings-types';
+import type { VoiceApprovalSettings, VoiceApprovalSettingsResponse, VoiceTranscriptionSettings } from './settings-types';
 
 type RequestJsonFn = <T>(url: string, init?: RequestInit) => Promise<T>;
 
@@ -9,8 +9,10 @@ export type UseVoiceApprovalSettingsResult = {
   voiceApprovalSettingsError: string | null;
   voiceApprovalSettingsNotice: string | null;
   voiceApprovalDraft: VoiceApprovalSettings | null;
+  voiceTranscriptionDraft: VoiceTranscriptionSettings | null;
   savingVoiceApprovalSettings: boolean;
   setVoiceApprovalDraft: React.Dispatch<React.SetStateAction<VoiceApprovalSettings | null>>;
+  setVoiceTranscriptionDraft: React.Dispatch<React.SetStateAction<VoiceTranscriptionSettings | null>>;
   loadVoiceApprovalSettings: () => Promise<void>;
   saveVoiceApprovalSettings: () => Promise<void>;
 };
@@ -21,6 +23,7 @@ export function useVoiceApprovalSettings(requestJson: RequestJsonFn): UseVoiceAp
   const [voiceApprovalSettingsError, setVoiceApprovalSettingsError] = React.useState<string | null>(null);
   const [voiceApprovalSettingsNotice, setVoiceApprovalSettingsNotice] = React.useState<string | null>(null);
   const [voiceApprovalDraft, setVoiceApprovalDraft] = React.useState<VoiceApprovalSettings | null>(null);
+  const [voiceTranscriptionDraft, setVoiceTranscriptionDraft] = React.useState<VoiceTranscriptionSettings | null>(null);
   const [savingVoiceApprovalSettings, setSavingVoiceApprovalSettings] = React.useState(false);
 
   const applyResponse = React.useCallback((data: VoiceApprovalSettingsResponse) => {
@@ -37,6 +40,9 @@ export function useVoiceApprovalSettings(requestJson: RequestJsonFn): UseVoiceAp
       duplicateCooldownMs: data.voiceApproval.duplicateCooldownMs,
       finalizeCheckIntervalMs: data.voiceApproval.finalizeCheckIntervalMs,
       postPromptCommandSuppressionMs: data.voiceApproval.postPromptCommandSuppressionMs,
+    });
+    setVoiceTranscriptionDraft({
+      finalMode: data.voiceTranscription.finalMode,
     });
   }, []);
 
@@ -58,7 +64,7 @@ export function useVoiceApprovalSettings(requestJson: RequestJsonFn): UseVoiceAp
   }, [loadVoiceApprovalSettings]);
 
   const saveVoiceApprovalSettings = React.useCallback(async () => {
-    if (!voiceApprovalDraft) return;
+    if (!voiceApprovalDraft || !voiceTranscriptionDraft) return;
     setSavingVoiceApprovalSettings(true);
     setVoiceApprovalSettingsError(null);
     setVoiceApprovalSettingsNotice(null);
@@ -66,7 +72,7 @@ export function useVoiceApprovalSettings(requestJson: RequestJsonFn): UseVoiceAp
       const data = await requestJson<VoiceApprovalSettingsResponse>('/api/settings/voice-approval', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ voiceApproval: voiceApprovalDraft }),
+        body: JSON.stringify({ voiceApproval: voiceApprovalDraft, voiceTranscription: voiceTranscriptionDraft }),
       });
       applyResponse(data);
       setVoiceApprovalSettingsNotice('Saved voice settings.');
@@ -75,7 +81,7 @@ export function useVoiceApprovalSettings(requestJson: RequestJsonFn): UseVoiceAp
     } finally {
       setSavingVoiceApprovalSettings(false);
     }
-  }, [applyResponse, requestJson, voiceApprovalDraft]);
+  }, [applyResponse, requestJson, voiceApprovalDraft, voiceTranscriptionDraft]);
 
   return {
     voiceApprovalSettings,
@@ -83,8 +89,10 @@ export function useVoiceApprovalSettings(requestJson: RequestJsonFn): UseVoiceAp
     voiceApprovalSettingsError,
     voiceApprovalSettingsNotice,
     voiceApprovalDraft,
+    voiceTranscriptionDraft,
     savingVoiceApprovalSettings,
     setVoiceApprovalDraft,
+    setVoiceTranscriptionDraft,
     loadVoiceApprovalSettings,
     saveVoiceApprovalSettings,
   };

@@ -37,6 +37,15 @@ describe('voice stream launch env', () => {
     expect(env.DRONE_PAIR_PASSWORD).toBe('settings-password');
   });
 
+  test('injects the voice transcription finalization mode', () => {
+    const env = buildVoiceStreamProcessEnv(
+      {},
+      { port: 3100, groqApiKey: null, finalTranscriptionMode: 'segments' },
+    );
+
+    expect(env.GROQ_STT_FINAL_TRANSCRIPTION_MODE).toBe('segments');
+  });
+
   test('injects the Hub API connection for voice assistant messages', () => {
     const env = buildVoiceStreamProcessEnv(
       {},

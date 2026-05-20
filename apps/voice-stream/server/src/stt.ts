@@ -48,6 +48,8 @@ export type TranscriptionConfig = {
   channels: number;
   broadcastSegments: boolean;
   ignoreEmptySleepCommands: boolean;
+  finalTranscriptionMode: "full-recording" | "segments";
+  maxSessionAudioBytes: number;
 };
 
 export type SpeechSegmenterConfig = {
@@ -86,6 +88,9 @@ export class GroqTranscriptionManager {
   private terminalCommandDetected = false;
   private disabledStatusSent = false;
   private transcriptContext = "";
+  private sessionChunks: Buffer[] = [];
+  private sessionBytes = 0;
+  private sessionAudioOverflowed = false;
 
   constructor(
     private readonly config: TranscriptionConfig,
@@ -153,6 +158,7 @@ export class GroqTranscriptionManager {
       return;
     }
 
+    this.rememberSessionAudio(pcm);
     this.enqueueSegments(this.segmenter.append(pcm));
 
     if (this.queue.length > 0) {
@@ -176,6 +182,7 @@ export class GroqTranscriptionManager {
     this.queue.length = 0;
     this.inFlight = false;
     this.segmenter.reset();
+    this.clearSessionAudio();
     clearInterval(this.timer);
     this.broadcast(this.status());
   }
@@ -228,8 +235,8 @@ export class GroqTranscriptionManager {
         this.broadcast(this.status());
         return;
       } else if (commandResult.sleepDetected) {
-        const transcriptText = this.buildFullTranscriptText(trimmed);
-        if (this.config.ignoreEmptySleepCommands && !hasTranscriptContent(transcriptText)) {
+        const fallbackTranscriptText = this.buildFullTranscriptText(trimmed);
+        if (this.config.ignoreEmptySleepCommands && !hasTranscriptContent(fallbackTranscriptText)) {
           this.log(
             `command=sleep_ignored_empty segment=${segment.sequence} phrase=${formatLogValue(commandResult.sleepPhrase ?? "that's it")} ` +
             `detectedAt=${new Date().toISOString()}`
@@ -239,7 +246,18 @@ export class GroqTranscriptionManager {
           this.processQueue();
           return;
         }
+        const sessionPcm = this.config.finalTranscriptionMode === "full-recording" ? this.takeSessionAudio() : Buffer.alloc(0);
+        if (this.config.finalTranscriptionMode === "segments") {
+          this.clearSessionAudio();
+        }
         this.enterTerminalCommandState({ clearContext: false });
+        const transcriptText = this.config.finalTranscriptionMode === "full-recording"
+          ? await this.transcribeFinalSession(sessionPcm, fallbackTranscriptText, segment.sequence)
+          : fallbackTranscriptText;
+        if (this.stopped) {
+          this.inFlight = false;
+          return;
+        }
         this.log(
           `command=sleep segment=${segment.sequence} phrase=${formatLogValue(commandResult.sleepPhrase ?? "that's it")} ` +
           `detectedAt=${new Date().toISOString()}`
@@ -306,6 +324,61 @@ export class GroqTranscriptionManager {
   private rememberTranscript(text: string): void {
     const next = `${this.transcriptContext} ${text}`.trim();
     this.transcriptContext = next.slice(Math.max(0, next.length - this.config.contextChars));
+  }
+
+  private rememberSessionAudio(pcm: Buffer): void {
+    if (this.config.finalTranscriptionMode === "segments") return;
+    if (pcm.byteLength === 0 || this.sessionAudioOverflowed) return;
+    if (this.sessionBytes + pcm.byteLength > this.config.maxSessionAudioBytes) {
+      this.log(
+        `session_audio_overflow bytes=${this.sessionBytes + pcm.byteLength} ` +
+        `maxBytes=${this.config.maxSessionAudioBytes} final transcription will use chunk transcript fallback`
+      );
+      this.clearSessionAudio();
+      this.sessionAudioOverflowed = true;
+      return;
+    }
+    const copy = Buffer.from(pcm);
+    this.sessionChunks.push(copy);
+    this.sessionBytes += copy.byteLength;
+  }
+
+  private takeSessionAudio(): Buffer {
+    const pcm = this.sessionBytes > 0
+      ? Buffer.concat(this.sessionChunks, this.sessionBytes)
+      : Buffer.alloc(0);
+    this.clearSessionAudio();
+    return pcm;
+  }
+
+  private clearSessionAudio(): void {
+    this.sessionChunks = [];
+    this.sessionBytes = 0;
+    this.sessionAudioOverflowed = false;
+  }
+
+  private async transcribeFinalSession(pcm: Buffer, fallbackText: string, sequence: number): Promise<string> {
+    if (pcm.byteLength === 0) return fallbackText;
+    const startedAt = Date.now();
+    try {
+      const wav = pcm16leToWav(pcm, this.config.sampleRateHz, this.config.channels);
+      const prompt = buildGroqPrompt(this.config.prompt, undefined, this.config.maxPromptChars);
+      const text = await transcribeWavWithGroq(wav, this.config, prompt);
+      const cleaned = stripTranscriptCommands(text).text;
+      this.log(
+        `segment=${sequence} final_groq_done elapsedMs=${Date.now() - startedAt} ` +
+        `audioMs=${pcmDurationMs(pcm.byteLength, this.config.sampleRateHz, this.config.channels)} ` +
+        `rawText=${formatLogValue(text, this.config.logTextChars)} ` +
+        `cleanedText=${formatLogValue(cleaned, this.config.logTextChars)}`
+      );
+      return hasTranscriptContent(cleaned) ? cleaned : fallbackText;
+    } catch (error) {
+      this.log(
+        `segment=${sequence} final_groq_error elapsedMs=${Date.now() - startedAt} ` +
+        `message=${formatLogValue(error instanceof Error ? error.message : String(error))}`
+      );
+      return fallbackText;
+    }
   }
 
   private buildFullTranscriptText(text: string): string {
@@ -502,6 +575,8 @@ export function buildTranscriptionConfigFromEnv(env: NodeJS.ProcessEnv): Transcr
     channels: 1,
     broadcastSegments: true,
     ignoreEmptySleepCommands: false,
+    finalTranscriptionMode: parseFinalTranscriptionMode(env.GROQ_STT_FINAL_TRANSCRIPTION_MODE),
+    maxSessionAudioBytes: parsePositiveInteger(env.GROQ_STT_MAX_SESSION_AUDIO_BYTES, 80 * 1024 * 1024),
   };
 }
 
@@ -762,6 +837,12 @@ function parsePositiveFloat(value: string | undefined, fallback: number): number
 
   const parsed = Number.parseFloat(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseFinalTranscriptionMode(value: string | undefined): "full-recording" | "segments" {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (normalized === "segments" || normalized === "chunks" || normalized === "chunked") return "segments";
+  return "full-recording";
 }
 
 function parseBoolean(value: string | undefined, fallback: boolean): boolean {

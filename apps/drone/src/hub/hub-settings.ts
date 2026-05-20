@@ -138,6 +138,8 @@ export type EffectiveAgentSuggestionSettings = {
   policyFingerprint: string;
 };
 export type VoiceApprovalSettingsSource = 'settings' | 'default';
+export type VoiceTranscriptionFinalMode = 'full-recording' | 'segments';
+export type VoiceTranscriptionSettingsSource = 'settings' | 'default';
 export type VoiceApprovalSettings = {
   triggerPhrase: string;
   unlockCode: string;
@@ -153,6 +155,13 @@ export type VoiceApprovalSettings = {
 };
 export type EffectiveVoiceApprovalSettings = VoiceApprovalSettings & {
   source: VoiceApprovalSettingsSource;
+  updatedAt: string | null;
+};
+export type VoiceTranscriptionSettings = {
+  finalMode: VoiceTranscriptionFinalMode;
+};
+export type EffectiveVoiceTranscriptionSettings = VoiceTranscriptionSettings & {
+  source: VoiceTranscriptionSettingsSource;
   updatedAt: string | null;
 };
 export type { KanbanBoardTaskType, KanbanBoardCard, KanbanBoardLane, KanbanBoardSettings };
@@ -216,6 +225,9 @@ export const VOICE_APPROVAL_SETTINGS_DEFAULT: VoiceApprovalSettings = {
   duplicateCooldownMs: 4_000,
   finalizeCheckIntervalMs: 250,
   postPromptCommandSuppressionMs: 1_800,
+};
+export const VOICE_TRANSCRIPTION_SETTINGS_DEFAULT: VoiceTranscriptionSettings = {
+  finalMode: 'full-recording',
 };
 export const VOICE_APPROVAL_SETTINGS_LIMITS = {
   triggerPhraseMaxChars: 64,
@@ -431,6 +443,21 @@ function parseVoiceApprovalSettings(raw: unknown): VoiceApprovalSettings | null 
   };
 }
 
+function parseVoiceTranscriptionFinalMode(raw: unknown): VoiceTranscriptionFinalMode | null {
+  const text = String(raw ?? '').trim().toLowerCase();
+  if (text === 'full-recording' || text === 'full_clip' || text === 'full-clip' || text === 'full') return 'full-recording';
+  if (text === 'segments' || text === 'chunks' || text === 'chunked') return 'segments';
+  return null;
+}
+
+function parseVoiceTranscriptionSettings(raw: unknown): VoiceTranscriptionSettings | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const value = raw as Record<string, unknown>;
+  const finalMode = parseVoiceTranscriptionFinalMode(value.finalMode);
+  if (!finalMode) return null;
+  return { finalMode };
+}
+
 function voiceApprovalSettingsEqual(a: VoiceApprovalSettings, b: VoiceApprovalSettings): boolean {
   return (
     a.triggerPhrase === b.triggerPhrase &&
@@ -445,6 +472,10 @@ function voiceApprovalSettingsEqual(a: VoiceApprovalSettings, b: VoiceApprovalSe
     a.finalizeCheckIntervalMs === b.finalizeCheckIntervalMs &&
     a.postPromptCommandSuppressionMs === b.postPromptCommandSuppressionMs
   );
+}
+
+function voiceTranscriptionSettingsEqual(a: VoiceTranscriptionSettings, b: VoiceTranscriptionSettings): boolean {
+  return a.finalMode === b.finalMode;
 }
 
 export function normalizeAgentMessageAutoContinuePrompt(raw: unknown): string {
@@ -1162,14 +1193,61 @@ export async function resolveEffectiveVoiceApprovalSettings(): Promise<Effective
 export async function resolveVoiceApprovalSettingsResponse(): Promise<{
   ok: true;
   voiceApproval: EffectiveVoiceApprovalSettings;
+  voiceTranscription: EffectiveVoiceTranscriptionSettings;
   defaults: VoiceApprovalSettings;
+  transcriptionDefaults: VoiceTranscriptionSettings;
   limits: typeof VOICE_APPROVAL_SETTINGS_LIMITS;
 }> {
   return {
     ok: true,
     voiceApproval: await resolveEffectiveVoiceApprovalSettings(),
+    voiceTranscription: await resolveEffectiveVoiceTranscriptionSettings(),
     defaults: VOICE_APPROVAL_SETTINGS_DEFAULT,
+    transcriptionDefaults: VOICE_TRANSCRIPTION_SETTINGS_DEFAULT,
     limits: VOICE_APPROVAL_SETTINGS_LIMITS,
+  };
+}
+
+async function getStoredVoiceTranscriptionSettings(): Promise<{
+  settings: VoiceTranscriptionSettings | null;
+  updatedAt: string | null;
+}> {
+  const reg = await loadRegistry();
+  const raw = reg.settings?.voiceTranscription;
+  const settings = parseVoiceTranscriptionSettings(raw);
+  const updatedAtRaw = raw?.updatedAt;
+  return {
+    settings,
+    updatedAt: typeof updatedAtRaw === 'string' && updatedAtRaw.trim() ? updatedAtRaw.trim() : null,
+  };
+}
+
+export async function upsertStoredVoiceTranscriptionSettings(settingsRaw: unknown): Promise<void> {
+  const settings = parseVoiceTranscriptionSettings(settingsRaw);
+  if (!settings) {
+    throw new Error('Invalid voice transcription settings.');
+  }
+  const updatedAt = new Date().toISOString();
+  await updateRegistry((reg) => {
+    reg.settings ??= {};
+    if (voiceTranscriptionSettingsEqual(settings, VOICE_TRANSCRIPTION_SETTINGS_DEFAULT)) {
+      delete reg.settings.voiceTranscription;
+      if (Object.keys(reg.settings).length === 0) delete reg.settings;
+      return;
+    }
+    reg.settings.voiceTranscription = {
+      ...settings,
+      updatedAt,
+    };
+  });
+}
+
+export async function resolveEffectiveVoiceTranscriptionSettings(): Promise<EffectiveVoiceTranscriptionSettings> {
+  const stored = await getStoredVoiceTranscriptionSettings();
+  return {
+    ...(stored.settings ?? VOICE_TRANSCRIPTION_SETTINGS_DEFAULT),
+    source: stored.settings ? 'settings' : 'default',
+    updatedAt: stored.settings ? stored.updatedAt : null,
   };
 }
 
