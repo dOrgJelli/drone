@@ -89,13 +89,23 @@ export type VoiceApprovalSettings = {
   postPromptCommandSuppressionMs: number;
 };
 
+export type VoiceTranscriptionFinalMode = 'full-recording' | 'segments';
+export type VoiceTranscriptionSettings = {
+  finalMode: VoiceTranscriptionFinalMode;
+};
+
 export type VoiceApprovalSettingsResponse = {
   ok: true;
   voiceApproval: VoiceApprovalSettings & {
     source: 'settings' | 'default';
     updatedAt: string | null;
   };
+  voiceTranscription: VoiceTranscriptionSettings & {
+    source: 'settings' | 'default';
+    updatedAt: string | null;
+  };
   defaults: VoiceApprovalSettings;
+  transcriptionDefaults: VoiceTranscriptionSettings;
   limits: {
     triggerPhraseMaxChars: number;
     codeMaxDigits: number;

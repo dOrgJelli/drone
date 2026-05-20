@@ -184,6 +184,7 @@ describeSocketSuite('LLM settings api', () => {
   let baseUrl = '';
   let groqSettingsChangeNotifications = 0;
   let voiceStreamPairingPasswordChangeNotifications = 0;
+  let voiceTranscriptionSettingsChangeNotifications = 0;
 
   const apiFetch = async (p: string, init?: RequestInit) => {
     const r = await fetch(`${baseUrl}${p}`, {
@@ -212,6 +213,9 @@ describeSocketSuite('LLM settings api', () => {
       },
       onVoiceStreamPairingPasswordSettingsChanged: () => {
         voiceStreamPairingPasswordChangeNotifications += 1;
+      },
+      onVoiceTranscriptionSettingsChanged: () => {
+        voiceTranscriptionSettingsChangeNotifications += 1;
       },
     });
     baseUrl = `http://${server.host}:${server.port}`;
@@ -302,6 +306,37 @@ describeSocketSuite('LLM settings api', () => {
     expect(cleared.data.hasPassword).toBe(false);
     expect(cleared.data.source).toBeNull();
     expect(voiceStreamPairingPasswordChangeNotifications).toBe(notificationCountBefore + 2);
+  });
+
+  test('stores voice transcription finalization settings', async () => {
+    const notificationCountBefore = voiceTranscriptionSettingsChangeNotifications;
+    const initial = await apiFetch('/api/settings/voice-approval');
+    expect(initial.r.status).toBe(200);
+    expect(initial.data.voiceTranscription.finalMode).toBe('full-recording');
+    expect(initial.data.voiceTranscription.source).toBe('default');
+
+    const saved = await apiFetch('/api/settings/voice-approval', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        voiceApproval: initial.data.voiceApproval,
+        voiceTranscription: { finalMode: 'segments' },
+      }),
+    });
+    expect(saved.r.status).toBe(200);
+    expect(saved.data.voiceTranscription.finalMode).toBe('segments');
+    expect(saved.data.voiceTranscription.source).toBe('settings');
+    expect(voiceTranscriptionSettingsChangeNotifications).toBe(notificationCountBefore + 1);
+
+    const reset = await apiFetch('/api/settings/voice-approval', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ voiceTranscription: { finalMode: 'full-recording' } }),
+    });
+    expect(reset.r.status).toBe(200);
+    expect(reset.data.voiceTranscription.finalMode).toBe('full-recording');
+    expect(reset.data.voiceTranscription.source).toBe('default');
+    expect(voiceTranscriptionSettingsChangeNotifications).toBe(notificationCountBefore + 2);
   });
 
   test('reads and updates agent auto-continue settings', async () => {

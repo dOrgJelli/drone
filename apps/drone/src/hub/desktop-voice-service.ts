@@ -7,7 +7,13 @@ import { existsSync, promises as fs } from 'node:fs';
 
 import { type DesktopVoiceClipboardMode, type DesktopVoiceMode } from './desktop-voice-behavior';
 import { managedDesktopVoiceModelDirSync } from './desktop-voice-models';
-import { VOICE_APPROVAL_SETTINGS_DEFAULT, type VoiceApprovalSettings } from './hub-settings';
+import {
+  VOICE_APPROVAL_SETTINGS_DEFAULT,
+  VOICE_TRANSCRIPTION_SETTINGS_DEFAULT,
+  type VoiceApprovalSettings,
+  type VoiceTranscriptionFinalMode,
+  type VoiceTranscriptionSettings,
+} from './hub-settings';
 import { ApprovalCodeRecognizer, type ApprovalCodeUpdate } from './voice-approval-code';
 import {
   hasTranscriptContent,
@@ -131,6 +137,7 @@ type DesktopVoiceServiceOptions = {
   abortChatPatch?: () => Promise<void>;
   synthesizeSpeechWav?: (text: string) => Promise<Buffer>;
   clipboardRecorder?: ClipboardAudioRecorder;
+  voiceTranscription?: VoiceTranscriptionSettings;
 };
 
 const VOSK_WAKE_GRAMMAR = [
@@ -991,9 +998,11 @@ export class DesktopVoiceService {
   private desktopVoiceSuspendedMessage: string | null = null;
   private promptCommandSuppressedUntil = 0;
   private approvalSettings: VoiceApprovalSettings = VOICE_APPROVAL_SETTINGS_DEFAULT;
+  private voiceTranscriptionFinalMode: VoiceTranscriptionFinalMode = VOICE_TRANSCRIPTION_SETTINGS_DEFAULT.finalMode;
 
   constructor(private readonly opts: DesktopVoiceServiceOptions) {
     this.clipboardRecorder = opts.clipboardRecorder ?? new ClipboardWavRecorder();
+    this.voiceTranscriptionFinalMode = opts.voiceTranscription?.finalMode ?? VOICE_TRANSCRIPTION_SETTINGS_DEFAULT.finalMode;
     this.capture.on('change', () => this.emitChange());
     this.capture.on('audio', (chunk: Buffer) => this.handleAudio(chunk));
     this.capture.on('error-state', (message) => {
@@ -1078,6 +1087,13 @@ export class DesktopVoiceService {
       duplicateCooldownMs: settings.duplicateCooldownMs,
     });
     if (this.mode === 'locked') this.message = this.lockedMessage();
+    this.touch();
+    this.emitChange();
+    return this.snapshot();
+  }
+
+  setVoiceTranscriptionSettings(settings: VoiceTranscriptionSettings): DesktopVoiceStatus {
+    this.voiceTranscriptionFinalMode = settings.finalMode;
     this.touch();
     this.emitChange();
     return this.snapshot();
@@ -1570,36 +1586,56 @@ export class DesktopVoiceService {
 
   private async finishPromptRecordingFromTranscript(): Promise<void> {
     const target = this.promptCaptureTarget ?? 'assistant';
-    const text = this.promptTranscriptText.trim();
+    const pcm = Buffer.concat(this.promptChunks);
+    const fallbackText = this.promptTranscriptText.trim();
     this.promptChunks = [];
     this.promptSegments = [];
     this.promptSegmenter.reset();
-    this.mode = 'sleeping';
-    this.message = text
-      ? target === 'patch'
-        ? 'Awake: sending patch to current drone chat.'
-        : target === 'clipboard'
-          ? 'Awake: sending voice transcription to clipboard.'
-          : 'Awake: sending assistant voice prompt.'
-      : target === 'patch'
-        ? 'Awake: no patch text detected.'
-        : target === 'clipboard'
-          ? 'Awake: no voice transcription detected.'
-          : 'Awake: no assistant prompt detected.';
-    this.promptTranscribing = false;
-    this.promptCaptureTarget = null;
-    this.suppressPromptCommandsBriefly();
-    this.touch();
-    this.emitChange();
-    if (!text) {
-      if (target === 'patch') {
-        void this.opts.abortChatPatch?.().catch((error) => {
-          desktopVoiceWarn('empty patch callback failed', { error: error?.message ?? String(error) });
-        });
-      }
-      return;
+    const useFullRecording = this.voiceTranscriptionFinalMode === 'full-recording';
+    if (useFullRecording) {
+      this.mode = 'transcribing';
+      this.message =
+        target === 'patch'
+          ? 'Awake: transcribing final patch recording.'
+          : target === 'clipboard'
+            ? 'Awake: transcribing final voice recording.'
+            : 'Awake: transcribing final assistant recording.';
     }
+    this.promptTranscribing = false;
+    this.suppressPromptCommandsBriefly();
+    if (useFullRecording) {
+      this.touch();
+      this.emitChange();
+    }
+
+    let text = '';
     try {
+      text = useFullRecording ? await this.transcribeFinalPromptRecording(pcm, fallbackText) : fallbackText;
+      this.mode = 'sleeping';
+      this.message = text
+        ? target === 'patch'
+          ? 'Awake: sending patch to current drone chat.'
+          : target === 'clipboard'
+            ? 'Awake: sending voice transcription to clipboard.'
+            : 'Awake: sending assistant voice prompt.'
+        : target === 'patch'
+          ? 'Awake: no patch text detected.'
+          : target === 'clipboard'
+            ? 'Awake: no voice transcription detected.'
+            : 'Awake: no assistant prompt detected.';
+      this.touch();
+      this.emitChange();
+
+      if (!text) {
+        if (target === 'patch') {
+          void this.opts.abortChatPatch?.().catch((error) => {
+            desktopVoiceWarn('empty patch callback failed', { error: error?.message ?? String(error) });
+          });
+        }
+        this.promptCaptureTarget = null;
+        return;
+      }
+
       if (target === 'patch') {
         await this.opts.submitChatPatch?.(text);
       } else if (target === 'clipboard') {
@@ -1623,11 +1659,33 @@ export class DesktopVoiceService {
             : target === 'clipboard'
               ? `Voice transcription failed: ${error?.message ?? String(error)}`
               : `Assistant voice prompt failed: ${error?.message ?? String(error)}`;
+      } else {
+        this.mode = 'sleeping';
+        this.message =
+          target === 'patch'
+            ? `Patch-in failed: ${error?.message ?? String(error)}`
+            : target === 'clipboard'
+              ? `Voice transcription failed: ${error?.message ?? String(error)}`
+              : `Assistant voice prompt failed: ${error?.message ?? String(error)}`;
       }
     }
+    this.promptCaptureTarget = null;
     this.promptTranscribing = false;
     this.touch();
     this.emitChange();
+  }
+
+  private async transcribeFinalPromptRecording(pcm: Buffer, fallbackText: string): Promise<string> {
+    if (pcm.byteLength <= 0) return fallbackText;
+    try {
+      const result = await this.opts.transcribeWav(pcm16leToWav(pcm));
+      const text = stripCommands(result.text).text.trim();
+      return hasTranscriptContent(text) ? text : fallbackText;
+    } catch (error: any) {
+      desktopVoiceWarn('final prompt transcription failed', { error: error?.message ?? String(error) });
+      if (hasTranscriptContent(fallbackText)) return fallbackText;
+      throw error;
+    }
   }
 
   private async finishAssistantPromptRecordingFromTranscript(): Promise<void> {

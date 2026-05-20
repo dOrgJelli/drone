@@ -1,5 +1,5 @@
 import React from 'react';
-import type { VoiceApprovalSettings } from './settings-types';
+import type { VoiceApprovalSettings, VoiceTranscriptionSettings } from './settings-types';
 import type { UseVoiceApprovalSettingsResult } from './use-voice-approval-settings';
 
 type VoiceApprovalSettingsTabProps = {
@@ -30,6 +30,11 @@ function sameSettings(a: VoiceApprovalSettings | null, b: VoiceApprovalSettings 
   return JSON.stringify(a) === JSON.stringify(b);
 }
 
+function sameTranscriptionSettings(a: VoiceTranscriptionSettings | null, b: VoiceTranscriptionSettings | null): boolean {
+  if (!a || !b) return false;
+  return a.finalMode === b.finalMode;
+}
+
 function savedSettings(input: UseVoiceApprovalSettingsResult): VoiceApprovalSettings | null {
   const value = input.voiceApprovalSettings?.voiceApproval;
   if (!value) return null;
@@ -48,6 +53,14 @@ function savedSettings(input: UseVoiceApprovalSettingsResult): VoiceApprovalSett
   };
 }
 
+function savedTranscriptionSettings(input: UseVoiceApprovalSettingsResult): VoiceTranscriptionSettings | null {
+  const value = input.voiceApprovalSettings?.voiceTranscription;
+  if (!value) return null;
+  return {
+    finalMode: value.finalMode,
+  };
+}
+
 function codeOnly(value: string, maxDigits: number): string {
   return value.replace(/\D/g, '').slice(0, maxDigits);
 }
@@ -59,14 +72,18 @@ export function VoiceApprovalSettingsTab({ voiceApproval }: VoiceApprovalSetting
     voiceApprovalSettingsError,
     voiceApprovalSettingsNotice,
     voiceApprovalDraft,
+    voiceTranscriptionDraft,
     savingVoiceApprovalSettings,
     setVoiceApprovalDraft,
+    setVoiceTranscriptionDraft,
     saveVoiceApprovalSettings,
   } = voiceApproval;
   const limits = voiceApprovalSettings?.limits;
   const defaults = voiceApprovalSettings?.defaults;
+  const transcriptionDefaults = voiceApprovalSettings?.transcriptionDefaults;
   const saved = savedSettings(voiceApproval);
-  const dirty = !sameSettings(voiceApprovalDraft, saved);
+  const savedTranscription = savedTranscriptionSettings(voiceApproval);
+  const dirty = !sameSettings(voiceApprovalDraft, saved) || !sameTranscriptionSettings(voiceTranscriptionDraft, savedTranscription);
 
   const updateDraft = React.useCallback(
     (patch: Partial<VoiceApprovalSettings>) => {
@@ -84,7 +101,7 @@ export function VoiceApprovalSettingsTab({ voiceApproval }: VoiceApprovalSetting
     return <div className="text-[12px] text-[var(--muted-dim)]">Loading voice approval settings...</div>;
   }
 
-  if (!voiceApprovalDraft || !limits || !defaults) {
+  if (!voiceApprovalDraft || !voiceTranscriptionDraft || !limits || !defaults || !transcriptionDefaults) {
     return (
       <div className="rounded border border-[rgba(255,90,90,.2)] bg-[var(--red-subtle)] px-3 py-2 text-[12px] text-[var(--red)]">
         {voiceApprovalSettingsError ?? 'Voice approval settings are unavailable.'}
@@ -183,6 +200,44 @@ export function VoiceApprovalSettingsTab({ voiceApproval }: VoiceApprovalSetting
 
       <div className="rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.12)] px-3 py-3 flex flex-col gap-3">
         <div className="text-[10px] font-semibold text-[var(--muted-dim)] tracking-[0.08em] uppercase" style={{ fontFamily: 'var(--display)' }}>
+          Transcription
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {([
+            {
+              mode: 'full-recording' as const,
+              label: 'Full recording',
+              description: 'Use chunks only to hear the stop phrase, then transcribe the full recording for the final text.',
+            },
+            {
+              mode: 'segments' as const,
+              label: 'Segment transcript',
+              description: 'Use the older chunk-by-chunk transcript as the final text.',
+            },
+          ]).map((option) => {
+            const active = voiceTranscriptionDraft.finalMode === option.mode;
+            return (
+              <button
+                key={option.mode}
+                type="button"
+                onClick={() => setVoiceTranscriptionDraft({ finalMode: option.mode })}
+                disabled={savingVoiceApprovalSettings}
+                className={`rounded border px-3 py-3 text-left transition-all ${
+                  active
+                    ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] shadow-[var(--glow-accent)]'
+                    : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] hover:bg-[var(--hover)]'
+                } ${savingVoiceApprovalSettings ? 'opacity-40 cursor-not-allowed' : ''}`}
+              >
+                <span className="block text-[12px] font-semibold text-[var(--fg-secondary)]">{option.label}</span>
+                <span className="mt-1 block text-[11px] leading-relaxed text-[var(--muted-dim)]">{option.description}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.12)] px-3 py-3 flex flex-col gap-3">
+        <div className="text-[10px] font-semibold text-[var(--muted-dim)] tracking-[0.08em] uppercase" style={{ fontFamily: 'var(--display)' }}>
           Codes
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
@@ -249,7 +304,10 @@ export function VoiceApprovalSettingsTab({ voiceApproval }: VoiceApprovalSetting
       <div className="flex flex-wrap gap-2 justify-end">
         <button
           type="button"
-          onClick={() => setVoiceApprovalDraft(defaults)}
+          onClick={() => {
+            setVoiceApprovalDraft(defaults);
+            setVoiceTranscriptionDraft(transcriptionDefaults);
+          }}
           disabled={savingVoiceApprovalSettings}
           className="h-9 px-3 rounded text-[11px] font-semibold tracking-wide uppercase border transition-all bg-[rgba(255,255,255,.02)] border-[var(--border-subtle)] text-[var(--muted)] hover:bg-[var(--hover)] hover:text-[var(--fg-secondary)] disabled:opacity-40 disabled:cursor-not-allowed"
           style={{ fontFamily: 'var(--display)' }}

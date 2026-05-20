@@ -198,6 +198,143 @@ try {
   globalThis.fetch = originalFetch;
 }
 
+let finalFetchCalls = 0;
+const finalPrompts: string[] = [];
+const sleepCommands: unknown[] = [];
+globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+  finalFetchCalls += 1;
+  const prompt = init?.body instanceof FormData ? init.body.get("prompt") : null;
+  finalPrompts.push(typeof prompt === "string" ? prompt : "");
+  const text = finalFetchCalls === 1
+    ? "rough chunk text that's it"
+    : "final full recording text that's it";
+  return new Response(JSON.stringify({ text }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}) as typeof fetch;
+
+try {
+  const manager = new GroqTranscriptionManager(
+    {
+      ...buildTranscriptionConfigFromEnv({ GROQ_API_KEY: "test" } as NodeJS.ProcessEnv),
+      endpoint: "http://127.0.0.1/transcribe",
+      intervalMs: 5,
+      minSpeechMs: 120,
+      minSubmitMs: 120,
+      silenceMs: 100,
+      shortUtteranceSilenceMs: 200,
+      maxSegmentMs: 2_000,
+      overlapMs: 0,
+      silenceThreshold: 0.01,
+      debugSegments: false,
+      prompt: "p".repeat(1_000),
+      maxPromptChars: 50,
+    },
+    () => {},
+    (command) => sleepCommands.push(command),
+    "test-final",
+  );
+  manager.appendPcm(tonePcm(140));
+  manager.appendPcm(silencePcm(120));
+  await waitFor(() => sleepCommands.length > 0);
+  assert.equal(finalFetchCalls, 2);
+  assert.deepEqual(finalPrompts.map((prompt) => Array.from(prompt).length), [50, 50]);
+  assert.deepEqual(sleepCommands[0], {
+    type: "sleep",
+    phrase: "that's it",
+    detectedAt: (sleepCommands[0] as any).detectedAt,
+    transcriptText: "final full recording text",
+  });
+  manager.stop();
+} finally {
+  globalThis.fetch = originalFetch;
+}
+
+let segmentModeFetchCalls = 0;
+const segmentModeSleepCommands: unknown[] = [];
+globalThis.fetch = (async () => {
+  segmentModeFetchCalls += 1;
+  return new Response(JSON.stringify({ text: "segment mode text that's it" }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}) as typeof fetch;
+
+try {
+  const manager = new GroqTranscriptionManager(
+    {
+      ...buildTranscriptionConfigFromEnv({
+        GROQ_API_KEY: "test",
+        GROQ_STT_FINAL_TRANSCRIPTION_MODE: "segments",
+      } as NodeJS.ProcessEnv),
+      endpoint: "http://127.0.0.1/transcribe",
+      intervalMs: 5,
+      minSpeechMs: 120,
+      minSubmitMs: 120,
+      silenceMs: 100,
+      shortUtteranceSilenceMs: 200,
+      maxSegmentMs: 2_000,
+      overlapMs: 0,
+      silenceThreshold: 0.01,
+      debugSegments: false,
+    },
+    () => {},
+    (command) => segmentModeSleepCommands.push(command),
+    "test-segments",
+  );
+  manager.appendPcm(tonePcm(140));
+  manager.appendPcm(silencePcm(120));
+  await waitFor(() => segmentModeSleepCommands.length > 0);
+  assert.equal(segmentModeFetchCalls, 1);
+  assert.equal((segmentModeSleepCommands[0] as any).transcriptText, "segment mode text");
+  manager.stop();
+} finally {
+  globalThis.fetch = originalFetch;
+}
+
+let overflowFetchCalls = 0;
+const overflowSleepCommands: unknown[] = [];
+globalThis.fetch = (async () => {
+  overflowFetchCalls += 1;
+  return new Response(JSON.stringify({ text: "overflow fallback text that's it" }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}) as typeof fetch;
+
+try {
+  const manager = new GroqTranscriptionManager(
+    {
+      ...buildTranscriptionConfigFromEnv({
+        GROQ_API_KEY: "test",
+        GROQ_STT_MAX_SESSION_AUDIO_BYTES: "1",
+      } as NodeJS.ProcessEnv),
+      endpoint: "http://127.0.0.1/transcribe",
+      intervalMs: 5,
+      minSpeechMs: 120,
+      minSubmitMs: 120,
+      silenceMs: 100,
+      shortUtteranceSilenceMs: 200,
+      maxSegmentMs: 2_000,
+      overlapMs: 0,
+      silenceThreshold: 0.01,
+      debugSegments: false,
+    },
+    () => {},
+    (command) => overflowSleepCommands.push(command),
+    "test-overflow",
+  );
+  manager.appendPcm(tonePcm(140));
+  manager.appendPcm(silencePcm(120));
+  await waitFor(() => overflowSleepCommands.length > 0);
+  assert.equal(overflowFetchCalls, 1);
+  assert.equal((overflowSleepCommands[0] as any).transcriptText, "overflow fallback text");
+  manager.stop();
+} finally {
+  globalThis.fetch = originalFetch;
+}
+
 console.log("STT WAV and segmentation tests passed");
 
 function silencePcm(ms: number): Buffer {

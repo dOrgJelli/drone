@@ -48,14 +48,18 @@ describe('DesktopVoiceService', () => {
     else process.env.DRONE_DESKTOP_VOICE_CLIPBOARD_PREWARM = originalClipboardPrewarm;
   });
 
-  test('returns to sleeping immediately when transcript sleep command finishes recording', async () => {
+  test('uses a final full-recording transcript when transcript sleep command finishes recording', async () => {
     let resolveSubmit!: () => void;
     const submitPromise = new Promise<void>((resolve) => {
       resolveSubmit = resolve;
     });
     let submittedPrompt = '';
+    let transcribedWav: Buffer | null = null;
     const service = new DesktopVoiceService({
-      transcribeWav: async () => ({ text: '', model: 'test' }),
+      transcribeWav: async (wav) => {
+        transcribedWav = wav;
+        return { text: 'final check the build that is it', model: 'test' };
+      },
       submitAssistantPrompt: async (prompt) => {
         submittedPrompt = prompt;
         await submitPromise;
@@ -63,20 +67,53 @@ describe('DesktopVoiceService', () => {
     });
 
     (service as any).mode = 'recording';
-    (service as any).promptTranscriptText = 'check the build';
+    (service as any).promptTranscriptText = 'rough chunk text';
+    (service as any).promptChunks = [Buffer.alloc(3200, 1), Buffer.alloc(3200, 2)];
 
     const finishPromise = (service as any).finishAssistantPromptRecordingFromTranscript() as Promise<void>;
+    await Promise.resolve();
     await Promise.resolve();
 
     expect(service.snapshot().mode).toBe('sleeping');
     expect(service.snapshot().message).toBe('Awake: sending assistant voice prompt.');
-    expect(submittedPrompt).toBe('check the build');
+    expect(submittedPrompt).toBe('final check the build');
+    expect(transcribedWav?.byteLength).toBeGreaterThan(6400);
 
     resolveSubmit();
     await finishPromise;
 
     expect(service.snapshot().mode).toBe('sleeping');
     expect(service.snapshot().message).toBe('Awake: sent assistant voice prompt.');
+  });
+
+  test('can use chunk transcript as the final desktop voice text', async () => {
+    let transcribeCalls = 0;
+    let submittedPrompt = '';
+    const service = new DesktopVoiceService({
+      voiceTranscription: { finalMode: 'segments' },
+      transcribeWav: async () => {
+        transcribeCalls += 1;
+        return { text: 'final text should not be used', model: 'test' };
+      },
+      submitAssistantPrompt: async (prompt) => {
+        submittedPrompt = prompt;
+      },
+    });
+
+    (service as any).mode = 'recording';
+    (service as any).promptCaptureTarget = 'assistant';
+    (service as any).promptTranscriptText = 'rough chunk text';
+    (service as any).promptChunks = [Buffer.alloc(3200, 1)];
+    const events: any[] = [];
+    const unsubscribe = service.subscribe((event) => events.push(event));
+
+    await (service as any).finishPromptRecordingFromTranscript();
+    unsubscribe();
+
+    expect(transcribeCalls).toBe(0);
+    expect(submittedPrompt).toBe('rough chunk text');
+    expect(service.snapshot().mode).toBe('sleeping');
+    expect(events.some((event) => event.type === 'desktop_voice_status' && event.status.mode === 'transcribing')).toBe(false);
   });
 
   test('reports desktop voice as starting before loading capture backends', async () => {

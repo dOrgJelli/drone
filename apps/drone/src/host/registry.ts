@@ -178,6 +178,10 @@ type DroneRegistryV1 = {
       postPromptCommandSuppressionMs?: number;
       updatedAt?: string;
     };
+    voiceTranscription?: {
+      finalMode?: 'full-recording' | 'segments';
+      updatedAt?: string;
+    };
     filesystem?: {
       uploadMaxBytes?: number;
       updatedAt?: string;
