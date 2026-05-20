@@ -403,4 +403,87 @@ describe('DesktopVoiceService', () => {
     expect(transcribed?.toString('utf8')).toBe('fake-wav');
     expect(tailPadMs).toBe(400);
   });
+
+  test('suspends awake desktop voice while shortcut clipboard recording runs', async () => {
+    let recognizerStarts = 0;
+    let recognizerStops = 0;
+    let captureStarts = 0;
+    let captureStops = 0;
+    const fake = createFakeClipboardRecorder({
+      stop: async () => Buffer.from('fake-wav'),
+    });
+    const service = new DesktopVoiceService({
+      transcribeWav: async () => ({ text: 'hello clipboard', model: 'test' }),
+      submitAssistantPrompt: async () => {},
+      clipboardRecorder: fake.recorder,
+    });
+    (service as any).mode = 'sleeping';
+    (service as any).message = 'Awake: waiting for hey Sebastian.';
+    (service as any).recognizer.start = () => {
+      recognizerStarts += 1;
+    };
+    (service as any).recognizer.stop = () => {
+      recognizerStops += 1;
+    };
+    (service as any).capture.start = () => {
+      captureStarts += 1;
+    };
+    (service as any).capture.stop = () => {
+      captureStops += 1;
+    };
+
+    const recordingStatus = await service.toggleClipboardRecording();
+
+    expect(recordingStatus.clipboard.mode).toBe('recording');
+    expect(recordingStatus.suspended.active).toBe(true);
+    expect(recordingStatus.suspended.reason).toBe('clipboard');
+    expect(recordingStatus.suspended.previousMode).toBe('sleeping');
+    expect(recognizerStops).toBe(1);
+    expect(captureStops).toBe(1);
+
+    const finishedStatus = await service.toggleClipboardRecording();
+
+    expect(finishedStatus.clipboard.mode).toBe('idle');
+    expect(finishedStatus.suspended.active).toBe(false);
+    expect(finishedStatus.mode).toBe('sleeping');
+    expect(finishedStatus.message).toBe('Awake: waiting for hey Sebastian.');
+    expect(recognizerStarts).toBe(1);
+    expect(captureStarts).toBe(1);
+  });
+
+  test('resumes suspended desktop voice when shortcut clipboard recording is cancelled', async () => {
+    let recognizerStarts = 0;
+    let captureStarts = 0;
+    let cancelCalls = 0;
+    const fake = createFakeClipboardRecorder({
+      cancel: () => {
+        cancelCalls += 1;
+      },
+    });
+    const service = new DesktopVoiceService({
+      transcribeWav: async () => ({ text: 'ignored', model: 'test' }),
+      submitAssistantPrompt: async () => {},
+      clipboardRecorder: fake.recorder,
+    });
+    (service as any).mode = 'sleeping';
+    (service as any).message = 'Awake: waiting for hey Sebastian.';
+    (service as any).recognizer.start = () => {
+      recognizerStarts += 1;
+    };
+    (service as any).recognizer.stop = () => {};
+    (service as any).capture.start = () => {
+      captureStarts += 1;
+    };
+    (service as any).capture.stop = () => {};
+
+    await service.toggleClipboardRecording();
+    const status = service.cancelClipboardRecording();
+
+    expect(status.clipboard.mode).toBe('idle');
+    expect(status.suspended.active).toBe(false);
+    expect(status.mode).toBe('sleeping');
+    expect(cancelCalls).toBe(1);
+    expect(recognizerStarts).toBe(1);
+    expect(captureStarts).toBe(1);
+  });
 });

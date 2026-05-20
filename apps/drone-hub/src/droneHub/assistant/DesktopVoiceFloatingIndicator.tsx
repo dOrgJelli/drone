@@ -21,7 +21,8 @@ export function DesktopVoiceFloatingIndicator() {
 
   React.useEffect(() => subscribeAssistantDesktopVoiceStatus(setStatus), []);
 
-  if (status.mode === 'off') return null;
+  const clipboardBusy = status.clipboard?.mode === 'recording' || status.clipboard?.mode === 'transcribing';
+  if (status.mode === 'off' || status.suspended?.active || clipboardBusy) return null;
 
   const active = isDesktopAssistantVoiceActive(status);
   const sleeping = status.mode === 'dormant';
