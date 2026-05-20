@@ -3836,6 +3836,7 @@ export function AssistantDock() {
         <div className="relative rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.03)] focus-within:border-[var(--accent-muted)]">
           <textarea
             ref={inputRef}
+            data-chat-input-focus-id="assistant-chat"
             value={draft}
             onChange={(event) => {
               const next = event.target.value;

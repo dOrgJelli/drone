@@ -7,6 +7,7 @@ describe('editable shortcut dispatch', () => {
       matchedActionId: 'createDraftDrone',
       targetInPrimaryChatInput: true,
       targetInCanvasMessageInput: false,
+      targetInAssistantChatInput: false,
     });
     expect(out).toBe(true);
   });
@@ -16,8 +17,19 @@ describe('editable shortcut dispatch', () => {
       matchedActionId: 'createDraftDrone',
       targetInPrimaryChatInput: false,
       targetInCanvasMessageInput: true,
+      targetInAssistantChatInput: false,
     });
     expect(out).toBe(true);
+  });
+
+  test('does not allow create-draft shortcut from assistant chat input', () => {
+    const out = shouldDispatchEditableShortcutAction({
+      matchedActionId: 'createDraftDrone',
+      targetInPrimaryChatInput: false,
+      targetInCanvasMessageInput: false,
+      targetInAssistantChatInput: true,
+    });
+    expect(out).toBe(false);
   });
 
   test('does not allow other shortcuts from editable inputs', () => {
@@ -25,6 +37,7 @@ describe('editable shortcut dispatch', () => {
       matchedActionId: 'openCanvasTab',
       targetInPrimaryChatInput: true,
       targetInCanvasMessageInput: true,
+      targetInAssistantChatInput: true,
     });
     expect(out).toBe(false);
   });
@@ -35,6 +48,7 @@ describe('editable shortcut dispatch', () => {
         matchedActionId: 'toggleVoiceClipboardRecording',
         targetInPrimaryChatInput: true,
         targetInCanvasMessageInput: false,
+        targetInAssistantChatInput: false,
       }),
     ).toBe(true);
     expect(
@@ -42,6 +56,15 @@ describe('editable shortcut dispatch', () => {
         matchedActionId: 'toggleVoiceClipboardRecording',
         targetInPrimaryChatInput: false,
         targetInCanvasMessageInput: true,
+        targetInAssistantChatInput: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldDispatchEditableShortcutAction({
+        matchedActionId: 'toggleVoiceClipboardRecording',
+        targetInPrimaryChatInput: false,
+        targetInCanvasMessageInput: false,
+        targetInAssistantChatInput: true,
       }),
     ).toBe(true);
   });
@@ -51,6 +74,7 @@ describe('editable shortcut dispatch', () => {
       matchedActionId: 'toggleVoiceClipboardRecording',
       targetInPrimaryChatInput: false,
       targetInCanvasMessageInput: false,
+      targetInAssistantChatInput: false,
     });
     expect(out).toBe(false);
   });
@@ -61,6 +85,7 @@ describe('editable shortcut dispatch', () => {
         matchedActionId: 'toggleAssistantVoiceSession',
         targetInPrimaryChatInput: true,
         targetInCanvasMessageInput: false,
+        targetInAssistantChatInput: false,
       }),
     ).toBe(true);
     expect(
@@ -68,6 +93,15 @@ describe('editable shortcut dispatch', () => {
         matchedActionId: 'toggleAssistantVoiceSession',
         targetInPrimaryChatInput: false,
         targetInCanvasMessageInput: true,
+        targetInAssistantChatInput: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldDispatchEditableShortcutAction({
+        matchedActionId: 'toggleAssistantVoiceSession',
+        targetInPrimaryChatInput: false,
+        targetInCanvasMessageInput: false,
+        targetInAssistantChatInput: true,
       }),
     ).toBe(true);
   });
@@ -78,6 +112,7 @@ describe('editable shortcut dispatch', () => {
         matchedActionId: 'createDroneChat',
         targetInPrimaryChatInput: true,
         targetInCanvasMessageInput: false,
+        targetInAssistantChatInput: false,
       }),
     ).toBe(false);
     expect(
@@ -85,6 +120,7 @@ describe('editable shortcut dispatch', () => {
         matchedActionId: 'createDroneChat',
         targetInPrimaryChatInput: false,
         targetInCanvasMessageInput: true,
+        targetInAssistantChatInput: false,
       }),
     ).toBe(false);
   });
@@ -95,6 +131,7 @@ describe('editable shortcut dispatch', () => {
         matchedActionId: 'createChildDraftDrone',
         targetInPrimaryChatInput: true,
         targetInCanvasMessageInput: false,
+        targetInAssistantChatInput: false,
       }),
     ).toBe(false);
     expect(
@@ -102,6 +139,7 @@ describe('editable shortcut dispatch', () => {
         matchedActionId: 'createChildDraftDrone',
         targetInPrimaryChatInput: false,
         targetInCanvasMessageInput: true,
+        targetInAssistantChatInput: false,
       }),
     ).toBe(false);
   });
