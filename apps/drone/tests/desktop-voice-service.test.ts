@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 
 import { DesktopVoiceService } from '../src/hub/desktop-voice-service';
+import { VOICE_APPROVAL_SETTINGS_DEFAULT } from '../src/hub/hub-settings';
 
 function createFakeClipboardRecorder(opts: {
   start?: () => Promise<void>;
@@ -189,6 +190,49 @@ describe('DesktopVoiceService', () => {
     unsubscribe();
 
     expect(events.some((event) => event.type === 'desktop_voice_transcript_segment')).toBe(false);
+  });
+
+  test('briefly suppresses wake commands after desktop voice transcription stops', async () => {
+    const service = new DesktopVoiceService({
+      transcribeWav: async () => ({ text: '', model: 'test' }),
+      submitAssistantPrompt: async () => {},
+    });
+
+    (service as any).mode = 'recording';
+    (service as any).promptCaptureTarget = 'clipboard';
+    (service as any).promptTranscriptText = 'copy this';
+
+    await (service as any).finishPromptRecordingFromTranscript();
+    expect(service.snapshot().mode).toBe('sleeping');
+
+    (service as any).handleRecognizedText('can you transcribe', true);
+    expect(service.snapshot().mode).toBe('sleeping');
+
+    (service as any).promptCommandSuppressedUntil = Date.now() - 1;
+    (service as any).handleRecognizedText('can you transcribe', true);
+    expect(service.snapshot().mode).toBe('recording');
+    expect(service.snapshot().transcript.target).toBe('clipboard');
+  });
+
+  test('uses configured post-prompt command suppression delay', async () => {
+    const service = new DesktopVoiceService({
+      transcribeWav: async () => ({ text: '', model: 'test' }),
+      submitAssistantPrompt: async () => {},
+    });
+    service.setApprovalSettings({
+      ...VOICE_APPROVAL_SETTINGS_DEFAULT,
+      postPromptCommandSuppressionMs: 0,
+    });
+
+    (service as any).mode = 'recording';
+    (service as any).promptCaptureTarget = 'clipboard';
+    (service as any).promptTranscriptText = 'copy this';
+
+    await (service as any).finishPromptRecordingFromTranscript();
+    (service as any).handleRecognizedText('can you transcribe', true);
+
+    expect(service.snapshot().mode).toBe('recording');
+    expect(service.snapshot().transcript.target).toBe('clipboard');
   });
 
   test('emits synthesized audio for desktop speak when a TTS synthesizer is configured', async () => {

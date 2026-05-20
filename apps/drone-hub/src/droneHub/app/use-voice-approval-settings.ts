@@ -36,6 +36,7 @@ export function useVoiceApprovalSettings(requestJson: RequestJsonFn): UseVoiceAp
       collectTimeoutMs: data.voiceApproval.collectTimeoutMs,
       duplicateCooldownMs: data.voiceApproval.duplicateCooldownMs,
       finalizeCheckIntervalMs: data.voiceApproval.finalizeCheckIntervalMs,
+      postPromptCommandSuppressionMs: data.voiceApproval.postPromptCommandSuppressionMs,
     });
   }, []);
 
@@ -68,7 +69,7 @@ export function useVoiceApprovalSettings(requestJson: RequestJsonFn): UseVoiceAp
         body: JSON.stringify({ voiceApproval: voiceApprovalDraft }),
       });
       applyResponse(data);
-      setVoiceApprovalSettingsNotice('Saved voice approval settings for desktop and Android.');
+      setVoiceApprovalSettingsNotice('Saved voice settings.');
     } catch (e: any) {
       setVoiceApprovalSettingsError(e?.message ?? String(e));
     } finally {

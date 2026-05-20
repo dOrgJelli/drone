@@ -9,7 +9,13 @@ type VoiceApprovalSettingsTabProps = {
 type NumberField = {
   key: keyof Pick<
     VoiceApprovalSettings,
-    'minDigits' | 'maxDigits' | 'stableMs' | 'collectTimeoutMs' | 'duplicateCooldownMs' | 'finalizeCheckIntervalMs'
+    | 'minDigits'
+    | 'maxDigits'
+    | 'stableMs'
+    | 'collectTimeoutMs'
+    | 'duplicateCooldownMs'
+    | 'finalizeCheckIntervalMs'
+    | 'postPromptCommandSuppressionMs'
   >;
   label: string;
   description: string;
@@ -38,6 +44,7 @@ function savedSettings(input: UseVoiceApprovalSettingsResult): VoiceApprovalSett
     collectTimeoutMs: value.collectTimeoutMs,
     duplicateCooldownMs: value.duplicateCooldownMs,
     finalizeCheckIntervalMs: value.finalizeCheckIntervalMs,
+    postPromptCommandSuppressionMs: value.postPromptCommandSuppressionMs,
   };
 }
 
@@ -150,6 +157,15 @@ export function VoiceApprovalSettingsTab({ voiceApproval }: VoiceApprovalSetting
       max: limits.finalizeCheckIntervalMsMax,
       step: 25,
     },
+    {
+      key: 'postPromptCommandSuppressionMs',
+      label: 'Post-prompt command delay',
+      description: 'After desktop voice hears a stop phrase, ignore wake commands for this long so trailing audio cannot restart recording.',
+      suffix: 'ms',
+      min: limits.postPromptCommandSuppressionMsMin,
+      max: limits.postPromptCommandSuppressionMsMax,
+      step: 100,
+    },
   ];
 
   return (
@@ -251,7 +267,7 @@ export function VoiceApprovalSettingsTab({ voiceApproval }: VoiceApprovalSetting
           }`}
           style={{ fontFamily: 'var(--display)' }}
         >
-          {savingVoiceApprovalSettings ? 'Saving...' : 'Save voice approval'}
+          {savingVoiceApprovalSettings ? 'Saving...' : 'Save voice settings'}
         </button>
       </div>
     </div>

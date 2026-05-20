@@ -86,6 +86,7 @@ export type VoiceApprovalSettings = {
   collectTimeoutMs: number;
   duplicateCooldownMs: number;
   finalizeCheckIntervalMs: number;
+  postPromptCommandSuppressionMs: number;
 };
 
 export type VoiceApprovalSettingsResponse = {
@@ -110,6 +111,8 @@ export type VoiceApprovalSettingsResponse = {
     duplicateCooldownMsMax: number;
     finalizeCheckIntervalMsMin: number;
     finalizeCheckIntervalMsMax: number;
+    postPromptCommandSuppressionMsMin: number;
+    postPromptCommandSuppressionMsMax: number;
   };
 };
 
