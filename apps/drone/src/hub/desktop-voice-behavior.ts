@@ -1,4 +1,4 @@
-export type DesktopVoiceMode = 'off' | 'locked' | 'sleeping' | 'recording' | 'transcribing' | 'error';
+export type DesktopVoiceMode = 'off' | 'locked' | 'sleeping' | 'dormant' | 'recording' | 'transcribing' | 'error';
 export type DesktopVoiceClipboardMode = 'idle' | 'recording' | 'transcribing' | 'error';
 
 export type DesktopVoiceCue = 'start_button' | 'stop_button' | 'unlock' | 'lock' | 'locked_off' | 'wake' | 'sleep' | 'status';
