@@ -129,7 +129,10 @@ async function requestDesktopVoiceToggle(): Promise<void> {
         // keep fallback
       }
       dispatchAssistantDesktopVoiceStatus({ mode: 'error', message });
+      return;
     }
+    const status = (await response.json()) as DesktopAssistantVoiceStatus;
+    dispatchAssistantDesktopVoiceStatus(status);
   } catch (error: any) {
     dispatchAssistantDesktopVoiceStatus({ mode: 'error', message: error?.message ?? String(error) });
   } finally {

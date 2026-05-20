@@ -1,5 +1,6 @@
 import React from 'react';
 import { dispatchAssistantDesktopVoiceToggle } from '../assistant/desktop-assistant-voice';
+import { playLocalVoiceCue } from '../assistant/local-voice-cues';
 import { copyText } from './clipboard';
 
 const DOUBLE_PRESS_MS = 320;
@@ -83,7 +84,12 @@ export function useVoiceClipboardRecorder(opts: {
 }): { toggleVoiceClipboardRecording: () => boolean } {
   const { showToast, updateVoiceToast } = opts;
   const pendingSinglePressTimerRef = React.useRef<number | null>(null);
+  const singlePressIdRef = React.useRef(0);
+  const activeSinglePressRef = React.useRef<{ id: number; toastAllowed: boolean } | null>(null);
+  const deferredStatusRef = React.useRef<DesktopVoiceStatus | null>(null);
+  const recordingStartCuePressIdRef = React.useRef<number | null>(null);
   const recordingToastIdRef = React.useRef<string | null>(null);
+  const clipboardModeRef = React.useRef<NonNullable<DesktopVoiceStatus['clipboard']>['mode']>('idle');
 
   const clearPendingSinglePress = React.useCallback(() => {
     if (pendingSinglePressTimerRef.current == null) return;
@@ -95,6 +101,7 @@ export function useVoiceClipboardRecorder(opts: {
     (status: DesktopVoiceStatus) => {
       const id = recordingToastIdRef.current;
       if (!id) return;
+      clipboardModeRef.current = status.clipboard?.mode ?? clipboardModeRef.current;
       const level = Math.max(0, Math.min(1, Number(status.capture?.level ?? 0)));
       updateVoiceToast?.(id, level, {
         title: status.clipboard?.mode === 'transcribing' ? 'Voice transcription' : 'Voice recording',
@@ -106,12 +113,16 @@ export function useVoiceClipboardRecorder(opts: {
     [updateVoiceToast],
   );
 
-  const runSinglePressAction = React.useCallback(async () => {
-    pendingSinglePressTimerRef.current = null;
-    console.debug('[voice-clipboard] single-press action started', { clientUnixMs: Date.now() });
-    try {
-      const status = await toggleHostClipboardRecording();
+  const playRecordingStartCue = React.useCallback((pressId: number) => {
+    if (recordingStartCuePressIdRef.current === pressId) return;
+    recordingStartCuePressIdRef.current = pressId;
+    playLocalVoiceCue('clipboard_recording_start');
+  }, []);
+
+  const showClipboardStatus = React.useCallback(
+    (status: DesktopVoiceStatus) => {
       const mode = status.clipboard?.mode ?? 'idle';
+      clipboardModeRef.current = mode;
       if (mode === 'recording') {
         recordingToastIdRef.current = showToast(
           status.clipboard?.message ?? 'Recording from host microphone. Press the shortcut again to stop and copy.',
@@ -130,27 +141,87 @@ export function useVoiceClipboardRecorder(opts: {
         recordingToastIdRef.current = null;
         showToast(status.clipboard?.error ?? status.clipboard?.message ?? 'Voice transcription failed.', 'Voice transcription failed');
       }
+    },
+    [showToast, updateRecordingToast],
+  );
+
+  const runSinglePressAction = React.useCallback(async (opts: { deferToastForPressId?: number } = {}) => {
+    console.debug('[voice-clipboard] single-press action started', { clientUnixMs: Date.now() });
+    try {
+      const status = await toggleHostClipboardRecording();
+      const mode = status.clipboard?.mode ?? 'idle';
+      clipboardModeRef.current = mode;
+      if (opts.deferToastForPressId != null) {
+        const activePress = activeSinglePressRef.current;
+        if (!activePress || activePress.id !== opts.deferToastForPressId) return;
+        if (mode === 'recording') playRecordingStartCue(opts.deferToastForPressId);
+        if (!activePress.toastAllowed) {
+          deferredStatusRef.current = status;
+          return;
+        }
+      }
+      showClipboardStatus(status);
     } catch (error: any) {
+      if (opts.deferToastForPressId != null) {
+        const activePress = activeSinglePressRef.current;
+        if (!activePress || activePress.id !== opts.deferToastForPressId) return;
+        if (!activePress.toastAllowed) {
+          deferredStatusRef.current = {
+            ok: true,
+            clipboard: {
+              mode: 'error',
+              message: 'Voice transcription failed.',
+              error: error?.message ?? String(error),
+            },
+          };
+          clipboardModeRef.current = 'error';
+          return;
+        }
+      }
       recordingToastIdRef.current = null;
+      clipboardModeRef.current = 'error';
       showToast(error?.message ?? String(error), 'Voice transcription failed');
     }
-  }, [showToast, updateRecordingToast]);
+  }, [showClipboardStatus, showToast]);
+
+  const allowDeferredSinglePressToast = React.useCallback((pressId: number) => {
+    const activePress = activeSinglePressRef.current;
+    if (!activePress || activePress.id !== pressId) return;
+    activePress.toastAllowed = true;
+    pendingSinglePressTimerRef.current = null;
+    const status = deferredStatusRef.current;
+    deferredStatusRef.current = null;
+    if (status) showClipboardStatus(status);
+  }, [showClipboardStatus]);
 
   const toggleVoiceClipboardRecording = React.useCallback((): boolean => {
     if (pendingSinglePressTimerRef.current != null) {
       clearPendingSinglePress();
+      activeSinglePressRef.current = null;
+      deferredStatusRef.current = null;
       recordingToastIdRef.current = null;
+      clipboardModeRef.current = 'idle';
       void cancelHostClipboardRecording();
       dispatchAssistantDesktopVoiceToggle();
-      showToast('Toggled desktop assistant voice.', 'Desktop voice', 'success');
       return true;
     }
-    void runSinglePressAction();
+    if (clipboardModeRef.current === 'recording') {
+      activeSinglePressRef.current = null;
+      deferredStatusRef.current = null;
+      clearPendingSinglePress();
+      void runSinglePressAction();
+      return true;
+    }
+    const pressId = singlePressIdRef.current + 1;
+    singlePressIdRef.current = pressId;
+    activeSinglePressRef.current = { id: pressId, toastAllowed: false };
+    deferredStatusRef.current = null;
+    void runSinglePressAction({ deferToastForPressId: pressId });
     pendingSinglePressTimerRef.current = window.setTimeout(() => {
-      pendingSinglePressTimerRef.current = null;
+      allowDeferredSinglePressToast(pressId);
     }, DOUBLE_PRESS_MS);
     return true;
-  }, [clearPendingSinglePress, runSinglePressAction, showToast]);
+  }, [allowDeferredSinglePressToast, clearPendingSinglePress, runSinglePressAction]);
 
   React.useEffect(() => {
     if (typeof window === 'undefined' || typeof window.EventSource === 'undefined') return;
@@ -158,6 +229,7 @@ export function useVoiceClipboardRecorder(opts: {
     source.addEventListener('desktop_voice_status', (event) => {
       try {
         const status = JSON.parse((event as MessageEvent).data) as DesktopVoiceStatus;
+        clipboardModeRef.current = status.clipboard?.mode ?? clipboardModeRef.current;
         updateRecordingToast(status);
       } catch {
         // Ignore malformed desktop voice status events.
@@ -168,8 +240,10 @@ export function useVoiceClipboardRecorder(opts: {
         const data = JSON.parse((event as MessageEvent).data);
         const text = String(data?.text ?? '').trim();
         if (!text) return;
+        playLocalVoiceCue('clipboard_transcription_success');
         void copyText(text).then((copied) => {
           recordingToastIdRef.current = null;
+          clipboardModeRef.current = 'idle';
           showToast(
             copied ? `Copied ${text.length.toLocaleString()} characters to the clipboard.` : 'Transcription finished, but clipboard access was blocked.',
             copied ? 'Voice transcription copied' : 'Voice transcription ready',
