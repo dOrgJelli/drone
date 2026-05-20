@@ -13,7 +13,8 @@ export class ApprovalCodeRecognizer {
   private lastCompletedAtMs = 0;
 
   constructor(
-    private readonly opts: {
+    private opts: {
+      triggerPhrase?: string;
       minDigits?: number;
       maxDigits?: number;
       stableMs?: number;
@@ -26,11 +27,23 @@ export class ApprovalCodeRecognizer {
     return this.collecting;
   }
 
+  configure(opts: {
+    triggerPhrase?: string;
+    minDigits?: number;
+    maxDigits?: number;
+    stableMs?: number;
+    collectTimeoutMs?: number;
+    duplicateCooldownMs?: number;
+  }): void {
+    this.opts = { ...opts };
+    this.reset();
+  }
+
   accept(text: string, nowMs: number): ApprovalCodeUpdate {
     const words = normalizeWords(text);
     if (words.length === 0) return this.flush(nowMs);
 
-    const phraseEnd = approvalCodePhraseEnd(words);
+    const phraseEnd = triggerPhraseEnd(words, this.triggerPhraseWords());
     if (!this.collecting && phraseEnd === null) return { type: 'none' };
 
     let shouldReportCollecting = false;
@@ -106,15 +119,28 @@ export class ApprovalCodeRecognizer {
   private duplicateCooldownMs(): number {
     return this.opts.duplicateCooldownMs ?? 4_000;
   }
+
+  private triggerPhraseWords(): string[] {
+    const configured = normalizeWords(this.opts.triggerPhrase ?? '');
+    return configured.length > 0 ? configured : ['approval', 'code'];
+  }
 }
 
 function normalizeWords(text: string): string[] {
   return String(text ?? '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
 }
 
-function approvalCodePhraseEnd(words: string[]): number | null {
-  for (let index = 0; index < words.length - 1; index += 1) {
-    if (words[index] === 'approval' && words[index + 1] === 'code') return index + 2;
+function triggerPhraseEnd(words: string[], triggerWords: string[]): number | null {
+  if (triggerWords.length === 0 || words.length < triggerWords.length) return null;
+  for (let index = 0; index <= words.length - triggerWords.length; index += 1) {
+    let matched = true;
+    for (let offset = 0; offset < triggerWords.length; offset += 1) {
+      if (words[index + offset] !== triggerWords[offset]) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) return index + triggerWords.length;
   }
   return null;
 }

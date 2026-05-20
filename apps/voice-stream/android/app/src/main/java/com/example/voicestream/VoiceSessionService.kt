@@ -48,7 +48,7 @@ class VoiceSessionService : Service() {
         override fun run() {
             handleApprovalUpdate(approvalCodeRecognizer.flush(SystemClock.elapsedRealtime()))
             if (approvalCodeRecognizer.isCollecting && serviceActive.get()) {
-                mainHandler.postDelayed(this, APPROVAL_CODE_CHECK_INTERVAL_MS)
+                mainHandler.postDelayed(this, approvalSettings.finalizeCheckIntervalMs)
             }
         }
     }
@@ -86,6 +86,8 @@ class VoiceSessionService : Service() {
     @Volatile private var lastMode = Constants.MODE_OFF
     @Volatile private var currentMicrophone = "Mic: phone"
     @Volatile private var lastApprovalStatus = ""
+    @Volatile private var streamTarget = STREAM_TARGET_ASSISTANT
+    @Volatile private var approvalSettings = ApprovalCodeSettings()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -201,19 +203,20 @@ class VoiceSessionService : Service() {
         stopSelf()
     }
 
-    private fun beginStreaming(reason: String) {
-        DroneLog.i("Streaming", "Begin streaming: $reason")
+    private fun beginStreaming(reason: String, target: String = STREAM_TARGET_ASSISTANT) {
+        DroneLog.i("Streaming", "Begin streaming: $reason target=$target")
         if (streaming.getAndSet(true)) {
-            publishState("Awake: streaming", Constants.MODE_STREAMING)
+            publishState(if (streamTarget == STREAM_TARGET_PATCH) "Awake: patching into chat" else "Awake: streaming", Constants.MODE_STREAMING)
             return
         }
 
+        streamTarget = target
         outgoingReady.set(false)
         seedPendingStreamFromPreRoll()
         playbackQueue.clear()
         startPlayback()
-        connectWebSocket(serverUrl)
-        publishState("Awake: connecting", Constants.MODE_STREAMING)
+        connectWebSocket(serverUrl, target)
+        publishState(if (target == STREAM_TARGET_PATCH) "Awake: patching into chat" else "Awake: connecting", Constants.MODE_STREAMING)
     }
 
     private fun endStreaming(status: String, returnToListening: Boolean) {
@@ -226,6 +229,7 @@ class VoiceSessionService : Service() {
         }
 
         outgoingReady.set(false)
+        streamTarget = STREAM_TARGET_ASSISTANT
         pendingStreamBuffer.clear()
         webSocket?.close(1000, "client stopped")
         webSocket = null
@@ -376,6 +380,14 @@ class VoiceSessionService : Service() {
                 cuePlayer.play(LocalCue.WAKE)
                 beginStreaming("Local wake word detected")
             }
+            WakeAction.START_PATCH_STREAMING -> {
+                if (now - lastWakeToggleMs < WAKE_DEBOUNCE_MS) return
+                lastWakeToggleMs = now
+                wakeDetector?.reset()
+                DroneLog.i("Wake", "Patch phrase detected; starting patch stream")
+                cuePlayer.play(LocalCue.WAKE)
+                beginStreaming("Local patch phrase detected", STREAM_TARGET_PATCH)
+            }
             WakeAction.PLAY_STATUS -> {
                 if (now - lastStatusCueMs < STATUS_CUE_DEBOUNCE_MS) return
                 lastStatusCueMs = now
@@ -395,7 +407,7 @@ class VoiceSessionService : Service() {
         handleApprovalUpdate(update)
         if (approvalCodeRecognizer.isCollecting) {
             mainHandler.removeCallbacks(approvalFinalizeRunnable)
-            mainHandler.postDelayed(approvalFinalizeRunnable, APPROVAL_CODE_CHECK_INTERVAL_MS)
+            mainHandler.postDelayed(approvalFinalizeRunnable, approvalSettings.finalizeCheckIntervalMs)
         }
     }
 
@@ -422,13 +434,13 @@ class VoiceSessionService : Service() {
 
     private fun handleCompletedApprovalCode(code: String) {
         when {
-            isLocked() && code == UNLOCK_CODE -> {
+            isLocked() && code == approvalSettings.unlockCode -> {
                 wakeController.unlockToListening()
                 cuePlayer.play(LocalCue.UNLOCK)
                 publishApprovalStatus("Unlocked")
                 publishState(waitingStatus(), waitingMode())
             }
-            isLocked() && code == LOCKED_OFF_CODE -> {
+            isLocked() && code == approvalSettings.lockedOffCode -> {
                 DroneLog.i("Approval", "Locked off code detected; stopping listening mode")
                 cuePlayer.play(LocalCue.LOCKED_OFF)
                 publishApprovalStatus("Turning off")
@@ -439,7 +451,7 @@ class VoiceSessionService : Service() {
                 lastApprovalStatus = ""
                 broadcastState()
             }
-            !isLocked() && code == LOCK_CODE -> {
+            !isLocked() && code == approvalSettings.lockCode -> {
                 wakeController.lockListening()
                 cuePlayer.play(LocalCue.LOCK)
                 publishApprovalStatus("Locked")
@@ -502,6 +514,11 @@ class VoiceSessionService : Service() {
                 }
             }
 
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                if (!serviceActive.get()) return
+                handleServerControlMessage(text)
+            }
+
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                 webSocket.close(code, reason)
             }
@@ -529,18 +546,19 @@ class VoiceSessionService : Service() {
         return Uri.parse(audioUrl).buildUpon().path("/control").build().toString()
     }
 
-    private fun connectWebSocket(url: String) {
-        val request = Request.Builder().url(url).build()
+    private fun connectWebSocket(url: String, target: String) {
+        val requestUrl = Uri.parse(url).buildUpon().appendQueryParameter("mode", target).build().toString()
+        val request = Request.Builder().url(requestUrl).build()
         webSocket = httpClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                DroneLog.i("WebSocket", "Connected to $url")
+                DroneLog.i("WebSocket", "Connected to $requestUrl")
                 if (!streaming.get()) {
                     webSocket.close(1000, "not streaming")
                     return
                 }
                 outgoingReady.set(true)
                 flushPendingStreamFrames()
-                publishState("Awake: streaming", Constants.MODE_STREAMING)
+                publishState(if (streamTarget == STREAM_TARGET_PATCH) "Awake: patching into chat" else "Awake: streaming", Constants.MODE_STREAMING)
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
@@ -591,16 +609,46 @@ class VoiceSessionService : Service() {
     }
 
     private fun handleServerControlMessage(text: String) {
-        val type = runCatching { JSONObject(text).optString("type") }.getOrDefault("")
-        if (type != "sleep") return
+        val parsed = runCatching { JSONObject(text) }.getOrNull() ?: return
+        val type = parsed.optString("type")
+        if (type == "approval_settings") {
+            applyApprovalSettings(parsed.optJSONObject("settings"))
+            return
+        }
+        if (type != "sleep" && type != "abort") return
 
-        DroneLog.i("WebSocket", "Server sleep command received")
+        DroneLog.i("WebSocket", "Server $type command received")
         mainHandler.post {
             if (!streaming.get()) return@post
             wakeController.manualStopStreaming(returnToListening = serviceActive.get())
             cuePlayer.play(LocalCue.SLEEP)
             endStreaming(waitingStatus(), returnToListening = true)
         }
+    }
+
+    private fun applyApprovalSettings(raw: JSONObject?) {
+        raw ?: return
+        val next = ApprovalCodeSettings(
+            triggerPhrase = raw.optString("triggerPhrase", approvalSettings.triggerPhrase).ifBlank { approvalSettings.triggerPhrase },
+            unlockCode = raw.optString("unlockCode", approvalSettings.unlockCode).filter { it.isDigit() }.ifBlank { approvalSettings.unlockCode },
+            lockCode = raw.optString("lockCode", approvalSettings.lockCode).filter { it.isDigit() }.ifBlank { approvalSettings.lockCode },
+            lockedOffCode = raw.optString("lockedOffCode", approvalSettings.lockedOffCode).filter { it.isDigit() }.ifBlank { approvalSettings.lockedOffCode },
+            minDigits = raw.optInt("minDigits", approvalSettings.minDigits).coerceIn(1, 8),
+            maxDigits = raw.optInt("maxDigits", approvalSettings.maxDigits).coerceIn(1, 12),
+            stableMs = raw.optLong("stableMs", approvalSettings.stableMs).coerceIn(250, 3_000),
+            collectTimeoutMs = raw.optLong("collectTimeoutMs", approvalSettings.collectTimeoutMs).coerceIn(1_000, 15_000),
+            duplicateCooldownMs = raw.optLong("duplicateCooldownMs", approvalSettings.duplicateCooldownMs).coerceIn(0, 15_000),
+            finalizeCheckIntervalMs = raw.optLong("finalizeCheckIntervalMs", approvalSettings.finalizeCheckIntervalMs).coerceIn(100, 1_000),
+        ).let { settings ->
+            if (settings.maxDigits < settings.minDigits) settings.copy(maxDigits = settings.minDigits) else settings
+        }
+        approvalSettings = next
+        approvalCodeRecognizer.configure(next)
+        wakeDetector?.updateApprovalTriggerPhrase(next.triggerPhrase)
+        if (wakeController.state == WakeState.LOCKED) {
+            publishState(lockedStatus(), Constants.MODE_LOCKED)
+        }
+        DroneLog.i("Approval", "Applied approval settings trigger=${next.triggerPhrase} min=${next.minDigits} max=${next.maxDigits}")
     }
 
     private fun isWavAudio(data: ByteArray): Boolean {
@@ -769,7 +817,7 @@ class VoiceSessionService : Service() {
     private fun notificationText(status: String, mode: String): String {
         return when (mode) {
             Constants.MODE_LOADING -> "Waking local detector"
-            Constants.MODE_LOCKED -> "Locked: 1234 asleep, 0000 off"
+            Constants.MODE_LOCKED -> lockedStatus()
             Constants.MODE_LISTENING -> "Asleep: waiting for hey sebastian"
             Constants.MODE_STREAMING -> "Awake: streaming"
             Constants.MODE_ERROR -> status
@@ -850,7 +898,7 @@ class VoiceSessionService : Service() {
 
     private fun lockedStatus(): String {
         return if (wakeDetector?.available == true) {
-            "Locked: 1234 asleep, 0000 off"
+            "Locked: ${approvalSettings.unlockCode} asleep, ${approvalSettings.lockedOffCode} off"
         } else {
             "Waking local detector"
         }
@@ -895,11 +943,9 @@ class VoiceSessionService : Service() {
         private const val STATUS_CUE_DEBOUNCE_MS = 1_000L
         private const val TEMPORARY_STATUS_MS = 1_200L
         private const val APPROVAL_STATUS_MS = 2_500L
-        private const val APPROVAL_CODE_CHECK_INTERVAL_MS = 250L
         private const val RECONNECT_CONTROL_WEBSOCKET_MS = 2_000L
-        private const val UNLOCK_CODE = "1234"
-        private const val LOCK_CODE = "4321"
-        private const val LOCKED_OFF_CODE = "0000"
+        private const val STREAM_TARGET_ASSISTANT = "assistant"
+        private const val STREAM_TARGET_PATCH = "patch"
         private const val PRE_ROLL_MS = 1_500
         private const val MAX_PENDING_STREAM_MS = 5_000
         private const val LOG_UPLOAD_INTERVAL_MS = 15_000L

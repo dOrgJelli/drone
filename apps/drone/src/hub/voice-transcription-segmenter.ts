@@ -1,7 +1,10 @@
 export type TranscriptCommandResult = {
   text: string;
   wake: boolean;
+  patch: boolean;
+  clipboard: boolean;
   sleep: boolean;
+  abort: boolean;
   status: boolean;
 };
 
@@ -17,13 +20,28 @@ export type PromptSpeechSegment = {
 export function stripCommands(text: string): TranscriptCommandResult {
   let cleaned = String(text ?? '');
   let wake = false;
+  let patch = false;
+  let clipboard = false;
   let sleep = false;
+  let abort = false;
   cleaned = cleaned.replace(/\b(?:hey|hay)\s+sebastian\b[\s,.:;!?-]*/gi, () => {
     wake = true;
     return ' ';
   });
+  cleaned = cleaned.replace(/\bpatch\s+me\s+in\b[\s,.:;!?-]*/gi, () => {
+    patch = true;
+    return ' ';
+  });
+  cleaned = cleaned.replace(/\bcan\s+you\s+transcribe\b[\s,.:;!?-]*/gi, () => {
+    clipboard = true;
+    return ' ';
+  });
   cleaned = cleaned.replace(/\b(?:that's|thats|that\s+is)\s+it\b[\s,.:;!?-]*/gi, () => {
     sleep = true;
+    return ' ';
+  });
+  cleaned = cleaned.replace(/\b(?:okay|ok)[\s,.:;!?-]+stop\b[\s,.:;!?-]*/gi, () => {
+    abort = true;
     return ' ';
   });
   const words = normalizeWords(cleaned);
@@ -32,7 +50,10 @@ export function stripCommands(text: string): TranscriptCommandResult {
   return {
     text: normalizeTranscriptWhitespace(cleaned),
     wake,
+    patch,
+    clipboard,
     sleep,
+    abort,
     status,
   };
 }

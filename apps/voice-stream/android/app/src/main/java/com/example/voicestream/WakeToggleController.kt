@@ -21,6 +21,9 @@ class WakeToggleController {
                 if (phrase.hasStart) {
                     state = WakeState.STREAMING
                     WakeAction.START_STREAMING
+                } else if (phrase.hasPatch) {
+                    state = WakeState.STREAMING
+                    WakeAction.START_PATCH_STREAMING
                 } else if (phrase.hasStatus) {
                     WakeAction.PLAY_STATUS
                 } else {
@@ -73,6 +76,7 @@ enum class WakeState {
 enum class WakeAction {
     NONE,
     START_STREAMING,
+    START_PATCH_STREAMING,
     STOP_STREAMING,
     PLAY_STATUS,
 }

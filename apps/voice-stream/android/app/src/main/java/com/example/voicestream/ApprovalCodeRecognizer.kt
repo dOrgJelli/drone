@@ -3,12 +3,19 @@ package com.example.voicestream
 import java.util.Locale
 
 class ApprovalCodeRecognizer(
-    private val minDigits: Int = 4,
-    private val maxDigits: Int = 8,
-    private val stableMs: Long = 900,
-    private val collectTimeoutMs: Long = 5_000,
-    private val duplicateCooldownMs: Long = 4_000,
+    minDigits: Int = 4,
+    maxDigits: Int = 8,
+    stableMs: Long = 900,
+    collectTimeoutMs: Long = 5_000,
+    duplicateCooldownMs: Long = 4_000,
 ) {
+    private var settings = ApprovalCodeSettings(
+        minDigits = minDigits,
+        maxDigits = maxDigits,
+        stableMs = stableMs,
+        collectTimeoutMs = collectTimeoutMs,
+        duplicateCooldownMs = duplicateCooldownMs,
+    )
     private var collecting = false
     private var startedAtMs = 0L
     private var lastUpdateAtMs = 0L
@@ -19,11 +26,16 @@ class ApprovalCodeRecognizer(
     val isCollecting: Boolean
         get() = collecting
 
+    fun configure(nextSettings: ApprovalCodeSettings) {
+        settings = nextSettings
+        reset()
+    }
+
     fun accept(text: String, nowMs: Long): ApprovalCodeUpdate {
         val words = words(text)
         if (words.isEmpty()) return flush(nowMs)
 
-        val phraseEnd = approvalCodePhraseEnd(words)
+        val phraseEnd = triggerPhraseEnd(words, words(settings.triggerPhrase))
         if (!collecting && phraseEnd == null) {
             return ApprovalCodeUpdate.None
         }
@@ -44,12 +56,12 @@ class ApprovalCodeRecognizer(
         }
         val candidate = candidateWords.mapNotNull { digitForWord(it) }.joinToString("")
         if (candidate.length > bestCode.length) {
-            bestCode = candidate.take(maxDigits)
+            bestCode = candidate.take(settings.maxDigits)
             lastUpdateAtMs = nowMs
             shouldReportCollecting = true
         }
 
-        if (bestCode.length >= maxDigits) {
+        if (bestCode.length >= settings.maxDigits) {
             return complete(nowMs)
         }
 
@@ -67,11 +79,11 @@ class ApprovalCodeRecognizer(
             return ApprovalCodeUpdate.None
         }
 
-        if (bestCode.length >= minDigits && nowMs - lastUpdateAtMs >= stableMs) {
+        if (bestCode.length >= settings.minDigits && nowMs - lastUpdateAtMs >= settings.stableMs) {
             return complete(nowMs)
         }
 
-        if (nowMs - startedAtMs >= collectTimeoutMs) {
+        if (nowMs - startedAtMs >= settings.collectTimeoutMs) {
             reset()
             return ApprovalCodeUpdate.Cancelled
         }
@@ -89,7 +101,7 @@ class ApprovalCodeRecognizer(
     private fun complete(nowMs: Long): ApprovalCodeUpdate {
         val code = bestCode
         reset()
-        if (code == lastCompletedCode && nowMs - lastCompletedAtMs < duplicateCooldownMs) {
+        if (code == lastCompletedCode && nowMs - lastCompletedAtMs < settings.duplicateCooldownMs) {
             return ApprovalCodeUpdate.None
         }
         lastCompletedCode = code
@@ -103,11 +115,17 @@ class ApprovalCodeRecognizer(
             .filter { it.isNotBlank() }
     }
 
-    private fun approvalCodePhraseEnd(words: List<String>): Int? {
-        for (index in 0 until words.lastIndex) {
-            if (words[index] == "approval" && words[index + 1] == "code") {
-                return index + 2
+    private fun triggerPhraseEnd(words: List<String>, triggerWords: List<String>): Int? {
+        if (triggerWords.isEmpty() || words.size < triggerWords.size) return null
+        for (index in 0..(words.size - triggerWords.size)) {
+            var matched = true
+            for (offset in triggerWords.indices) {
+                if (words[index + offset] != triggerWords[offset]) {
+                    matched = false
+                    break
+                }
             }
+            if (matched) return index + triggerWords.size
         }
         return null
     }
@@ -128,6 +146,19 @@ class ApprovalCodeRecognizer(
         }
     }
 }
+
+data class ApprovalCodeSettings(
+    val triggerPhrase: String = "approval code",
+    val minDigits: Int = 4,
+    val maxDigits: Int = 8,
+    val stableMs: Long = 900,
+    val collectTimeoutMs: Long = 5_000,
+    val duplicateCooldownMs: Long = 4_000,
+    val finalizeCheckIntervalMs: Long = 250,
+    val unlockCode: String = "1234",
+    val lockCode: String = "4321",
+    val lockedOffCode: String = "0000",
+)
 
 sealed class ApprovalCodeUpdate {
     data object None : ApprovalCodeUpdate()

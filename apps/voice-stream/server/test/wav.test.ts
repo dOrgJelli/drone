@@ -117,7 +117,24 @@ assert.equal(cleanedWake.text, "what am I saying right now?");
 const cleanedSleep = stripTranscriptCommands("That's it. This should not include the command.");
 assert.equal(cleanedSleep.wakeDetected, false);
 assert.equal(cleanedSleep.sleepDetected, true);
+assert.equal(cleanedSleep.abortDetected, false);
 assert.equal(cleanedSleep.text, "This should not include the command.");
+
+for (const phrase of ["ok stop", "ok, stop", "okay stop", "okay, stop"]) {
+  const cleanedAbort = stripTranscriptCommands(`${phrase}. This should be discarded.`);
+  assert.equal(cleanedAbort.abortDetected, true);
+  assert.equal(cleanedAbort.sleepDetected, false);
+  assert.equal(cleanedAbort.text, "This should be discarded.");
+
+  const cleanedOnlyAbort = stripTranscriptCommands(`${phrase}.`);
+  assert.equal(cleanedOnlyAbort.abortDetected, true);
+  assert.equal(cleanedOnlyAbort.sleepDetected, false);
+  assert.equal(cleanedOnlyAbort.text, "");
+}
+
+const cleanedPatchWake = stripTranscriptCommands("Patch me in, send this to the current chat.");
+assert.equal(cleanedPatchWake.wakeDetected, true);
+assert.equal(cleanedPatchWake.text, "send this to the current chat.");
 
 const cleanedStandaloneHey = stripTranscriptCommands("Hey, what am I saying right now?");
 assert.equal(cleanedStandaloneHey.wakeDetected, false);

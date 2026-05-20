@@ -74,6 +74,12 @@ type LaunchHint =
     }
   | null;
 
+type VoicePatchStatus = {
+  active: boolean;
+  droneId: string | null;
+  chatName: string | null;
+};
+
 type SelectedDroneWorkspaceProps = {
   currentDrone: DroneSummary;
   deleteMode: DroneDeleteMode;
@@ -337,6 +343,32 @@ export function SelectedDroneWorkspace({
     () => explicitSelectedChat || resolveChatNameForDrone(currentDrone, selectedChat),
     [currentDrone, explicitSelectedChat, selectedChat],
   );
+  const [voicePatchStatus, setVoicePatchStatus] = React.useState<VoicePatchStatus>({
+    active: false,
+    droneId: null,
+    chatName: null,
+  });
+  React.useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.EventSource === 'undefined') return;
+    const source = new window.EventSource('/api/assistant/voice/patch-status/events');
+    source.addEventListener('voice_patch_status', (event) => {
+      try {
+        const data = JSON.parse((event as MessageEvent).data);
+        setVoicePatchStatus({
+          active: Boolean(data?.active),
+          droneId: String(data?.droneId ?? '').trim() || null,
+          chatName: String(data?.chatName ?? '').trim() || null,
+        });
+      } catch {
+        // Ignore malformed voice patch status events.
+      }
+    });
+    return () => source.close();
+  }, []);
+  const voicePatchActiveForCurrentChat =
+    voicePatchStatus.active &&
+    voicePatchStatus.droneId === currentDrone.id &&
+    (voicePatchStatus.chatName || 'default') === activeChatName;
   const currentDroneHomePath = React.useMemo(() => droneHomePath(currentDrone), [currentDrone]);
   const spawnCurrentDroneHubTask = React.useCallback(
     (mode: DroneHubTaskSpawnMode, task: DroneHubTask) =>
@@ -1943,6 +1975,7 @@ export function SelectedDroneWorkspace({
             }
             automationActions={chatAutomationActions}
             lockComposerWhileAutomationActive={false}
+            voicePatchActive={voicePatchActiveForCurrentChat}
             autoFocus={shouldAutoFocusInput}
             onStop={canStopResponse ? () => requestStopResponse() : undefined}
             stopping={stoppingResponse}

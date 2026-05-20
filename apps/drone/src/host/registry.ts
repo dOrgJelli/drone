@@ -164,6 +164,19 @@ type DroneRegistryV1 = {
       modelId?: string;
       updatedAt?: string;
     };
+    voiceApproval?: {
+      triggerPhrase?: string;
+      unlockCode?: string;
+      lockCode?: string;
+      lockedOffCode?: string;
+      minDigits?: number;
+      maxDigits?: number;
+      stableMs?: number;
+      collectTimeoutMs?: number;
+      duplicateCooldownMs?: number;
+      finalizeCheckIntervalMs?: number;
+      updatedAt?: string;
+    };
     filesystem?: {
       uploadMaxBytes?: number;
       updatedAt?: string;

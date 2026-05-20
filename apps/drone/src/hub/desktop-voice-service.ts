@@ -5,8 +5,9 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { existsSync, promises as fs } from 'node:fs';
 
-import { DESKTOP_VOICE_CODES, type DesktopVoiceClipboardMode, type DesktopVoiceMode } from './desktop-voice-behavior';
+import { type DesktopVoiceClipboardMode, type DesktopVoiceMode } from './desktop-voice-behavior';
 import { managedDesktopVoiceModelDirSync } from './desktop-voice-models';
+import { VOICE_APPROVAL_SETTINGS_DEFAULT, type VoiceApprovalSettings } from './hub-settings';
 import { ApprovalCodeRecognizer, type ApprovalCodeUpdate } from './voice-approval-code';
 import {
   hasTranscriptContent,
@@ -53,6 +54,8 @@ type VoiceClipboardTrace = {
   apiReceivedUnixMs?: number;
 };
 
+type DesktopVoiceCaptureTarget = 'assistant' | 'patch' | 'clipboard';
+
 type DesktopVoiceStatus = {
   ok: true;
   mode: DesktopVoiceMode;
@@ -70,6 +73,7 @@ type DesktopVoiceStatus = {
   };
   transcript: {
     active: boolean;
+    target: DesktopVoiceCaptureTarget | null;
     status: 'idle' | 'collecting' | 'transcribing' | 'error';
     text: string;
     error: string | null;
@@ -113,6 +117,9 @@ type DesktopVoiceEvent = {
 type DesktopVoiceServiceOptions = {
   transcribeWav: (wav: Buffer) => Promise<{ text: string; model: string }>;
   submitAssistantPrompt: (prompt: string) => Promise<void>;
+  startChatPatch?: () => Promise<void>;
+  submitChatPatch?: (prompt: string) => Promise<void>;
+  abortChatPatch?: () => Promise<void>;
   synthesizeSpeechWav?: (text: string) => Promise<Buffer>;
   clipboardRecorder?: ClipboardAudioRecorder;
 };
@@ -123,6 +130,10 @@ const VOSK_WAKE_GRAMMAR = [
   'hey',
   'hay',
   'sebastian',
+  'patch me in',
+  'patch',
+  'can you transcribe',
+  'transcribe',
   'status',
   'state us',
   'state is',
@@ -144,6 +155,32 @@ const VOSK_WAKE_GRAMMAR = [
   'nine',
   '[unk]',
 ] as const;
+
+function formatDigitsForSpeech(code: string): string {
+  const words: Record<string, string> = {
+    '0': 'zero',
+    '1': 'one',
+    '2': 'two',
+    '3': 'three',
+    '4': 'four',
+    '5': 'five',
+    '6': 'six',
+    '7': 'seven',
+    '8': 'eight',
+    '9': 'nine',
+  };
+  return String(code ?? '').split('').map((digit) => words[digit] ?? digit).join(' ').trim();
+}
+
+function normalizeGrammarPhrase(phrase: string): string {
+  return String(phrase ?? '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean).join(' ');
+}
+
+function triggerGrammarEntries(phrase: string): string[] {
+  const normalized = normalizeGrammarPhrase(phrase);
+  const words = normalized.split(/\s+/).filter(Boolean);
+  return normalized ? [normalized, ...words] : [];
+}
 
 function splitEnvCaptureCommand(raw: string): CaptureCommand | null {
   const trimmed = raw.trim();
@@ -383,6 +420,7 @@ class VoskCommandRecognizer extends EventEmitter {
   private lastFinalText: string | null = null;
   private lastTextFinal = false;
   private lastTextUpdatedAt: string | null = null;
+  private approvalTriggerPhrase = VOICE_APPROVAL_SETTINGS_DEFAULT.triggerPhrase;
 
   snapshot(): DesktopVoiceStatus['recognizer'] {
     return {
@@ -413,10 +451,11 @@ class VoskCommandRecognizer extends EventEmitter {
       };
       vosk.setLogLevel?.(desktopVoiceDebugEnabled() ? 0 : -1);
       const model = new vosk.Model(modelDir);
+      const grammar = this.grammar();
       const recognizer = new vosk.Recognizer({
         model,
         sampleRate: 16_000,
-        grammar: [...VOSK_WAKE_GRAMMAR],
+        grammar,
       });
       this.model = model;
       this.recognizer = recognizer;
@@ -430,7 +469,7 @@ class VoskCommandRecognizer extends EventEmitter {
       desktopVoiceLog('recognizer started', {
         backend: this.backend,
         modelDir,
-        grammar: VOSK_WAKE_GRAMMAR,
+        grammar,
       });
       this.emit('ready');
     } catch (error: any) {
@@ -443,6 +482,20 @@ class VoskCommandRecognizer extends EventEmitter {
       desktopVoiceWarn('recognizer start failed', { error: this.error });
       this.emit('error-state', this.error);
     }
+  }
+
+  setApprovalTriggerPhrase(phrase: string): void {
+    const next = normalizeGrammarPhrase(phrase) || VOICE_APPROVAL_SETTINGS_DEFAULT.triggerPhrase;
+    if (next === this.approvalTriggerPhrase) return;
+    this.approvalTriggerPhrase = next;
+    if (!this.recognizer) return;
+    this.stop();
+    this.start();
+  }
+
+  private grammar(): string[] {
+    const extra = triggerGrammarEntries(this.approvalTriggerPhrase);
+    return Array.from(new Set([...VOSK_WAKE_GRAMMAR, ...extra]));
   }
 
   stop(): void {
@@ -903,6 +956,7 @@ export class DesktopVoiceService {
   private readonly promptSegmenter = new PromptSpeechSegmenter();
   private promptSegments: PromptSpeechSegment[] = [];
   private promptTranscribing = false;
+  private promptCaptureTarget: DesktopVoiceCaptureTarget | null = null;
   private promptTranscriptText = '';
   private promptTranscriptError: string | null = null;
   private promptTranscriptUpdatedAt: string | null = null;
@@ -918,6 +972,7 @@ export class DesktopVoiceService {
   private clipboardMessage = 'Voice transcription is idle.';
   private clipboardError: string | null = null;
   private clipboardStartSuppressedUntil = 0;
+  private approvalSettings: VoiceApprovalSettings = VOICE_APPROVAL_SETTINGS_DEFAULT;
 
   constructor(private readonly opts: DesktopVoiceServiceOptions) {
     this.clipboardRecorder = opts.clipboardRecorder ?? new ClipboardWavRecorder();
@@ -940,7 +995,7 @@ export class DesktopVoiceService {
       this.emitChange();
     });
     this.recognizer.on('ready', () => {
-      if (this.mode === 'locked') this.message = 'Locked: say approval code one two three four.';
+      if (this.mode === 'locked') this.message = this.lockedMessage();
       this.touch();
       this.emitChange();
     });
@@ -962,6 +1017,7 @@ export class DesktopVoiceService {
       recognizer: this.recognizer.snapshot(),
       transcript: {
         active: this.mode === 'recording' || this.mode === 'transcribing',
+        target: this.mode === 'recording' || this.mode === 'transcribing' ? this.promptCaptureTarget : null,
         status: this.promptTranscriptError
           ? 'error'
           : this.promptTranscribing
@@ -981,6 +1037,23 @@ export class DesktopVoiceService {
       ...(this.lastApprovalCode ? { lastApprovalCode: this.lastApprovalCode } : {}),
       capture: this.capture.snapshot(),
     };
+  }
+
+  setApprovalSettings(settings: VoiceApprovalSettings): DesktopVoiceStatus {
+    this.approvalSettings = { ...settings };
+    this.recognizer.setApprovalTriggerPhrase(settings.triggerPhrase);
+    this.approvalRecognizer.configure({
+      triggerPhrase: settings.triggerPhrase,
+      minDigits: settings.minDigits,
+      maxDigits: settings.maxDigits,
+      stableMs: settings.stableMs,
+      collectTimeoutMs: settings.collectTimeoutMs,
+      duplicateCooldownMs: settings.duplicateCooldownMs,
+    });
+    if (this.mode === 'locked') this.message = this.lockedMessage();
+    this.touch();
+    this.emitChange();
+    return this.snapshot();
   }
 
   subscribe(listener: (event: DesktopVoiceEvent) => void): () => void {
@@ -1036,6 +1109,7 @@ export class DesktopVoiceService {
     this.promptChunks = [];
     this.resetApprovalCollection();
     this.resetPromptTranscription();
+    this.promptCaptureTarget = null;
     this.touch();
     this.emitChange();
     return this.snapshot();
@@ -1129,7 +1203,14 @@ export class DesktopVoiceService {
   }
 
   private handleAudio(chunk: Buffer): void {
-    if (this.mode !== 'off' && this.mode !== 'error' && this.mode !== 'recording' && this.mode !== 'transcribing') this.recognizer.write(chunk);
+    if (
+      this.mode !== 'off' &&
+      this.mode !== 'error' &&
+      this.mode !== 'recording' &&
+      this.mode !== 'transcribing' &&
+      this.clipboardMode !== 'recording' &&
+      this.clipboardMode !== 'transcribing'
+    ) this.recognizer.write(chunk);
     if (this.mode === 'recording') {
       this.promptChunks.push(chunk);
       this.enqueuePromptSegments(this.promptSegmenter.append(chunk));
@@ -1160,7 +1241,15 @@ export class DesktopVoiceService {
       return;
     }
     if (command.wake && this.mode === 'sleeping' && this.shouldAcceptCommand('wake', 1500)) {
-      this.startAssistantPromptRecording();
+      void this.startPromptRecording('assistant');
+      return;
+    }
+    if (command.patch && this.mode === 'sleeping' && this.shouldAcceptCommand('patch', 1500)) {
+      void this.startPromptRecording('patch');
+      return;
+    }
+    if (command.clipboard && this.mode === 'sleeping' && this.shouldAcceptCommand('clipboard', 1500)) {
+      void this.startPromptRecording('clipboard');
       return;
     }
   }
@@ -1171,7 +1260,7 @@ export class DesktopVoiceService {
       this.approvalFinalizeTimer = null;
       this.handleApprovalUpdate(this.approvalRecognizer.flush(Date.now()));
       if (this.approvalRecognizer.isCollecting && this.mode !== 'off' && this.mode !== 'error') this.scheduleApprovalFinalize();
-    }, 250);
+    }, this.approvalSettings.finalizeCheckIntervalMs);
     this.approvalFinalizeTimer.unref?.();
   }
 
@@ -1208,10 +1297,10 @@ export class DesktopVoiceService {
     if (!this.shouldAcceptCommand(`approval:${code}`, 1800)) return;
     this.lastApprovalCode = code;
     if (this.mode === 'locked') {
-      if (code === DESKTOP_VOICE_CODES.unlock) {
+      if (code === this.approvalSettings.unlockCode) {
         this.mode = 'sleeping';
         this.message = 'Asleep: waiting for hey Sebastian.';
-      } else if (code === DESKTOP_VOICE_CODES.lockedOff) {
+      } else if (code === this.approvalSettings.lockedOffCode) {
         this.stop('Desktop voice is off.');
         return;
       } else {
@@ -1221,12 +1310,13 @@ export class DesktopVoiceService {
       this.emitChange();
       return;
     }
-    if ((this.mode === 'sleeping' || this.mode === 'recording') && code === DESKTOP_VOICE_CODES.lock) {
+    if ((this.mode === 'sleeping' || this.mode === 'recording') && code === this.approvalSettings.lockCode) {
       this.mode = 'locked';
-      this.message = 'Locked: say approval code one two three four.';
+      this.message = this.lockedMessage();
       this.promptChunks = [];
       this.resetApprovalCollection();
       this.resetPromptTranscription();
+      this.promptCaptureTarget = null;
       this.touch();
       this.emitChange();
       return;
@@ -1236,11 +1326,31 @@ export class DesktopVoiceService {
     this.emitChange();
   }
 
-  private startAssistantPromptRecording(): void {
+  private lockedMessage(): string {
+    return `Locked: say ${this.approvalSettings.triggerPhrase} ${formatDigitsForSpeech(this.approvalSettings.unlockCode)}.`;
+  }
+
+  private async startPromptRecording(target: DesktopVoiceCaptureTarget): Promise<void> {
+    if (target === 'patch') {
+      try {
+        await this.opts.startChatPatch?.();
+      } catch (error: any) {
+        this.message = `Patch-in failed: ${error?.message ?? String(error)}`;
+        this.touch();
+        this.emitChange();
+        return;
+      }
+    }
     this.mode = 'recording';
-    this.message = 'Awake: recording assistant voice prompt.';
+    this.message =
+      target === 'patch'
+        ? 'Awake: patching into current drone chat.'
+        : target === 'clipboard'
+          ? 'Awake: recording clipboard transcription.'
+        : 'Awake: recording assistant voice prompt.';
     this.promptChunks = [];
     this.resetPromptTranscription();
+    this.promptCaptureTarget = target;
     this.touch();
     this.emitChange();
   }
@@ -1285,28 +1395,43 @@ export class DesktopVoiceService {
       const command = stripCommands(result.text);
       const inferredSleep = !command.sleep && this.shouldInferSleepCommand(result.text, segment);
       const sleep = command.sleep || inferredSleep;
+      const abort = command.abort;
       const text = inferredSleep ? '' : command.text.trim();
       desktopVoiceLog('prompt transcript segment', {
         sequence: segment.sequence,
         model: result.model,
         sleep,
+        abort,
         sleepInferred: inferredSleep,
         rawText: result.text,
         text,
       });
+      if (abort && this.mode === 'recording' && this.shouldAcceptCommand('abort:transcript', 1200)) {
+        this.promptTranscriptError = null;
+        this.promptTranscribing = false;
+        await this.abortPromptRecordingFromTranscript();
+        return;
+      }
       if (hasTranscriptContent(text)) {
         this.promptTranscriptText = this.promptTranscriptText ? `${this.promptTranscriptText}\n${text}` : text;
         this.promptTranscriptUpdatedAt = new Date().toISOString();
-        this.events.emit('event', { type: 'desktop_voice_transcript_segment', text } satisfies DesktopVoiceEvent);
+        if (this.promptCaptureTarget === 'assistant') {
+          this.events.emit('event', { type: 'desktop_voice_transcript_segment', text } satisfies DesktopVoiceEvent);
+        }
       }
       this.promptTranscriptError = null;
       this.promptTranscribing = false;
       if (sleep && this.mode === 'recording' && this.shouldAcceptCommand('sleep:transcript', 1200)) {
-        await this.finishAssistantPromptRecordingFromTranscript();
+        await this.finishPromptRecordingFromTranscript();
         return;
       }
       if (this.mode === 'recording') {
-        this.message = 'Awake: recording assistant voice prompt.';
+        this.message =
+          this.promptCaptureTarget === 'patch'
+            ? 'Awake: patching into current drone chat.'
+            : this.promptCaptureTarget === 'clipboard'
+              ? 'Awake: recording clipboard transcription.'
+              : 'Awake: recording assistant voice prompt.';
         this.touch();
         this.emitChange();
         this.processPromptTranscriptQueue();
@@ -1326,26 +1451,94 @@ export class DesktopVoiceService {
     return isLikelyShortSleepMistranscription(text);
   }
 
-  private async finishAssistantPromptRecordingFromTranscript(): Promise<void> {
+  private async abortPromptRecordingFromTranscript(): Promise<void> {
+    const target = this.promptCaptureTarget;
+    this.promptChunks = [];
+    this.promptSegments = [];
+    this.promptSegmenter.reset();
+    this.mode = 'sleeping';
+    this.message =
+      target === 'patch'
+        ? 'Asleep: patch-in cancelled.'
+        : target === 'clipboard'
+          ? 'Asleep: voice transcription cancelled.'
+          : 'Asleep: assistant voice prompt cancelled.';
+    this.promptTranscribing = false;
+    this.promptTranscriptText = '';
+    this.promptCaptureTarget = null;
+    if (target === 'patch') {
+      void this.opts.abortChatPatch?.().catch((error) => {
+        desktopVoiceWarn('patch abort callback failed', { error: error?.message ?? String(error) });
+      });
+    }
+    this.touch();
+    this.emitChange();
+  }
+
+  private async finishPromptRecordingFromTranscript(): Promise<void> {
+    const target = this.promptCaptureTarget ?? 'assistant';
     const text = this.promptTranscriptText.trim();
     this.promptChunks = [];
     this.promptSegments = [];
     this.promptSegmenter.reset();
     this.mode = 'sleeping';
-    this.message = text ? 'Asleep: sending assistant voice prompt.' : 'Asleep: no assistant prompt detected.';
+    this.message = text
+      ? target === 'patch'
+        ? 'Asleep: sending patch to current drone chat.'
+        : target === 'clipboard'
+          ? 'Asleep: sending voice transcription to clipboard.'
+          : 'Asleep: sending assistant voice prompt.'
+      : target === 'patch'
+        ? 'Asleep: no patch text detected.'
+        : target === 'clipboard'
+          ? 'Asleep: no voice transcription detected.'
+          : 'Asleep: no assistant prompt detected.';
     this.promptTranscribing = false;
+    this.promptCaptureTarget = null;
     this.touch();
     this.emitChange();
-    if (!text) return;
+    if (!text) {
+      if (target === 'patch') {
+        void this.opts.abortChatPatch?.().catch((error) => {
+          desktopVoiceWarn('empty patch callback failed', { error: error?.message ?? String(error) });
+        });
+      }
+      return;
+    }
     try {
-      await this.opts.submitAssistantPrompt(text);
-      if (this.mode === 'sleeping') this.message = 'Asleep: sent assistant voice prompt.';
+      if (target === 'patch') {
+        await this.opts.submitChatPatch?.(text);
+      } else if (target === 'clipboard') {
+        this.events.emit('event', { type: 'desktop_voice_clipboard_result', text } satisfies DesktopVoiceEvent);
+      } else {
+        await this.opts.submitAssistantPrompt(text);
+      }
+      if (this.mode === 'sleeping') {
+        this.message =
+          target === 'patch'
+            ? 'Asleep: sent patch to current drone chat.'
+            : target === 'clipboard'
+              ? 'Asleep: voice transcription copied.'
+              : 'Asleep: sent assistant voice prompt.';
+      }
     } catch (error: any) {
-      if (this.mode === 'sleeping') this.message = `Assistant voice prompt failed: ${error?.message ?? String(error)}`;
+      if (this.mode === 'sleeping') {
+        this.message =
+          target === 'patch'
+            ? `Patch-in failed: ${error?.message ?? String(error)}`
+            : target === 'clipboard'
+              ? `Voice transcription failed: ${error?.message ?? String(error)}`
+              : `Assistant voice prompt failed: ${error?.message ?? String(error)}`;
+      }
     }
     this.promptTranscribing = false;
     this.touch();
     this.emitChange();
+  }
+
+  private async finishAssistantPromptRecordingFromTranscript(): Promise<void> {
+    this.promptCaptureTarget = 'assistant';
+    await this.finishPromptRecordingFromTranscript();
   }
 
   private shouldAcceptCommand(key: string, cooldownMs: number): boolean {

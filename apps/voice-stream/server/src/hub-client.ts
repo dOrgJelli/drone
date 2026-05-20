@@ -24,6 +24,42 @@ export async function submitVoiceMessage(config: HubClientConfig, prompt: string
   return await postHubJson(config, "/api/assistant/voice/message", { prompt, title });
 }
 
+export async function beginVoicePatch(config: HubClientConfig, source = "android", sessionId?: string | null): Promise<any> {
+  return await postHubJson(config, "/api/assistant/voice/patch-state", { active: true, source, sessionId });
+}
+
+export async function endVoicePatch(config: HubClientConfig, source = "android", sessionId?: string | null, reason?: string): Promise<any> {
+  return await postHubJson(config, "/api/assistant/voice/patch-state", { active: false, source, sessionId, reason });
+}
+
+export async function submitVoicePatchMessage(config: HubClientConfig, prompt: string, source = "android", sessionId?: string | null): Promise<any> {
+  return await postHubJson(config, "/api/assistant/voice/patch-message", { prompt, source, sessionId });
+}
+
+export async function getVoiceApprovalSettings(config: HubClientConfig): Promise<any> {
+  return await getHubJson(config, "/api/settings/voice-approval");
+}
+
+async function getHubJson(config: HubClientConfig, pathname: string): Promise<any> {
+  const response = await fetch(`${config.apiUrl}${pathname}`, {
+    method: "GET",
+    headers: {
+      authorization: `Bearer ${config.apiToken}`,
+    },
+  });
+  const text = await response.text();
+  let data: any = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { error: text };
+    }
+  }
+  if (!response.ok) throw new Error(data?.error ?? `${response.status} ${response.statusText}`);
+  return data;
+}
+
 async function postHubJson(config: HubClientConfig, pathname: string, body: any): Promise<any> {
   const response = await fetch(`${config.apiUrl}${pathname}`, {
     method: "POST",

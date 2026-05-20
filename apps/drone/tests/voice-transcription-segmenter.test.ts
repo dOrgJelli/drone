@@ -10,6 +10,15 @@ describe('voice transcription command stripping', () => {
     expect(stripCommands("write this down that's it").text).toBe('write this down');
   });
 
+  test('detects patch, clipboard, and abort commands', () => {
+    expect(stripCommands('patch me in').patch).toBe(true);
+    expect(stripCommands('can you transcribe').clipboard).toBe(true);
+    for (const phrase of ['ok stop', 'ok, stop', 'okay stop', 'okay, stop']) {
+      expect(stripCommands(phrase).abort).toBe(true);
+      expect(stripCommands(`keep this ${phrase}`).text).toBe('keep this');
+    }
+  });
+
   test('does not treat common non-command text as sleep in the shared stripper', () => {
     const command = stripCommands('thank you');
     expect(command.sleep).toBe(false);

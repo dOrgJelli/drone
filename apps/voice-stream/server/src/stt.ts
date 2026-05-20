@@ -18,7 +18,7 @@ export type TranscriptSegment = {
 export type TranscriptMessage = TranscriptStatus | TranscriptSegment;
 
 export type TranscriptCommand = {
-  type: "sleep";
+  type: "sleep" | "abort";
   phrase: string;
   detectedAt: string;
   transcriptText: string;
@@ -46,6 +46,7 @@ export type TranscriptionConfig = {
   logTextChars: number;
   sampleRateHz: number;
   channels: number;
+  broadcastSegments: boolean;
 };
 
 export type SpeechSegmenterConfig = {
@@ -80,6 +81,8 @@ export class GroqTranscriptionManager {
   private readonly queue: QueuedSegment[] = [];
   private readonly timer: NodeJS.Timeout;
   private inFlight = false;
+  private stopped = false;
+  private terminalCommandDetected = false;
   private disabledStatusSent = false;
   private transcriptContext = "";
 
@@ -140,6 +143,7 @@ export class GroqTranscriptionManager {
   }
 
   appendPcm(pcm: Buffer): void {
+    if (this.stopped || this.terminalCommandDetected) return;
     if (!this.config.apiKey) {
       if (!this.disabledStatusSent) {
         this.disabledStatusSent = true;
@@ -158,6 +162,7 @@ export class GroqTranscriptionManager {
   }
 
   flushPending(): void {
+    if (this.stopped || this.terminalCommandDetected) return;
     const segment = this.segmenter.flush();
     if (segment) {
       this.enqueueSegments([segment]);
@@ -166,11 +171,16 @@ export class GroqTranscriptionManager {
   }
 
   stop(): void {
+    this.stopped = true;
+    this.queue.length = 0;
+    this.inFlight = false;
+    this.segmenter.reset();
     clearInterval(this.timer);
+    this.broadcast(this.status());
   }
 
   private processQueue(): void {
-    if (!this.config.apiKey || this.inFlight || this.queue.length === 0) {
+    if (!this.config.apiKey || this.stopped || this.terminalCommandDetected || this.inFlight || this.queue.length === 0) {
       return;
     }
 
@@ -187,11 +197,38 @@ export class GroqTranscriptionManager {
       const wav = pcm16leToWav(segment.pcm, this.config.sampleRateHz, this.config.channels);
       const prompt = this.buildPrompt();
       const text = await transcribeWavWithGroq(wav, this.config, prompt);
+      if (this.stopped || this.terminalCommandDetected) {
+        this.inFlight = false;
+        return;
+      }
       const commandResult = stripTranscriptCommands(text);
       this.logSegmentResult(segment, text, commandResult, Date.now() - startedAt, prompt);
       const trimmed = commandResult.text;
-      if (commandResult.sleepDetected) {
+      if (commandResult.abortDetected) {
+        this.enterTerminalCommandState({ clearContext: true });
+        this.log(
+          `command=abort segment=${segment.sequence} phrase=${formatLogValue(commandResult.abortPhrase ?? "okay stop")} ` +
+          `detectedAt=${new Date().toISOString()}`
+        );
+        this.onCommand?.({
+          type: "abort",
+          phrase: commandResult.abortPhrase ?? "okay stop",
+          detectedAt: new Date().toISOString(),
+          transcriptText: "",
+        });
+        this.broadcast({
+          type: "transcript_status",
+          configured: true,
+          status: "ready",
+          message: "Abort command detected by transcript.",
+          model: this.config.model,
+        });
+        this.inFlight = false;
+        this.broadcast(this.status());
+        return;
+      } else if (commandResult.sleepDetected) {
         const transcriptText = this.buildFullTranscriptText(trimmed);
+        this.enterTerminalCommandState({ clearContext: false });
         this.log(
           `command=sleep segment=${segment.sequence} phrase=${formatLogValue(commandResult.sleepPhrase ?? "that's it")} ` +
           `detectedAt=${new Date().toISOString()}`
@@ -209,23 +246,32 @@ export class GroqTranscriptionManager {
           message: "Sleep command detected by transcript.",
           model: this.config.model,
         });
+        this.inFlight = false;
+        this.broadcast(this.status());
+        return;
       }
 
-      if (hasTranscriptContent(trimmed)) {
+      if (!commandResult.abortDetected && hasTranscriptContent(trimmed)) {
         this.rememberTranscript(trimmed);
-        this.broadcast({
-          type: "transcript_segment",
-          text: trimmed,
-          final: true,
-          model: this.config.model,
-          audioMs: segment.audioMs,
-          receivedAt: new Date().toISOString(),
-        });
+        if (this.config.broadcastSegments) {
+          this.broadcast({
+            type: "transcript_segment",
+            text: trimmed,
+            final: true,
+            model: this.config.model,
+            audioMs: segment.audioMs,
+            receivedAt: new Date().toISOString(),
+          });
+        }
       }
       this.inFlight = false;
       this.broadcast(this.status());
       this.processQueue();
     } catch (error) {
+      if (this.stopped || this.terminalCommandDetected) {
+        this.inFlight = false;
+        return;
+      }
       this.log(
         `segment=${segment.sequence} groq_error elapsedMs=${Date.now() - startedAt} ` +
         `message=${formatLogValue(error instanceof Error ? error.message : String(error))}`
@@ -255,6 +301,13 @@ export class GroqTranscriptionManager {
     return `${this.transcriptContext} ${text}`.trim();
   }
 
+  private enterTerminalCommandState(opts: { clearContext: boolean }): void {
+    this.terminalCommandDetected = true;
+    this.queue.length = 0;
+    this.segmenter.reset();
+    if (opts.clearContext) this.transcriptContext = "";
+  }
+
   private enqueueSegments(segments: QueuedSegment[]): void {
     for (const segment of segments) {
       this.queue.push(segment);
@@ -278,7 +331,7 @@ export class GroqTranscriptionManager {
       `speechMs=${segment.speechMs} trailingSilenceMs=${segment.trailingSilenceMs} ` +
       `rawAudioMs=${segment.rawAudioMs} submitAudioMs=${segment.audioMs} ` +
       `promptChars=${prompt ? Array.from(prompt).length : 0} wake=${commandResult.wakeDetected} ` +
-      `sleep=${commandResult.sleepDetected} phrase=${formatLogValue(commandResult.sleepPhrase ?? "")} ` +
+      `sleep=${commandResult.sleepDetected} abort=${commandResult.abortDetected} phrase=${formatLogValue(commandResult.sleepPhrase ?? commandResult.abortPhrase ?? "")} ` +
       `rawText=${formatLogValue(rawText, this.config.logTextChars)} ` +
       `cleanedText=${formatLogValue(commandResult.text, this.config.logTextChars)}`
     );
@@ -303,6 +356,11 @@ export class PcmSpeechSegmenter {
 
   get hasOpenSpeech(): boolean {
     return this.speechMs > 0;
+  }
+
+  reset(): void {
+    this.resetCurrent();
+    this.carryover = Buffer.alloc(0);
   }
 
   append(pcm: Buffer): QueuedSegment[] {
@@ -431,6 +489,7 @@ export function buildTranscriptionConfigFromEnv(env: NodeJS.ProcessEnv): Transcr
     logTextChars: parsePositiveInteger(env.GROQ_STT_LOG_TEXT_CHARS, 500),
     sampleRateHz: 16_000,
     channels: 1,
+    broadcastSegments: true,
   };
 }
 
@@ -472,13 +531,22 @@ export function stripTranscriptCommands(text: string): {
   wakeDetected: boolean;
   sleepDetected: boolean;
   sleepPhrase?: string;
+  abortDetected: boolean;
+  abortPhrase?: string;
 } {
   let cleaned = text;
   let wakeDetected = false;
   let sleepDetected = false;
   let sleepPhrase: string | undefined;
+  let abortDetected = false;
+  let abortPhrase: string | undefined;
 
   cleaned = cleaned.replace(/\b(?:hey|hay)\s+sebastian\b[\s,.:;!?-]*/gi, () => {
+    wakeDetected = true;
+    return " ";
+  });
+
+  cleaned = cleaned.replace(/\bpatch\s+me\s+in\b[\s,.:;!?-]*/gi, () => {
     wakeDetected = true;
     return " ";
   });
@@ -489,11 +557,19 @@ export function stripTranscriptCommands(text: string): {
     return " ";
   });
 
+  cleaned = cleaned.replace(/\b(?:okay|ok)[\s,.:;!?-]+stop\b[\s,.:;!?-]*/gi, (match) => {
+    abortDetected = true;
+    abortPhrase = match.trim();
+    return " ";
+  });
+
   return {
     text: normalizeTranscriptWhitespace(cleaned),
     wakeDetected,
     sleepDetected,
     sleepPhrase,
+    abortDetected,
+    abortPhrase,
   };
 }
 

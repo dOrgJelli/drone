@@ -2,6 +2,7 @@ package com.example.voicestream
 
 import android.content.Context
 import android.os.SystemClock
+import org.json.JSONArray
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
@@ -24,6 +25,7 @@ class VoskWakeWordDetector(
     private var lastLoggedAtMs = 0L
     private var lastDetectedPhrase: WakePhrase? = null
     private var lastDetectedAtMs = 0L
+    @Volatile private var approvalTriggerPhrase = "approval code"
 
     fun prepare() {
         if (available || !loading.compareAndSet(false, true)) return
@@ -35,7 +37,7 @@ class VoskWakeWordDetector(
             TARGET_MODEL_DIR,
             { loadedModel ->
                 val loadedRecognizer = try {
-                    Recognizer(loadedModel, Constants.SAMPLE_RATE_HZ.toFloat(), WAKE_GRAMMAR)
+                    Recognizer(loadedModel, Constants.SAMPLE_RATE_HZ.toFloat(), buildWakeGrammar())
                 } catch (error: IOException) {
                     onStatus("Error: Vosk recognizer failed ${error.message ?: error.javaClass.simpleName}")
                     null
@@ -75,6 +77,26 @@ class VoskWakeWordDetector(
     fun reset() {
         synchronized(recognizerLock) {
             recognizer?.runCatching { reset() }
+            lastDetectedPhrase = null
+            lastDetectedAtMs = 0L
+        }
+    }
+
+    fun updateApprovalTriggerPhrase(phrase: String) {
+        val normalized = normalizeGrammarPhrase(phrase).ifBlank { "approval code" }
+        if (normalized == approvalTriggerPhrase) return
+        synchronized(recognizerLock) {
+            approvalTriggerPhrase = normalized
+            val localModel = model ?: return@synchronized
+            val nextRecognizer = try {
+                Recognizer(localModel, Constants.SAMPLE_RATE_HZ.toFloat(), buildWakeGrammar())
+            } catch (error: IOException) {
+                DroneLog.w("Vosk", "Failed to rebuild recognizer for approval trigger", error)
+                return@synchronized
+            }
+            recognizer?.runCatching { close() }
+            recognizer = nextRecognizer
+            available = true
             lastDetectedPhrase = null
             lastDetectedAtMs = 0L
         }
@@ -138,6 +160,51 @@ class VoskWakeWordDetector(
         private const val TARGET_MODEL_DIR = "vosk-model-en-us"
         private const val RECOGNIZER_LOG_INTERVAL_MS = 1_500L
         private const val PHRASE_COOLDOWN_MS = 900L
-        private const val WAKE_GRAMMAR = "[\"hey sebastian\", \"hay sebastian\", \"hey\", \"hay\", \"sebastian\", \"status\", \"state us\", \"state is\", \"status check\", \"check status\", \"approval\", \"code\", \"approval code\", \"zero\", \"oh\", \"one\", \"two\", \"three\", \"four\", \"five\", \"six\", \"seven\", \"eight\", \"nine\", \"[unk]\"]"
+        private val BASE_WAKE_GRAMMAR = listOf(
+            "hey sebastian",
+            "hay sebastian",
+            "hey",
+            "hay",
+            "sebastian",
+            "patch me in",
+            "status",
+            "state us",
+            "state is",
+            "status check",
+            "check status",
+            "approval",
+            "code",
+            "approval code",
+            "zero",
+            "oh",
+            "one",
+            "two",
+            "three",
+            "four",
+            "five",
+            "six",
+            "seven",
+            "eight",
+            "nine",
+            "[unk]",
+        )
+    }
+
+    private fun buildWakeGrammar(): String {
+        val entries = LinkedHashSet<String>()
+        entries.addAll(BASE_WAKE_GRAMMAR)
+        val trigger = normalizeGrammarPhrase(approvalTriggerPhrase)
+        if (trigger.isNotBlank()) {
+            entries.add(trigger)
+            trigger.split(Regex("\\s+")).filter { it.isNotBlank() }.forEach { entries.add(it) }
+        }
+        return JSONArray(entries.toList()).toString()
+    }
+
+    private fun normalizeGrammarPhrase(phrase: String): String {
+        return phrase.lowercase()
+            .split(Regex("[^a-z0-9]+"))
+            .filter { it.isNotBlank() }
+            .joinToString(" ")
     }
 }

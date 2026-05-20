@@ -78,6 +78,119 @@ describe('DesktopVoiceService', () => {
     expect(service.snapshot().message).toBe('Asleep: sent assistant voice prompt.');
   });
 
+  test('aborts normal assistant voice recording without submitting prompt text', async () => {
+    let submitCalls = 0;
+    const service = new DesktopVoiceService({
+      transcribeWav: async () => ({ text: '', model: 'test' }),
+      submitAssistantPrompt: async () => {
+        submitCalls += 1;
+      },
+    });
+
+    (service as any).mode = 'recording';
+    (service as any).promptCaptureTarget = 'assistant';
+    (service as any).promptTranscriptText = 'do not send this';
+
+    await (service as any).abortPromptRecordingFromTranscript();
+
+    expect(service.snapshot().mode).toBe('sleeping');
+    expect(service.snapshot().message).toBe('Asleep: assistant voice prompt cancelled.');
+    expect(service.snapshot().transcript.text).toBe('');
+    expect(submitCalls).toBe(0);
+  });
+
+  test('does not emit transcript text when abort phrase is in the same segment', async () => {
+    const phrases = ['ok stop', 'ok, stop', 'okay stop', 'okay, stop'];
+    for (const phrase of phrases) {
+      let submitCalls = 0;
+      const service = new DesktopVoiceService({
+        transcribeWav: async () => ({ text: `do not leak this ${phrase}`, model: 'test' }),
+        submitAssistantPrompt: async () => {
+          submitCalls += 1;
+        },
+      });
+      const events: any[] = [];
+      const unsubscribe = service.subscribe((event) => events.push(event));
+
+      (service as any).mode = 'recording';
+      (service as any).promptCaptureTarget = 'assistant';
+      await (service as any).transcribePromptSegment({
+        pcm: Buffer.alloc(3200),
+        audioMs: 100,
+        speechMs: 100,
+        trailingSilenceMs: 0,
+        reason: 'flush',
+        sequence: 1,
+      });
+
+      unsubscribe();
+
+      expect(service.snapshot().mode).toBe('sleeping');
+      expect(service.snapshot().message).toBe('Asleep: assistant voice prompt cancelled.');
+      expect(service.snapshot().transcript.text).toBe('');
+      expect(submitCalls).toBe(0);
+      expect(events.some((event) => event.type === 'desktop_voice_transcript_segment')).toBe(false);
+    }
+  });
+
+  test('does not emit transcript text when abort phrase follows dictated text', async () => {
+    const service = new DesktopVoiceService({
+      transcribeWav: async () => ({ text: 'do not leak this okay stop', model: 'test' }),
+      submitAssistantPrompt: async () => {},
+    });
+    const events: any[] = [];
+    const unsubscribe = service.subscribe((event) => events.push(event));
+
+    (service as any).mode = 'recording';
+    (service as any).promptCaptureTarget = 'assistant';
+    await (service as any).transcribePromptSegment({
+      pcm: Buffer.alloc(3200),
+      audioMs: 100,
+      speechMs: 100,
+      trailingSilenceMs: 0,
+      reason: 'flush',
+      sequence: 1,
+    });
+
+    unsubscribe();
+
+    expect(service.snapshot().mode).toBe('sleeping');
+    expect(service.snapshot().transcript.text).toBe('');
+    expect(events.some((event) => event.type === 'desktop_voice_transcript_segment')).toBe(false);
+  });
+
+  test('does not emit transcript segments for patch or clipboard captures', async () => {
+    const texts = ['patch text', 'clipboard text'];
+    const service = new DesktopVoiceService({
+      transcribeWav: async () => ({ text: texts.shift() ?? '', model: 'test' }),
+      submitAssistantPrompt: async () => {},
+    });
+    const events: any[] = [];
+    const unsubscribe = service.subscribe((event) => events.push(event));
+    const segment = {
+      pcm: Buffer.alloc(3200),
+      audioMs: 100,
+      speechMs: 100,
+      trailingSilenceMs: 0,
+      reason: 'flush',
+      sequence: 1,
+    };
+
+    (service as any).promptCaptureTarget = 'patch';
+    (service as any).promptTranscriptText = '';
+    (service as any).mode = 'recording';
+    await (service as any).transcribePromptSegment(segment);
+
+    (service as any).promptCaptureTarget = 'clipboard';
+    (service as any).promptTranscriptText = '';
+    (service as any).mode = 'recording';
+    await (service as any).transcribePromptSegment(segment);
+
+    unsubscribe();
+
+    expect(events.some((event) => event.type === 'desktop_voice_transcript_segment')).toBe(false);
+  });
+
   test('emits synthesized audio for desktop speak when a TTS synthesizer is configured', async () => {
     const service = new DesktopVoiceService({
       transcribeWav: async () => ({ text: '', model: 'test' }),

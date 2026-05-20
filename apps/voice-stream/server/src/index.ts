@@ -1,7 +1,8 @@
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { appendFileSync, createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { homedir } from "node:os";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -21,7 +22,11 @@ import {
 } from "./tts.js";
 import {
   buildHubClientConfigFromEnv,
+  beginVoicePatch,
   connectVoiceThread,
+  endVoicePatch,
+  getVoiceApprovalSettings,
+  submitVoicePatchMessage,
   submitVoiceMessage,
 } from "./hub-client.js";
 
@@ -37,11 +42,38 @@ const pairingAdminSessions = new Set<string>();
 const androidLogPath = resolve(repoRoot, "server/.runtime/android-logs/drone-android.log");
 const androidMinVersion = resolveAndroidVersionInfo();
 const approvalCodes: ApprovalCodeMessage[] = [];
+const defaultApprovalSettings: VoiceApprovalSettings = {
+  triggerPhrase: "approval code",
+  unlockCode: "1234",
+  lockCode: "4321",
+  lockedOffCode: "0000",
+  minDigits: 4,
+  maxDigits: 8,
+  stableMs: 900,
+  collectTimeoutMs: 5_000,
+  duplicateCooldownMs: 4_000,
+  finalizeCheckIntervalMs: 250,
+};
+let currentApprovalSettings: VoiceApprovalSettings = defaultApprovalSettings;
+let currentApprovalSettingsFingerprint = JSON.stringify(defaultApprovalSettings);
 
 type AndroidVersionInfo = {
   versionCode: number;
   versionName?: string;
   source: string;
+};
+
+type VoiceApprovalSettings = {
+  triggerPhrase: string;
+  unlockCode: string;
+  lockCode: string;
+  lockedOffCode: string;
+  minDigits: number;
+  maxDigits: number;
+  stableMs: number;
+  collectTimeoutMs: number;
+  duplicateCooldownMs: number;
+  finalizeCheckIntervalMs: number;
 };
 
 type ApprovalCodeMessage = {
@@ -98,6 +130,11 @@ async function handleHttpRequest(req: IncomingMessage, res: ServerResponse): Pro
 
   if (url.pathname === "/approvals") {
     await serveApprovalCode(req, res, url);
+    return;
+  }
+
+  if (url.pathname === "/internal/approval-settings/reload") {
+    await serveApprovalSettingsReload(req, res, url);
     return;
   }
 
@@ -166,12 +203,18 @@ server.on("upgrade", (req, socket, head) => {
 wss.on("connection", (socket, request) => {
   const clientId = nextClientId++;
   const remote = `${request.socket.remoteAddress ?? "unknown"}:${request.socket.remotePort ?? ""}`;
+  const requestUrl = new URL(request.url ?? "/audio", `http://${request.headers.host ?? "localhost"}`);
+  const voiceMode = requestUrl.searchParams.get("mode") === "patch" ? "patch" : "assistant";
+  const patchSessionId = voiceMode === "patch" ? randomBytes(12).toString("hex") : null;
   const sttManager = new GroqTranscriptionManager(
-    transcriptionConfig,
+    {
+      ...transcriptionConfig,
+      broadcastSegments: voiceMode !== "patch",
+    },
     (message) => broadcastTranscriptMessage(message),
     (command) => {
       sendAudioCommand(socket, clientId, command);
-      void handleSleepCommand(clientId, command);
+      void handleTranscriptCommand(clientId, voiceMode, command, patchSessionId);
     },
     `client ${clientId}`,
   );
@@ -179,7 +222,7 @@ wss.on("connection", (socket, request) => {
   let framesIn = 0;
 
   console.log(`[client ${clientId}] connected from ${remote}`);
-  void handleVoiceClientConnected(clientId);
+  void handleVoiceClientConnected(clientId, voiceMode, patchSessionId);
 
   socket.on("message", (data, isBinary) => {
     if (!isBinary) {
@@ -202,6 +245,7 @@ wss.on("connection", (socket, request) => {
   socket.on("close", (code, reason) => {
     sttManager.flushPending();
     sttManager.stop();
+    if (voiceMode === "patch") void handlePatchClientClosed(clientId, patchSessionId);
     clearInterval(stats);
     console.log(`[client ${clientId}] closed ${code} ${reason.toString()}`);
   });
@@ -216,6 +260,10 @@ controlWss.on("connection", (socket, request) => {
   const remote = `${request.socket.remoteAddress ?? "unknown"}:${request.socket.remotePort ?? ""}`;
   console.log(`[control ${clientId}] connected from ${remote}`);
   controlClients.set(clientId, socket);
+  sendApprovalSettings(socket);
+  void refreshApprovalSettings("control-connect", true).catch((error) => {
+    console.warn("[approval-settings] refresh on control connect failed", error);
+  });
 
   socket.on("message", (data, isBinary) => {
     if (isBinary) return;
@@ -264,6 +312,71 @@ function handleControlMessage(clientId: number, text: string): void {
   broadcastMonitorJson(message);
 }
 
+async function refreshApprovalSettings(reason: string, forceBroadcast = false): Promise<void> {
+  if (!hubClientConfig) {
+    if (forceBroadcast) broadcastApprovalSettings();
+    return;
+  }
+  const data = await getVoiceApprovalSettings(hubClientConfig);
+  const settings = parseVoiceApprovalSettings(data?.voiceApproval);
+  if (!settings) throw new Error("Hub returned invalid voice approval settings");
+  const fingerprint = JSON.stringify(settings);
+  const changed = fingerprint !== currentApprovalSettingsFingerprint;
+  currentApprovalSettings = settings;
+  currentApprovalSettingsFingerprint = fingerprint;
+  if (changed || forceBroadcast) {
+    console.log(`[approval-settings] ${changed ? "updated" : "sent"} reason=${reason}`);
+    broadcastApprovalSettings();
+  }
+}
+
+function parseVoiceApprovalSettings(raw: any): VoiceApprovalSettings | null {
+  if (!raw || typeof raw !== "object") return null;
+  const triggerPhrase = String(raw.triggerPhrase ?? "").trim().replace(/\s+/g, " ");
+  const unlockCode = String(raw.unlockCode ?? "").replace(/\D/g, "");
+  const lockCode = String(raw.lockCode ?? "").replace(/\D/g, "");
+  const lockedOffCode = String(raw.lockedOffCode ?? "").replace(/\D/g, "");
+  const minDigits = clampInteger(raw.minDigits, 1, 8);
+  const maxDigits = clampInteger(raw.maxDigits, 1, 12);
+  const stableMs = clampInteger(raw.stableMs, 250, 3_000);
+  const collectTimeoutMs = clampInteger(raw.collectTimeoutMs, 1_000, 15_000);
+  const duplicateCooldownMs = clampInteger(raw.duplicateCooldownMs, 0, 15_000);
+  const finalizeCheckIntervalMs = clampInteger(raw.finalizeCheckIntervalMs, 100, 1_000);
+  if (!triggerPhrase || !unlockCode || !lockCode || !lockedOffCode) return null;
+  if ([minDigits, maxDigits, stableMs, collectTimeoutMs, duplicateCooldownMs, finalizeCheckIntervalMs].some((value) => value == null)) return null;
+  if (maxDigits! < minDigits!) return null;
+  return {
+    triggerPhrase,
+    unlockCode,
+    lockCode,
+    lockedOffCode,
+    minDigits: minDigits!,
+    maxDigits: maxDigits!,
+    stableMs: stableMs!,
+    collectTimeoutMs: collectTimeoutMs!,
+    duplicateCooldownMs: duplicateCooldownMs!,
+    finalizeCheckIntervalMs: finalizeCheckIntervalMs!,
+  };
+}
+
+function clampInteger(raw: unknown, min: number, max: number): number | null {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  const i = Math.floor(n);
+  return i < min || i > max ? null : i;
+}
+
+function broadcastApprovalSettings(): void {
+  for (const socket of controlClients.values()) {
+    sendApprovalSettings(socket);
+  }
+}
+
+function sendApprovalSettings(socket: WebSocket): void {
+  if (socket.readyState !== WebSocket.OPEN) return;
+  socket.send(JSON.stringify({ type: "approval_settings", settings: currentApprovalSettings }));
+}
+
 function sendAudioCommand(socket: WebSocket, clientId: number, command: TranscriptCommand): void {
   const payload = JSON.stringify(command);
   if (socket.readyState !== WebSocket.OPEN) {
@@ -278,9 +391,18 @@ function sendAudioCommand(socket: WebSocket, clientId: number, command: Transcri
   }
 }
 
-async function handleVoiceClientConnected(clientId: number): Promise<void> {
+async function handleVoiceClientConnected(clientId: number, voiceMode: "assistant" | "patch", patchSessionId: string | null): Promise<void> {
   if (!hubClientConfig) {
     console.warn(`[hub] skipped voice thread connect for client ${clientId}: missing DRONE_HUB_API_URL or DRONE_HUB_API_TOKEN`);
+    return;
+  }
+  if (voiceMode === "patch") {
+    try {
+      const result = await beginVoicePatch(hubClientConfig, "android", patchSessionId);
+      console.log(`[hub] voice client ${clientId} patching ${result.droneId ?? "unknown"}/${result.chatName ?? "default"} session=${patchSessionId ?? "none"}`);
+    } catch (error) {
+      console.warn(`[hub] voice patch begin failed for client ${clientId}`, error);
+    }
     return;
   }
   try {
@@ -291,14 +413,30 @@ async function handleVoiceClientConnected(clientId: number): Promise<void> {
   }
 }
 
-async function handleSleepCommand(clientId: number, command: TranscriptCommand): Promise<void> {
+async function handleTranscriptCommand(clientId: number, voiceMode: "assistant" | "patch", command: TranscriptCommand, patchSessionId: string | null): Promise<void> {
+  if (command.type === "abort") {
+    if (voiceMode === "patch") await handlePatchAbort(clientId, patchSessionId);
+    else console.log(`[hub] voice transcript aborted for client ${clientId}`);
+    return;
+  }
   const prompt = String(command.transcriptText ?? "").trim();
   if (!prompt) {
     console.warn(`[hub] skipped empty voice transcript for client ${clientId}`);
+    if (voiceMode === "patch") await handlePatchAbort(clientId, patchSessionId);
     return;
   }
   if (!hubClientConfig) {
     console.warn(`[hub] skipped voice transcript for client ${clientId}: missing DRONE_HUB_API_URL or DRONE_HUB_API_TOKEN`);
+    return;
+  }
+  if (voiceMode === "patch") {
+    try {
+      const result = await submitVoicePatchMessage(hubClientConfig, prompt, "android", patchSessionId);
+      console.log(`[hub] submitted voice patch chars=${prompt.length} target=${result.droneId ?? "unknown"}/${result.chatName ?? "default"} session=${patchSessionId ?? "none"}`);
+    } catch (error) {
+      console.warn(`[hub] voice patch submit failed for client ${clientId}`, error);
+      await handlePatchAbort(clientId, patchSessionId);
+    }
     return;
   }
   try {
@@ -306,6 +444,25 @@ async function handleSleepCommand(clientId: number, command: TranscriptCommand):
     console.log(`[hub] submitted voice transcript chars=${prompt.length} thread=${result.threadId}`);
   } catch (error) {
     console.warn(`[hub] voice transcript submit failed for client ${clientId}`, error);
+  }
+}
+
+async function handlePatchAbort(clientId: number, patchSessionId: string | null): Promise<void> {
+  if (!hubClientConfig) return;
+  try {
+    await endVoicePatch(hubClientConfig, "android", patchSessionId, "aborted");
+    console.log(`[hub] voice patch aborted for client ${clientId} session=${patchSessionId ?? "none"}`);
+  } catch (error) {
+    console.warn(`[hub] voice patch abort failed for client ${clientId}`, error);
+  }
+}
+
+async function handlePatchClientClosed(clientId: number, patchSessionId: string | null): Promise<void> {
+  if (!hubClientConfig) return;
+  try {
+    await endVoicePatch(hubClientConfig, "android", patchSessionId, "closed");
+  } catch (error) {
+    console.warn(`[hub] voice patch close cleanup failed for client ${clientId}`, error);
   }
 }
 
@@ -366,6 +523,9 @@ server.listen(port, "0.0.0.0", () => {
   console.log(`Pairing page: ${pairingAdminPassword ? "enabled (/pair)" : "disabled (missing DRONE_PAIR_PASSWORD)"}`);
   console.log(`APK path: ${apkPath}`);
   console.log("Audio format: 16 kHz mono signed 16-bit little-endian PCM");
+  void refreshApprovalSettings("startup", false).catch((error) => {
+    console.warn("[approval-settings] startup refresh failed", error);
+  });
 });
 
 async function serveDownloadPage(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -969,6 +1129,33 @@ function saveAndroidLog(body: string, req: IncomingMessage): void {
   console.log(`[android-log] saved ${Buffer.byteLength(body)} bytes reason=${reason}`);
 }
 
+async function serveApprovalSettingsReload(req: IncomingMessage, res: ServerResponse, _url: URL): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, {
+      "allow": "POST",
+      "content-type": "text/plain; charset=utf-8",
+    });
+    res.end("Method not allowed\n");
+    return;
+  }
+
+  if (!isAuthorizedHubRequest(req)) {
+    res.writeHead(401, { "content-type": "text/plain; charset=utf-8" });
+    res.end("Unauthorized\n");
+    console.warn("[approval-settings] rejected unauthorized reload");
+    return;
+  }
+
+  try {
+    await refreshApprovalSettings("hub-reload", true);
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: true, settings: currentApprovalSettings }));
+  } catch (error: any) {
+    res.writeHead(502, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: false, error: error?.message ?? String(error) }));
+  }
+}
+
 async function serveApprovalCode(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
   if (req.method !== "POST") {
     res.writeHead(405, {
@@ -1230,17 +1417,11 @@ function resolveAndroidVersionInfo(): AndroidVersionInfo {
     return { ...apkVersion, source: "APK metadata" };
   }
 
-  const versionProperties = readVersionPropertiesInfo();
-  if (versionProperties != null) {
-    return { ...versionProperties, source: "android/version.properties" };
+  if (existsSync(apkPath)) {
+    throw new Error(`Could not read version metadata from served APK at ${apkPath}. Set AAPT_PATH or rebuild the APK.`);
   }
 
-  const gradleVersionCode = readGradleVersionCode();
-  if (gradleVersionCode != null) {
-    return { versionCode: gradleVersionCode, source: "android/app/build.gradle.kts" };
-  }
-
-  return { versionCode: 1, source: "fallback" };
+  return { versionCode: 1, source: "APK missing" };
 }
 
 function readApkVersionInfo(): Omit<AndroidVersionInfo, "source"> | null {
@@ -1261,11 +1442,26 @@ function readApkVersionInfo(): Omit<AndroidVersionInfo, "source"> | null {
 }
 
 function aaptCandidates(): string[] {
-  return [
+  const sdkRoots = [
+    process.env.ANDROID_HOME?.trim() ?? "",
+    process.env.ANDROID_SDK_ROOT?.trim() ?? "",
+    resolve(homedir(), "Android/Sdk"),
+  ].filter(Boolean);
+  const sdkAaptCandidates = sdkRoots.flatMap((sdkRoot) => {
+    const buildToolsDir = resolve(sdkRoot, "build-tools");
+    if (!existsSync(buildToolsDir)) return [];
+    return runCatchingArray(() => readdirSync(buildToolsDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))
+      .map((version) => resolve(buildToolsDir, version, "aapt")));
+  });
+  return uniqueStrings([
     process.env.AAPT_PATH?.trim() ?? "",
+    ...sdkAaptCandidates,
     resolve(repoRoot, "tools/android-sdk/build-tools/35.0.0/aapt"),
     resolve(repoRoot, "tools/android-sdk/build-tools/34.0.0/aapt"),
-  ].filter(Boolean);
+  ].filter(Boolean));
 }
 
 function runAaptBadging(aaptPath: string): string | null {
@@ -1275,30 +1471,8 @@ function runAaptBadging(aaptPath: string): string | null {
   }));
 }
 
-function readVersionPropertiesInfo(): Omit<AndroidVersionInfo, "source"> | null {
-  const versionPath = resolve(repoRoot, "android/version.properties");
-  if (!existsSync(versionPath)) return null;
-  const text = readFileSync(versionPath, "utf8");
-  const codeMatch = text.match(/^versionCode=(\d+)$/m);
-  if (!codeMatch?.[1]) return null;
-  const parsed = Number.parseInt(codeMatch[1], 10);
-  if (!Number.isSafeInteger(parsed) || parsed < 1) return null;
-  const nameBase = text.match(/^versionNameBase=(.+)$/m)?.[1]?.trim();
-  return nameBase ? { versionCode: parsed, versionName: `${nameBase}.${parsed}` } : { versionCode: parsed };
-}
-
 function formatAndroidVersion(info: AndroidVersionInfo): string {
   return info.versionName ? `${info.versionName} (versionCode ${info.versionCode})` : `versionCode ${info.versionCode}`;
-}
-
-function readGradleVersionCode(): number | null {
-  const gradlePath = resolve(repoRoot, "android/app/build.gradle.kts");
-  if (!existsSync(gradlePath)) return null;
-  const text = readFileSync(gradlePath, "utf8");
-  const match = text.match(/\bversionCode\s*=\s*(\d+)/);
-  if (!match?.[1]) return null;
-  const parsed = Number.parseInt(match[1], 10);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
 function runCatchingString(fn: () => string): string | null {
@@ -1307,6 +1481,18 @@ function runCatchingString(fn: () => string): string | null {
   } catch {
     return null;
   }
+}
+
+function runCatchingArray<T>(fn: () => T[]): T[] {
+  try {
+    return fn();
+  } catch {
+    return [];
+  }
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
 }
 
 function isPairingAdmin(req: IncomingMessage): boolean {

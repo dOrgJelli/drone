@@ -75,6 +75,44 @@ export type DesktopVoiceModelSettingsResponse = {
   catalog: DesktopVoiceModelCatalogEntry[];
 };
 
+export type VoiceApprovalSettings = {
+  triggerPhrase: string;
+  unlockCode: string;
+  lockCode: string;
+  lockedOffCode: string;
+  minDigits: number;
+  maxDigits: number;
+  stableMs: number;
+  collectTimeoutMs: number;
+  duplicateCooldownMs: number;
+  finalizeCheckIntervalMs: number;
+};
+
+export type VoiceApprovalSettingsResponse = {
+  ok: true;
+  voiceApproval: VoiceApprovalSettings & {
+    source: 'settings' | 'default';
+    updatedAt: string | null;
+  };
+  defaults: VoiceApprovalSettings;
+  limits: {
+    triggerPhraseMaxChars: number;
+    codeMaxDigits: number;
+    minDigitsMin: number;
+    minDigitsMax: number;
+    maxDigitsMin: number;
+    maxDigitsMax: number;
+    stableMsMin: number;
+    stableMsMax: number;
+    collectTimeoutMsMin: number;
+    collectTimeoutMsMax: number;
+    duplicateCooldownMsMin: number;
+    duplicateCooldownMsMax: number;
+    finalizeCheckIntervalMsMin: number;
+    finalizeCheckIntervalMsMax: number;
+  };
+};
+
 export type HubLogsResponse = {
   ok: true;
   logPath: string;

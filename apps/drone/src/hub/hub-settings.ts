@@ -137,6 +137,23 @@ export type EffectiveAgentSuggestionSettings = {
   updatedAt: string | null;
   policyFingerprint: string;
 };
+export type VoiceApprovalSettingsSource = 'settings' | 'default';
+export type VoiceApprovalSettings = {
+  triggerPhrase: string;
+  unlockCode: string;
+  lockCode: string;
+  lockedOffCode: string;
+  minDigits: number;
+  maxDigits: number;
+  stableMs: number;
+  collectTimeoutMs: number;
+  duplicateCooldownMs: number;
+  finalizeCheckIntervalMs: number;
+};
+export type EffectiveVoiceApprovalSettings = VoiceApprovalSettings & {
+  source: VoiceApprovalSettingsSource;
+  updatedAt: string | null;
+};
 export type { KanbanBoardTaskType, KanbanBoardCard, KanbanBoardLane, KanbanBoardSettings };
 export type TaskPlaybookButtonSettings = Array<{
   id: string;
@@ -186,6 +203,34 @@ export const AGENT_MESSAGE_AUTO_CONTINUE_PROMPT_DEFAULT = 'continue';
 export const AGENT_MESSAGE_AUTO_CONTINUE_PROMPT_MAX_CHARS = 200;
 export const AGENT_SUGGESTION_ENABLED_BY_DEFAULT = false;
 export const AGENT_SUGGESTION_POLICY_MAX_CHARS = 20_000;
+export const VOICE_APPROVAL_SETTINGS_DEFAULT: VoiceApprovalSettings = {
+  triggerPhrase: 'approval code',
+  unlockCode: '1234',
+  lockCode: '4321',
+  lockedOffCode: '0000',
+  minDigits: 4,
+  maxDigits: 8,
+  stableMs: 900,
+  collectTimeoutMs: 5_000,
+  duplicateCooldownMs: 4_000,
+  finalizeCheckIntervalMs: 250,
+};
+export const VOICE_APPROVAL_SETTINGS_LIMITS = {
+  triggerPhraseMaxChars: 64,
+  codeMaxDigits: 8,
+  minDigitsMin: 1,
+  minDigitsMax: 8,
+  maxDigitsMin: 1,
+  maxDigitsMax: 12,
+  stableMsMin: 250,
+  stableMsMax: 3_000,
+  collectTimeoutMsMin: 1_000,
+  collectTimeoutMsMax: 15_000,
+  duplicateCooldownMsMin: 0,
+  duplicateCooldownMsMax: 15_000,
+  finalizeCheckIntervalMsMin: 100,
+  finalizeCheckIntervalMsMax: 1_000,
+} as const;
 export const AGENT_SUGGESTION_POLICY_DEFAULT = `# Assistant Suggestion Policy
 
 Suggest the most likely next user reply in this developer chat after an assistant message.
@@ -296,6 +341,98 @@ export function parseFilesystemUploadMaxBytes(raw: unknown): number | null {
   const i = Math.floor(n);
   if (i < FILESYSTEM_UPLOAD_MAX_BYTES_MIN || i > FILESYSTEM_UPLOAD_MAX_BYTES_MAX) return null;
   return i;
+}
+
+function normalizeVoiceApprovalTriggerPhrase(raw: unknown): string {
+  const text = typeof raw === 'string' ? raw.trim().replace(/\s+/g, ' ') : '';
+  if (!text) return '';
+  return text.length > VOICE_APPROVAL_SETTINGS_LIMITS.triggerPhraseMaxChars
+    ? text.slice(0, VOICE_APPROVAL_SETTINGS_LIMITS.triggerPhraseMaxChars).trim()
+    : text;
+}
+
+function normalizeVoiceApprovalCode(raw: unknown): string {
+  const text = typeof raw === 'string' || typeof raw === 'number' ? String(raw).replace(/\D/g, '') : '';
+  if (!text) return '';
+  return text.slice(0, VOICE_APPROVAL_SETTINGS_LIMITS.codeMaxDigits);
+}
+
+function parseIntegerInRange(raw: unknown, min: number, max: number): number | null {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  const i = Math.floor(n);
+  if (i < min || i > max) return null;
+  return i;
+}
+
+function parseVoiceApprovalSettings(raw: unknown): VoiceApprovalSettings | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const value = raw as Record<string, unknown>;
+  const triggerPhrase = normalizeVoiceApprovalTriggerPhrase(value.triggerPhrase);
+  const unlockCode = normalizeVoiceApprovalCode(value.unlockCode);
+  const lockCode = normalizeVoiceApprovalCode(value.lockCode);
+  const lockedOffCode = normalizeVoiceApprovalCode(value.lockedOffCode);
+  const minDigits = parseIntegerInRange(value.minDigits, VOICE_APPROVAL_SETTINGS_LIMITS.minDigitsMin, VOICE_APPROVAL_SETTINGS_LIMITS.minDigitsMax);
+  const maxDigits = parseIntegerInRange(value.maxDigits, VOICE_APPROVAL_SETTINGS_LIMITS.maxDigitsMin, VOICE_APPROVAL_SETTINGS_LIMITS.maxDigitsMax);
+  const stableMs = parseIntegerInRange(value.stableMs, VOICE_APPROVAL_SETTINGS_LIMITS.stableMsMin, VOICE_APPROVAL_SETTINGS_LIMITS.stableMsMax);
+  const collectTimeoutMs = parseIntegerInRange(
+    value.collectTimeoutMs,
+    VOICE_APPROVAL_SETTINGS_LIMITS.collectTimeoutMsMin,
+    VOICE_APPROVAL_SETTINGS_LIMITS.collectTimeoutMsMax,
+  );
+  const duplicateCooldownMs = parseIntegerInRange(
+    value.duplicateCooldownMs,
+    VOICE_APPROVAL_SETTINGS_LIMITS.duplicateCooldownMsMin,
+    VOICE_APPROVAL_SETTINGS_LIMITS.duplicateCooldownMsMax,
+  );
+  const finalizeCheckIntervalMs = parseIntegerInRange(
+    value.finalizeCheckIntervalMs,
+    VOICE_APPROVAL_SETTINGS_LIMITS.finalizeCheckIntervalMsMin,
+    VOICE_APPROVAL_SETTINGS_LIMITS.finalizeCheckIntervalMsMax,
+  );
+  if (
+    !triggerPhrase ||
+    !unlockCode ||
+    !lockCode ||
+    !lockedOffCode ||
+    minDigits == null ||
+    maxDigits == null ||
+    stableMs == null ||
+    collectTimeoutMs == null ||
+    duplicateCooldownMs == null ||
+    finalizeCheckIntervalMs == null
+  ) return null;
+  if (maxDigits < minDigits) return null;
+  const codeSet = new Set([unlockCode, lockCode, lockedOffCode]);
+  if (codeSet.size !== 3) return null;
+  if ([unlockCode, lockCode, lockedOffCode].some((code) => code.length > maxDigits)) return null;
+  return {
+    triggerPhrase,
+    unlockCode,
+    lockCode,
+    lockedOffCode,
+    minDigits,
+    maxDigits,
+    stableMs,
+    collectTimeoutMs,
+    duplicateCooldownMs,
+    finalizeCheckIntervalMs,
+  };
+}
+
+function voiceApprovalSettingsEqual(a: VoiceApprovalSettings, b: VoiceApprovalSettings): boolean {
+  return (
+    a.triggerPhrase === b.triggerPhrase &&
+    a.unlockCode === b.unlockCode &&
+    a.lockCode === b.lockCode &&
+    a.lockedOffCode === b.lockedOffCode &&
+    a.minDigits === b.minDigits &&
+    a.maxDigits === b.maxDigits &&
+    a.stableMs === b.stableMs &&
+    a.collectTimeoutMs === b.collectTimeoutMs &&
+    a.duplicateCooldownMs === b.duplicateCooldownMs &&
+    a.finalizeCheckIntervalMs === b.finalizeCheckIntervalMs
+  );
 }
 
 export function normalizeAgentMessageAutoContinuePrompt(raw: unknown): string {
@@ -964,6 +1101,63 @@ export async function resolveFilesystemSettingsResponse(): Promise<{
       maxUploadMaxBytes: FILESYSTEM_UPLOAD_MAX_BYTES_MAX,
       defaultUploadMaxBytes: FILESYSTEM_UPLOAD_MAX_BYTES_DEFAULT,
     },
+  };
+}
+
+async function getStoredVoiceApprovalSettings(): Promise<{
+  settings: VoiceApprovalSettings | null;
+  updatedAt: string | null;
+}> {
+  const reg = await loadRegistry();
+  const raw = reg.settings?.voiceApproval;
+  const settings = parseVoiceApprovalSettings(raw);
+  const updatedAtRaw = raw?.updatedAt;
+  return {
+    settings,
+    updatedAt: typeof updatedAtRaw === 'string' && updatedAtRaw.trim() ? updatedAtRaw.trim() : null,
+  };
+}
+
+export async function upsertStoredVoiceApprovalSettings(settingsRaw: unknown): Promise<void> {
+  const settings = parseVoiceApprovalSettings(settingsRaw);
+  if (!settings) {
+    throw new Error('Invalid voice approval settings.');
+  }
+  const updatedAt = new Date().toISOString();
+  await updateRegistry((reg) => {
+    reg.settings ??= {};
+    if (voiceApprovalSettingsEqual(settings, VOICE_APPROVAL_SETTINGS_DEFAULT)) {
+      delete reg.settings.voiceApproval;
+      if (Object.keys(reg.settings).length === 0) delete reg.settings;
+      return;
+    }
+    reg.settings.voiceApproval = {
+      ...settings,
+      updatedAt,
+    };
+  });
+}
+
+export async function resolveEffectiveVoiceApprovalSettings(): Promise<EffectiveVoiceApprovalSettings> {
+  const stored = await getStoredVoiceApprovalSettings();
+  return {
+    ...(stored.settings ?? VOICE_APPROVAL_SETTINGS_DEFAULT),
+    source: stored.settings ? 'settings' : 'default',
+    updatedAt: stored.settings ? stored.updatedAt : null,
+  };
+}
+
+export async function resolveVoiceApprovalSettingsResponse(): Promise<{
+  ok: true;
+  voiceApproval: EffectiveVoiceApprovalSettings;
+  defaults: VoiceApprovalSettings;
+  limits: typeof VOICE_APPROVAL_SETTINGS_LIMITS;
+}> {
+  return {
+    ok: true,
+    voiceApproval: await resolveEffectiveVoiceApprovalSettings(),
+    defaults: VOICE_APPROVAL_SETTINGS_DEFAULT,
+    limits: VOICE_APPROVAL_SETTINGS_LIMITS,
   };
 }
 

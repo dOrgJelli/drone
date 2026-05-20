@@ -246,6 +246,7 @@ import {
   resolveEffectiveFilesystemSettings,
   resolveEffectiveDeleteActionSettings,
   resolveEffectiveLlmProvider,
+  resolveEffectiveVoiceApprovalSettings,
   resolveFilesystemSettingsResponse,
   resolveEffectiveProviderApiKeySettings,
   resolveGroqApiKeySettings,
@@ -253,6 +254,7 @@ import {
   resolveLlmSettingsResponse,
   resolveTaskPlaybookButtonSettingsResponse,
   resolveUiPreferencesSettingsResponse,
+  resolveVoiceApprovalSettingsResponse,
   upsertStoredDeleteActionSettings,
   upsertStoredFilesystemSettings,
   upsertStoredKanbanBoardSettings,
@@ -260,6 +262,7 @@ import {
   upsertStoredAgentSuggestionSettings,
   upsertStoredLlmProvider,
   upsertStoredProviderApiKey,
+  upsertStoredVoiceApprovalSettings,
   upsertVoiceStreamPairingPassword,
   upsertStoredTaskPlaybookButtonSettings,
   upsertStoredUiPreferencesSettings,
@@ -453,7 +456,7 @@ function formatPullHostBranchBeforeCreateError(error: unknown): {
   };
 }
 
-async function readHubLogTail(opts: {
+async function readLogTail(logPath: string, opts: {
   tailLines: number;
   maxBytes: number;
 }): Promise<{
@@ -464,8 +467,6 @@ async function readHubLogTail(opts: {
   bytesRead: number;
   updatedAt: string | null;
 }> {
-  const logPath = droneRootPath('hub.log');
-
   let fileSize = 0;
   let updatedAt: string | null = null;
   try {
@@ -522,6 +523,32 @@ async function readHubLogTail(opts: {
     bytesRead,
     updatedAt,
   };
+}
+
+async function readHubLogTail(opts: {
+  tailLines: number;
+  maxBytes: number;
+}) {
+  return await readLogTail(droneRootPath('hub.log'), opts);
+}
+
+function resolveAndroidVoiceLogPath(): string {
+  const configured = String(process.env.DRONE_ANDROID_LOG_PATH ?? '').trim();
+  if (configured) return path.resolve(configured);
+
+  const candidates = [
+    path.resolve(process.cwd(), '..', 'voice-stream', 'server', '.runtime', 'android-logs', 'drone-android.log'),
+    path.resolve(process.cwd(), 'apps', 'voice-stream', 'server', '.runtime', 'android-logs', 'drone-android.log'),
+    path.resolve(__dirname, '..', '..', '..', 'voice-stream', 'server', '.runtime', 'android-logs', 'drone-android.log'),
+  ];
+  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
+}
+
+async function readAndroidVoiceLogTail(opts: {
+  tailLines: number;
+  maxBytes: number;
+}) {
+  return await readLogTail(resolveAndroidVoiceLogPath(), opts);
 }
 
 function json(res: http.ServerResponse, status: number, body: any) {
@@ -10578,6 +10605,7 @@ export async function startDroneHubApiServer(opts: {
   allowedOrigins?: string[];
   onGroqApiKeySettingsChanged?: () => void | Promise<void>;
   onVoiceStreamPairingPasswordSettingsChanged?: () => void | Promise<void>;
+  onVoiceApprovalSettingsChanged?: () => void | Promise<void>;
 }) {
   for (const timer of RECONCILE_RETRY_TIMERS.values()) {
     try {
@@ -10608,6 +10636,14 @@ export async function startDroneHubApiServer(opts: {
     if (!opts.onVoiceStreamPairingPasswordSettingsChanged) return;
     void Promise.resolve(opts.onVoiceStreamPairingPasswordSettingsChanged()).catch((error: any) => {
       hubLog('warn', 'Voice Stream pairing password settings change hook failed', {
+        error: String(error?.message ?? error ?? ''),
+      });
+    });
+  };
+  const notifyVoiceApprovalSettingsChanged = () => {
+    if (!opts.onVoiceApprovalSettingsChanged) return;
+    void Promise.resolve(opts.onVoiceApprovalSettingsChanged()).catch((error: any) => {
+      hubLog('warn', 'Voice approval settings change hook failed', {
         error: String(error?.message ?? error ?? ''),
       });
     });
@@ -11203,6 +11239,15 @@ export async function startDroneHubApiServer(opts: {
     submitAssistantPrompt: async (prompt) => {
       await assistantService.submitVoicePrompt({ prompt, title: 'Desktop voice thread', source: 'desktop' });
     },
+    startChatPatch: async () => {
+      beginVoicePatchSession('desktop');
+    },
+    submitChatPatch: async (prompt) => {
+      await submitVoicePatchPrompt(prompt, 'desktop');
+    },
+    abortChatPatch: async () => {
+      endVoicePatchSession('desktop', 'aborted');
+    },
     synthesizeSpeechWav: async (text) => {
       const groqSettings = await resolveGroqApiKeySettings();
       const apiKey = String(process.env.GROQ_TTS_API_KEY ?? '').trim() || groqSettings.apiKey;
@@ -11210,6 +11255,139 @@ export async function startDroneHubApiServer(opts: {
       return await synthesizeTextWavWithGroq(text.slice(0, 4_000), buildGroqTtsConfig({ apiKey }));
     },
   });
+  const reloadDesktopVoiceApprovalSettings = async () => {
+    desktopVoiceService.setApprovalSettings(await resolveEffectiveVoiceApprovalSettings());
+  };
+  void reloadDesktopVoiceApprovalSettings().catch((error: any) => {
+    hubLog('warn', 'Failed to apply desktop voice approval settings', { error: String(error?.message ?? error ?? '') });
+  });
+
+  type VoicePatchState = {
+    active: boolean;
+    sessionId: string | null;
+    source: string | null;
+    droneId: string | null;
+    droneName: string | null;
+    chatName: string | null;
+    startedAt: string | null;
+    updatedAt: string;
+    message: string;
+  };
+
+  let activeAssistantContext: {
+    activeDroneId: string | null;
+    activeDroneName: string | null;
+    activeChatName: string | null;
+    appView: string | null;
+  } = {
+    activeDroneId: null,
+    activeDroneName: null,
+    activeChatName: null,
+    appView: null,
+  };
+  let voicePatchState: VoicePatchState = {
+    active: false,
+    sessionId: null,
+    source: null,
+    droneId: null,
+    droneName: null,
+    chatName: null,
+    startedAt: null,
+    updatedAt: nowIso(),
+    message: 'Voice patch is idle.',
+  };
+  const voicePatchSubscribers = new Set<http.ServerResponse>();
+
+  function emitVoicePatchState(): void {
+    for (const subscriber of Array.from(voicePatchSubscribers)) {
+      if (subscriber.destroyed || subscriber.writableEnded) {
+        voicePatchSubscribers.delete(subscriber);
+        continue;
+      }
+      subscriber.write(`event: voice_patch_status\n`);
+      subscriber.write(`data: ${JSON.stringify(voicePatchState)}\n\n`);
+    }
+  }
+
+  function setVoicePatchState(next: VoicePatchState): VoicePatchState {
+    voicePatchState = next;
+    emitVoicePatchState();
+    return voicePatchState;
+  }
+
+  function beginVoicePatchSession(sourceRaw: unknown, sessionIdRaw?: unknown): VoicePatchState {
+    const droneId = String(activeAssistantContext.activeDroneId ?? '').trim();
+    const droneName = String(activeAssistantContext.activeDroneName ?? '').trim();
+    const chatName = String(activeAssistantContext.activeChatName ?? '').trim() || 'default';
+    if (!droneId) throw new Error('No active drone chat is open.');
+    const source = String(sourceRaw ?? '').trim() || 'unknown';
+    const sessionId = String(sessionIdRaw ?? '').trim() || crypto.randomUUID();
+    const at = nowIso();
+    return setVoicePatchState({
+      active: true,
+      sessionId,
+      source,
+      droneId,
+      droneName: droneName || droneId,
+      chatName,
+      startedAt: at,
+      updatedAt: at,
+      message: `Patching into ${droneName || droneId} / ${chatName}.`,
+    });
+  }
+
+  function endVoicePatchSession(sourceRaw: unknown, reason = 'idle', sessionIdRaw?: unknown): VoicePatchState {
+    const sessionId = String(sessionIdRaw ?? '').trim();
+    if (sessionId && voicePatchState.sessionId && sessionId !== voicePatchState.sessionId) {
+      return voicePatchState;
+    }
+    const source = String(sourceRaw ?? '').trim() || voicePatchState.source || 'unknown';
+    const at = nowIso();
+    return setVoicePatchState({
+      active: false,
+      sessionId: voicePatchState.sessionId,
+      source,
+      droneId: voicePatchState.droneId,
+      droneName: voicePatchState.droneName,
+      chatName: voicePatchState.chatName,
+      startedAt: voicePatchState.startedAt,
+      updatedAt: at,
+      message:
+        reason === 'sent'
+          ? 'Voice patch sent.'
+          : reason === 'aborted'
+            ? 'Voice patch cancelled.'
+            : reason === 'closed'
+              ? 'Voice patch stream closed.'
+              : 'Voice patch is idle.',
+    });
+  }
+
+  async function submitVoicePatchPrompt(promptRaw: unknown, sourceRaw: unknown, sessionIdRaw?: unknown): Promise<{ ok: true; droneId: string; chatName: string; promptId: string; pendingState?: string | null; blockedByAutomation?: boolean }> {
+    const prompt = String(promptRaw ?? '').trim();
+    if (!prompt) throw new Error('Patch transcript is empty.');
+    const sessionId = String(sessionIdRaw ?? '').trim();
+    const canUseExistingTarget =
+      Boolean(voicePatchState.droneId) &&
+      (!sessionId || !voicePatchState.sessionId || voicePatchState.sessionId === sessionId);
+    const target = canUseExistingTarget
+      ? voicePatchState
+      : beginVoicePatchSession(sourceRaw, sessionId);
+    const droneId = String(target.droneId ?? '').trim();
+    const chatName = String(target.chatName ?? '').trim() || 'default';
+    if (!droneId) throw new Error('No active drone chat is open.');
+    const result = await createOrEnqueuePromptUnified({ droneId, chatName, prompt, cwd: null });
+    if (result.kind === 'error') throw new Error(result.error);
+    endVoicePatchSession(sourceRaw, 'sent', target.sessionId);
+    return {
+      ok: true,
+      droneId,
+      chatName,
+      promptId: result.id,
+      pendingState: result.pendingState,
+      blockedByAutomation: result.blockedByAutomation,
+    };
+  }
 
   function writeAssistantSseEvent(res: http.ServerResponse, event: string, data: any): void {
     if (res.destroyed || res.writableEnded) return;
@@ -11626,6 +11804,77 @@ export async function startDroneHubApiServer(opts: {
         return;
       }
 
+      if (pathname === '/api/assistant/voice/patch-status' && method === 'GET') {
+        json(res, 200, { ok: true, patch: voicePatchState });
+        return;
+      }
+
+      if (pathname === '/api/assistant/voice/patch-status/events' && method === 'GET') {
+        res.statusCode = 200;
+        res.setHeader('content-type', 'text/event-stream; charset=utf-8');
+        res.setHeader('cache-control', 'no-cache, no-transform');
+        res.setHeader('connection', 'keep-alive');
+        req.socket.setTimeout(0);
+        (res as any).flushHeaders?.();
+        voicePatchSubscribers.add(res);
+        res.write(`event: connected\n`);
+        res.write(`data: ${JSON.stringify({ ok: true, at: nowIso() })}\n\n`);
+        res.write(`event: voice_patch_status\n`);
+        res.write(`data: ${JSON.stringify(voicePatchState)}\n\n`);
+        const keepAlive = setInterval(() => {
+          if (res.destroyed || res.writableEnded) return;
+          res.write(': keepalive\n\n');
+        }, 25_000);
+        (keepAlive as any).unref?.();
+        const cleanup = () => {
+          clearInterval(keepAlive);
+          voicePatchSubscribers.delete(res);
+        };
+        req.on('close', cleanup);
+        res.on('close', cleanup);
+        return;
+      }
+
+      if (pathname === '/api/assistant/voice/patch-state' && method === 'POST') {
+        let body: any = null;
+        try {
+          body = await readJsonBody(req);
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+          return;
+        }
+        try {
+          const active = Boolean(body?.active);
+          const reason = String(body?.reason ?? '').trim() || 'aborted';
+          const patch = active
+            ? beginVoicePatchSession(body?.source, body?.sessionId)
+            : voicePatchState.active
+              ? endVoicePatchSession(body?.source, reason, body?.sessionId)
+              : voicePatchState;
+          json(res, 200, { ok: true, ...patch });
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+        }
+        return;
+      }
+
+      if (pathname === '/api/assistant/voice/patch-message' && method === 'POST') {
+        let body: any = null;
+        try {
+          body = await readJsonBody(req);
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+          return;
+        }
+        try {
+          json(res, 202, await submitVoicePatchPrompt(body?.prompt ?? body?.message, body?.source, body?.sessionId));
+        } catch (e: any) {
+          endVoicePatchSession(body?.source, 'aborted', body?.sessionId);
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+        }
+        return;
+      }
+
       if (pathname === '/api/assistant/threads' && method === 'POST') {
         let body: any = null;
         try {
@@ -11646,6 +11895,12 @@ export async function startDroneHubApiServer(opts: {
           json(res, 400, { ok: false, error: e?.message ?? String(e) });
           return;
         }
+        activeAssistantContext = {
+          activeDroneId: String(body?.activeDroneId ?? '').trim() || null,
+          activeDroneName: String(body?.activeDroneName ?? '').trim() || null,
+          activeChatName: String(body?.activeChatName ?? '').trim() || null,
+          appView: String(body?.appView ?? '').trim() || null,
+        };
         assistantService.updateAppContext(body ?? {});
         json(res, 200, { ok: true });
         return;
@@ -12120,6 +12375,32 @@ export async function startDroneHubApiServer(opts: {
           }
           await upsertStoredFilesystemSettings({ uploadMaxBytes });
           json(res, 200, await resolveFilesystemSettingsResponse());
+          return;
+        }
+      }
+
+      if (pathname === '/api/settings/voice-approval') {
+        if (method === 'GET') {
+          json(res, 200, await resolveVoiceApprovalSettingsResponse());
+          return;
+        }
+
+        if (method === 'POST') {
+          let body: any = null;
+          try {
+            body = await readJsonBody(req);
+          } catch (e: any) {
+            json(res, 400, { ok: false, error: e?.message ?? String(e) });
+            return;
+          }
+          try {
+            await upsertStoredVoiceApprovalSettings(body?.voiceApproval ?? body);
+            await reloadDesktopVoiceApprovalSettings();
+            notifyVoiceApprovalSettingsChanged();
+            json(res, 200, await resolveVoiceApprovalSettingsResponse());
+          } catch (e: any) {
+            json(res, 400, { ok: false, error: e?.message ?? String(e) });
+          }
           return;
         }
       }
@@ -12628,6 +12909,30 @@ export async function startDroneHubApiServer(opts: {
           );
           try {
             const out = await readHubLogTail({ maxBytes, tailLines });
+            json(res, 200, { ok: true, ...out, maxBytes, tailLines });
+          } catch (e: any) {
+            json(res, 500, { ok: false, error: e?.message ?? String(e) });
+          }
+          return;
+        }
+      }
+
+      if (pathname === '/api/settings/android/logs') {
+        if (method === 'GET') {
+          const maxBytes = clampIntParam(
+            u.searchParams.get('maxBytes'),
+            HUB_SETTINGS_LOG_DEFAULT_MAX_BYTES,
+            1,
+            HUB_SETTINGS_LOG_MAX_BYTES,
+          );
+          const tailLines = clampIntParam(
+            u.searchParams.get('tail'),
+            HUB_SETTINGS_LOG_DEFAULT_TAIL_LINES,
+            1,
+            HUB_SETTINGS_LOG_MAX_TAIL_LINES,
+          );
+          try {
+            const out = await readAndroidVoiceLogTail({ maxBytes, tailLines });
             json(res, 200, { ok: true, ...out, maxBytes, tailLines });
           } catch (e: any) {
             json(res, 500, { ok: false, error: e?.message ?? String(e) });

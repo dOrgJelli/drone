@@ -10,6 +10,7 @@ import { SkillLibrarySection } from './SkillLibrarySection';
 import { SyncSettingsTab } from './SyncSettingsTab';
 import { SystemLogsSettingsTab } from './SystemLogsSettingsTab';
 import { TrashBehaviorSettingsTab } from './TrashBehaviorSettingsTab';
+import { VoiceApprovalSettingsTab } from './VoiceApprovalSettingsTab';
 import { SETTINGS_TABS, type SettingsTabId } from './settings-tabs';
 import { useDroneHubUiStore } from './use-drone-hub-ui-store';
 import type { UseDeleteActionSettingsResult } from './use-delete-action-settings';
@@ -24,6 +25,7 @@ import type { UseLlmSettingsResult } from './use-llm-settings';
 import type { UseProfileSettingsResult } from './use-profile-settings';
 import type { UseSkillLibraryResult } from './use-skill-library';
 import type { UseSyncSetsResult } from './use-sync-sets';
+import type { UseVoiceApprovalSettingsResult } from './use-voice-approval-settings';
 
 type SettingsViewProps = {
   github: UseGithubSettingsResult;
@@ -35,6 +37,7 @@ type SettingsViewProps = {
   deleteAction: UseDeleteActionSettingsResult;
   filesystem: UseFilesystemSettingsResult;
   desktopVoiceModel: UseDesktopVoiceModelSettingsResult;
+  voiceApproval: UseVoiceApprovalSettingsResult;
   syncSets: UseSyncSetsResult;
   profile: UseProfileSettingsResult;
   hubLogsState: UseHubLogsResult;
@@ -67,6 +70,7 @@ export function SettingsView({
   deleteAction,
   filesystem,
   desktopVoiceModel,
+  voiceApproval,
   syncSets,
   profile,
   hubLogsState,
@@ -86,6 +90,7 @@ export function SettingsView({
 
   const settingsBusy =
     hubLogsState.hubLogsLoading ||
+    hubLogsState.androidLogsLoading ||
     github.githubSettingsLoading ||
     llm.llmSettingsLoading ||
     agentMessageAutoContinue.agentMessageAutoContinueSettingsLoading ||
@@ -93,6 +98,7 @@ export function SettingsView({
     deleteAction.deleteSettingsLoading ||
     filesystem.filesystemSettingsLoading ||
     desktopVoiceModel.desktopVoiceModelSettingsLoading ||
+    voiceApproval.voiceApprovalSettingsLoading ||
     syncSets.syncSetsLoading ||
     profile.profileSettingsLoading ||
     deleteAction.archivedDronesLoading ||
@@ -120,6 +126,7 @@ export function SettingsView({
     filesystem.savingFilesystemSettings ||
     desktopVoiceModel.installingDesktopVoiceModel ||
     desktopVoiceModel.removingDesktopVoiceModel ||
+    voiceApproval.savingVoiceApprovalSettings ||
     syncSets.creatingSyncSet ||
     Boolean(syncSets.savingSyncSetId) ||
     Boolean(syncSets.deletingSyncSetId) ||
@@ -161,15 +168,17 @@ export function SettingsView({
     void deleteAction.loadDeleteSettings();
     void filesystem.loadFilesystemSettings();
     void desktopVoiceModel.loadDesktopVoiceModelSettings();
+    void voiceApproval.loadVoiceApprovalSettings();
     void syncSets.loadSyncSets();
     void agents.loadAgentsSettings();
     void deleteAction.loadArchivedDrones();
     void deleteAction.loadArchivedChats();
     void profile.loadProfileSettings();
     void hubLogsState.loadHubLogs();
+    void hubLogsState.loadAndroidLogs();
     void skillLibrary.loadSkills();
     void skillLibrary.loadSkillSources();
-  }, [agentMessageAutoContinue, agentSuggestion, agents, agentsDraftDirty, deleteAction, desktopVoiceModel, filesystem, github, hubLogsState, llm, profile, skillLibrary, syncSets]);
+  }, [agentMessageAutoContinue, agentSuggestion, agents, agentsDraftDirty, deleteAction, desktopVoiceModel, filesystem, github, hubLogsState, llm, profile, skillLibrary, syncSets, voiceApproval]);
 
   const renderActiveTab = () => {
     if (activeTab === 'general') {
@@ -189,6 +198,7 @@ export function SettingsView({
       );
     }
     if (activeTab === 'sync') return <SyncSettingsTab syncSets={syncSets} />;
+    if (activeTab === 'voice') return <VoiceApprovalSettingsTab voiceApproval={voiceApproval} />;
     if (activeTab === 'profiles') return <ProfilesSettingsTab profile={profile} />;
     if (activeTab === 'trash') return <TrashBehaviorSettingsTab deleteAction={deleteAction} />;
     if (activeTab === 'archive') return <ArchiveSettingsTab deleteAction={deleteAction} />;

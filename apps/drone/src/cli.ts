@@ -358,6 +358,25 @@ async function getFreeTcpPort(): Promise<number> {
   return addr.port;
 }
 
+async function isTcpPortAvailable(host: string, port: number): Promise<boolean> {
+  const server = net.createServer();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(port, host, () => resolve());
+    });
+    return true;
+  } catch (error: any) {
+    const code = String(error?.code ?? '');
+    if (code === 'EADDRINUSE' || code === 'EACCES') return false;
+    throw error;
+  } finally {
+    if (server.listening) {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }
+}
+
 const DEFAULT_HUB_API_PORT = 8787;
 const DEFAULT_VOICE_STREAM_PORT = 3199;
 
@@ -618,12 +637,22 @@ async function writeHubApiToken(token: string, rootDir?: string): Promise<void> 
   await setPrivateFileModeBestEffort(p);
 }
 
-async function clearHubApiTokenBestEffort(rootDir?: string): Promise<void> {
+async function readHubApiToken(rootDir?: string): Promise<string | null> {
   try {
-    await fs.rm(hubTokenPath(rootDir), { force: true });
+    const raw = await fs.readFile(hubTokenPath(rootDir), 'utf8');
+    const token = String(raw ?? '').trim();
+    return token || null;
   } catch {
-    // ignore
+    return null;
   }
+}
+
+async function ensureHubApiToken(rootDir?: string): Promise<string> {
+  const existing = await readHubApiToken(rootDir);
+  if (existing) return existing;
+  const token = crypto.randomBytes(32).toString('base64url');
+  await writeHubApiToken(token, rootDir);
+  return token;
 }
 
 async function setPrivateFileModeBestEffort(p: string): Promise<void> {
@@ -642,7 +671,6 @@ async function removeHubStateIfOwnedByPid(pid: number, rootDir?: string): Promis
     const cur = await readHubState(rootDir);
     if (cur && cur.pid === pid) {
       await fs.rm(hubStatePath(rootDir), { force: true });
-      await clearHubApiTokenBestEffort(rootDir);
     }
   } catch {
     // ignore
@@ -746,7 +774,6 @@ async function stopHubAtRootIfRunning(rootDir: string): Promise<boolean> {
     } catch {
       // ignore
     }
-    await clearHubApiTokenBestEffort(rootDir);
     return false;
   }
   await stopHubProcess(cur.pid);
@@ -755,7 +782,6 @@ async function stopHubAtRootIfRunning(rootDir: string): Promise<boolean> {
   } catch {
     // ignore
   }
-  await clearHubApiTokenBestEffort(rootDir);
   return true;
 }
 
@@ -1850,13 +1876,15 @@ async function hubRun(options: any) {
   await ensureDefaultProfileForFirstRun();
   await ensureHubSetupState();
   const activeProfile = readActiveProfileNameSync();
-  const apiToken = crypto.randomBytes(32).toString('base64url');
+  const apiToken = await ensureHubApiToken();
   const allowedOrigins = new Set<string>([`http://127.0.0.1:${uiPort}`, `http://localhost:${uiPort}`]);
   if (apiHost && apiHost !== '0.0.0.0' && apiHost !== '::') {
     allowedOrigins.add(`http://${apiHost}:${uiPort}`);
   }
   const repoRoot = resolveRepoRootFromDroneCliDir();
   let shuttingDown = false;
+  let waitForStopResolve: (() => void) | null = null;
+  let shutdownStarted = false;
   let voiceStreamRestart: Promise<void> | null = null;
   let voiceStreamChild: ChildProcess | null = null;
   const intentionalVoiceStreamStops = new WeakSet<ChildProcess>();
@@ -1887,17 +1915,40 @@ async function hubRun(options: any) {
       } catch {
         // ignore
       }
-      trackVoiceStreamChild(await startVoiceStreamServer(repoRoot, voiceStreamPort, {
-        url: `http://127.0.0.1:${api.port}`,
-        token: apiToken,
-      }));
-      // eslint-disable-next-line no-console
-      console.log(`Voice Stream restarted after settings change: http://127.0.0.1:${voiceStreamPort}`);
+      if (await isTcpPortAvailable('0.0.0.0', voiceStreamPort)) {
+        trackVoiceStreamChild(await startVoiceStreamServer(repoRoot, voiceStreamPort, {
+          url: `http://127.0.0.1:${api.port}`,
+          token: apiToken,
+        }));
+        // eslint-disable-next-line no-console
+        console.log(`Voice Stream restarted after settings change: http://127.0.0.1:${voiceStreamPort}`);
+      } else {
+        // eslint-disable-next-line no-console
+        console.warn(`Voice Stream port ${voiceStreamPort} is already in use; leaving the existing server running.`);
+      }
     })();
     try {
       await voiceStreamRestart;
     } finally {
       voiceStreamRestart = null;
+    }
+  };
+
+  const reloadVoiceStreamApprovalSettings = async () => {
+    if (!voiceStreamEnabled || shuttingDown) return;
+    const url = `http://127.0.0.1:${voiceStreamPort}/internal/approval-settings/reload`;
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${apiToken}` },
+      });
+      if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        throw new Error(`${response.status} ${response.statusText}${text ? `: ${text}` : ''}`);
+      }
+    } catch (error: any) {
+      // eslint-disable-next-line no-console
+      console.warn(`Voice Stream approval settings reload failed: ${error?.message ?? String(error)}`);
     }
   };
 
@@ -1909,6 +1960,7 @@ async function hubRun(options: any) {
     allowedOrigins: Array.from(allowedOrigins),
     onGroqApiKeySettingsChanged: restartVoiceStreamForSettings,
     onVoiceStreamPairingPasswordSettingsChanged: restartVoiceStreamForSettings,
+    onVoiceApprovalSettingsChanged: reloadVoiceStreamApprovalSettings,
   });
 
   const voiceStream = voiceStreamEnabled
@@ -1933,24 +1985,36 @@ async function hubRun(options: any) {
 
   // Start the drone-hub Vite dev server and proxy /api → Hub API server.
   const hubDir = path.join(repoRoot, 'apps', 'drone-hub');
-  if (voiceStreamEnabled) {
+  if (voiceStreamEnabled && (await isTcpPortAvailable('0.0.0.0', voiceStreamPort))) {
     trackVoiceStreamChild(await startVoiceStreamServer(repoRoot, voiceStreamPort, {
       url: `http://127.0.0.1:${api.port}`,
       token: apiToken,
     }));
+  } else if (voiceStreamEnabled) {
+    // eslint-disable-next-line no-console
+    console.warn(`Voice Stream port ${voiceStreamPort} is already in use; leaving the existing server running.`);
   }
-  const child = spawn('bun', ['run', 'dev', '--', '--port', String(uiPort), '--strictPort'], {
-    cwd: hubDir,
-    stdio: 'inherit',
-    env: {
-      ...process.env,
-      DRONE_HUB_API_PORT: String(api.port),
-      DRONE_HUB_API_TOKEN: apiToken,
-      ...(activeProfile ? { VITE_DRONE_PROFILE_ID: activeProfile } : {}),
-    },
-  });
+  const uiPortAvailable = await isTcpPortAvailable('127.0.0.1', uiPort);
+  const child = uiPortAvailable
+    ? spawn('bun', ['run', 'dev', '--', '--port', String(uiPort), '--strictPort'], {
+        cwd: hubDir,
+        stdio: 'inherit',
+        env: {
+          ...process.env,
+          DRONE_HUB_API_PORT: String(api.port),
+          DRONE_HUB_API_TOKEN: apiToken,
+          ...(activeProfile ? { VITE_DRONE_PROFILE_ID: activeProfile } : {}),
+        },
+      })
+    : null;
+  if (!uiPortAvailable) {
+    // eslint-disable-next-line no-console
+    console.warn(`Drone Hub UI port ${uiPort} is already in use; leaving the existing UI server running.`);
+  }
 
   const shutdown = async () => {
+    if (shutdownStarted) return;
+    shutdownStarted = true;
     shuttingDown = true;
     try {
       if (voiceStreamChild) {
@@ -1961,7 +2025,7 @@ async function hubRun(options: any) {
       // ignore
     }
     try {
-      child.kill('SIGINT');
+      child?.kill('SIGINT');
     } catch {
       // ignore
     }
@@ -1971,6 +2035,7 @@ async function hubRun(options: any) {
       // ignore
     }
     await removeHubStateIfOwnedByPid(process.pid);
+    waitForStopResolve?.();
   };
 
   process.once('SIGINT', async () => {
@@ -1990,8 +2055,9 @@ async function hubRun(options: any) {
   }
 
   await new Promise<void>((resolve, reject) => {
-    child.once('error', reject);
-    child.once('exit', () => resolve());
+    waitForStopResolve = resolve;
+    child?.once('error', reject);
+    child?.once('exit', () => resolve());
   });
   await shutdown();
 }
@@ -2120,12 +2186,10 @@ async function hubStop() {
       } catch {
         // ignore
       }
-      await clearHubApiTokenBestEffort();
       // eslint-disable-next-line no-console
       console.log(JSON.stringify({ ok: true, stopped: true, recovered: true, pids: recoveredPids }, null, 2));
       return;
     }
-    await clearHubApiTokenBestEffort();
     // eslint-disable-next-line no-console
     console.log(JSON.stringify({ ok: true, stopped: false, reason: 'not running' }, null, 2));
     return;
@@ -2138,7 +2202,6 @@ async function hubStop() {
     } catch {
       // ignore
     }
-    await clearHubApiTokenBestEffort();
     const recoveredPids = await findRecoverableHubRunnerPids(fallbackUiPort);
     if (recoveredPids.length > 0) {
       for (const recoveredPid of recoveredPids) {
@@ -2160,7 +2223,6 @@ async function hubStop() {
   } catch {
     // ignore
   }
-  await clearHubApiTokenBestEffort();
 
   // eslint-disable-next-line no-console
   console.log(JSON.stringify({ ok: true, stopped: true, pid }, null, 2));

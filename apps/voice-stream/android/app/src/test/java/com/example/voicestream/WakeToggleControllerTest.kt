@@ -56,6 +56,17 @@ class WakeToggleControllerTest {
     }
 
     @Test
+    fun patchPhraseStartsPatchStreaming() {
+        val controller = WakeToggleController()
+
+        controller.startListening()
+        controller.unlockToListening()
+
+        assertEquals(WakeAction.START_PATCH_STREAMING, controller.wakeDetected(WakePhrase.PATCH))
+        assertEquals(WakeState.STREAMING, controller.state)
+    }
+
+    @Test
     fun stopAllStopsStreamingAndTurnsOff() {
         val controller = WakeToggleController()
 
@@ -84,6 +95,7 @@ class WakeToggleControllerTest {
         assertEquals(null, WakePhraseMatcher.match("hay"))
         assertEquals(WakePhrase.START, WakePhraseMatcher.match("hey sebastian"))
         assertEquals(WakePhrase.START, WakePhraseMatcher.match("hay sebastian"))
+        assertEquals(WakePhrase.PATCH, WakePhraseMatcher.match("patch me in"))
         assertEquals(null, WakePhraseMatcher.match("that's it"))
         assertEquals(null, WakePhraseMatcher.match("that is it"))
         assertEquals(null, WakePhraseMatcher.match("thats it"))
