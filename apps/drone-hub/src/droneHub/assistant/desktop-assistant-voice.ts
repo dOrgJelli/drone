@@ -35,6 +35,36 @@ export type DesktopAssistantVoiceStatus = {
   };
 };
 
+export function isDesktopAssistantVoiceActive(status: DesktopAssistantVoiceStatus): boolean {
+  return status.mode !== 'off' && status.mode !== 'error';
+}
+
+export function isDesktopAssistantVoiceBusy(status: DesktopAssistantVoiceStatus): boolean {
+  return status.mode === 'recording' || status.mode === 'transcribing';
+}
+
+export function desktopAssistantVoiceHeardText(status: DesktopAssistantVoiceStatus): string {
+  return String(status.recognizer?.text ?? status.recognizer?.finalText ?? '').trim();
+}
+
+export function desktopAssistantVoiceControlLabel(status: DesktopAssistantVoiceStatus): string {
+  if (status.mode === 'off') return 'Start voice';
+  if (status.mode === 'error') return 'Voice error';
+  if (status.mode === 'locked') return 'Locked';
+  if (status.mode === 'dormant') return 'Sleep';
+  if (status.mode === 'sleeping') return 'Awake';
+  if (status.mode === 'recording') return 'Recording';
+  if (status.mode === 'transcribing') return 'Transcribing';
+  return 'Voice';
+}
+
+export function desktopAssistantVoiceControlTitle(status: DesktopAssistantVoiceStatus): string {
+  if (status.mode === 'off' || status.mode === 'error') return 'Start desktop assistant voice';
+  if (isDesktopAssistantVoiceBusy(status)) return 'Stop recording';
+  if (status.mode === 'dormant') return 'Wake desktop assistant voice';
+  return 'Sleep desktop assistant voice';
+}
+
 export const ASSISTANT_DESKTOP_VOICE_TOGGLE_EVENT = 'droneHub:assistantDesktopVoiceToggle';
 export const ASSISTANT_DESKTOP_VOICE_STATUS_EVENT = 'droneHub:assistantDesktopVoiceStatus';
 export const ASSISTANT_DESKTOP_VOICE_TRANSCRIPT_SEGMENT_EVENT = 'droneHub:assistantDesktopVoiceTranscriptSegment';
