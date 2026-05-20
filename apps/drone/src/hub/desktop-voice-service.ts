@@ -61,6 +61,12 @@ type DesktopVoiceStatus = {
   mode: DesktopVoiceMode;
   message: string;
   updatedAt: string;
+  suspended: {
+    active: boolean;
+    reason: 'clipboard' | null;
+    previousMode: DesktopVoiceMode | null;
+    message: string | null;
+  };
   supportsWakeWords: boolean;
   recognizer: {
     active: boolean;
@@ -980,6 +986,9 @@ export class DesktopVoiceService {
   private clipboardMessage = 'Voice transcription is idle.';
   private clipboardError: string | null = null;
   private clipboardStartSuppressedUntil = 0;
+  private desktopVoiceSuspensionReason: 'clipboard' | null = null;
+  private desktopVoiceSuspendedMode: DesktopVoiceMode | null = null;
+  private desktopVoiceSuspendedMessage: string | null = null;
   private promptCommandSuppressedUntil = 0;
   private approvalSettings: VoiceApprovalSettings = VOICE_APPROVAL_SETTINGS_DEFAULT;
 
@@ -1023,6 +1032,14 @@ export class DesktopVoiceService {
       mode: this.mode,
       message: this.message,
       updatedAt: this.updatedAt,
+      suspended: {
+        active: this.desktopVoiceSuspensionReason != null,
+        reason: this.desktopVoiceSuspensionReason,
+        previousMode: this.desktopVoiceSuspendedMode,
+        message: this.desktopVoiceSuspensionReason === 'clipboard'
+          ? 'Desktop voice is suspended during voice transcription.'
+          : null,
+      },
       supportsWakeWords: this.recognizer.snapshot().active,
       recognizer: this.recognizer.snapshot(),
       transcript: {
@@ -1094,6 +1111,7 @@ export class DesktopVoiceService {
   }
 
   toggle(): DesktopVoiceStatus {
+    if (this.desktopVoiceSuspensionReason) return this.snapshot();
     if (this.mode === 'off' || this.mode === 'error') return this.start();
     if (this.mode === 'recording' || this.mode === 'transcribing') {
       void this.abortPromptRecordingFromTranscript();
@@ -1145,6 +1163,7 @@ export class DesktopVoiceService {
     this.desktopStartSessionId += 1;
     this.capture.stop();
     this.recognizer.stop();
+    this.clearDesktopVoiceSuspension();
     this.mode = 'off';
     this.message = message;
     this.promptChunks = [];
@@ -1177,6 +1196,7 @@ export class DesktopVoiceService {
         this.clipboardMode = 'error';
         this.clipboardError = 'Clipboard microphone recorder is not active.';
         this.clipboardMessage = `Voice transcription failed: ${this.clipboardError}`;
+        this.resumeDesktopVoiceAfterClipboard();
         this.touch();
         this.emitChange();
         return this.snapshot();
@@ -1199,6 +1219,7 @@ export class DesktopVoiceService {
     this.clipboardMode = 'recording';
     this.clipboardMessage = 'Starting voice transcription recorder.';
     this.clipboardError = null;
+    this.suspendDesktopVoiceForClipboard();
     this.touch();
     this.emitChange();
     try {
@@ -1219,6 +1240,7 @@ export class DesktopVoiceService {
       this.clipboardMode = 'error';
       this.clipboardError = error?.message ?? String(error);
       this.clipboardMessage = `Voice transcription failed: ${this.clipboardError}`;
+      this.resumeDesktopVoiceAfterClipboard();
       this.touch();
       this.emitChange();
     }
@@ -1238,6 +1260,7 @@ export class DesktopVoiceService {
     this.clipboardMode = 'idle';
     this.clipboardMessage = message;
     this.clipboardError = null;
+    this.resumeDesktopVoiceAfterClipboard();
     this.touch();
     this.emitChange();
     return this.snapshot();
@@ -1686,9 +1709,61 @@ export class DesktopVoiceService {
       this.clipboardRecordingStartedAtMs = 0;
       this.clipboardRecordingRequestId = null;
     } finally {
+      this.resumeDesktopVoiceAfterClipboard();
       this.touch();
       this.emitChange();
     }
+  }
+
+  private suspendDesktopVoiceForClipboard(): void {
+    if (this.desktopVoiceSuspensionReason) return;
+    if (this.mode === 'off' || this.mode === 'error' || this.mode === 'recording' || this.mode === 'transcribing') return;
+    this.desktopStartSessionId += 1;
+    this.desktopVoiceSuspensionReason = 'clipboard';
+    this.desktopVoiceSuspendedMode = this.mode;
+    this.desktopVoiceSuspendedMessage = this.message;
+    this.recognizer.stop();
+    this.capture.stop();
+    this.resetApprovalCollection();
+    this.message = 'Desktop voice is suspended during voice transcription.';
+    this.touch();
+    this.emitChange();
+  }
+
+  private resumeDesktopVoiceAfterClipboard(): void {
+    if (this.desktopVoiceSuspensionReason !== 'clipboard') return;
+    const previousMode = this.desktopVoiceSuspendedMode;
+    const previousMessage = this.desktopVoiceSuspendedMessage;
+    this.clearDesktopVoiceSuspension();
+    if (!previousMode || this.mode === 'off' || this.mode === 'error' || this.mode === 'recording' || this.mode === 'transcribing') return;
+    this.mode = previousMode;
+    this.message = previousMessage ?? this.defaultMessageForMode(previousMode);
+    this.desktopStartSessionId += 1;
+    if (previousMode === 'sleeping' || previousMode === 'locked') {
+      this.recognizer.start();
+      this.capture.start();
+    } else if (previousMode === 'dormant') {
+      this.capture.start();
+    }
+    this.touch();
+    this.emitChange();
+  }
+
+  private clearDesktopVoiceSuspension(): void {
+    this.desktopVoiceSuspensionReason = null;
+    this.desktopVoiceSuspendedMode = null;
+    this.desktopVoiceSuspendedMessage = null;
+  }
+
+  private defaultMessageForMode(mode: DesktopVoiceMode): string {
+    if (mode === 'locked') return this.lockedMessage();
+    if (mode === 'dormant') return 'Sleep: voice paused.';
+    if (mode === 'sleeping') return 'Awake: waiting for hey Sebastian.';
+    if (mode === 'off') return 'Desktop voice is off.';
+    if (mode === 'error') return 'Desktop voice failed.';
+    if (mode === 'recording') return 'Awake: recording assistant voice prompt.';
+    if (mode === 'transcribing') return 'Transcribing assistant voice prompt.';
+    return this.message;
   }
 
   private touch(): void {

@@ -9,6 +9,12 @@ export type DesktopAssistantVoiceStatus = {
   updatedAt?: string;
   level?: number;
   lastApprovalCode?: string;
+  suspended?: {
+    active: boolean;
+    reason: 'clipboard' | null;
+    previousMode: DesktopAssistantVoiceMode | null;
+    message: string | null;
+  };
   supportsWakeWords?: boolean;
   recognizer?: {
     active: boolean;
@@ -32,6 +38,11 @@ export type DesktopAssistantVoiceStatus = {
     bytes: number;
     level: number;
     error: string | null;
+  };
+  clipboard?: {
+    mode?: 'idle' | 'recording' | 'transcribing' | 'error';
+    message?: string;
+    error?: string | null;
   };
 };
 
