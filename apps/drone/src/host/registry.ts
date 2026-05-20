@@ -175,6 +175,7 @@ type DroneRegistryV1 = {
       collectTimeoutMs?: number;
       duplicateCooldownMs?: number;
       finalizeCheckIntervalMs?: number;
+      postPromptCommandSuppressionMs?: number;
       updatedAt?: string;
     };
     filesystem?: {

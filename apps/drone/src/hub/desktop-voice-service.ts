@@ -973,6 +973,7 @@ export class DesktopVoiceService {
   private clipboardMessage = 'Voice transcription is idle.';
   private clipboardError: string | null = null;
   private clipboardStartSuppressedUntil = 0;
+  private promptCommandSuppressedUntil = 0;
   private approvalSettings: VoiceApprovalSettings = VOICE_APPROVAL_SETTINGS_DEFAULT;
 
   constructor(private readonly opts: DesktopVoiceServiceOptions) {
@@ -1268,6 +1269,12 @@ export class DesktopVoiceService {
     }
 
     const command = stripCommands(text);
+    if (
+      Date.now() < this.promptCommandSuppressedUntil &&
+      (command.status || command.wake || command.patch || command.clipboard)
+    ) {
+      return;
+    }
     if (command.status && this.mode === 'sleeping' && this.shouldAcceptCommand('status', 1000)) {
       this.message = 'Awake: status OK.';
       this.touch();
@@ -1500,6 +1507,7 @@ export class DesktopVoiceService {
     this.promptTranscribing = false;
     this.promptTranscriptText = '';
     this.promptCaptureTarget = null;
+    this.suppressPromptCommandsBriefly();
     if (target === 'patch') {
       void this.opts.abortChatPatch?.().catch((error) => {
         desktopVoiceWarn('patch abort callback failed', { error: error?.message ?? String(error) });
@@ -1529,6 +1537,7 @@ export class DesktopVoiceService {
           : 'Awake: no assistant prompt detected.';
     this.promptTranscribing = false;
     this.promptCaptureTarget = null;
+    this.suppressPromptCommandsBriefly();
     this.touch();
     this.emitChange();
     if (!text) {
@@ -1596,12 +1605,18 @@ export class DesktopVoiceService {
       if (text) await this.opts.submitAssistantPrompt(text);
       this.mode = 'sleeping';
       this.message = text ? 'Awake: sent assistant voice prompt.' : 'Awake: no assistant prompt detected.';
+      this.suppressPromptCommandsBriefly();
     } catch (error: any) {
       this.mode = 'sleeping';
       this.message = `Assistant voice transcription failed: ${error?.message ?? String(error)}`;
+      this.suppressPromptCommandsBriefly();
     }
     this.touch();
     this.emitChange();
+  }
+
+  private suppressPromptCommandsBriefly(): void {
+    this.promptCommandSuppressedUntil = Date.now() + Math.max(0, this.approvalSettings.postPromptCommandSuppressionMs);
   }
 
   private async stopClipboardRecording(): Promise<void> {

@@ -149,6 +149,7 @@ export type VoiceApprovalSettings = {
   collectTimeoutMs: number;
   duplicateCooldownMs: number;
   finalizeCheckIntervalMs: number;
+  postPromptCommandSuppressionMs: number;
 };
 export type EffectiveVoiceApprovalSettings = VoiceApprovalSettings & {
   source: VoiceApprovalSettingsSource;
@@ -214,6 +215,7 @@ export const VOICE_APPROVAL_SETTINGS_DEFAULT: VoiceApprovalSettings = {
   collectTimeoutMs: 5_000,
   duplicateCooldownMs: 4_000,
   finalizeCheckIntervalMs: 250,
+  postPromptCommandSuppressionMs: 1_800,
 };
 export const VOICE_APPROVAL_SETTINGS_LIMITS = {
   triggerPhraseMaxChars: 64,
@@ -230,6 +232,8 @@ export const VOICE_APPROVAL_SETTINGS_LIMITS = {
   duplicateCooldownMsMax: 15_000,
   finalizeCheckIntervalMsMin: 100,
   finalizeCheckIntervalMsMax: 1_000,
+  postPromptCommandSuppressionMsMin: 0,
+  postPromptCommandSuppressionMsMax: 5_000,
 } as const;
 export const AGENT_SUGGESTION_POLICY_DEFAULT = `# Assistant Suggestion Policy
 
@@ -390,6 +394,11 @@ function parseVoiceApprovalSettings(raw: unknown): VoiceApprovalSettings | null 
     VOICE_APPROVAL_SETTINGS_LIMITS.finalizeCheckIntervalMsMin,
     VOICE_APPROVAL_SETTINGS_LIMITS.finalizeCheckIntervalMsMax,
   );
+  const postPromptCommandSuppressionMs = parseIntegerInRange(
+    value.postPromptCommandSuppressionMs ?? VOICE_APPROVAL_SETTINGS_DEFAULT.postPromptCommandSuppressionMs,
+    VOICE_APPROVAL_SETTINGS_LIMITS.postPromptCommandSuppressionMsMin,
+    VOICE_APPROVAL_SETTINGS_LIMITS.postPromptCommandSuppressionMsMax,
+  );
   if (
     !triggerPhrase ||
     !unlockCode ||
@@ -400,7 +409,8 @@ function parseVoiceApprovalSettings(raw: unknown): VoiceApprovalSettings | null 
     stableMs == null ||
     collectTimeoutMs == null ||
     duplicateCooldownMs == null ||
-    finalizeCheckIntervalMs == null
+    finalizeCheckIntervalMs == null ||
+    postPromptCommandSuppressionMs == null
   ) return null;
   if (maxDigits < minDigits) return null;
   const codeSet = new Set([unlockCode, lockCode, lockedOffCode]);
@@ -417,6 +427,7 @@ function parseVoiceApprovalSettings(raw: unknown): VoiceApprovalSettings | null 
     collectTimeoutMs,
     duplicateCooldownMs,
     finalizeCheckIntervalMs,
+    postPromptCommandSuppressionMs,
   };
 }
 
@@ -431,7 +442,8 @@ function voiceApprovalSettingsEqual(a: VoiceApprovalSettings, b: VoiceApprovalSe
     a.stableMs === b.stableMs &&
     a.collectTimeoutMs === b.collectTimeoutMs &&
     a.duplicateCooldownMs === b.duplicateCooldownMs &&
-    a.finalizeCheckIntervalMs === b.finalizeCheckIntervalMs
+    a.finalizeCheckIntervalMs === b.finalizeCheckIntervalMs &&
+    a.postPromptCommandSuppressionMs === b.postPromptCommandSuppressionMs
   );
 }
 
