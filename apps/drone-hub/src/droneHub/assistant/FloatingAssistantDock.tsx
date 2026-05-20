@@ -1,16 +1,161 @@
 import React from 'react';
+import { requestJson } from '../http';
 import { AssistantDock } from './AssistantDock';
 import { DesktopVoiceFloatingIndicator } from './DesktopVoiceFloatingIndicator';
+import {
+  summarizeAssistantActivity,
+  type AssistantActivityCounts,
+  type AssistantActivitySnapshot,
+} from './assistant-activity';
 
 const FLOATING_ASSISTANT_OPEN_STORAGE_KEY = 'droneHub.assistant.floatingOpen';
+const ASSISTANT_ACTIVITY_IDLE_REFRESH_INTERVAL_MS = 2_500;
+const ASSISTANT_ACTIVITY_ACTIVE_REFRESH_INTERVAL_MS = 1_000;
+const ASSISTANT_ACTIVITY_EVENT_REFRESH_DEBOUNCE_MS = 150;
 
 function readInitialOpen(): boolean {
   if (typeof window === 'undefined') return false;
   return window.localStorage.getItem(FLOATING_ASSISTANT_OPEN_STORAGE_KEY) === '1';
 }
 
+function useMinimizedAssistantActivity(enabled: boolean): AssistantActivityCounts {
+  const [counts, setCounts] = React.useState<AssistantActivityCounts>({ normal: 0, voice: 0, total: 0 });
+  const [eventsUnavailable, setEventsUnavailable] = React.useState(
+    () => typeof window === 'undefined' || typeof window.EventSource === 'undefined',
+  );
+  const [eventsConnected, setEventsConnected] = React.useState(false);
+  const enabledRef = React.useRef(enabled);
+  const refreshTimerRef = React.useRef<number | null>(null);
+
+  React.useEffect(() => {
+    enabledRef.current = enabled;
+  }, [enabled]);
+
+  const refresh = React.useCallback(async () => {
+    if (!enabled) return;
+    try {
+      const snapshot = await requestJson<AssistantActivitySnapshot>('/api/assistant/threads');
+      if (!enabledRef.current) return;
+      setCounts(summarizeAssistantActivity(snapshot));
+    } catch {
+      if (!enabledRef.current) return;
+      setCounts({ normal: 0, voice: 0, total: 0 });
+    }
+  }, [enabled]);
+
+  const scheduleRefresh = React.useCallback(() => {
+    if (!enabled || typeof window === 'undefined') return;
+    if (refreshTimerRef.current != null) {
+      window.clearTimeout(refreshTimerRef.current);
+    }
+    refreshTimerRef.current = window.setTimeout(() => {
+      refreshTimerRef.current = null;
+      void refresh();
+    }, ASSISTANT_ACTIVITY_EVENT_REFRESH_DEBOUNCE_MS);
+  }, [enabled, refresh]);
+
+  React.useEffect(() => {
+    if (!enabled) {
+      if (refreshTimerRef.current != null) {
+        window.clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
+      setCounts({ normal: 0, voice: 0, total: 0 });
+      return;
+    }
+    void refresh();
+  }, [enabled, refresh]);
+
+  React.useEffect(() => {
+    if (!enabled || typeof window === 'undefined' || typeof window.EventSource === 'undefined') {
+      setEventsUnavailable(true);
+      setEventsConnected(false);
+      return;
+    }
+    let closed = false;
+    const source = new window.EventSource('/api/assistant/events');
+    const markConnected = () => {
+      if (closed) return;
+      setEventsConnected(true);
+      setEventsUnavailable(false);
+      scheduleRefresh();
+    };
+    const markChanged = () => {
+      if (closed) return;
+      scheduleRefresh();
+    };
+    source.onopen = markConnected;
+    source.onmessage = markChanged;
+    source.addEventListener('connected', markConnected);
+    source.addEventListener('assistant_change', markChanged);
+    source.onerror = () => {
+      if (closed) return;
+      setEventsConnected(false);
+      setEventsUnavailable(true);
+    };
+    return () => {
+      closed = true;
+      source.close();
+    };
+  }, [enabled, scheduleRefresh]);
+
+  React.useEffect(() => {
+    if (!enabled || !eventsUnavailable || eventsConnected) return;
+    const intervalMs = counts.total > 0 ? ASSISTANT_ACTIVITY_ACTIVE_REFRESH_INTERVAL_MS : ASSISTANT_ACTIVITY_IDLE_REFRESH_INTERVAL_MS;
+    const timer = window.setInterval(() => {
+      void refresh();
+    }, intervalMs);
+    return () => window.clearInterval(timer);
+  }, [counts.total, enabled, eventsConnected, eventsUnavailable, refresh]);
+
+  React.useEffect(() => {
+    return () => {
+      if (refreshTimerRef.current != null) {
+        window.clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  return counts;
+}
+
+function MinimizedAssistantActivityBadge({
+  label,
+  count,
+  tone,
+}: {
+  label: string;
+  count: number;
+  tone: 'normal' | 'voice';
+}) {
+  if (count <= 0) return null;
+  return (
+    <span
+      className={`inline-flex h-5 min-w-5 items-center justify-center gap-1 rounded-full border px-1.5 text-[10px] font-semibold leading-none ${
+        tone === 'voice'
+          ? 'border-[rgba(74,222,128,.38)] bg-[rgba(74,222,128,.10)] text-[var(--green)]'
+          : 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
+      }`}
+      title={`${count} active ${label}`}
+      aria-label={`${count} active ${label}`}
+    >
+      {tone === 'voice' ? (
+        <svg viewBox="0 0 24 24" aria-hidden="true" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2">
+          <rect x="9" y="3" width="6" height="11" rx="3" />
+          <path d="M5 11a7 7 0 0 0 14 0" />
+          <path d="M12 18v3" />
+          <path d="M8 21h8" />
+        </svg>
+      ) : null}
+      <span>{count > 9 ? '9+' : count}</span>
+    </span>
+  );
+}
+
 export function FloatingAssistantDock({ embeddedVisible }: { embeddedVisible: boolean }) {
   const [open, setOpen] = React.useState(readInitialOpen);
+  const activityCounts = useMinimizedAssistantActivity(!embeddedVisible && !open);
 
   React.useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -26,11 +171,27 @@ export function FloatingAssistantDock({ embeddedVisible }: { embeddedVisible: bo
         <button
           type="button"
           onClick={() => setOpen(true)}
-          className="h-10 rounded border border-[var(--accent-muted)] bg-[var(--panel-alt)] px-3 text-[11px] font-semibold uppercase tracking-wide text-[var(--accent)] shadow-[0_16px_40px_rgba(0,0,0,.35)] hover:bg-[var(--accent-subtle)]"
+          className={`group flex h-10 items-center gap-2 rounded border bg-[var(--panel-alt)] px-3 text-[11px] font-semibold uppercase tracking-wide shadow-[0_16px_40px_rgba(0,0,0,.35)] transition-all hover:bg-[var(--accent-subtle)] ${
+            activityCounts.total > 0
+              ? 'border-[var(--accent)] text-[var(--accent)] shadow-[0_0_0_1px_rgba(59,130,246,.24),0_0_24px_rgba(59,130,246,.26),0_16px_40px_rgba(0,0,0,.35)]'
+              : 'border-[var(--accent-muted)] text-[var(--accent)]'
+          }`}
           style={{ fontFamily: 'var(--display)' }}
-          title="Open global assistant"
+          title={activityCounts.total > 0 ? `${activityCounts.total} assistant thread${activityCounts.total === 1 ? '' : 's'} active` : 'Open global assistant'}
         >
-          Assistant
+          <span className="relative flex h-2 w-2 flex-shrink-0">
+            {activityCounts.total > 0 ? (
+              <>
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--accent)] opacity-45" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-[var(--accent)]" />
+              </>
+            ) : (
+              <span className="h-2 w-2 rounded-full bg-[var(--muted-dim)] opacity-60" />
+            )}
+          </span>
+          <span>Assistant</span>
+          <MinimizedAssistantActivityBadge label="assistant threads" count={activityCounts.normal} tone="normal" />
+          <MinimizedAssistantActivityBadge label="voice assistant threads" count={activityCounts.voice} tone="voice" />
         </button>
       </div>
     );
