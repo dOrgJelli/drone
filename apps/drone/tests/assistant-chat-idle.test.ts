@@ -112,6 +112,69 @@ describe('assistant chat idle wait', () => {
     });
   });
 
+  test('treats a pending seeded drone default chat as active until it becomes a real chat', async () => {
+    await withTempDroneDataDir('assistant-chat-idle-pending-seed-', async () => {
+      const startedAt = new Date().toISOString();
+      await updateRegistry((reg: any) => {
+        reg.pending = {
+          'drone-pending': {
+            id: 'drone-pending',
+            name: 'Drone Pending',
+            createdAt: startedAt,
+            updatedAt: startedAt,
+            phase: 'starting',
+            seed: { chatName: 'default', prompt: 'start this work' },
+          },
+        };
+      });
+
+      let status = summarizeAssistantChatIdle(await loadRegistry(), { droneId: 'drone-pending', chatName: 'default' }, { requireChat: true });
+      expect(status.idle).toBe(false);
+      expect(status.reason).toBe('active_user_messages');
+      expect(status.latest?.text).toBe('start this work');
+
+      setTimeout(() => {
+        void updateRegistry((reg: any) => {
+          reg.pending = {};
+          reg.drones = {
+            'drone-pending': {
+              id: 'drone-pending',
+              name: 'Drone Pending',
+              createdAt: startedAt,
+              chats: {
+                default: {
+                  createdAt: startedAt,
+                  turns: [
+                    {
+                      id: 'startup-seed',
+                      at: startedAt,
+                      promptAt: startedAt,
+                      completedAt: new Date().toISOString(),
+                      prompt: 'start this work',
+                      ok: true,
+                      output: 'seed done',
+                    },
+                  ],
+                },
+              },
+            },
+          };
+        });
+      }, 50);
+
+      const result = await waitForAssistantChatIdle({
+        targets: [{ droneId: 'drone-pending', chatName: 'default' }],
+        timeoutMs: 2000,
+        pollIntervalMs: 25,
+        idleForMs: 0,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.targets[0]?.idle).toBe(true);
+      expect(result.targets[0]?.latest?.text).toBe('seed done');
+    });
+  });
+
   test('rejects unknown chat targets instead of treating them as idle', async () => {
     await withTempDroneDataDir('assistant-chat-idle-missing-chat-', async () => {
       await updateRegistry((reg: any) => {
