@@ -76,6 +76,7 @@ type LaunchHint =
 
 type VoicePatchStatus = {
   active: boolean;
+  sessionId: string | null;
   droneId: string | null;
   chatName: string | null;
 };
@@ -345,9 +346,12 @@ export function SelectedDroneWorkspace({
   );
   const [voicePatchStatus, setVoicePatchStatus] = React.useState<VoicePatchStatus>({
     active: false,
+    sessionId: null,
     droneId: null,
     chatName: null,
   });
+  const [voicePatchCancelling, setVoicePatchCancelling] = React.useState(false);
+  const [voicePatchCancelError, setVoicePatchCancelError] = React.useState<string | null>(null);
   React.useEffect(() => {
     if (typeof window === 'undefined' || typeof window.EventSource === 'undefined') return;
     const source = new window.EventSource('/api/assistant/voice/patch-status/events');
@@ -356,9 +360,11 @@ export function SelectedDroneWorkspace({
         const data = JSON.parse((event as MessageEvent).data);
         setVoicePatchStatus({
           active: Boolean(data?.active),
+          sessionId: String(data?.sessionId ?? '').trim() || null,
           droneId: String(data?.droneId ?? '').trim() || null,
           chatName: String(data?.chatName ?? '').trim() || null,
         });
+        if (!data?.active) setVoicePatchCancelError(null);
       } catch {
         // Ignore malformed voice patch status events.
       }
@@ -369,6 +375,33 @@ export function SelectedDroneWorkspace({
     voicePatchStatus.active &&
     voicePatchStatus.droneId === currentDrone.id &&
     (voicePatchStatus.chatName || 'default') === activeChatName;
+  const cancelVoicePatchForCurrentChat = React.useCallback(async () => {
+    if (!voicePatchActiveForCurrentChat) return;
+    setVoicePatchCancelling(true);
+    setVoicePatchCancelError(null);
+    try {
+      const next = await requestJson<VoicePatchStatus & { ok?: boolean }>('/api/assistant/voice/patch-state', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          active: false,
+          source: 'hub-ui',
+          sessionId: voicePatchStatus.sessionId ?? undefined,
+          reason: 'aborted',
+        }),
+      });
+      setVoicePatchStatus({
+        active: Boolean(next?.active),
+        sessionId: String(next?.sessionId ?? '').trim() || null,
+        droneId: String(next?.droneId ?? '').trim() || null,
+        chatName: String(next?.chatName ?? '').trim() || null,
+      });
+    } catch (e: any) {
+      setVoicePatchCancelError(`Failed to cancel patch mode: ${e?.message ?? String(e)}`);
+    } finally {
+      setVoicePatchCancelling(false);
+    }
+  }, [voicePatchActiveForCurrentChat, voicePatchStatus.sessionId]);
   const currentDroneHomePath = React.useMemo(() => droneHomePath(currentDrone), [currentDrone]);
   const spawnCurrentDroneHubTask = React.useCallback(
     (mode: DroneHubTaskSpawnMode, task: DroneHubTask) =>
@@ -1966,7 +1999,7 @@ export function SelectedDroneWorkspace({
             onDraftValueChange={(next) => {
               setChatInputDraft(chatDraftKey, next);
             }}
-            promptError={stopResponseError || promptError}
+            promptError={stopResponseError || voicePatchCancelError || promptError}
             sending={sendingPrompt}
             waiting={
               chatUiMode === 'transcript'
@@ -1976,6 +2009,8 @@ export function SelectedDroneWorkspace({
             automationActions={chatAutomationActions}
             lockComposerWhileAutomationActive={false}
             voicePatchActive={voicePatchActiveForCurrentChat}
+            voicePatchCancelling={voicePatchCancelling}
+            onCancelVoicePatch={voicePatchActiveForCurrentChat ? cancelVoicePatchForCurrentChat : undefined}
             autoFocus={shouldAutoFocusInput}
             onStop={canStopResponse ? () => requestStopResponse() : undefined}
             stopping={stoppingResponse}
