@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { PcmSpeechSegmenter, buildGroqPrompt, hasTranscriptContent, pcm16leToWav, pcmDurationMs, stripTranscriptCommands } from "../src/stt.js";
+import { GroqTranscriptionManager, PcmSpeechSegmenter, buildGroqPrompt, buildTranscriptionConfigFromEnv, hasTranscriptContent, pcm16leToWav, pcmDurationMs, stripTranscriptCommands } from "../src/stt.js";
 import { normalizeWavChunkSizes } from "../src/tts.js";
 
 const pcm = Buffer.alloc(640);
@@ -158,6 +158,46 @@ assert.equal(hasTranscriptContent(". . ."), false);
 assert.equal(hasTranscriptContent("..."), false);
 assert.equal(hasTranscriptContent("pairing is password protected."), true);
 
+const originalFetch = globalThis.fetch;
+let fetchCalls = 0;
+const ignoredSleepCommands: unknown[] = [];
+globalThis.fetch = (async () => {
+  fetchCalls += 1;
+  return new Response(JSON.stringify({ text: "that's it" }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}) as typeof fetch;
+
+try {
+  const manager = new GroqTranscriptionManager(
+    {
+      ...buildTranscriptionConfigFromEnv({ GROQ_API_KEY: "test" } as NodeJS.ProcessEnv),
+      endpoint: "http://127.0.0.1/transcribe",
+      intervalMs: 5,
+      minSpeechMs: 120,
+      minSubmitMs: 120,
+      silenceMs: 100,
+      shortUtteranceSilenceMs: 200,
+      maxSegmentMs: 2_000,
+      overlapMs: 0,
+      silenceThreshold: 0.01,
+      debugSegments: false,
+      ignoreEmptySleepCommands: true,
+    },
+    () => {},
+    (command) => ignoredSleepCommands.push(command),
+    "test",
+  );
+  manager.appendPcm(tonePcm(140));
+  manager.appendPcm(silencePcm(120));
+  await waitFor(() => fetchCalls > 0 && manager.status().status === "ready");
+  assert.equal(ignoredSleepCommands.length, 0);
+  manager.stop();
+} finally {
+  globalThis.fetch = originalFetch;
+}
+
 console.log("STT WAV and segmentation tests passed");
 
 function silencePcm(ms: number): Buffer {
@@ -172,4 +212,13 @@ function tonePcm(ms: number): Buffer {
     output.writeInt16LE(sample, i * 2);
   }
   return output;
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail("Timed out waiting for async STT test condition");
 }

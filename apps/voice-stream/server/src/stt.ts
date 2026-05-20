@@ -47,6 +47,7 @@ export type TranscriptionConfig = {
   sampleRateHz: number;
   channels: number;
   broadcastSegments: boolean;
+  ignoreEmptySleepCommands: boolean;
 };
 
 export type SpeechSegmenterConfig = {
@@ -228,6 +229,16 @@ export class GroqTranscriptionManager {
         return;
       } else if (commandResult.sleepDetected) {
         const transcriptText = this.buildFullTranscriptText(trimmed);
+        if (this.config.ignoreEmptySleepCommands && !hasTranscriptContent(transcriptText)) {
+          this.log(
+            `command=sleep_ignored_empty segment=${segment.sequence} phrase=${formatLogValue(commandResult.sleepPhrase ?? "that's it")} ` +
+            `detectedAt=${new Date().toISOString()}`
+          );
+          this.inFlight = false;
+          this.broadcast(this.status());
+          this.processQueue();
+          return;
+        }
         this.enterTerminalCommandState({ clearContext: false });
         this.log(
           `command=sleep segment=${segment.sequence} phrase=${formatLogValue(commandResult.sleepPhrase ?? "that's it")} ` +
@@ -490,6 +501,7 @@ export function buildTranscriptionConfigFromEnv(env: NodeJS.ProcessEnv): Transcr
     sampleRateHz: 16_000,
     channels: 1,
     broadcastSegments: true,
+    ignoreEmptySleepCommands: false,
   };
 }
 

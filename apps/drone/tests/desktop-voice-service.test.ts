@@ -242,6 +242,32 @@ describe('DesktopVoiceService', () => {
     expect(events.some((event) => event.type === 'desktop_voice_transcript_segment')).toBe(false);
   });
 
+  test('does not cancel a patch when the first empty segment looks like sleep', async () => {
+    let abortCalls = 0;
+    const service = new DesktopVoiceService({
+      transcribeWav: async () => ({ text: 'thank you', model: 'test' }),
+      submitAssistantPrompt: async () => {},
+      abortChatPatch: async () => {
+        abortCalls += 1;
+      },
+    });
+
+    (service as any).mode = 'recording';
+    (service as any).promptCaptureTarget = 'patch';
+    await (service as any).transcribePromptSegment({
+      pcm: Buffer.alloc(3200),
+      audioMs: 100,
+      speechMs: 100,
+      trailingSilenceMs: 0,
+      reason: 'flush',
+      sequence: 1,
+    });
+
+    expect(service.snapshot().mode).toBe('recording');
+    expect(service.snapshot().message).toBe('Awake: patching into current drone chat.');
+    expect(abortCalls).toBe(0);
+  });
+
   test('briefly suppresses wake commands after desktop voice transcription stops', async () => {
     const service = new DesktopVoiceService({
       transcribeWav: async () => ({ text: '', model: 'test' }),

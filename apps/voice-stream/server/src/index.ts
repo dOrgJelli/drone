@@ -211,6 +211,7 @@ wss.on("connection", (socket, request) => {
     {
       ...transcriptionConfig,
       broadcastSegments: voiceMode === "assistant",
+      ignoreEmptySleepCommands: voiceMode === "patch",
     },
     (message) => broadcastTranscriptMessage(message),
     (command) => {

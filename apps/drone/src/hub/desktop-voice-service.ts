@@ -1435,15 +1435,20 @@ export class DesktopVoiceService {
       const result = await this.opts.transcribeWav(pcm16leToWav(segment.pcm));
       const command = stripCommands(result.text);
       const inferredSleep = !command.sleep && this.shouldInferSleepCommand(result.text, segment);
-      const sleep = command.sleep || inferredSleep;
-      const abort = command.abort;
       const text = inferredSleep ? '' : command.text.trim();
+      const ignoreEmptyPatchSleep =
+        this.promptCaptureTarget === 'patch' &&
+        !hasTranscriptContent(this.promptTranscriptText) &&
+        !hasTranscriptContent(text);
+      const sleep = (command.sleep || inferredSleep) && !ignoreEmptyPatchSleep;
+      const abort = command.abort;
       desktopVoiceLog('prompt transcript segment', {
         sequence: segment.sequence,
         model: result.model,
         sleep,
         abort,
         sleepInferred: inferredSleep,
+        sleepIgnored: ignoreEmptyPatchSleep && (command.sleep || inferredSleep),
         rawText: result.text,
         text,
       });
