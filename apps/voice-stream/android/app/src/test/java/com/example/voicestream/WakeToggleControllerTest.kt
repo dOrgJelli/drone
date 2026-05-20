@@ -9,13 +9,7 @@ class WakeToggleControllerTest {
         val controller = WakeToggleController()
 
         assertEquals(WakeAction.NONE, controller.startListening())
-        assertEquals(WakeState.LOCKED, controller.state)
-        assertEquals(WakeAction.NONE, controller.wakeDetected(WakePhrase.START))
-        assertEquals(WakeState.LOCKED, controller.state)
-
-        assertEquals(WakeAction.NONE, controller.unlockToListening())
         assertEquals(WakeState.WAITING_FOR_WAKE, controller.state)
-
         assertEquals(WakeAction.START_STREAMING, controller.wakeDetected(WakePhrase.START))
         assertEquals(WakeState.STREAMING, controller.state)
 
@@ -76,6 +70,28 @@ class WakeToggleControllerTest {
 
         assertEquals(WakeAction.STOP_STREAMING, controller.stopAll())
         assertEquals(WakeState.OFF, controller.state)
+    }
+
+    @Test
+    fun toggleAwakeSleepSwitchesBetweenListeningAndDormant() {
+        val controller = WakeToggleController()
+
+        controller.startListening()
+        assertEquals(WakeState.WAITING_FOR_WAKE, controller.state)
+        assertEquals(WakeAction.NONE, controller.toggleAwakeSleep())
+        assertEquals(WakeState.DORMANT, controller.state)
+        assertEquals(WakeAction.NONE, controller.toggleAwakeSleep())
+        assertEquals(WakeState.WAITING_FOR_WAKE, controller.state)
+    }
+
+    @Test
+    fun toggleAwakeSleepStopsStreaming() {
+        val controller = WakeToggleController()
+
+        controller.startListening()
+        controller.wakeDetected(WakePhrase.START)
+        assertEquals(WakeAction.STOP_STREAMING, controller.toggleAwakeSleep())
+        assertEquals(WakeState.WAITING_FOR_WAKE, controller.state)
     }
 
     @Test

@@ -49,7 +49,7 @@ class VoskWakeWordDetector(
                 }
                 loading.set(false)
                 if (available) {
-                    onStatus("Asleep: waiting for \"hey sebastian\"")
+                    onStatus("Awake: waiting for \"hey sebastian\"")
                 }
             },
             { error ->

@@ -4,12 +4,24 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
 import android.os.SystemClock
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.max
 
 object ApprovalTtsPlayer {
+    private val generation = AtomicInteger(0)
+    @Volatile private var activeTrack: AudioTrack? = null
+
+    fun stopAll() {
+        generation.incrementAndGet()
+        releaseActiveTrack()
+    }
+
     fun playWav(wav: ByteArray) {
+        val playbackGeneration = generation.incrementAndGet()
+        releaseActiveTrack()
         Thread {
             runCatching {
+                if (playbackGeneration != generation.get()) return@runCatching
                 val audio = WavPcm.parse(wav)
                 val channelMask = when (audio.channels) {
                     1 -> AudioFormat.CHANNEL_OUT_MONO
@@ -39,10 +51,13 @@ object ApprovalTtsPlayer {
                     .setBufferSizeInBytes(bufferSize)
                     .setTransferMode(AudioTrack.MODE_STREAM)
                     .build()
+                activeTrack = track
                 try {
+                    if (playbackGeneration != generation.get()) return@runCatching
                     track.play()
                     var offset = 0
                     while (offset < audio.pcm.size) {
+                        if (playbackGeneration != generation.get()) return@runCatching
                         val written = track.write(
                             audio.pcm,
                             offset,
@@ -54,8 +69,12 @@ object ApprovalTtsPlayer {
                         }
                         offset += written
                     }
+                    if (playbackGeneration != generation.get()) return@runCatching
                     SystemClock.sleep(audio.durationMs + RELEASE_DELAY_MS)
                 } finally {
+                    if (activeTrack === track) {
+                        activeTrack = null
+                    }
                     runCatching { track.stop() }
                     runCatching { track.release() }
                 }
@@ -67,6 +86,16 @@ object ApprovalTtsPlayer {
             isDaemon = true
             start()
         }
+    }
+
+    private fun releaseActiveTrack() {
+        activeTrack?.let { track ->
+            runCatching { track.pause() }
+            runCatching { track.stop() }
+            runCatching { track.flush() }
+            runCatching { track.release() }
+        }
+        activeTrack = null
     }
 
     private data class WavPcm(

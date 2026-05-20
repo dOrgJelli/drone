@@ -68,14 +68,14 @@ describe('DesktopVoiceService', () => {
     await Promise.resolve();
 
     expect(service.snapshot().mode).toBe('sleeping');
-    expect(service.snapshot().message).toBe('Asleep: sending assistant voice prompt.');
+    expect(service.snapshot().message).toBe('Awake: sending assistant voice prompt.');
     expect(submittedPrompt).toBe('check the build');
 
     resolveSubmit();
     await finishPromise;
 
     expect(service.snapshot().mode).toBe('sleeping');
-    expect(service.snapshot().message).toBe('Asleep: sent assistant voice prompt.');
+    expect(service.snapshot().message).toBe('Awake: sent assistant voice prompt.');
   });
 
   test('reports desktop voice as starting before loading capture backends', async () => {
@@ -94,8 +94,8 @@ describe('DesktopVoiceService', () => {
 
     const status = service.start();
 
-    expect(status.mode).toBe('locked');
-    expect(status.message).toBe('Locked: starting host microphone and local wake model.');
+    expect(status.mode).toBe('sleeping');
+    expect(status.message).toBe('Awake: waiting for hey Sebastian.');
     expect(recognizerStarted).toBe(false);
     expect(captureStarted).toBe(false);
 
@@ -144,7 +144,7 @@ describe('DesktopVoiceService', () => {
     await (service as any).abortPromptRecordingFromTranscript();
 
     expect(service.snapshot().mode).toBe('sleeping');
-    expect(service.snapshot().message).toBe('Asleep: assistant voice prompt cancelled.');
+    expect(service.snapshot().message).toBe('Awake: assistant voice prompt cancelled.');
     expect(service.snapshot().transcript.text).toBe('');
     expect(submitCalls).toBe(0);
   });
@@ -176,7 +176,7 @@ describe('DesktopVoiceService', () => {
       unsubscribe();
 
       expect(service.snapshot().mode).toBe('sleeping');
-      expect(service.snapshot().message).toBe('Asleep: assistant voice prompt cancelled.');
+      expect(service.snapshot().message).toBe('Awake: assistant voice prompt cancelled.');
       expect(service.snapshot().transcript.text).toBe('');
       expect(submitCalls).toBe(0);
       expect(events.some((event) => event.type === 'desktop_voice_transcript_segment')).toBe(false);

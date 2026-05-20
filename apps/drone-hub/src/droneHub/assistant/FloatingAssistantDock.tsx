@@ -1,5 +1,6 @@
 import React from 'react';
 import { AssistantDock } from './AssistantDock';
+import { DesktopVoiceFloatingIndicator } from './DesktopVoiceFloatingIndicator';
 
 const FLOATING_ASSISTANT_OPEN_STORAGE_KEY = 'droneHub.assistant.floatingOpen';
 
@@ -20,7 +21,8 @@ export function FloatingAssistantDock({ embeddedVisible }: { embeddedVisible: bo
 
   if (!open) {
     return (
-      <div className="absolute bottom-4 right-4 z-30 pointer-events-auto">
+      <div className="absolute bottom-4 right-4 z-30 flex flex-col items-end gap-2.5 pointer-events-auto">
+        <DesktopVoiceFloatingIndicator />
         <button
           type="button"
           onClick={() => setOpen(true)}
