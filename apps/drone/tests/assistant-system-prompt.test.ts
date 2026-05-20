@@ -127,6 +127,7 @@ describe('assistant system prompt settings', () => {
       expect(thread.thinkingLevel).toBe('high');
 
       await expect(setThinkingLevel.execute('call-thinking-bad', { level: 'xhigh' })).rejects.toThrow(/not supported/);
+      await expect(setThinkingLevel.execute('call-thinking-typo', { level: 'medum' })).rejects.toThrow(/invalid thinking level/);
     });
   });
 });
