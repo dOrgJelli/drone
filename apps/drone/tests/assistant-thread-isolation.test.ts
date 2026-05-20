@@ -144,6 +144,86 @@ describe('assistant thread isolation', () => {
     });
   });
 
+  test('keeps selected access even when no drones are selected', async () => {
+    await withTempDroneDataDir('assistant-empty-selected-scope-', async () => {
+      const service = makeService();
+      installFakeRuntime(service, {});
+
+      const created = await service.createThread({ title: 'empty selected' });
+      const threadId = created.activeThreadId;
+      await service.updateAccessScope({
+        threadId,
+        readMode: 'selected',
+        writeMode: 'selected',
+        droneIds: [],
+      });
+
+      const snapshot = await service.snapshot();
+      const thread = snapshot.threads.find((item) => item.id === threadId) as any;
+      expect(thread.accessScope.readMode).toBe('selected');
+      expect(thread.accessScope.writeMode).toBe('selected');
+      expect(thread.accessScope.droneIds).toEqual([]);
+    });
+  });
+
+  test('defaults new assistant and voice threads to limited write access', async () => {
+    await withTempDroneDataDir('assistant-thread-access-defaults-', async () => {
+      const service = makeService();
+      installFakeRuntime(service, {});
+
+      const noActive = await service.createThread({ title: 'no active chat' });
+      let thread = noActive.threads.find((item) => item.id === noActive.activeThreadId) as any;
+      expect(thread.accessScope).toMatchObject({ readMode: 'all', writeMode: 'selected', droneIds: [] });
+
+      service.updateAppContext({
+        activeDroneId: 'drone-a',
+        activeDroneName: 'Drone A',
+        activeChatName: 'default',
+        appView: 'workspace',
+      });
+      const withActive = await service.createThread({ title: 'active chat' });
+      thread = withActive.threads.find((item) => item.id === withActive.activeThreadId) as any;
+      expect(thread.accessScope).toMatchObject({ readMode: 'all', writeMode: 'selected', droneIds: ['drone-a'] });
+
+      const voice = await service.ensureLatestVoiceThread();
+      expect(voice.thread.accessScope).toMatchObject({ readMode: 'all', writeMode: 'selected', droneIds: [] });
+    });
+  });
+
+  test('adds newly created drones to selected assistant access', async () => {
+    await withTempDroneDataDir('assistant-created-drone-scope-', async () => {
+      const service = new HubAssistantService({
+        listDrones: async () => [],
+        createDrone: async () => ({ id: 'drone-new', name: 'Drone New', runtime: 'container' }),
+        setDroneGroup: async () => {
+          throw new Error('not implemented');
+        },
+        messageDrone: async () => {
+          throw new Error('not implemented');
+        },
+      });
+      installFakeRuntime(service, {});
+
+      const created = await service.createThread({ title: 'create drone scope' });
+      const threadId = created.activeThreadId;
+      await service.updateAccessScope({
+        threadId,
+        readMode: 'selected',
+        writeMode: 'selected',
+        droneIds: [],
+      });
+
+      const runtime = await (service as any).runtime();
+      const tools = (service as any).buildTools(runtime, threadId, null);
+      const createDrone = tools.find((tool: any) => tool.name === 'create_drone');
+      await createDrone.execute('create-new', { name: 'Drone New' });
+
+      const snapshot = await service.snapshot();
+      const thread = snapshot.threads.find((item) => item.id === threadId) as any;
+      expect(thread.accessScope).toMatchObject({ readMode: 'selected', writeMode: 'selected', droneIds: ['drone-new'] });
+    });
+  });
+
   test('voice assistant threads are tagged and get speak by default', async () => {
     await withTempDroneDataDir('assistant-voice-thread-', async () => {
       const service = makeService();

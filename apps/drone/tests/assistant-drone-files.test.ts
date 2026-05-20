@@ -232,6 +232,7 @@ function makeFileService(files: Map<string, Map<string, string>>): HubAssistantS
 
 async function buildAssistantFileTools(service: HubAssistantService): Promise<{ threadId: string; tools: any[] }> {
   const snapshot = await service.createThread({ title: 'files', provider: 'openai', model: 'gpt-5.5' });
+  await service.updateAccessScope({ threadId: snapshot.activeThreadId, readMode: 'all', writeMode: 'all', droneIds: [] });
   return {
     threadId: snapshot.activeThreadId,
     tools: (service as any).buildTools({ Type }, snapshot.activeThreadId),
@@ -482,6 +483,7 @@ describe('assistant drone file tools', () => {
       const service = makeFileService(new Map());
       const snapshot = await service.createThread({ title: 'bash approval', provider: 'openai', model: 'gpt-5.5' });
       const threadId = snapshot.activeThreadId;
+      await service.updateAccessScope({ threadId, readMode: 'all', writeMode: 'all', droneIds: [] });
       const approvals: any[] = [];
 
       const beforeToolCall = (service as any).beforeToolCall(
