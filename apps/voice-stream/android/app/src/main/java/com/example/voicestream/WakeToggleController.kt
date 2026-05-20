@@ -47,6 +47,9 @@ class WakeToggleController {
                 } else if (phrase.hasPatch) {
                     state = WakeState.STREAMING
                     WakeAction.START_PATCH_STREAMING
+                } else if (phrase.hasClipboard) {
+                    state = WakeState.STREAMING
+                    WakeAction.START_CLIPBOARD_STREAMING
                 } else if (phrase.hasStatus) {
                     WakeAction.PLAY_STATUS
                 } else {
@@ -56,7 +59,7 @@ class WakeToggleController {
             WakeState.STREAMING -> {
                 WakeAction.NONE
             }
-            WakeState.LOCKED, WakeState.OFF, WakeState.ERROR -> WakeAction.NONE
+            WakeState.LOCKED, WakeState.DORMANT, WakeState.OFF, WakeState.ERROR -> WakeAction.NONE
         }
     }
 
@@ -101,6 +104,7 @@ enum class WakeAction {
     NONE,
     START_STREAMING,
     START_PATCH_STREAMING,
+    START_CLIPBOARD_STREAMING,
     STOP_STREAMING,
     PLAY_STATUS,
 }

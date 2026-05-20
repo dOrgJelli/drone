@@ -61,6 +61,17 @@ class WakeToggleControllerTest {
     }
 
     @Test
+    fun clipboardPhraseStartsClipboardStreaming() {
+        val controller = WakeToggleController()
+
+        controller.startListening()
+        controller.unlockToListening()
+
+        assertEquals(WakeAction.START_CLIPBOARD_STREAMING, controller.wakeDetected(WakePhrase.CLIPBOARD))
+        assertEquals(WakeState.STREAMING, controller.state)
+    }
+
+    @Test
     fun stopAllStopsStreamingAndTurnsOff() {
         val controller = WakeToggleController()
 
@@ -112,6 +123,8 @@ class WakeToggleControllerTest {
         assertEquals(WakePhrase.START, WakePhraseMatcher.match("hey sebastian"))
         assertEquals(WakePhrase.START, WakePhraseMatcher.match("hay sebastian"))
         assertEquals(WakePhrase.PATCH, WakePhraseMatcher.match("patch me in"))
+        assertEquals(WakePhrase.CLIPBOARD, WakePhraseMatcher.match("can you transcribe"))
+        assertEquals(WakePhrase.CLIPBOARD, WakePhraseMatcher.match("transcribe"))
         assertEquals(null, WakePhraseMatcher.match("that's it"))
         assertEquals(null, WakePhraseMatcher.match("that is it"))
         assertEquals(null, WakePhraseMatcher.match("thats it"))

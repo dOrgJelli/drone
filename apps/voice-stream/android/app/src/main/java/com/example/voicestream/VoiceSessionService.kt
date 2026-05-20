@@ -6,6 +6,8 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -251,7 +253,7 @@ class VoiceSessionService : Service() {
     private fun beginStreaming(reason: String, target: String = STREAM_TARGET_ASSISTANT) {
         DroneLog.i("Streaming", "Begin streaming: $reason target=$target")
         if (streaming.getAndSet(true)) {
-            publishState(if (streamTarget == STREAM_TARGET_PATCH) "Awake: patching into chat" else "Awake: streaming", Constants.MODE_STREAMING)
+            publishState(streamingStatus(), Constants.MODE_STREAMING)
             return
         }
 
@@ -261,7 +263,7 @@ class VoiceSessionService : Service() {
         playbackQueue.clear()
         startPlayback()
         connectWebSocket(serverUrl, target)
-        publishState(if (target == STREAM_TARGET_PATCH) "Awake: patching into chat" else "Awake: connecting", Constants.MODE_STREAMING)
+        publishState(connectingStatus(target), Constants.MODE_STREAMING)
     }
 
     private fun endStreaming(status: String, returnToListening: Boolean) {
@@ -436,6 +438,14 @@ class VoiceSessionService : Service() {
                 cuePlayer.play(LocalCue.WAKE)
                 beginStreaming("Local patch phrase detected", STREAM_TARGET_PATCH)
             }
+            WakeAction.START_CLIPBOARD_STREAMING -> {
+                if (now - lastWakeToggleMs < WAKE_DEBOUNCE_MS) return
+                lastWakeToggleMs = now
+                wakeDetector?.reset()
+                DroneLog.i("Wake", "Clipboard phrase detected; starting clipboard stream")
+                cuePlayer.play(LocalCue.WAKE)
+                beginStreaming("Local clipboard phrase detected", STREAM_TARGET_CLIPBOARD)
+            }
             WakeAction.PLAY_STATUS -> {
                 if (now - lastStatusCueMs < STATUS_CUE_DEBOUNCE_MS) return
                 lastStatusCueMs = now
@@ -606,7 +616,7 @@ class VoiceSessionService : Service() {
                 }
                 outgoingReady.set(true)
                 flushPendingStreamFrames()
-                publishState(if (streamTarget == STREAM_TARGET_PATCH) "Awake: patching into chat" else "Awake: streaming", Constants.MODE_STREAMING)
+                publishState(streamingStatus(), Constants.MODE_STREAMING)
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
@@ -668,9 +678,36 @@ class VoiceSessionService : Service() {
         DroneLog.i("WebSocket", "Server $type command received")
         mainHandler.post {
             if (!streaming.get()) return@post
+            val copied = if (type == "sleep" && streamTarget == STREAM_TARGET_CLIPBOARD) {
+                copyTranscriptToClipboard(parsed.optString("transcriptText"))
+            } else {
+                false
+            }
+            val nextStatus = if (streamTarget == STREAM_TARGET_CLIPBOARD) {
+                when {
+                    type == "abort" -> "Asleep: voice transcription cancelled"
+                    copied -> "Asleep: copied voice transcription"
+                    else -> "Asleep: no voice transcription detected"
+                }
+            } else {
+                waitingStatus()
+            }
             wakeController.manualStopStreaming(returnToListening = serviceActive.get())
             cuePlayer.play(LocalCue.SLEEP)
-            endStreaming(waitingStatus(), returnToListening = true)
+            endStreaming(nextStatus, returnToListening = true)
+        }
+    }
+
+    private fun copyTranscriptToClipboard(text: String): Boolean {
+        val trimmed = text.trim()
+        if (trimmed.isBlank()) return false
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return false
+        return runCatching {
+            clipboard.setPrimaryClip(ClipData.newPlainText("Drone voice transcription", trimmed))
+            true
+        }.getOrElse { error ->
+            DroneLog.w("Clipboard", "Failed to copy voice transcription", error)
+            false
         }
     }
 
@@ -868,7 +905,7 @@ class VoiceSessionService : Service() {
             Constants.MODE_LOCKED -> lockedStatus()
             Constants.MODE_LISTENING -> "Awake: waiting for hey sebastian"
             Constants.MODE_DORMANT -> "Sleep: voice paused"
-            Constants.MODE_STREAMING -> "Awake: streaming"
+            Constants.MODE_STREAMING -> status
             Constants.MODE_ERROR -> status
             else -> "Running"
         }
@@ -880,7 +917,7 @@ class VoiceSessionService : Service() {
             if (serviceActive.get() && !streaming.get()) {
                 publishState(waitingStatus(), waitingMode())
             } else if (serviceActive.get() && streaming.get()) {
-                publishState("Awake: streaming", Constants.MODE_STREAMING)
+                publishState(streamingStatus(), Constants.MODE_STREAMING)
             }
         }, TEMPORARY_STATUS_MS)
     }
@@ -959,6 +996,22 @@ class VoiceSessionService : Service() {
         return if (wakeDetector?.available == true) Constants.MODE_LISTENING else Constants.MODE_LOADING
     }
 
+    private fun connectingStatus(target: String): String {
+        return when (target) {
+            STREAM_TARGET_PATCH -> "Awake: patching into chat"
+            STREAM_TARGET_CLIPBOARD -> "Awake: recording clipboard transcription"
+            else -> "Awake: connecting"
+        }
+    }
+
+    private fun streamingStatus(): String {
+        return when (streamTarget) {
+            STREAM_TARGET_PATCH -> "Awake: patching into chat"
+            STREAM_TARGET_CLIPBOARD -> "Awake: recording clipboard transcription"
+            else -> "Awake: streaming"
+        }
+    }
+
     private fun lockedStatus(): String {
         return if (wakeDetector?.available == true) {
             "Locked: ${approvalSettings.unlockCode} asleep, ${approvalSettings.lockedOffCode} off"
@@ -1010,6 +1063,7 @@ class VoiceSessionService : Service() {
         private const val RECONNECT_CONTROL_WEBSOCKET_MS = 2_000L
         private const val STREAM_TARGET_ASSISTANT = "assistant"
         private const val STREAM_TARGET_PATCH = "patch"
+        private const val STREAM_TARGET_CLIPBOARD = "clipboard"
         private const val PRE_ROLL_MS = 1_500
         private const val MAX_PENDING_STREAM_MS = 5_000
         private const val LOG_UPLOAD_INTERVAL_MS = 15_000L

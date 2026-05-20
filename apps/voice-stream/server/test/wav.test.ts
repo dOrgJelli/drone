@@ -136,6 +136,14 @@ const cleanedPatchWake = stripTranscriptCommands("Patch me in, send this to the 
 assert.equal(cleanedPatchWake.wakeDetected, true);
 assert.equal(cleanedPatchWake.text, "send this to the current chat.");
 
+const cleanedClipboardWake = stripTranscriptCommands("Can you transcribe, send this to my clipboard.");
+assert.equal(cleanedClipboardWake.wakeDetected, true);
+assert.equal(cleanedClipboardWake.text, "send this to my clipboard.");
+
+const cleanedShortClipboardWake = stripTranscriptCommands("Transcribe send this to my clipboard.");
+assert.equal(cleanedShortClipboardWake.wakeDetected, true);
+assert.equal(cleanedShortClipboardWake.text, "send this to my clipboard.");
+
 const cleanedStandaloneHey = stripTranscriptCommands("Hey, what am I saying right now?");
 assert.equal(cleanedStandaloneHey.wakeDetected, false);
 assert.equal(cleanedStandaloneHey.text, "Hey, what am I saying right now?");

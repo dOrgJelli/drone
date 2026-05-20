@@ -178,6 +178,7 @@ let nextClientId = 1;
 let nextControlClientId = 1;
 let nextMonitorId = 1;
 const controlClients = new Map<number, WebSocket>();
+type VoiceMode = "assistant" | "patch" | "clipboard";
 
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
@@ -204,12 +205,12 @@ wss.on("connection", (socket, request) => {
   const clientId = nextClientId++;
   const remote = `${request.socket.remoteAddress ?? "unknown"}:${request.socket.remotePort ?? ""}`;
   const requestUrl = new URL(request.url ?? "/audio", `http://${request.headers.host ?? "localhost"}`);
-  const voiceMode = requestUrl.searchParams.get("mode") === "patch" ? "patch" : "assistant";
+  const voiceMode = parseVoiceMode(requestUrl.searchParams.get("mode"));
   const patchSessionId = voiceMode === "patch" ? randomBytes(12).toString("hex") : null;
   const sttManager = new GroqTranscriptionManager(
     {
       ...transcriptionConfig,
-      broadcastSegments: voiceMode !== "patch",
+      broadcastSegments: voiceMode === "assistant",
     },
     (message) => broadcastTranscriptMessage(message),
     (command) => {
@@ -391,7 +392,16 @@ function sendAudioCommand(socket: WebSocket, clientId: number, command: Transcri
   }
 }
 
-async function handleVoiceClientConnected(clientId: number, voiceMode: "assistant" | "patch", patchSessionId: string | null): Promise<void> {
+function parseVoiceMode(raw: string | null): VoiceMode {
+  if (raw === "patch" || raw === "clipboard") return raw;
+  return "assistant";
+}
+
+async function handleVoiceClientConnected(clientId: number, voiceMode: VoiceMode, patchSessionId: string | null): Promise<void> {
+  if (voiceMode === "clipboard") {
+    console.log(`[hub] voice client ${clientId} recording Android clipboard transcription`);
+    return;
+  }
   if (!hubClientConfig) {
     console.warn(`[hub] skipped voice thread connect for client ${clientId}: missing DRONE_HUB_API_URL or DRONE_HUB_API_TOKEN`);
     return;
@@ -413,9 +423,10 @@ async function handleVoiceClientConnected(clientId: number, voiceMode: "assistan
   }
 }
 
-async function handleTranscriptCommand(clientId: number, voiceMode: "assistant" | "patch", command: TranscriptCommand, patchSessionId: string | null): Promise<void> {
+async function handleTranscriptCommand(clientId: number, voiceMode: VoiceMode, command: TranscriptCommand, patchSessionId: string | null): Promise<void> {
   if (command.type === "abort") {
     if (voiceMode === "patch") await handlePatchAbort(clientId, patchSessionId);
+    else if (voiceMode === "clipboard") console.log(`[hub] Android clipboard transcription aborted for client ${clientId}`);
     else console.log(`[hub] voice transcript aborted for client ${clientId}`);
     return;
   }
@@ -423,6 +434,10 @@ async function handleTranscriptCommand(clientId: number, voiceMode: "assistant" 
   if (!prompt) {
     console.warn(`[hub] skipped empty voice transcript for client ${clientId}`);
     if (voiceMode === "patch") await handlePatchAbort(clientId, patchSessionId);
+    return;
+  }
+  if (voiceMode === "clipboard") {
+    console.log(`[hub] Android clipboard transcription completed chars=${prompt.length} client=${clientId}`);
     return;
   }
   if (!hubClientConfig) {
