@@ -164,6 +164,13 @@ describe('assistant thread isolation', () => {
       const reused = await service.ensureLatestVoiceThread();
       expect(reused.created).toBe(false);
       expect(reused.threadId).toBe(voice.threadId);
+
+      const disabled = await service.updateThread(voice.threadId, {
+        enabledTools: voice.thread.enabledTools.filter((name: string) => name !== 'set_thinking_level'),
+      });
+      thread = disabled.threads.find((item) => item.id === voice.threadId) as any;
+      expect(thread.enabledTools).not.toContain('set_thinking_level');
+      expect(thread.enabledTools).toContain('speak');
     });
   });
 

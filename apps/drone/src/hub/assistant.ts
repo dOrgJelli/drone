@@ -693,6 +693,14 @@ function normalizeThinkingLevel(raw: unknown): AssistantThinkingLevel {
   return 'off';
 }
 
+function parseThinkingLevelForTool(raw: unknown): AssistantThinkingLevel {
+  const value = String(raw ?? '').trim().toLowerCase();
+  if (!value) throw new Error('missing thinking level');
+  if (value === 'instant' || value === 'none') return 'off';
+  if (value === 'off' || value === 'minimal' || value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh') return value;
+  throw new Error(`invalid thinking level: ${String(raw ?? '')}`);
+}
+
 function normalizeAssistantPromptDeliveryMode(raw: unknown): AssistantPromptDeliveryMode {
   const value = String(raw ?? '').trim().toLowerCase();
   return value === 'asap' || value === 'steer' || value === 'steering' ? 'asap' : 'queue';
@@ -1057,7 +1065,7 @@ function normalizeAssistantVoiceSource(raw: unknown): AssistantVoiceSource | nul
 function enabledToolsForVoiceMode(enabledTools: string[], voiceEnabled: boolean): string[] {
   const base = normalizeAssistantEnabledTools(enabledTools);
   if (!voiceEnabled) return base.filter((name) => name !== 'speak');
-  return normalizeAssistantEnabledTools([...base, 'set_thinking_level', 'speak'], ASSISTANT_VOICE_DEFAULT_ENABLED_TOOL_NAMES);
+  return normalizeAssistantEnabledTools([...base, 'speak'], ASSISTANT_VOICE_DEFAULT_ENABLED_TOOL_NAMES);
 }
 
 function normalizeAssistantSystemPromptPatches(raw: unknown): Array<{ oldText: string; newText: string }> {
@@ -2459,9 +2467,13 @@ export class HubAssistantService {
     if (patch.promptDeliveryMode != null) thread.promptDeliveryMode = normalizeAssistantPromptDeliveryMode(patch.promptDeliveryMode);
     if (patch.enabledTools != null) thread.enabledTools = normalizeAssistantEnabledTools(patch.enabledTools, thread.enabledTools);
     if (patch.voiceEnabled != null) {
+      const wasVoiceEnabled = thread.voiceEnabled;
       thread.voiceEnabled = normalizeAssistantVoiceEnabled(patch.voiceEnabled);
       thread.voiceEnabledAt = thread.voiceEnabled ? nowIso() : null;
-      thread.enabledTools = enabledToolsForVoiceMode(thread.enabledTools, thread.voiceEnabled);
+      thread.enabledTools =
+        thread.voiceEnabled && !wasVoiceEnabled
+          ? normalizeAssistantEnabledTools([...thread.enabledTools, 'set_thinking_level', 'speak'], ASSISTANT_VOICE_DEFAULT_ENABLED_TOOL_NAMES)
+          : enabledToolsForVoiceMode(thread.enabledTools, thread.voiceEnabled);
     }
     thread.updatedAt = nowIso();
     await this.persist();
@@ -2503,7 +2515,7 @@ export class HubAssistantService {
   }> {
     await this.ensureLoaded();
     const thread = this.getThread(threadId);
-    const requested = normalizeThinkingLevel(rawLevel);
+    const requested = parseThinkingLevelForTool(rawLevel);
     const supportedThinkingLevels = supportedThinkingLevelsForModel(thread.provider, thread.model);
     if (!supportedThinkingLevels.includes(requested)) {
       throw new Error(
