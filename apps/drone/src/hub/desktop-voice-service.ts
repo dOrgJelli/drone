@@ -947,6 +947,7 @@ export class DesktopVoiceService {
   private readonly approvalRecognizer = new ApprovalCodeRecognizer();
   private approvalFinalizeTimer: NodeJS.Timeout | null = null;
   private desktopSubscriberCount = 0;
+  private desktopStartSessionId = 0;
   private mode: DesktopVoiceMode = 'off';
   private message = 'Desktop voice is off.';
   private updatedAt = new Date().toISOString();
@@ -996,6 +997,7 @@ export class DesktopVoiceService {
       this.emitChange();
     });
     this.recognizer.on('ready', () => {
+      if (this.mode === 'sleeping') this.message = 'Awake: waiting for hey Sebastian.';
       if (this.mode === 'locked') this.message = this.lockedMessage();
       this.touch();
       this.emitChange();
@@ -1086,23 +1088,54 @@ export class DesktopVoiceService {
 
   toggle(): DesktopVoiceStatus {
     if (this.mode === 'off' || this.mode === 'error') return this.start();
-    return this.stop('Desktop voice is off.');
+    if (this.mode === 'recording' || this.mode === 'transcribing') {
+      void this.abortPromptRecordingFromTranscript();
+      return this.snapshot();
+    }
+    if (this.mode === 'sleeping') return this.enterDormant();
+    if (this.mode === 'dormant') return this.enterListening();
+    if (this.mode === 'locked') return this.enterListening();
+    return this.snapshot();
   }
 
   start(): DesktopVoiceStatus {
     desktopVoiceLog('desktop voice start requested');
-    this.mode = 'locked';
-    this.message = 'Locked: starting host microphone and local wake model.';
+    const sessionId = ++this.desktopStartSessionId;
+    this.mode = 'sleeping';
+    this.message = 'Awake: waiting for hey Sebastian.';
     this.resetApprovalCollection();
     this.touch();
+    this.emitChange();
+    setImmediate(() => {
+      if (this.desktopStartSessionId !== sessionId || this.mode !== 'sleeping') return;
+      this.recognizer.start();
+      this.capture.start();
+    });
+    return this.snapshot();
+  }
+
+  private enterDormant(): DesktopVoiceStatus {
+    this.recognizer.stop();
+    this.mode = 'dormant';
+    this.message = 'Sleep: voice paused.';
+    this.resetApprovalCollection();
+    this.touch();
+    this.emitChange();
+    return this.snapshot();
+  }
+
+  private enterListening(): DesktopVoiceStatus {
+    this.mode = 'sleeping';
+    this.message = 'Awake: waiting for hey Sebastian.';
     this.recognizer.start();
-    this.capture.start();
+    this.touch();
     this.emitChange();
     return this.snapshot();
   }
 
   stop(message = 'Desktop voice is off.'): DesktopVoiceStatus {
     desktopVoiceLog('desktop voice stop requested', { message });
+    this.desktopStartSessionId += 1;
     this.capture.stop();
     this.recognizer.stop();
     this.mode = 'off';
@@ -1207,6 +1240,7 @@ export class DesktopVoiceService {
     if (
       this.mode !== 'off' &&
       this.mode !== 'error' &&
+      this.mode !== 'dormant' &&
       this.mode !== 'recording' &&
       this.mode !== 'transcribing' &&
       this.clipboardMode !== 'recording' &&
@@ -1220,7 +1254,7 @@ export class DesktopVoiceService {
   }
 
   private handleRecognizedText(text: string, _final: boolean): void {
-    if (this.mode === 'off' || this.mode === 'error') return;
+    if (this.mode === 'off' || this.mode === 'error' || this.mode === 'dormant') return;
     this.touch();
     this.emitChange();
 
@@ -1242,7 +1276,7 @@ export class DesktopVoiceService {
       return;
     }
     if (command.status && this.mode === 'sleeping' && this.shouldAcceptCommand('status', 1000)) {
-      this.message = 'Asleep: status OK.';
+      this.message = 'Awake: status OK.';
       this.touch();
       this.emitChange();
       return;
@@ -1306,7 +1340,7 @@ export class DesktopVoiceService {
     if (this.mode === 'locked') {
       if (code === this.approvalSettings.unlockCode) {
         this.mode = 'sleeping';
-        this.message = 'Asleep: waiting for hey Sebastian.';
+        this.message = 'Awake: waiting for hey Sebastian.';
       } else if (code === this.approvalSettings.lockedOffCode) {
         this.stop('Desktop voice is off.');
         return;
@@ -1466,10 +1500,10 @@ export class DesktopVoiceService {
     this.mode = 'sleeping';
     this.message =
       target === 'patch'
-        ? 'Asleep: patch-in cancelled.'
+        ? 'Awake: patch-in cancelled.'
         : target === 'clipboard'
-          ? 'Asleep: voice transcription cancelled.'
-          : 'Asleep: assistant voice prompt cancelled.';
+          ? 'Awake: voice transcription cancelled.'
+          : 'Awake: assistant voice prompt cancelled.';
     this.promptTranscribing = false;
     this.promptTranscriptText = '';
     this.promptCaptureTarget = null;
@@ -1492,15 +1526,15 @@ export class DesktopVoiceService {
     this.mode = 'sleeping';
     this.message = text
       ? target === 'patch'
-        ? 'Asleep: sending patch to current drone chat.'
+        ? 'Awake: sending patch to current drone chat.'
         : target === 'clipboard'
-          ? 'Asleep: sending voice transcription to clipboard.'
-          : 'Asleep: sending assistant voice prompt.'
+          ? 'Awake: sending voice transcription to clipboard.'
+          : 'Awake: sending assistant voice prompt.'
       : target === 'patch'
-        ? 'Asleep: no patch text detected.'
+        ? 'Awake: no patch text detected.'
         : target === 'clipboard'
-          ? 'Asleep: no voice transcription detected.'
-          : 'Asleep: no assistant prompt detected.';
+          ? 'Awake: no voice transcription detected.'
+          : 'Awake: no assistant prompt detected.';
     this.promptTranscribing = false;
     this.promptCaptureTarget = null;
     this.suppressPromptCommandsBriefly();
@@ -1525,10 +1559,10 @@ export class DesktopVoiceService {
       if (this.mode === 'sleeping') {
         this.message =
           target === 'patch'
-            ? 'Asleep: sent patch to current drone chat.'
+            ? 'Awake: sent patch to current drone chat.'
             : target === 'clipboard'
-              ? 'Asleep: voice transcription copied.'
-              : 'Asleep: sent assistant voice prompt.';
+              ? 'Awake: voice transcription copied.'
+              : 'Awake: sent assistant voice prompt.';
       }
     } catch (error: any) {
       if (this.mode === 'sleeping') {
@@ -1570,7 +1604,7 @@ export class DesktopVoiceService {
       const text = stripCommands(result.text).text.trim();
       if (text) await this.opts.submitAssistantPrompt(text);
       this.mode = 'sleeping';
-      this.message = text ? 'Asleep: sent assistant voice prompt.' : 'Asleep: no assistant prompt detected.';
+      this.message = text ? 'Awake: sent assistant voice prompt.' : 'Awake: no assistant prompt detected.';
       this.suppressPromptCommandsBriefly();
     } catch (error: any) {
       this.mode = 'sleeping';

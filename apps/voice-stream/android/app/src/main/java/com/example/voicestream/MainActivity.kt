@@ -39,6 +39,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var approvalText: TextView
     private lateinit var microphoneText: TextView
     private lateinit var listeningButton: Button
+    private lateinit var offButton: Button
     private lateinit var root: LinearLayout
     private lateinit var settingsPanel: View
     private lateinit var settingsButton: Button
@@ -136,13 +137,25 @@ class MainActivity : ComponentActivity() {
                 1f
             )
             listeningButton = Button(this@MainActivity).apply {
-                setOnClickListener { toggleListening() }
+                setOnClickListener { toggleAwakeSleep() }
                 styleActionButton(SessionMode.OFF)
             }
             addView(listeningButton, LinearLayout.LayoutParams(
                 166.dp(),
                 166.dp()
             ))
+            offButton = Button(this@MainActivity).apply {
+                text = "Off"
+                visibility = View.GONE
+                styleOffButton()
+                setOnClickListener { turnOff() }
+            }
+            addView(offButton, LinearLayout.LayoutParams(
+                148.dp(),
+                48.dp()
+            ).apply {
+                topMargin = 18.dp()
+            })
         })
 
         statusText = TextView(this).apply {
@@ -426,14 +439,35 @@ class MainActivity : ComponentActivity() {
 
     private fun Button.styleActionButton(mode: SessionMode) {
         isAllCaps = false
-        textSize = 23f
+        textSize = 22f
         typeface = Typeface.DEFAULT_BOLD
         setTextColor(COLOR_TEXT)
+        text = when (mode) {
+            SessionMode.OFF,
+            SessionMode.ERROR -> "Start"
+            SessionMode.DORMANT -> "Sleep"
+            SessionMode.LOCKED -> "Locked"
+            SessionMode.LOADING,
+            SessionMode.LISTENING,
+            SessionMode.STREAMING -> "Awake"
+        }
         background = actionBackground(mode)
         minHeight = 0
         minimumHeight = 0
         elevation = 14.dp().toFloat()
         translationZ = 3.dp().toFloat()
+    }
+
+    private fun Button.styleOffButton() {
+        isAllCaps = false
+        textSize = 15f
+        typeface = Typeface.DEFAULT_BOLD
+        setTextColor(COLOR_MUTED)
+        background = rounded(Color.rgb(18, 26, 36), 14.dp(), COLOR_STROKE, 1.dp())
+        minHeight = 0
+        minimumHeight = 0
+        elevation = 0f
+        translationZ = 0f
     }
 
     private fun Button.styleFloatingButton() {
@@ -459,14 +493,24 @@ class MainActivity : ComponentActivity() {
         val colors = when (mode) {
             SessionMode.OFF,
             SessionMode.ERROR -> intArrayOf(Color.rgb(37, 51, 67), Color.rgb(14, 22, 34))
+            SessionMode.DORMANT -> intArrayOf(Color.rgb(42, 52, 68), Color.rgb(18, 24, 34))
             SessionMode.LOCKED,
-            SessionMode.LOADING,
+            SessionMode.LOADING -> intArrayOf(Color.rgb(64, 48, 24), Color.rgb(34, 28, 18))
             SessionMode.LISTENING,
-            SessionMode.STREAMING -> intArrayOf(Color.rgb(176, 56, 70), Color.rgb(102, 30, 42))
+            SessionMode.STREAMING -> intArrayOf(Color.rgb(18, 88, 82), Color.rgb(10, 52, 58))
+        }
+        val stroke = when (mode) {
+            SessionMode.OFF,
+            SessionMode.ERROR -> COLOR_STROKE
+            SessionMode.DORMANT -> Color.rgb(100, 116, 139)
+            SessionMode.LOCKED,
+            SessionMode.LOADING -> Color.rgb(251, 191, 36)
+            SessionMode.LISTENING,
+            SessionMode.STREAMING -> COLOR_ACCENT
         }
         return GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, colors).apply {
             shape = GradientDrawable.OVAL
-            setStroke(2.dp(), if (mode == SessionMode.OFF || mode == SessionMode.ERROR) COLOR_STROKE else Color.rgb(244, 114, 132))
+            setStroke(2.dp(), stroke)
         }
     }
 
@@ -518,16 +562,20 @@ class MainActivity : ComponentActivity() {
         startWithUrl(Constants.ACTION_START_LISTENING)
     }
 
-    private fun toggleListening() {
+    private fun toggleAwakeSleep() {
         if (sessionMode == SessionMode.OFF || sessionMode == SessionMode.ERROR) {
             cuePlayer.play(LocalCue.START_BUTTON)
             updateSessionUi(SessionMode.LOADING, "Waking local detector")
             startListening()
         } else {
-            cuePlayer.play(LocalCue.STOP_BUTTON)
-            stopListening()
-            updateSessionUi(SessionMode.OFF, "Off")
+            sendServiceAction(Constants.ACTION_TOGGLE_AWAKE_SLEEP)
         }
+    }
+
+    private fun turnOff() {
+        cuePlayer.play(LocalCue.STOP_BUTTON)
+        stopListening()
+        updateSessionUi(SessionMode.OFF, "Off")
     }
 
     private fun startWithUrl(actionName: String) {
@@ -759,12 +807,16 @@ class MainActivity : ComponentActivity() {
         listeningButton.text = when (mode) {
             SessionMode.OFF,
             SessionMode.ERROR -> "Start"
-            SessionMode.LOCKED,
+            SessionMode.DORMANT -> "Sleep"
+            SessionMode.LOCKED -> "Locked"
             SessionMode.LOADING,
             SessionMode.LISTENING,
-            SessionMode.STREAMING -> "Stop"
+            SessionMode.STREAMING -> "Awake"
         }
         listeningButton.styleActionButton(mode)
+        if (::offButton.isInitialized) {
+            offButton.visibility = if (mode == SessionMode.OFF || mode == SessionMode.ERROR) View.GONE else View.VISIBLE
+        }
     }
 
     private fun updateApprovalUi(mode: SessionMode, approvalStatus: String) {
@@ -818,6 +870,7 @@ class MainActivity : ComponentActivity() {
     private fun statusFillColor(mode: SessionMode): Int {
         return when (mode) {
             SessionMode.OFF -> Color.rgb(30, 41, 59)
+            SessionMode.DORMANT -> Color.rgb(42, 52, 68)
             SessionMode.LOCKED -> Color.rgb(64, 48, 24)
             SessionMode.LOADING -> Color.rgb(64, 48, 24)
             SessionMode.LISTENING -> Color.rgb(13, 54, 48)
@@ -829,6 +882,7 @@ class MainActivity : ComponentActivity() {
     private fun statusStrokeColor(mode: SessionMode): Int {
         return when (mode) {
             SessionMode.OFF -> Color.rgb(51, 65, 85)
+            SessionMode.DORMANT -> Color.rgb(148, 163, 184)
             SessionMode.LOCKED -> Color.rgb(251, 191, 36)
             SessionMode.LOADING -> Color.rgb(180, 120, 36)
             SessionMode.LISTENING -> Color.rgb(45, 212, 191)
@@ -842,6 +896,7 @@ class MainActivity : ComponentActivity() {
         LOCKED,
         LOADING,
         LISTENING,
+        DORMANT,
         STREAMING,
         ERROR;
 
@@ -852,6 +907,7 @@ class MainActivity : ComponentActivity() {
                     Constants.MODE_LOCKED -> LOCKED
                     Constants.MODE_LOADING -> LOADING
                     Constants.MODE_LISTENING -> LISTENING
+                    Constants.MODE_DORMANT -> DORMANT
                     Constants.MODE_STREAMING -> STREAMING
                     Constants.MODE_ERROR -> ERROR
                     else -> fromStatus(status)
@@ -863,6 +919,7 @@ class MainActivity : ComponentActivity() {
                     status == "Off" -> OFF
                     status.startsWith("Error:") -> ERROR
                     status.startsWith("Awake") -> STREAMING
+                    status.startsWith("Sleep") -> DORMANT
                     status.startsWith("Asleep") -> LISTENING
                     status.startsWith("Locked") -> LOCKED
                     status.startsWith("Waking") -> LOADING

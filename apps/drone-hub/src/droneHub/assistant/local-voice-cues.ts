@@ -1,4 +1,14 @@
-export type LocalVoiceCue = 'start_button' | 'stop_button' | 'unlock' | 'lock' | 'locked_off' | 'wake' | 'sleep' | 'status';
+export type LocalVoiceCue =
+  | 'start_button'
+  | 'stop_button'
+  | 'unlock'
+  | 'lock'
+  | 'locked_off'
+  | 'wake'
+  | 'sleep'
+  | 'status'
+  | 'clipboard_recording_start'
+  | 'clipboard_transcription_success';
 
 const CUE_TONES: Record<LocalVoiceCue, Array<{ frequencyHz: number; durationMs: number }>> = {
   start_button: [
@@ -39,6 +49,16 @@ const CUE_TONES: Record<LocalVoiceCue, Array<{ frequencyHz: number; durationMs: 
     { frequencyHz: 520, durationMs: 70 },
     { frequencyHz: 0, durationMs: 45 },
     { frequencyHz: 700, durationMs: 90 },
+  ],
+  clipboard_recording_start: [
+    { frequencyHz: 360, durationMs: 55 },
+    { frequencyHz: 540, durationMs: 70 },
+    { frequencyHz: 720, durationMs: 95 },
+  ],
+  clipboard_transcription_success: [
+    { frequencyHz: 640, durationMs: 55 },
+    { frequencyHz: 820, durationMs: 70 },
+    { frequencyHz: 1040, durationMs: 120 },
   ],
 };
 
@@ -82,4 +102,3 @@ export function playLocalVoiceCue(cue: LocalVoiceCue): void {
     // Cue playback is best-effort.
   }
 }
-

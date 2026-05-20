@@ -5,8 +5,31 @@ class WakeToggleController {
         private set
 
     fun startListening(): WakeAction {
-        state = WakeState.LOCKED
+        state = WakeState.WAITING_FOR_WAKE
         return WakeAction.NONE
+    }
+
+    fun toggleAwakeSleep(): WakeAction {
+        return when (state) {
+            WakeState.STREAMING -> {
+                state = WakeState.WAITING_FOR_WAKE
+                WakeAction.STOP_STREAMING
+            }
+            WakeState.WAITING_FOR_WAKE -> {
+                state = WakeState.DORMANT
+                WakeAction.NONE
+            }
+            WakeState.DORMANT -> {
+                state = WakeState.WAITING_FOR_WAKE
+                WakeAction.NONE
+            }
+            WakeState.LOCKED -> {
+                state = WakeState.WAITING_FOR_WAKE
+                WakeAction.NONE
+            }
+            WakeState.OFF,
+            WakeState.ERROR -> WakeAction.NONE
+        }
     }
 
     fun stopAll(): WakeAction {
@@ -69,6 +92,7 @@ enum class WakeState {
     OFF,
     LOCKED,
     WAITING_FOR_WAKE,
+    DORMANT,
     STREAMING,
     ERROR,
 }

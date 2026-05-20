@@ -1,6 +1,6 @@
 import { playLocalVoiceCue, type LocalVoiceCue } from './local-voice-cues';
 
-export type DesktopAssistantVoiceMode = 'off' | 'locked' | 'sleeping' | 'recording' | 'transcribing' | 'error';
+export type DesktopAssistantVoiceMode = 'off' | 'locked' | 'sleeping' | 'dormant' | 'recording' | 'transcribing' | 'error';
 
 export type DesktopAssistantVoiceStatus = {
   ok?: true;
@@ -52,7 +52,9 @@ function cueForTransition(previous: DesktopAssistantVoiceStatus | null, next: De
   if (next.mode === 'off' && previous.mode !== 'off') {
     return next.lastApprovalCode === '0000' ? 'locked_off' : 'stop_button';
   }
-  if ((previous.mode === 'off' || previous.mode === 'error') && next.mode === 'locked') return 'start_button';
+  if ((previous.mode === 'off' || previous.mode === 'error') && next.mode === 'sleeping') return 'start_button';
+  if (previous.mode === 'sleeping' && next.mode === 'dormant') return 'sleep';
+  if (previous.mode === 'dormant' && next.mode === 'sleeping') return 'wake';
   if (previous.mode === 'locked' && next.mode === 'sleeping') return 'unlock';
   if ((previous.mode === 'sleeping' || previous.mode === 'recording') && next.mode === 'locked') return 'lock';
   if (previous.mode === 'sleeping' && next.mode === 'recording') return 'wake';
@@ -71,6 +73,16 @@ function playCueForStatus(status: DesktopAssistantVoiceStatus): void {
   lastCueKey = cueKey;
   lastCueAt = now;
   playLocalVoiceCue(cue);
+}
+
+function stopDesktopVoiceSpeech(): void {
+  if (typeof window === 'undefined') return;
+  currentSpeechAudio?.pause();
+  if (currentSpeechAudio) {
+    currentSpeechAudio.currentTime = 0;
+  }
+  currentSpeechAudio = null;
+  if ('speechSynthesis' in window) window.speechSynthesis.cancel();
 }
 
 function speakDesktopVoiceText(text: string): void {
@@ -117,6 +129,33 @@ async function requestDesktopVoiceToggle(): Promise<void> {
         // keep fallback
       }
       dispatchAssistantDesktopVoiceStatus({ mode: 'error', message });
+      return;
+    }
+    const status = (await response.json()) as DesktopAssistantVoiceStatus;
+    dispatchAssistantDesktopVoiceStatus(status);
+  } catch (error: any) {
+    dispatchAssistantDesktopVoiceStatus({ mode: 'error', message: error?.message ?? String(error) });
+  } finally {
+    toggleInFlight = false;
+  }
+}
+
+async function requestDesktopVoiceStop(): Promise<void> {
+  const now = Date.now();
+  if (toggleInFlight || now - lastToggleAt < 500) return;
+  toggleInFlight = true;
+  lastToggleAt = now;
+  try {
+    const response = await fetch('/api/assistant/desktop-voice/stop', { method: 'POST' });
+    if (!response.ok) {
+      let message = `Desktop voice stop failed (${response.status})`;
+      try {
+        const data = await response.json();
+        message = String(data?.error ?? message);
+      } catch {
+        // keep fallback
+      }
+      dispatchAssistantDesktopVoiceStatus({ mode: 'error', message });
     }
   } catch (error: any) {
     dispatchAssistantDesktopVoiceStatus({ mode: 'error', message: error?.message ?? String(error) });
@@ -125,14 +164,22 @@ async function requestDesktopVoiceToggle(): Promise<void> {
   }
 }
 
+export function dispatchAssistantDesktopVoiceStop(): void {
+  if (typeof window === 'undefined') return;
+  stopDesktopVoiceSpeech();
+  void requestDesktopVoiceStop();
+}
+
 export function dispatchAssistantDesktopVoiceToggle(): void {
   if (typeof window === 'undefined') return;
+  if (latestStatus?.mode === 'sleeping') stopDesktopVoiceSpeech();
   window.dispatchEvent(new CustomEvent(ASSISTANT_DESKTOP_VOICE_TOGGLE_EVENT));
   void requestDesktopVoiceToggle();
 }
 
 export function dispatchAssistantDesktopVoiceStatus(status: DesktopAssistantVoiceStatus): void {
   if (typeof window === 'undefined') return;
+  if (status.mode === 'off' || status.mode === 'dormant') stopDesktopVoiceSpeech();
   playCueForStatus(status);
   window.dispatchEvent(new CustomEvent<DesktopAssistantVoiceStatus>(ASSISTANT_DESKTOP_VOICE_STATUS_EVENT, { detail: status }));
 }

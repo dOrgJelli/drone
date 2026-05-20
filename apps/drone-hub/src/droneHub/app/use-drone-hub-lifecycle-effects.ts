@@ -403,6 +403,11 @@ export function useDroneHubLifecycleEffects({
       return Boolean(target.closest('[data-canvas-message-input="1"]'));
     };
 
+    const isAssistantChatInputTarget = (target: EventTarget | null): boolean => {
+      if (!(target instanceof HTMLElement)) return false;
+      return Boolean(target.closest('[data-chat-input-focus-id="assistant-chat"]'));
+    };
+
     const isInteractiveTarget = (target: EventTarget | null): boolean => {
       if (!(target instanceof HTMLElement)) return false;
       return Boolean(target.closest('button, a[href], summary, [role="button"], [role="menuitem"], [role="tab"]'));
@@ -439,6 +444,7 @@ export function useDroneHubLifecycleEffects({
           matchedActionId: matched?.id ?? null,
           targetInPrimaryChatInput: isPrimaryChatInputTarget(e.target),
           targetInCanvasMessageInput: isCanvasMessageInputTarget(e.target),
+          targetInAssistantChatInput: isAssistantChatInputTarget(e.target),
         });
         if (!allowEditableShortcut || !matched) return;
         const handled = runShortcutAction(matched.id, e);
