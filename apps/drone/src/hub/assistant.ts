@@ -3726,11 +3726,11 @@ export class HubAssistantService {
           initialMessage: Type.Optional(Type.String({ description: 'Optional first user message to seed into the new drone default chat.' })),
         }),
         executionMode: 'sequential',
-        execute: async (_toolCallId: string, params: any) => {
+        execute: async (_toolCallId: string, params: any, signal?: AbortSignal) => {
           const request = await this.buildCreateDroneRequest(params ?? {}, threadId);
           const result = await this.tools.createDrone(request);
           this.addDroneToSelectedAccessScope(threadId, result.id);
-          const ready = await waitForAssistantDroneReady({ droneId: result.id });
+          const ready = await waitForAssistantDroneReady({ droneId: result.id, signal });
           return {
             content: [
               {
@@ -3755,11 +3755,11 @@ export class HubAssistantService {
           initialMessage: Type.Optional(Type.String({ description: 'Optional first user message to seed into the cloned drone default chat.' })),
         }),
         executionMode: 'sequential',
-        execute: async (_toolCallId: string, params: any) => {
+        execute: async (_toolCallId: string, params: any, signal?: AbortSignal) => {
           const request = await this.buildCloneDroneRequest(params ?? {}, threadId);
           const result = await this.tools.createDrone(request);
           this.addDroneToSelectedAccessScope(threadId, result.id);
-          const ready = await waitForAssistantDroneReady({ droneId: result.id });
+          const ready = await waitForAssistantDroneReady({ droneId: result.id, signal });
           return {
             content: [
               {

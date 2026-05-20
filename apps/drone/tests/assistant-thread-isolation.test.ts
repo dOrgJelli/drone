@@ -319,6 +319,43 @@ describe('assistant thread isolation', () => {
     });
   });
 
+  test('aborts assistant create drone readiness waits', async () => {
+    await withTempDroneDataDir('assistant-create-drone-abort-', async () => {
+      const service = new HubAssistantService({
+        listDrones: async () => [],
+        createDrone: async (request) => {
+          await updateRegistry((reg: any) => {
+            reg.pending = {
+              'drone-pending': {
+                id: 'drone-pending',
+                name: request.name,
+                runtime: 'container',
+                phase: 'starting',
+                createdAt: new Date().toISOString(),
+              },
+            };
+          });
+          return { id: 'drone-pending', name: request.name, runtime: 'container', phase: 'starting' };
+        },
+        setDroneGroup: async () => {
+          throw new Error('not implemented');
+        },
+        messageDrone: async () => {
+          throw new Error('not implemented');
+        },
+      });
+      installFakeRuntime(service, {});
+      const snapshot = await service.createThread({ title: 'create abort' });
+      const runtime = await (service as any).runtime();
+      const tools = (service as any).buildTools(runtime, snapshot.activeThreadId, null);
+      const createDrone = tools.find((tool: any) => tool.name === 'create_drone');
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 10);
+
+      await expect(createDrone.execute('create-abort', { name: 'Pending Drone' }, controller.signal)).rejects.toThrow('aborted');
+    });
+  });
+
   test('clones container drones without approval and rejects host clone sources', async () => {
     await withTempDroneDataDir('assistant-clone-drone-', async () => {
       const now = new Date().toISOString();
