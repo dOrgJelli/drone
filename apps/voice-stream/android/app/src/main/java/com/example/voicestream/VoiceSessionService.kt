@@ -121,6 +121,14 @@ class VoiceSessionService : Service() {
                 endStreaming(waitingStatus(), returnToListening = serviceActive.get())
             }
 
+            Constants.ACTION_TOGGLE_AWAKE_SLEEP -> {
+                if (!serviceActive.get()) {
+                    startListeningMode(resolveServerUrl(intent))
+                } else {
+                    handleToggleAwakeSleep()
+                }
+            }
+
             Constants.ACTION_QUERY_STATUS -> {
                 publishState(lastStatus, lastMode)
                 if (!serviceActive.get()) {
@@ -173,13 +181,50 @@ class VoiceSessionService : Service() {
         }
 
         if (!streaming.get()) {
-            wakeController.startListening()
-            publishState(waitingStatus(), waitingMode())
+            publishState(currentAwakeSleepStatus(), currentAwakeSleepMode())
+        }
+    }
+
+    private fun handleToggleAwakeSleep() {
+        val action = wakeController.toggleAwakeSleep()
+        when (action) {
+            WakeAction.STOP_STREAMING -> {
+                cuePlayer.play(LocalCue.SLEEP)
+                endStreaming(currentAwakeSleepStatus(), returnToListening = true)
+            }
+            WakeAction.NONE -> {
+                wakeDetector?.reset()
+                if (wakeController.state == WakeState.DORMANT) {
+                    ApprovalTtsPlayer.stopAll()
+                    cuePlayer.play(LocalCue.SLEEP)
+                } else if (wakeController.state == WakeState.WAITING_FOR_WAKE) {
+                    cuePlayer.play(LocalCue.WAKE)
+                }
+                publishState(currentAwakeSleepStatus(), currentAwakeSleepMode())
+            }
+            else -> Unit
+        }
+    }
+
+    private fun currentAwakeSleepStatus(): String {
+        return when (wakeController.state) {
+            WakeState.DORMANT -> dormantStatus()
+            WakeState.LOCKED -> lockedStatus()
+            else -> waitingStatus()
+        }
+    }
+
+    private fun currentAwakeSleepMode(): String {
+        return when (wakeController.state) {
+            WakeState.DORMANT -> Constants.MODE_DORMANT
+            WakeState.LOCKED -> Constants.MODE_LOCKED
+            else -> waitingMode()
         }
     }
 
     private fun stopListeningMode() {
         DroneLog.i("Service", "Stopping listening mode")
+        ApprovalTtsPlayer.stopAll()
         serviceActive.set(false)
         mainHandler.removeCallbacks(logUploadRunnable)
         mainHandler.removeCallbacks(approvalFinalizeRunnable)
@@ -259,6 +304,8 @@ class VoiceSessionService : Service() {
                         publishState("Awake: streaming", Constants.MODE_STREAMING)
                     } else if (wakeController.state == WakeState.LOCKED) {
                         publishState(lockedStatus(), Constants.MODE_LOCKED)
+                    } else if (wakeController.state == WakeState.DORMANT) {
+                        publishState(dormantStatus(), Constants.MODE_DORMANT)
                     } else {
                         publishState(status, modeForWakeDetectorStatus(status))
                     }
@@ -366,6 +413,7 @@ class VoiceSessionService : Service() {
     }
 
     private fun handleWakeDetected(phrase: WakePhrase) {
+        if (wakeController.state == WakeState.DORMANT) return
         val action = wakeController.wakeDetected(phrase)
         if (action == WakeAction.NONE) return
 
@@ -393,7 +441,7 @@ class VoiceSessionService : Service() {
                 lastStatusCueMs = now
                 wakeDetector?.reset()
                 DroneLog.i("Wake", "Status phrase detected")
-                publishTemporaryStatus("Asleep: status OK")
+                publishTemporaryStatus("Awake: status OK")
                 cuePlayer.play(LocalCue.STATUS)
             }
             WakeAction.STOP_STREAMING,
@@ -818,7 +866,8 @@ class VoiceSessionService : Service() {
         return when (mode) {
             Constants.MODE_LOADING -> "Waking local detector"
             Constants.MODE_LOCKED -> lockedStatus()
-            Constants.MODE_LISTENING -> "Asleep: waiting for hey sebastian"
+            Constants.MODE_LISTENING -> "Awake: waiting for hey sebastian"
+            Constants.MODE_DORMANT -> "Sleep: voice paused"
             Constants.MODE_STREAMING -> "Awake: streaming"
             Constants.MODE_ERROR -> status
             else -> "Running"
@@ -882,8 +931,19 @@ class VoiceSessionService : Service() {
         if (wakeController.state == WakeState.LOCKED) {
             return lockedStatus()
         }
+        if (wakeController.state == WakeState.DORMANT) {
+            return dormantStatus()
+        }
         return if (wakeDetector?.available == true) {
-            "Asleep: waiting for \"hey sebastian\""
+            "Awake: waiting for \"hey sebastian\""
+        } else {
+            "Waking local detector"
+        }
+    }
+
+    private fun dormantStatus(): String {
+        return if (wakeDetector?.available == true) {
+            "Sleep: voice paused"
         } else {
             "Waking local detector"
         }
@@ -892,6 +952,9 @@ class VoiceSessionService : Service() {
     private fun waitingMode(): String {
         if (wakeController.state == WakeState.LOCKED) {
             return Constants.MODE_LOCKED
+        }
+        if (wakeController.state == WakeState.DORMANT) {
+            return Constants.MODE_DORMANT
         }
         return if (wakeDetector?.available == true) Constants.MODE_LISTENING else Constants.MODE_LOADING
     }
@@ -917,6 +980,7 @@ class VoiceSessionService : Service() {
             status == "Off" -> Constants.MODE_OFF
             status.startsWith("Error:") -> Constants.MODE_ERROR
             status.startsWith("Awake") -> Constants.MODE_STREAMING
+            status.startsWith("Sleep") -> Constants.MODE_DORMANT
             status.startsWith("Asleep") -> Constants.MODE_LISTENING
             status.startsWith("Locked") -> Constants.MODE_LOCKED
             status.startsWith("Waking") -> Constants.MODE_LOADING

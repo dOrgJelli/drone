@@ -10,6 +10,7 @@ import { IconFile, iconForFilePath } from '../icons';
 import {
   ASSISTANT_DESKTOP_VOICE_TRANSCRIPT_SEGMENT_EVENT,
   dispatchAssistantDesktopVoiceToggle,
+  dispatchAssistantDesktopVoiceStop,
   subscribeAssistantDesktopVoiceStatus,
   type DesktopAssistantVoiceStatus,
 } from './desktop-assistant-voice';
@@ -1347,6 +1348,7 @@ function AssistantThreadSidebar({
   onOpenPairing,
   desktopVoiceStatus,
   onToggleDesktopVoice,
+  onStopDesktopVoice,
   onCollapse,
 }: {
   threads: AssistantThread[];
@@ -1359,6 +1361,7 @@ function AssistantThreadSidebar({
   onOpenPairing: () => void;
   desktopVoiceStatus: DesktopAssistantVoiceStatus;
   onToggleDesktopVoice: () => void;
+  onStopDesktopVoice: () => void;
   onCollapse: () => void;
 }) {
   const voiceMode = mode === 'voice';
@@ -1367,16 +1370,28 @@ function AssistantThreadSidebar({
   const desktopVoiceHeardText = String(desktopVoiceStatus.recognizer?.text ?? desktopVoiceStatus.recognizer?.finalText ?? '').trim();
   const desktopVoiceLabel =
     desktopVoiceStatus.mode === 'off'
-      ? 'Desktop voice'
+      ? 'Start voice'
+      : desktopVoiceStatus.mode === 'error'
+        ? 'Voice error'
       : desktopVoiceStatus.mode === 'locked'
         ? 'Locked'
+      : desktopVoiceStatus.mode === 'dormant'
+        ? 'Sleep'
       : desktopVoiceStatus.mode === 'sleeping'
-        ? 'Asleep'
+        ? 'Awake'
         : desktopVoiceStatus.mode === 'recording'
           ? 'Recording'
           : desktopVoiceStatus.mode === 'transcribing'
             ? 'Transcribing'
-            : 'Voice error';
+            : 'Voice';
+  const desktopVoiceMainTitle =
+    desktopVoiceStatus.mode === 'off' || desktopVoiceStatus.mode === 'error'
+      ? 'Start desktop assistant voice'
+      : desktopVoiceStatus.mode === 'recording' || desktopVoiceStatus.mode === 'transcribing'
+        ? 'Stop recording'
+        : desktopVoiceStatus.mode === 'dormant'
+          ? 'Wake desktop assistant voice'
+          : 'Sleep desktop assistant voice';
   return (
     <aside className="flex w-52 max-w-[46%] min-w-0 flex-shrink-0 flex-col border-r border-[var(--border)] bg-[rgba(0,0,0,.14)]">
       <div className="flex h-11 flex-shrink-0 items-center gap-2 border-b border-[var(--border)] px-2">
@@ -1475,24 +1490,20 @@ function AssistantThreadSidebar({
         )}
       </div>
       <div className="flex-shrink-0 space-y-2 border-t border-[var(--border)] p-2">
-        <div className="flex flex-col items-center gap-1.5 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-2 py-3">
+        <div className="flex flex-col items-center gap-2 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-2 py-3">
           <button
             type="button"
             onClick={onToggleDesktopVoice}
-            aria-pressed={desktopVoiceActive}
-            aria-label="Toggle desktop assistant voice"
-            title={
-              desktopVoiceStatus.mode === 'off'
-                ? 'Start desktop assistant voice'
-                : desktopVoiceStatus.mode === 'error'
-                  ? desktopVoiceStatus.message
-                  : 'Stop desktop assistant voice'
-            }
-            className={`relative flex h-16 w-16 items-center justify-center rounded-full border transition-colors ${
+            aria-pressed={desktopVoiceActive && desktopVoiceStatus.mode !== 'dormant'}
+            aria-label="Toggle desktop assistant voice awake or sleep"
+            title={desktopVoiceMainTitle}
+            className={`relative flex h-16 w-16 items-center justify-center rounded-full border transition-all duration-200 ${
               desktopVoiceStatus.mode === 'error'
                 ? 'border-[rgba(255,90,90,.5)] bg-[rgba(255,90,90,.1)] text-[var(--red)]'
+                : desktopVoiceStatus.mode === 'dormant'
+                  ? 'border-[rgba(148,163,184,.45)] bg-[rgba(148,163,184,.08)] text-[var(--muted)]'
                 : desktopVoiceActive
-                  ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)] shadow-[0_0_24px_rgba(59,130,246,.26)]'
+                  ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)] shadow-[0_0_24px_rgba(45,212,191,.22)]'
                   : 'border-[var(--border-subtle)] bg-[rgba(255,255,255,.035)] text-[var(--muted)] hover:border-[var(--accent-muted)] hover:text-[var(--fg-secondary)]'
             }`}
           >
@@ -1509,6 +1520,18 @@ function AssistantThreadSidebar({
           <div className="max-w-full truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)]" style={{ fontFamily: 'var(--display)' }}>
             {desktopVoiceLabel}
           </div>
+          {desktopVoiceActive ? (
+            <button
+              type="button"
+              onClick={onStopDesktopVoice}
+              aria-label="Turn off desktop assistant voice"
+              title="Turn off desktop assistant voice"
+              className="flex h-8 w-[88px] items-center justify-center rounded-md border border-[var(--border-subtle)] bg-[rgba(255,255,255,.03)] text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--muted)] transition-colors hover:border-[rgba(248,113,113,.35)] hover:bg-[rgba(248,113,113,.08)] hover:text-[var(--red)]"
+              style={{ fontFamily: 'var(--display)' }}
+            >
+              Off
+            </button>
+          ) : null}
           {desktopVoiceHeardText ? (
             <div
               className="w-full truncate rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.16)] px-2 py-1 text-center text-[10px] text-[var(--muted-dim)]"
@@ -3357,6 +3380,7 @@ export function AssistantDock() {
           onOpenPairing={() => void openVoicePairing()}
           desktopVoiceStatus={desktopVoiceStatus}
           onToggleDesktopVoice={dispatchAssistantDesktopVoiceToggle}
+          onStopDesktopVoice={dispatchAssistantDesktopVoiceStop}
           onCollapse={() => setThreadSidebarOpen(false)}
         />
       ) : null}
