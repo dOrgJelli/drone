@@ -11116,7 +11116,12 @@ export async function startDroneHubApiServer(opts: {
   const isAndroidSpeakUnavailable = (error: unknown): boolean => {
     const anyError = error as any;
     const message = String(anyError?.message ?? error ?? '');
+    const causeMessage = String(anyError?.cause?.message ?? '');
+    const causeCode = String(anyError?.cause?.code ?? '');
     return message.includes('Voice Stream server is not running') ||
+      message.includes('fetch failed') ||
+      /ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|ETIMEDOUT/.test(causeCode) ||
+      /ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|ETIMEDOUT/.test(causeMessage) ||
       (Number(anyError?.status) === 409 && /no android control client/i.test(message));
   };
   const speakToVoiceTarget = async ({ threadId, text, source }: { threadId: string; text: string; source?: AssistantVoiceSource | null }) => {
