@@ -21,4 +21,12 @@ contextBridge.exposeInMainWorld('voiceStreamDesktop', {
     ipcRenderer.on('vosk:text', listener);
     return () => ipcRenderer.removeListener('vosk:text', listener);
   },
+  onPairingPayload: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('pairing:payload', listener);
+    void ipcRenderer.invoke('pairing:takePending').then((pending) => {
+      for (const payload of pending || []) callback(payload);
+    });
+    return () => ipcRenderer.removeListener('pairing:payload', listener);
+  },
 });

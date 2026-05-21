@@ -52,6 +52,8 @@ function runPackager() {
     '--overwrite',
     `--extra-resource=${modelPath}`,
     `--extra-resource=${vendorNodeModules}`,
+    '--protocol=voicestream',
+    '--protocol-name=VoiceStream',
     "--ignore=^/(android|docs|gradle|release|server|web|dist|\\.desktop-vendor)(/|$)",
     "--ignore=^/(build.gradle.kts|settings.gradle.kts|gradle.properties|gradlew|gradlew.bat)$",
   ];
