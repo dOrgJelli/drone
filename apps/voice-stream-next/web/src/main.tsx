@@ -3,6 +3,11 @@ import { createRoot } from 'react-dom/client';
 import { ClerkProvider, SignedIn, SignedOut, SignIn, UserButton, useAuth, useUser } from '@clerk/clerk-react';
 import QRCode from 'qrcode';
 import { ApprovalCodeRecognizer, type ApprovalCodeUpdate } from '../../server/src/approval-code.js';
+import {
+  approvalRecognizerOptions,
+  VOICE_APPROVAL_SETTINGS_DEFAULT,
+  type VoiceApprovalSettings,
+} from '../../server/src/voice-approval-settings.js';
 import './styles.css';
 
 type UserProfile = {
@@ -13,12 +18,11 @@ type UserProfile = {
   admin: boolean;
 };
 
-type VoiceSettings = {
-  unlockCode: string;
-  lockCode: string;
-  offCode: string;
+type VoiceSettings = VoiceApprovalSettings & {
   updatedAt: string;
 };
+
+type VoiceApprovalFormState = VoiceApprovalSettings;
 
 type DeviceRecord = {
   id: string;
@@ -409,7 +413,7 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
   const [pairingQr, setPairingQr] = React.useState('');
   const [pairingExpiresAt, setPairingExpiresAt] = React.useState<string | null>(null);
   const [pairingDeviceId, setPairingDeviceId] = React.useState<string | null>(null);
-  const [codes, setCodes] = React.useState({ unlockCode: '1234', lockCode: '4321', offCode: '0000' });
+  const [approvalSettings, setApprovalSettings] = React.useState<VoiceApprovalFormState>(VOICE_APPROVAL_SETTINGS_DEFAULT);
 
   const activeThread = dashboard?.threads.find((thread) => thread.id === activeThreadId) ?? dashboard?.threads[0] ?? null;
 
@@ -418,10 +422,18 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
     try {
       const data = await client.request<DashboardData>('/api/dashboard');
       setDashboard(data);
-      setCodes({
+      setApprovalSettings({
+        triggerPhrase: data.settings.triggerPhrase,
         unlockCode: data.settings.unlockCode,
         lockCode: data.settings.lockCode,
-        offCode: data.settings.offCode,
+        lockedOffCode: data.settings.lockedOffCode,
+        minDigits: data.settings.minDigits,
+        maxDigits: data.settings.maxDigits,
+        stableMs: data.settings.stableMs,
+        collectTimeoutMs: data.settings.collectTimeoutMs,
+        duplicateCooldownMs: data.settings.duplicateCooldownMs,
+        finalizeCheckIntervalMs: data.settings.finalizeCheckIntervalMs,
+        postPromptCommandSuppressionMs: data.settings.postPromptCommandSuppressionMs,
       });
       if (!activeThreadId && data.threads[0]) setActiveThreadId(data.threads[0].id);
     } catch (err: any) {
@@ -495,18 +507,30 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
     }
   }
 
-  async function saveCodes(event: React.FormEvent) {
+  async function saveApprovalSettings(event: React.FormEvent) {
     event.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      const data = await client.request<{ ok: true; settings: VoiceSettings }>('/api/settings/voice-codes', {
-        method: 'PATCH',
-        body: JSON.stringify(codes),
+      const data = await client.request<{ ok: true; settings: VoiceSettings }>('/api/settings/voice-approval', {
+        method: 'POST',
+        body: JSON.stringify({ settings: approvalSettings }),
       });
-      setCodes(data.settings);
+      setApprovalSettings({
+        triggerPhrase: data.settings.triggerPhrase,
+        unlockCode: data.settings.unlockCode,
+        lockCode: data.settings.lockCode,
+        lockedOffCode: data.settings.lockedOffCode,
+        minDigits: data.settings.minDigits,
+        maxDigits: data.settings.maxDigits,
+        stableMs: data.settings.stableMs,
+        collectTimeoutMs: data.settings.collectTimeoutMs,
+        duplicateCooldownMs: data.settings.duplicateCooldownMs,
+        finalizeCheckIntervalMs: data.settings.finalizeCheckIntervalMs,
+        postPromptCommandSuppressionMs: data.settings.postPromptCommandSuppressionMs,
+      });
       await loadDashboard();
-      setNotice('Saved voice codes.');
+      setNotice('Saved voice approval settings.');
     } catch (err: any) {
       setError(err?.message ?? String(err));
     } finally {
@@ -749,22 +773,100 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
           </section>
 
           <section className="panel">
-            <h2>Voice Codes</h2>
-            <form className="settings-form" onSubmit={(event) => void saveCodes(event)}>
+            <h2>Voice Approval</h2>
+            <form className="settings-form" onSubmit={(event) => void saveApprovalSettings(event)}>
+              <label>
+                Trigger phrase
+                <input
+                  value={approvalSettings.triggerPhrase}
+                  onChange={(event) => setApprovalSettings((prev) => ({ ...prev, triggerPhrase: event.target.value }))}
+                />
+              </label>
               <label>
                 Unlock
-                <input value={codes.unlockCode} onChange={(event) => setCodes((prev) => ({ ...prev, unlockCode: codeValue(event.target.value) }))} />
+                <input
+                  value={approvalSettings.unlockCode}
+                  onChange={(event) => setApprovalSettings((prev) => ({ ...prev, unlockCode: codeValue(event.target.value) }))}
+                />
               </label>
               <label>
                 Lock
-                <input value={codes.lockCode} onChange={(event) => setCodes((prev) => ({ ...prev, lockCode: codeValue(event.target.value) }))} />
+                <input
+                  value={approvalSettings.lockCode}
+                  onChange={(event) => setApprovalSettings((prev) => ({ ...prev, lockCode: codeValue(event.target.value) }))}
+                />
               </label>
               <label>
                 Off
-                <input value={codes.offCode} onChange={(event) => setCodes((prev) => ({ ...prev, offCode: codeValue(event.target.value) }))} />
+                <input
+                  value={approvalSettings.lockedOffCode}
+                  onChange={(event) => setApprovalSettings((prev) => ({ ...prev, lockedOffCode: codeValue(event.target.value) }))}
+                />
+              </label>
+              <label>
+                Min digits
+                <input
+                  type="number"
+                  min={1}
+                  max={12}
+                  value={approvalSettings.minDigits}
+                  onChange={(event) => setApprovalSettings((prev) => ({ ...prev, minDigits: Number(event.target.value) }))}
+                />
+              </label>
+              <label>
+                Max digits
+                <input
+                  type="number"
+                  min={1}
+                  max={12}
+                  value={approvalSettings.maxDigits}
+                  onChange={(event) => setApprovalSettings((prev) => ({ ...prev, maxDigits: Number(event.target.value) }))}
+                />
+              </label>
+              <label>
+                Stable ms
+                <input
+                  type="number"
+                  min={250}
+                  max={3000}
+                  value={approvalSettings.stableMs}
+                  onChange={(event) => setApprovalSettings((prev) => ({ ...prev, stableMs: Number(event.target.value) }))}
+                />
+              </label>
+              <label>
+                Collection timeout ms
+                <input
+                  type="number"
+                  min={1000}
+                  max={15000}
+                  value={approvalSettings.collectTimeoutMs}
+                  onChange={(event) => setApprovalSettings((prev) => ({ ...prev, collectTimeoutMs: Number(event.target.value) }))}
+                />
+              </label>
+              <label>
+                Duplicate cooldown ms
+                <input
+                  type="number"
+                  min={0}
+                  max={15000}
+                  value={approvalSettings.duplicateCooldownMs}
+                  onChange={(event) => setApprovalSettings((prev) => ({ ...prev, duplicateCooldownMs: Number(event.target.value) }))}
+                />
+              </label>
+              <label>
+                Finalize interval ms
+                <input
+                  type="number"
+                  min={100}
+                  max={1000}
+                  value={approvalSettings.finalizeCheckIntervalMs}
+                  onChange={(event) =>
+                    setApprovalSettings((prev) => ({ ...prev, finalizeCheckIntervalMs: Number(event.target.value) }))
+                  }
+                />
               </label>
               <button type="submit" disabled={busy}>
-                Save Codes
+                Save Approval Settings
               </button>
             </form>
           </section>
@@ -1014,7 +1116,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
     let update = approvalRecognizerRef.current.accept(text, now);
     if (approvalRecognizerRef.current.isCollecting) {
       if (finalizeNow) {
-        update = approvalRecognizerRef.current.flush(now + 900);
+        update = approvalRecognizerRef.current.flush(now + (voiceSettings?.stableMs ?? 900));
       } else {
         scheduleApprovalFinalize();
       }
@@ -1026,14 +1128,10 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
   }
 
   async function loadVoiceSettings(): Promise<VoiceSettings> {
-    const data = await client.request<{ ok: true; settings: { unlockCode: string; lockCode: string; lockedOffCode: string } }>('/api/settings/voice-approval');
-    const next = {
-      unlockCode: data.settings.unlockCode,
-      lockCode: data.settings.lockCode,
-      offCode: data.settings.lockedOffCode,
-      updatedAt: '',
-    };
+    const data = await client.request<{ ok: true; settings: VoiceSettings }>('/api/settings/voice-approval');
+    const next = data.settings;
     setVoiceSettings(next);
+    approvalRecognizerRef.current.configure(approvalRecognizerOptions(next));
     return next;
   }
 
@@ -1255,8 +1353,8 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
     resetApprovalCollection();
     setMode('sleeping');
     const settings = voiceSettings;
-    setStatus(settings ? `Sleep: ${settings.unlockCode} awake, ${settings.offCode} off.` : 'Sleeping.');
-    void reportDesktopStatus('sleeping', settings ? `Sleep: ${settings.unlockCode} awake, ${settings.offCode} off.` : 'Sleeping.');
+    setStatus(settings ? `Sleep: ${settings.unlockCode} awake, ${settings.lockedOffCode} off.` : 'Sleeping.');
+    void reportDesktopStatus('sleeping', settings ? `Sleep: ${settings.unlockCode} awake, ${settings.lockedOffCode} off.` : 'Sleeping.');
     startWakeListener();
   }
 
@@ -1434,7 +1532,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
       setStatus('Unlocked.');
       return;
     }
-    if (code === settings.offCode) {
+    if (code === settings.lockedOffCode) {
       turnOff();
       return;
     }
@@ -1443,7 +1541,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
       return;
     }
     if (currentMode === 'sleeping') {
-      setStatus(`Sleep: ${settings.unlockCode} awake, ${settings.offCode} off.`);
+      setStatus(`Sleep: ${settings.unlockCode} awake, ${settings.lockedOffCode} off.`);
       return;
     }
     await client.request('/api/voice/approval-codes', {

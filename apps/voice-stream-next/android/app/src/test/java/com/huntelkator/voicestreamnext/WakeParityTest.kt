@@ -52,6 +52,25 @@ class WakeParityTest {
     }
 
     @Test
+    fun approvalCodeUsesCustomTriggerPhrase() {
+        val recognizer = ApprovalCodeRecognizer(
+            stableMs = 500,
+            collectTimeoutMs = 3_000,
+        )
+        recognizer.configure(
+            ApprovalCodeSettings(
+                triggerPhrase = "gate code",
+                minDigits = 4,
+                maxDigits = 6,
+            ),
+        )
+
+        assertEquals(ApprovalCodeUpdate.None, recognizer.accept("approval code one two three four", 0))
+        assertEquals(ApprovalCodeUpdate.Collecting("1234"), recognizer.accept("gate code one two three four", 100))
+        assertEquals(ApprovalCodeUpdate.Completed("1234"), recognizer.flush(700))
+    }
+
+    @Test
     fun approvalCodeSuppressesImmediateDuplicateCompletion() {
         val recognizer = ApprovalCodeRecognizer(stableMs = 500, duplicateCooldownMs = 4_000)
 

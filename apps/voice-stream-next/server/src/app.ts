@@ -9,6 +9,7 @@ import { VoiceStreamNextDb } from './db.js';
 import { requireAdmin, resolveRequestUser, type AuthContext } from './auth.js';
 import { generateAssistantReply, synthesizeSpeech, transcribePcm16 } from './assistant-runtime.js';
 import { approvalCodeFromText } from './approval-code.js';
+import { parseVoiceApprovalSettings, voiceApprovalSettingsResponse } from './voice-approval-settings.js';
 import {
   HEARTBEAT_INTERVAL_MS,
   MAX_STREAM_BYTES,
@@ -200,33 +201,30 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
   app.patch('/api/settings/voice-codes', async (req, reply) =>
     withUser(req, reply, db, clerkEnabled, async (ctx) => {
       const body = jsonBody(req);
+      const current = db.ensureVoiceSettings(ctx.user.id);
       const settings = db.updateVoiceSettings(ctx.user.id, {
         unlockCode: cleanCode(body.unlockCode, 'unlock code'),
         lockCode: cleanCode(body.lockCode, 'lock code'),
-        offCode: cleanCode(body.offCode, 'off code'),
+        lockedOffCode: cleanCode(body.offCode ?? body.lockedOffCode ?? current.lockedOffCode, 'off code'),
       });
       return { ok: true, settings };
     }),
   );
 
   app.get('/api/settings/voice-approval', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => voiceApprovalSettingsResponse(db.ensureVoiceSettings(ctx.user.id))),
+  );
+
+  app.post('/api/settings/voice-approval', async (req, reply) =>
     withUser(req, reply, db, clerkEnabled, async (ctx) => {
-      const settings = db.ensureVoiceSettings(ctx.user.id);
-      return {
-        ok: true,
-        settings: {
-          triggerPhrase: 'approval code',
-          unlockCode: settings.unlockCode,
-          lockCode: settings.lockCode,
-          lockedOffCode: settings.offCode,
-          minDigits: 4,
-          maxDigits: 8,
-          stableMs: 900,
-          collectTimeoutMs: 5000,
-          duplicateCooldownMs: 4000,
-          finalizeCheckIntervalMs: 250,
-        },
-      };
+      const body = jsonBody(req);
+      const payload = body.settings ?? body.voiceApproval ?? body;
+      const parsed = parseVoiceApprovalSettings(payload);
+      if (!parsed) {
+        throw Object.assign(new Error('Invalid voice approval settings.'), { statusCode: 400 });
+      }
+      const settings = db.updateVoiceApprovalSettings(ctx.user.id, parsed);
+      return voiceApprovalSettingsResponse(settings);
     }),
   );
 

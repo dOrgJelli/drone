@@ -367,6 +367,17 @@ async function loadDashboard() {
   const dashboard = await api('/api/dashboard');
   state.dashboard = dashboard;
   state.voiceSettings = dashboard.settings;
+  if (state.voiceSettings) {
+    state.approvalRecognizer.configure({
+      triggerPhrase: state.voiceSettings.triggerPhrase,
+      minDigits: state.voiceSettings.minDigits,
+      maxDigits: state.voiceSettings.maxDigits,
+      stableMs: state.voiceSettings.stableMs,
+      collectTimeoutMs: state.voiceSettings.collectTimeoutMs,
+      duplicateCooldownMs: state.voiceSettings.duplicateCooldownMs,
+      finalizeCheckIntervalMs: state.voiceSettings.finalizeCheckIntervalMs,
+    });
+  }
   state.activeThreadId = state.activeThreadId || dashboard.threads[0]?.id || null;
   renderLogs(dashboard.logs);
   updateConnection('ok', 'Connected', state.config.deviceId ? `${state.config.deviceName} · ${state.config.deviceId.slice(0, 12)}` : `${dashboard.user.displayName}`);
@@ -376,11 +387,16 @@ async function loadDashboard() {
 async function loadVoiceSettings() {
   if (state.voiceSettings) return state.voiceSettings;
   const data = await api('/api/settings/voice-approval');
-  state.voiceSettings = {
-    unlockCode: data.settings.unlockCode,
-    lockCode: data.settings.lockCode,
-    offCode: data.settings.lockedOffCode,
-  };
+  state.voiceSettings = data.settings;
+  state.approvalRecognizer.configure({
+    triggerPhrase: data.settings.triggerPhrase,
+    minDigits: data.settings.minDigits,
+    maxDigits: data.settings.maxDigits,
+    stableMs: data.settings.stableMs,
+    collectTimeoutMs: data.settings.collectTimeoutMs,
+    duplicateCooldownMs: data.settings.duplicateCooldownMs,
+    finalizeCheckIntervalMs: data.settings.finalizeCheckIntervalMs,
+  });
   return state.voiceSettings;
 }
 
@@ -671,7 +687,7 @@ function acceptApprovalText(text, finalizeNow = false) {
   let update = state.approvalRecognizer.accept(text, now);
   if (state.approvalRecognizer.isCollecting) {
     if (finalizeNow) {
-      update = state.approvalRecognizer.flush(now + 900);
+      update = state.approvalRecognizer.flush(now + (state.voiceSettings?.stableMs ?? 900));
     } else {
       scheduleApprovalFinalize();
     }
@@ -693,8 +709,9 @@ function wakePhraseMatch(text) {
   return null;
 }
 
-function enterAwake() {
+async function enterAwake() {
   resetApprovalCollection();
+  await loadVoiceSettings().catch(() => null);
   setMode('awake', 'Awake. Say or enter "hey sebastian" to start recording.');
   startWakeListener();
 }
@@ -704,7 +721,7 @@ async function enterSleep() {
   resetApprovalCollection();
   playLocalVoiceCue('sleep');
   const settings = await loadVoiceSettings().catch(() => null);
-  setMode('sleeping', settings ? `Sleep: ${settings.unlockCode} awake, ${settings.offCode} off.` : 'Sleeping.');
+  setMode('sleeping', settings ? `Sleep: ${settings.unlockCode} awake, ${settings.lockedOffCode} off.` : 'Sleeping.');
   startWakeListener();
 }
 
@@ -724,7 +741,7 @@ async function processApprovalCode(code) {
     setMode('awake', 'Unlocked.');
     return;
   }
-  if (code === settings.offCode) {
+  if (code === settings.lockedOffCode) {
     await turnOff({ cue: 'sleeping_off' });
     return;
   }
@@ -733,7 +750,7 @@ async function processApprovalCode(code) {
     return;
   }
   if (state.mode === 'sleeping') {
-    showStatus(`Sleep: ${settings.unlockCode} awake, ${settings.offCode} off.`);
+    showStatus(`Sleep: ${settings.unlockCode} awake, ${settings.lockedOffCode} off.`);
     return;
   }
   playLocalVoiceCue('status');
@@ -931,7 +948,7 @@ els.newThreadButton.addEventListener('click', () => createThread().catch((err) =
 els.messageForm.addEventListener('submit', (event) => sendMessage(event).catch((err) => showStatus(err.message)));
 els.startMicButton.addEventListener('click', () => startMic('assistant', { cue: 'start_button' }).catch((err) => showStatus(err.message)));
 els.stopMicButton.addEventListener('click', () => stopMic().catch((err) => showStatus(err.message)));
-els.awakeButton.addEventListener('click', () => enterAwake());
+els.awakeButton.addEventListener('click', () => enterAwake().catch((err) => showStatus(err.message)));
 els.sleepButton.addEventListener('click', () => enterSleep().catch((err) => showStatus(err.message)));
 els.offButton.addEventListener('click', () => turnOff().catch((err) => showStatus(err.message)));
 els.wakePhraseForm.addEventListener('submit', (event) => processWakePhrase(event).catch((err) => showStatus(err.message)));

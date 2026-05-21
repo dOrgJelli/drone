@@ -74,7 +74,7 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
         awakeMode = true
         sleeping = false
         approvalSettings = runCatching { api.voiceApprovalSettings() }.getOrDefault(VoiceApprovalSettings())
-        approvalCodeSettings = ApprovalCodeSettings()
+        approvalCodeSettings = approvalSettings.toApprovalCodeSettings()
         approvalCodeRecognizer.configure(approvalCodeSettings)
         wakeDetector = VoskWakeWordDetector(
             context,

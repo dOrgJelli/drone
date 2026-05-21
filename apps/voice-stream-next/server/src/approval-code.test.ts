@@ -36,6 +36,21 @@ describe('ApprovalCodeRecognizer', () => {
     expect(recognizer.flush(5_000)).toEqual({ type: 'cancelled' });
   });
 
+  test('honors custom trigger phrase and digit timing settings', () => {
+    const recognizer = new ApprovalCodeRecognizer({
+      triggerPhrase: 'access code',
+      minDigits: 3,
+      maxDigits: 6,
+      stableMs: 400,
+      collectTimeoutMs: 2_000,
+      duplicateCooldownMs: 1_000,
+    });
+
+    expect(recognizer.accept('access code one two three', 0)).toEqual({ type: 'collecting', partialCode: '123' });
+    expect(recognizer.flush(399)).toEqual({ type: 'none' });
+    expect(recognizer.flush(400)).toEqual({ type: 'completed', code: '123' });
+  });
+
   test('suppresses duplicate completed codes during cooldown', () => {
     const recognizer = new ApprovalCodeRecognizer();
 

@@ -2,6 +2,11 @@ import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { Database } from 'bun:sqlite';
 
+import {
+  VOICE_APPROVAL_SETTINGS_DEFAULT,
+  type VoiceApprovalSettings,
+} from './voice-approval-settings.js';
+
 export type UserProfile = {
   id: string;
   clerkUserId: string;
@@ -13,10 +18,7 @@ export type UserProfile = {
   lastSeenAt: string;
 };
 
-export type VoiceSettings = {
-  unlockCode: string;
-  lockCode: string;
-  offCode: string;
+export type VoiceSettings = VoiceApprovalSettings & {
   updatedAt: string;
 };
 
@@ -168,9 +170,19 @@ function rowUser(row: any): UserProfile {
 
 function rowVoiceSettings(row: any): VoiceSettings {
   return {
-    unlockCode: String(row.unlock_code ?? '1234'),
-    lockCode: String(row.lock_code ?? '4321'),
-    offCode: String(row.off_code ?? '0000'),
+    triggerPhrase: String(row.trigger_phrase ?? VOICE_APPROVAL_SETTINGS_DEFAULT.triggerPhrase),
+    unlockCode: String(row.unlock_code ?? VOICE_APPROVAL_SETTINGS_DEFAULT.unlockCode),
+    lockCode: String(row.lock_code ?? VOICE_APPROVAL_SETTINGS_DEFAULT.lockCode),
+    lockedOffCode: String(row.off_code ?? VOICE_APPROVAL_SETTINGS_DEFAULT.lockedOffCode),
+    minDigits: Number(row.min_digits ?? VOICE_APPROVAL_SETTINGS_DEFAULT.minDigits),
+    maxDigits: Number(row.max_digits ?? VOICE_APPROVAL_SETTINGS_DEFAULT.maxDigits),
+    stableMs: Number(row.stable_ms ?? VOICE_APPROVAL_SETTINGS_DEFAULT.stableMs),
+    collectTimeoutMs: Number(row.collect_timeout_ms ?? VOICE_APPROVAL_SETTINGS_DEFAULT.collectTimeoutMs),
+    duplicateCooldownMs: Number(row.duplicate_cooldown_ms ?? VOICE_APPROVAL_SETTINGS_DEFAULT.duplicateCooldownMs),
+    finalizeCheckIntervalMs: Number(row.finalize_check_interval_ms ?? VOICE_APPROVAL_SETTINGS_DEFAULT.finalizeCheckIntervalMs),
+    postPromptCommandSuppressionMs: Number(
+      row.post_prompt_command_suppression_ms ?? VOICE_APPROVAL_SETTINGS_DEFAULT.postPromptCommandSuppressionMs,
+    ),
     updatedAt: String(row.updated_at),
   };
 }
@@ -431,6 +443,14 @@ export class VoiceStreamNextDb {
       )
     `);
     this.ensureColumn('devices', 'revoked_at', 'TEXT');
+    this.ensureColumn('voice_settings', 'trigger_phrase', 'TEXT');
+    this.ensureColumn('voice_settings', 'min_digits', 'INTEGER');
+    this.ensureColumn('voice_settings', 'max_digits', 'INTEGER');
+    this.ensureColumn('voice_settings', 'stable_ms', 'INTEGER');
+    this.ensureColumn('voice_settings', 'collect_timeout_ms', 'INTEGER');
+    this.ensureColumn('voice_settings', 'duplicate_cooldown_ms', 'INTEGER');
+    this.ensureColumn('voice_settings', 'finalize_check_interval_ms', 'INTEGER');
+    this.ensureColumn('voice_settings', 'post_prompt_command_suppression_ms', 'INTEGER');
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -500,18 +520,77 @@ export class VoiceStreamNextDb {
     const existing = this.db.query('SELECT * FROM voice_settings WHERE user_id = $userId').get({ $userId: userId });
     if (existing) return rowVoiceSettings(existing);
     const at = nowIso();
+    const defaults = VOICE_APPROVAL_SETTINGS_DEFAULT;
     this.db
       .query(
         `
-        INSERT INTO voice_settings (id, user_id, unlock_code, lock_code, off_code, updated_at)
-        VALUES ($id, $userId, '1234', '4321', '0000', $updatedAt)
+        INSERT INTO voice_settings (
+          id,
+          user_id,
+          unlock_code,
+          lock_code,
+          off_code,
+          trigger_phrase,
+          min_digits,
+          max_digits,
+          stable_ms,
+          collect_timeout_ms,
+          duplicate_cooldown_ms,
+          finalize_check_interval_ms,
+          post_prompt_command_suppression_ms,
+          updated_at
+        )
+        VALUES (
+          $id,
+          $userId,
+          $unlockCode,
+          $lockCode,
+          $offCode,
+          $triggerPhrase,
+          $minDigits,
+          $maxDigits,
+          $stableMs,
+          $collectTimeoutMs,
+          $duplicateCooldownMs,
+          $finalizeCheckIntervalMs,
+          $postPromptCommandSuppressionMs,
+          $updatedAt
+        )
       `,
       )
-      .run({ $id: newId('vset'), $userId: userId, $updatedAt: at });
+      .run({
+        $id: newId('vset'),
+        $userId: userId,
+        $unlockCode: defaults.unlockCode,
+        $lockCode: defaults.lockCode,
+        $offCode: defaults.lockedOffCode,
+        $triggerPhrase: defaults.triggerPhrase,
+        $minDigits: defaults.minDigits,
+        $maxDigits: defaults.maxDigits,
+        $stableMs: defaults.stableMs,
+        $collectTimeoutMs: defaults.collectTimeoutMs,
+        $duplicateCooldownMs: defaults.duplicateCooldownMs,
+        $finalizeCheckIntervalMs: defaults.finalizeCheckIntervalMs,
+        $postPromptCommandSuppressionMs: defaults.postPromptCommandSuppressionMs,
+        $updatedAt: at,
+      });
     return this.ensureVoiceSettings(userId);
   }
 
-  updateVoiceSettings(userId: string, input: { unlockCode: string; lockCode: string; offCode: string }): VoiceSettings {
+  updateVoiceSettings(
+    userId: string,
+    input: { unlockCode: string; lockCode: string; offCode?: string; lockedOffCode?: string },
+  ): VoiceSettings {
+    const current = this.ensureVoiceSettings(userId);
+    return this.updateVoiceApprovalSettings(userId, {
+      ...current,
+      unlockCode: input.unlockCode,
+      lockCode: input.lockCode,
+      lockedOffCode: input.lockedOffCode ?? input.offCode ?? current.lockedOffCode,
+    });
+  }
+
+  updateVoiceApprovalSettings(userId: string, input: VoiceApprovalSettings): VoiceSettings {
     const at = nowIso();
     this.ensureVoiceSettings(userId);
     this.db
@@ -520,7 +599,15 @@ export class VoiceStreamNextDb {
         UPDATE voice_settings
         SET unlock_code = $unlockCode,
             lock_code = $lockCode,
-            off_code = $offCode,
+            off_code = $lockedOffCode,
+            trigger_phrase = $triggerPhrase,
+            min_digits = $minDigits,
+            max_digits = $maxDigits,
+            stable_ms = $stableMs,
+            collect_timeout_ms = $collectTimeoutMs,
+            duplicate_cooldown_ms = $duplicateCooldownMs,
+            finalize_check_interval_ms = $finalizeCheckIntervalMs,
+            post_prompt_command_suppression_ms = $postPromptCommandSuppressionMs,
             updated_at = $updatedAt
         WHERE user_id = $userId
       `,
@@ -528,7 +615,15 @@ export class VoiceStreamNextDb {
       .run({
         $unlockCode: input.unlockCode,
         $lockCode: input.lockCode,
-        $offCode: input.offCode,
+        $lockedOffCode: input.lockedOffCode,
+        $triggerPhrase: input.triggerPhrase,
+        $minDigits: input.minDigits,
+        $maxDigits: input.maxDigits,
+        $stableMs: input.stableMs,
+        $collectTimeoutMs: input.collectTimeoutMs,
+        $duplicateCooldownMs: input.duplicateCooldownMs,
+        $finalizeCheckIntervalMs: input.finalizeCheckIntervalMs,
+        $postPromptCommandSuppressionMs: input.postPromptCommandSuppressionMs,
         $updatedAt: at,
         $userId: userId,
       });
