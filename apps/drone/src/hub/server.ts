@@ -11959,12 +11959,12 @@ export async function startDroneHubApiServer(opts: {
           return;
         }
         try {
-          await assistantService.updateAccessScope(body ?? {});
+          const accessScope = await assistantService.updateAccessScope(body ?? {});
+          json(res, 200, { ok: true, accessScope });
         } catch (e: any) {
           json(res, 400, { ok: false, error: e?.message ?? String(e) });
           return;
         }
-        json(res, 200, { ok: true });
         return;
       }
 
