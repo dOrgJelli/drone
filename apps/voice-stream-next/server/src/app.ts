@@ -8,6 +8,14 @@ import { clerkPlugin } from '@clerk/fastify';
 import { VoiceStreamNextDb } from './db.js';
 import { requireAdmin, resolveRequestUser, type AuthContext } from './auth.js';
 import { generateAssistantReply, synthesizeSpeech, transcribePcm16 } from './assistant-runtime.js';
+import {
+  HEARTBEAT_INTERVAL_MS,
+  MAX_STREAM_BYTES,
+  MAX_STREAM_DURATION_MS,
+  VOICE_STREAM_PROTOCOL_VERSION,
+  VoiceCloseCode,
+  parseVoiceClientMessage,
+} from './protocol.js';
 
 type AppOptions = {
   logger?: boolean;
@@ -30,6 +38,24 @@ function cleanCode(raw: unknown, label: string): string {
   const value = String(raw ?? '').replace(/\D/g, '');
   if (!value || value.length > 12) throw Object.assign(new Error(`${label} must be 1-12 digits`), { statusCode: 400 });
   return value;
+}
+
+function approvalCodeFromText(text: string): string | null {
+  const words = text
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+  const phraseIndex = words.findIndex((word, index) => word === 'approval' && words[index + 1] === 'code');
+  if (phraseIndex < 0) return null;
+  const digits = words
+    .slice(phraseIndex + 2)
+    .map((word) => {
+      if (/^\d$/.test(word)) return word;
+      return ({ zero: '0', oh: '0', o: '0', one: '1', won: '1', two: '2', too: '2', to: '2', three: '3', tree: '3', four: '4', for: '4', five: '5', six: '6', seven: '7', eight: '8', ate: '8', nine: '9', niner: '9' } as Record<string, string>)[word] ?? '';
+    })
+    .join('')
+    .slice(0, 8);
+  return digits.length >= 4 ? digits : null;
 }
 
 function queryValue(value: unknown): string {
@@ -131,6 +157,27 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     }),
   );
 
+  app.get('/api/settings/voice-approval', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const settings = db.ensureVoiceSettings(ctx.user.id);
+      return {
+        ok: true,
+        settings: {
+          triggerPhrase: 'approval code',
+          unlockCode: settings.unlockCode,
+          lockCode: settings.lockCode,
+          lockedOffCode: settings.offCode,
+          minDigits: 4,
+          maxDigits: 8,
+          stableMs: 900,
+          collectTimeoutMs: 5000,
+          duplicateCooldownMs: 4000,
+          finalizeCheckIntervalMs: 250,
+        },
+      };
+    }),
+  );
+
   app.post('/api/devices', async (req, reply) =>
     withUser(req, reply, db, clerkEnabled, async (ctx) => {
       const body = jsonBody(req);
@@ -174,6 +221,19 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
         detailsJson,
       });
       return { ok: true, log };
+    }),
+  );
+
+  app.post('/api/voice/approval-codes', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const body = jsonBody(req);
+      const code = cleanCode(body.code, 'approval code');
+      const approvalCode = db.addApprovalCode(ctx.user.id, {
+        voiceSessionId: cleanText(body.voiceSessionId) || null,
+        code,
+        source: cleanText(body.source, 'client') || 'client',
+      });
+      return { ok: true, approvalCode };
     }),
   );
 
@@ -252,16 +312,28 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     const requestedSessionId = queryValue(query.sessionId);
     const verifiedDevice = db.verifyDeviceToken(deviceId, token);
     if (!verifiedDevice) {
-      socket.close(1008, 'invalid device token');
+      socket.close(VoiceCloseCode.Unauthorized, 'invalid device token');
       return;
     }
-    const device = verifiedDevice
+    const device = verifiedDevice;
 
     let frames = 0;
     let bytes = 0;
+    let storedBytes = 0;
     let finalized = false;
     const chunks: Uint8Array[] = [];
     const startedAt = Date.now();
+    socket.send(JSON.stringify({ type: 'server_hello', protocolVersion: VOICE_STREAM_PROTOCOL_VERSION, maxBytes: MAX_STREAM_BYTES, maxDurationMs: MAX_STREAM_DURATION_MS }));
+    const heartbeat = setInterval(() => {
+      if ((socket as any).readyState === 1) {
+        socket.send(JSON.stringify({ type: 'server_ping', sentAt: new Date().toISOString() }));
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+    const durationLimit = setTimeout(() => {
+      if ((socket as any).readyState === 1) {
+        socket.close(VoiceCloseCode.TooLong, 'stream duration limit exceeded');
+      }
+    }, MAX_STREAM_DURATION_MS);
     db.addLog(device.userId, {
       deviceId: device.id,
       source: device.deviceType,
@@ -272,13 +344,16 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
 
     socket.on('message', (data, isBinary) => {
       if (!isBinary) {
-        let parsed: any = null;
-        try {
-          parsed = JSON.parse(String(data));
-        } catch {
-          parsed = null;
+        const parsed = parseVoiceClientMessage(String(data));
+        if (!parsed) {
+          socket.close(VoiceCloseCode.InvalidMessage, 'invalid protocol message');
+          return;
         }
-        if (parsed?.type === 'end') {
+        if (parsed.type === 'client_ping') {
+          socket.send(JSON.stringify({ type: 'server_pong', sentAt: new Date().toISOString(), clientSentAt: parsed.sentAt }));
+          return;
+        }
+        if (parsed.type === 'end') {
           void finalizeVoiceStream();
         }
         return;
@@ -286,9 +361,14 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       frames += 1;
       const size = binarySize(data);
       bytes += size;
-      if (bytes <= 24 * 1024 * 1024) {
-        const chunk = binaryChunk(data);
-        if (chunk) chunks.push(new Uint8Array(chunk));
+      if (bytes > MAX_STREAM_BYTES) {
+        socket.close(VoiceCloseCode.TooLarge, 'stream byte limit exceeded');
+        return;
+      }
+      const chunk = binaryChunk(data);
+      if (chunk) {
+        chunks.push(new Uint8Array(chunk));
+        storedBytes += chunk.byteLength;
       }
     });
 
@@ -299,18 +379,24 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     async function finalizeVoiceStream(): Promise<void> {
       if (finalized) return;
       finalized = true;
+      clearInterval(heartbeat);
+      clearTimeout(durationLimit);
       const session =
-        (requestedSessionId ? db.voiceSession(device.userId, requestedSessionId) : null) ??
+        (requestedSessionId ? db.voiceSessionForDevice(device.userId, device.id, requestedSessionId) : null) ??
         db.latestVoiceSessionForDevice(device.userId, device.id) ??
         db.createVoiceSession(device.userId, device.id);
       let transcript = '';
       let assistantText = '';
       let runtime = 'fallback';
       try {
-        const transcription = await transcribePcm16(concatChunks(chunks, Math.min(bytes, 24 * 1024 * 1024)));
+        const transcription = await transcribePcm16(concatChunks(chunks, storedBytes));
         transcript = transcription.text;
         if (transcript) {
           db.addTranscript(device.userId, session.id, transcript);
+          const approvalCode = approvalCodeFromText(transcript);
+          if (approvalCode) {
+            db.addApprovalCode(device.userId, { voiceSessionId: session.id, code: approvalCode, source: device.deviceType });
+          }
           db.addMessage(device.userId, session.assistantThreadId, { role: 'user', content: transcript });
           const history = db.listMessages(device.userId, session.assistantThreadId).map((message) => ({
             role: message.role,

@@ -62,6 +62,7 @@ type DashboardData = {
   settings: VoiceSettings;
   threads: AssistantThread[];
   logs: LogRecord[];
+  approvalCodes: { id: string; code: string; source: string; createdAt: string }[];
   devices: DeviceRecord[];
   adminDevices: DeviceRecord[];
   stats: { threadCount: number; deviceCount: number; logCount: number };
@@ -492,6 +493,8 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
 function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh: () => Promise<void> }) {
   const [deviceName, setDeviceName] = React.useState('Electron desktop');
   const [status, setStatus] = React.useState('Ready');
+  const [mode, setMode] = React.useState<'off' | 'awake' | 'sleeping' | 'recording'>('off');
+  const [phrase, setPhrase] = React.useState('');
   const [streaming, setStreaming] = React.useState(false);
   const [device, setDevice] = React.useState<{ id: string; token: string } | null>(() => {
     try {
@@ -535,6 +538,9 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
     const source = context.createMediaStreamSource(media);
     const processor = context.createScriptProcessor(4096, 1, 1);
     const socket = openDesktopVoiceSocket(activeDevice, session.session.id);
+    socket.onopen = () => {
+      socket.send(JSON.stringify({ type: 'client_hello', protocolVersion: 1, client: 'electron-web' }));
+    };
     processor.onaudioprocess = (event) => {
       if (socket.readyState !== WebSocket.OPEN) return;
       socket.send(floatToPcm16(event.inputBuffer.getChannelData(0)));
@@ -545,9 +551,18 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
           const message = JSON.parse(event.data);
           if (message.type === 'assistant_result') {
             setStatus(`Transcript: ${message.transcript || 'empty'} / Reply: ${message.assistantText || 'empty'}`);
+            const approvalCode = approvalCodeFromText(message.transcript || '');
+            if (approvalCode) {
+              void client.request('/api/voice/approval-codes', {
+                method: 'POST',
+                body: JSON.stringify({ code: approvalCode, source: 'desktop' }),
+              });
+            }
             void onRefresh();
           } else if (message.type === 'assistant_error') {
             setStatus(message.error || 'Voice runtime failed.');
+          } else if (message.type === 'server_ping') {
+            socket.send(JSON.stringify({ type: 'client_ping', sentAt: new Date().toISOString() }));
           }
         } catch {
           setStatus(event.data);
@@ -561,6 +576,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
     processor.connect(context.destination);
     refs.current = { socket, stream: media, context, processor };
     setStreaming(true);
+    setMode('recording');
     setStatus('Streaming desktop microphone.');
   }
 
@@ -572,7 +588,48 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
     await refs.current.context?.close().catch(() => undefined);
     refs.current = {};
     setStreaming(false);
+    setMode('awake');
     setStatus('Voice stream stopped.');
+  }
+
+  function enterAwake() {
+    setMode('awake');
+    setStatus('Awake. Say or enter "hey sebastian" to start recording.');
+  }
+
+  function enterSleep() {
+    if (streaming) void stopVoice();
+    setMode('sleeping');
+    setStatus('Sleeping.');
+  }
+
+  function turnOff() {
+    if (streaming) void stopVoice();
+    setMode('off');
+    setStatus('Off.');
+  }
+
+  async function processWakePhrase() {
+    const match = wakePhraseMatch(phrase);
+    setPhrase('');
+    if (!match) {
+      setStatus('No wake command matched.');
+      return;
+    }
+    if (match === 'sleep') {
+      enterSleep();
+      return;
+    }
+    if (match === 'status') {
+      setStatus(`Mode: ${mode}. Device: ${device?.id ? device.id.slice(0, 12) : 'unpaired'}.`);
+      return;
+    }
+    if (mode === 'sleeping') {
+      setStatus('Sleeping. Wake the app manually first.');
+      return;
+    }
+    if (mode === 'off') enterAwake();
+    await startVoice();
   }
 
   return (
@@ -580,17 +637,26 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
       <div className="panel-heading">
         <div>
           <h2>Desktop Voice</h2>
-          <p>Signed in with Clerk in Electron. Streams microphone audio to the assistant runtime.</p>
+          <p>Mode: {mode}. Wake phrases: hey sebastian, patch me in, can you transcribe, go to sleep, status.</p>
         </div>
         <div className="voice-actions">
           <button type="button" onClick={() => void pairDesktop()} disabled={streaming}>
             Pair
           </button>
-          <button type="button" onClick={() => void startVoice()} disabled={streaming}>
-            Start
+          <button type="button" onClick={enterAwake} disabled={streaming}>
+            Awake
+          </button>
+          <button type="button" onClick={enterSleep}>
+            Sleep
+          </button>
+          <button type="button" onClick={() => void startVoice()} disabled={streaming || mode === 'sleeping'}>
+            Record
           </button>
           <button type="button" onClick={() => void stopVoice()} disabled={!streaming}>
             Stop
+          </button>
+          <button type="button" onClick={turnOff}>
+            Off
           </button>
         </div>
       </div>
@@ -598,9 +664,34 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
         Desktop name
         <input value={deviceName} onChange={(event) => setDeviceName(event.target.value)} disabled={streaming} />
       </label>
+      <form className="desktop-phrase-row" onSubmit={(event) => { event.preventDefault(); void processWakePhrase(); }}>
+        <input value={phrase} onChange={(event) => setPhrase(event.target.value)} placeholder="Type a wake phrase for desktop testing" />
+        <button type="submit">Run Phrase</button>
+      </form>
       <p className="runtime-status">{status}</p>
     </section>
   );
+}
+
+function wakePhraseMatch(text: string): 'start' | 'patch' | 'clipboard' | 'sleep' | 'status' | null {
+  const words = text.toLowerCase().split(/[^a-z]+/).filter(Boolean);
+  const compact = words.join('');
+  if (words.some((word, index) => word === 'go' && words[index + 1] === 'to' && words[index + 2] === 'sleep')) return 'sleep';
+  if (words.some((word, index) => (word === 'hey' || word === 'hay') && words[index + 1] === 'sebastian')) return 'start';
+  if (words.some((word, index) => word === 'patch' && words[index + 1] === 'me' && words[index + 2] === 'in')) return 'patch';
+  if (words.includes('transcribe')) return 'clipboard';
+  if (words.includes('status') || compact === 'stateus' || compact === 'checkstatus') return 'status';
+  return null;
+}
+
+function approvalCodeFromText(text: string): string | null {
+  const words = text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  const start = words.findIndex((word, index) => word === 'approval' && words[index + 1] === 'code');
+  if (start < 0) return null;
+  const digits = words.slice(start + 2).map((word) => ({
+    zero: '0', oh: '0', o: '0', one: '1', won: '1', two: '2', too: '2', to: '2', three: '3', tree: '3', four: '4', for: '4', five: '5', six: '6', seven: '7', eight: '8', ate: '8', nine: '9', niner: '9',
+  } as Record<string, string>)[word] ?? (/^\d$/.test(word) ? word : '')).join('').slice(0, 8);
+  return digits.length >= 4 ? digits : null;
 }
 
 function openDesktopVoiceSocket(device: { id: string; token: string }, sessionId: string): WebSocket {

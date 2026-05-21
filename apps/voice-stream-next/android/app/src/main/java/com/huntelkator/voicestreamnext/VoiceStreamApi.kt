@@ -132,6 +132,14 @@ class VoiceStreamApi(private val context: Context) {
         )
     }
 
+    fun uploadApprovalCode(code: String, voiceSessionId: String? = null) {
+        val body = JSONObject()
+            .put("source", "android")
+            .put("code", code)
+        if (!voiceSessionId.isNullOrBlank()) body.put("voiceSessionId", voiceSessionId)
+        request("POST", "/api/voice/approval-codes", body)
+    }
+
     private fun request(method: String, path: String, body: JSONObject? = null): JSONObject {
         val config = loadConfig()
         val url = "${config.serverUrl.trimEnd('/')}$path"

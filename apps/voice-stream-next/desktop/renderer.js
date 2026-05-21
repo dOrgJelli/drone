@@ -256,7 +256,24 @@ function openVoiceSocket() {
   if (state.voiceSessionId) url.searchParams.set('sessionId', state.voiceSessionId);
   const socket = new WebSocket(url.toString());
   socket.binaryType = 'arraybuffer';
-  socket.onopen = () => showStatus('Voice stream connected.');
+  socket.onopen = () => {
+    socket.send(JSON.stringify({ type: 'client_hello', protocolVersion: 1, client: 'electron-fallback' }));
+    showStatus('Voice stream connected.');
+  };
+  socket.onmessage = (event) => {
+    if (typeof event.data !== 'string') return;
+    try {
+      const message = JSON.parse(event.data);
+      if (message.type === 'server_ping') {
+        socket.send(JSON.stringify({ type: 'client_ping', sentAt: new Date().toISOString() }));
+      }
+      if (message.type === 'assistant_result') {
+        showStatus(`Transcript: ${message.transcript || 'empty'} / Reply: ${message.assistantText || 'empty'}`);
+      }
+    } catch {
+      // Ignore non-protocol text frames in the fallback desktop shell.
+    }
+  };
   socket.onclose = () => showStatus('Voice stream closed.');
   socket.onerror = () => showStatus('Voice stream error.');
   return socket;

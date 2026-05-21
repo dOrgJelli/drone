@@ -12,6 +12,9 @@ object Constants {
     const val PREF_DEVICE_TOKEN = "device_token"
     const val PREF_DEVICE_NAME = "device_name"
 
+    const val ACTION_START_VOICE = "com.huntelkator.voicestreamnext.action.START_VOICE"
+    const val ACTION_STOP_VOICE = "com.huntelkator.voicestreamnext.action.STOP_VOICE"
+
     const val AUTH_DEV = "dev"
     const val AUTH_BEARER = "bearer"
     const val DEFAULT_SERVER_URL = "http://10.0.2.2:3299"

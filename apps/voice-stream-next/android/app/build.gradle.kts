@@ -6,6 +6,10 @@ plugins {
 android {
     namespace = "com.huntelkator.voicestreamnext"
     compileSdk = 36
+    val releaseKeystorePath = System.getenv("VOICE_STREAM_NEXT_ANDROID_KEYSTORE").orEmpty()
+    val releaseKeyAlias = System.getenv("VOICE_STREAM_NEXT_ANDROID_KEY_ALIAS").orEmpty()
+    val releaseKeyPassword = System.getenv("VOICE_STREAM_NEXT_ANDROID_KEY_PASSWORD").orEmpty()
+    val releaseStorePassword = System.getenv("VOICE_STREAM_NEXT_ANDROID_STORE_PASSWORD").orEmpty()
 
     defaultConfig {
         applicationId = "com.huntelkator.voicestreamnext"
@@ -18,6 +22,22 @@ android {
 
     buildFeatures {
         buildConfig = true
+    }
+
+    if (releaseKeystorePath.isNotBlank() && releaseKeyAlias.isNotBlank() && releaseKeyPassword.isNotBlank() && releaseStorePassword.isNotBlank()) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(releaseKeystorePath)
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+                storePassword = releaseStorePassword
+            }
+        }
+        buildTypes {
+            getByName("release") {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
     }
 
     packaging {

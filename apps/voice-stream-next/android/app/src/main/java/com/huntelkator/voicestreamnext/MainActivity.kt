@@ -19,6 +19,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import com.clerk.api.Clerk
 import com.clerk.api.network.serialization.ClerkResult
 import com.clerk.api.session.GetTokenOptions
@@ -42,7 +43,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var summaryText: TextView
     private lateinit var assistantInput: EditText
     private lateinit var assistantOutput: TextView
-    private lateinit var audioStreamer: AudioStreamer
+    private val wakeController = WakeToggleController()
+    private val approvalCodeRecognizer = ApprovalCodeRecognizer()
 
     private val micPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) startVoiceSession() else showStatus("Microphone permission denied.")
@@ -51,7 +53,6 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         api = VoiceStreamApi(applicationContext)
-        audioStreamer = AudioStreamer(applicationContext, api)
         window.statusBarColor = COLOR_BACKGROUND
         window.navigationBarColor = COLOR_BACKGROUND
         buildUi()
@@ -128,6 +129,16 @@ class MainActivity : ComponentActivity() {
             addView(assistantOutput)
         })
 
+        root.addView(card("Wake And Approval").apply {
+            addView(field("Wake phrase or approval phrase").also { wakePhraseInput = it })
+            addView(row(
+                button("Awake") { enterAwake() },
+                button("Run phrase") { processWakePhrase() },
+                button("Sleep") { enterSleep() },
+                button("Off") { turnOff() }
+            ))
+        })
+
         val clerkNote = if (BuildConfig.CLERK_PUBLISHABLE_KEY.isBlank()) {
             "Clerk SDK is installed. Set VOICE_STREAM_NEXT_ANDROID_CLERK_PUBLISHABLE_KEY for native initialization, or paste a Clerk session token here."
         } else {
@@ -190,20 +201,73 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun startVoiceSession() = runApi("Starting voice session") {
+    private fun startVoiceSession() {
         val deviceId = api.pairedDeviceId()
         if (deviceId.isBlank()) {
             showStatus("Pair this device first.")
-            return@runApi
+            return
         }
-        val sessionId = api.createVoiceSession(deviceId)
-        api.uploadLog("Android voice session started")
-        audioStreamer.start(sessionId) { status -> showStatus(status) }
+        wakeController.manualStartRecording()
+        ContextCompat.startForegroundService(
+            this,
+            Intent(this, VoiceSessionService::class.java).apply { action = Constants.ACTION_START_VOICE }
+        )
+        showStatus("Foreground voice service started.")
     }
 
     private fun stopVoiceSession() {
-        audioStreamer.stop()
+        startService(Intent(this, VoiceSessionService::class.java).apply { action = Constants.ACTION_STOP_VOICE })
+        wakeController.manualStopRecording(returnToAwake = true)
         showStatus("Voice stream stopped.")
+    }
+
+    private lateinit var wakePhraseInput: EditText
+
+    private fun enterAwake() {
+        wakeController.startAwake()
+        showStatus("Awake. Listening for wake phrases.")
+    }
+
+    private fun enterSleep() {
+        if (wakeController.state == WakeState.RECORDING) stopVoiceSession()
+        wakeController.toggleAwakeSleep()
+        showStatus("Sleeping.")
+    }
+
+    private fun turnOff() {
+        startService(Intent(this, VoiceSessionService::class.java).apply { action = Constants.ACTION_STOP_VOICE })
+        wakeController.stopAll()
+        showStatus("Off.")
+    }
+
+    private fun processWakePhrase() {
+        val text = wakePhraseInput.text.toString()
+        wakePhraseInput.setText("")
+        approvalCodeRecognizer.extract(text)?.let { code ->
+            runApi("Uploading approval code") {
+                api.uploadApprovalCode(code)
+                showStatus("Approval code uploaded.")
+            }
+            return
+        }
+        val phrase = WakePhraseMatcher.match(text)
+        if (phrase == null) {
+            showStatus("No wake phrase matched.")
+            return
+        }
+        val action = wakeController.wakeDetected(phrase)
+        when (action) {
+            WakeAction.START_RECORDING,
+            WakeAction.START_PATCH_RECORDING,
+            WakeAction.START_CLIPBOARD_RECORDING -> ensureMicThenStart()
+            WakeAction.STOP_RECORDING,
+            WakeAction.ENTER_SLEEPING -> {
+                stopVoiceSession()
+                showStatus("Sleeping.")
+            }
+            WakeAction.PLAY_STATUS -> showStatus("Mode: ${wakeController.state}")
+            WakeAction.NONE -> showStatus("Mode: ${wakeController.state}")
+        }
     }
 
     private fun sendAssistantMessage() = runApi("Sending assistant message") {

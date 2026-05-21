@@ -71,6 +71,15 @@ export type VoiceSession = {
   endedAt: string | null;
 };
 
+export type ApprovalCodeRecord = {
+  id: string;
+  voiceSessionId: string | null;
+  userId: string;
+  code: string;
+  source: string;
+  createdAt: string;
+};
+
 type UpsertUserInput = {
   clerkUserId: string;
   displayName: string;
@@ -178,6 +187,17 @@ function rowVoiceSession(row: any): VoiceSession {
     mode: String(row.mode),
     startedAt: String(row.started_at),
     endedAt: row.ended_at == null ? null : String(row.ended_at),
+  };
+}
+
+function rowApprovalCode(row: any): ApprovalCodeRecord {
+  return {
+    id: String(row.id),
+    voiceSessionId: row.voice_session_id == null ? null : String(row.voice_session_id),
+    userId: String(row.user_id),
+    code: String(row.code),
+    source: String(row.source),
+    createdAt: String(row.created_at),
   };
 }
 
@@ -587,6 +607,13 @@ export class VoiceStreamNextDb {
     return row ? rowVoiceSession(row) : null;
   }
 
+  voiceSessionForDevice(userId: string, deviceId: string, sessionId: string): VoiceSession | null {
+    const row = this.db
+      .query('SELECT * FROM voice_sessions WHERE user_id = $userId AND device_id = $deviceId AND id = $sessionId')
+      .get({ $userId: userId, $deviceId: deviceId, $sessionId: sessionId });
+    return row ? rowVoiceSession(row) : null;
+  }
+
   latestVoiceSessionForDevice(userId: string, deviceId: string): VoiceSession | null {
     const row = this.db
       .query(
@@ -614,6 +641,34 @@ export class VoiceStreamNextDb {
       .run({ $id: newId('trn'), $voiceSessionId: voiceSessionId, $userId: userId, $text: trimmed, $createdAt: nowIso() });
   }
 
+  addApprovalCode(userId: string, input: { voiceSessionId?: string | null; code: string; source: string }): ApprovalCodeRecord {
+    const id = newId('apv');
+    this.db
+      .query(
+        `
+        INSERT INTO approval_codes (id, voice_session_id, user_id, code, source, created_at)
+        VALUES ($id, $voiceSessionId, $userId, $code, $source, $createdAt)
+      `,
+      )
+      .run({
+        $id: id,
+        $voiceSessionId: input.voiceSessionId ?? null,
+        $userId: userId,
+        $code: input.code,
+        $source: input.source,
+        $createdAt: nowIso(),
+      });
+    const row = this.db.query('SELECT * FROM approval_codes WHERE id = $id').get({ $id: id });
+    return rowApprovalCode(row);
+  }
+
+  listApprovalCodes(userId: string, limit = 40): ApprovalCodeRecord[] {
+    return this.db
+      .query('SELECT * FROM approval_codes WHERE user_id = $userId ORDER BY created_at DESC LIMIT $limit')
+      .all({ $userId: userId, $limit: limit })
+      .map(rowApprovalCode);
+  }
+
   endVoiceSession(userId: string, sessionId: string): void {
     this.db
       .query('UPDATE voice_sessions SET ended_at = $endedAt WHERE user_id = $userId AND id = $sessionId AND ended_at IS NULL')
@@ -630,6 +685,7 @@ export class VoiceStreamNextDb {
       settings,
       threads,
       logs,
+      approvalCodes: this.listApprovalCodes(user.id, 40),
       devices,
       adminDevices: user.admin ? this.listDevices() : [],
       stats: {

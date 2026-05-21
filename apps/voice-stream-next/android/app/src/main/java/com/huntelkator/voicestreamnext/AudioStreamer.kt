@@ -14,6 +14,7 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString.Companion.toByteString
+import org.json.JSONObject
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -50,7 +51,17 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
             Request.Builder().url(socketUrl).build(),
             object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
+                    webSocket.send(JSONObject().put("type", "client_hello").put("protocolVersion", 1).put("client", "android").toString())
                     onStatus("Voice stream connected.")
+                }
+
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    val message = runCatching { JSONObject(text) }.getOrNull() ?: return
+                    when (message.optString("type")) {
+                        "server_ping" -> webSocket.send(JSONObject().put("type", "client_ping").put("sentAt", java.time.Instant.now().toString()).toString())
+                        "assistant_result" -> onStatus("Assistant replied.")
+                        "assistant_error" -> onStatus(message.optString("error", "Voice runtime failed."))
+                    }
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
