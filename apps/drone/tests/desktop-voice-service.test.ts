@@ -200,6 +200,29 @@ describe('DesktopVoiceService', () => {
     expect(submittedPrompt).toBe('');
   });
 
+  test('keeps embedded go to sleep text while recording a patch', async () => {
+    const service = new DesktopVoiceService({
+      transcribeWav: async () => ({ text: 'if you say go to sleep it should lock listening', model: 'test' }),
+      submitAssistantPrompt: async () => {},
+    });
+
+    (service as any).mode = 'recording';
+    (service as any).promptCaptureTarget = 'patch';
+
+    await (service as any).transcribePromptSegment({
+      pcm: Buffer.alloc(3200),
+      audioMs: 100,
+      speechMs: 100,
+      trailingSilenceMs: 0,
+      reason: 'flush',
+      sequence: 1,
+    });
+
+    expect(service.snapshot().mode).toBe('recording');
+    expect(service.snapshot().message).toBe('Awake: patching into current drone chat.');
+    expect(service.snapshot().transcript.text).toBe('if you say go to sleep it should lock listening');
+  });
+
   test('does not start deferred capture backends after immediate stop', async () => {
     const service = new DesktopVoiceService({
       transcribeWav: async () => ({ text: '', model: 'test' }),

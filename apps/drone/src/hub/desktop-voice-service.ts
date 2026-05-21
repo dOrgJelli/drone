@@ -18,6 +18,7 @@ import { ApprovalCodeRecognizer, type ApprovalCodeUpdate } from './voice-approva
 import {
   hasTranscriptContent,
   isLikelyShortSleepMistranscription,
+  normalizeTranscriptWhitespace,
   pcm16leRms,
   pcm16leToWav,
   PromptSpeechSegmenter,
@@ -190,6 +191,11 @@ function formatDigitsForSpeech(code: string): string {
     '9': 'nine',
   };
   return String(code ?? '').split('').map((digit) => words[digit] ?? digit).join(' ').trim();
+}
+
+function promptTextFromCommand(rawText: string, command: ReturnType<typeof stripCommands>): string {
+  if (command.lock && hasTranscriptContent(command.text)) return normalizeTranscriptWhitespace(rawText);
+  return command.text.trim();
 }
 
 function normalizeGrammarPhrase(phrase: string): string {
@@ -1491,7 +1497,7 @@ export class DesktopVoiceService {
       const result = await this.opts.transcribeWav(pcm16leToWav(segment.pcm));
       const command = stripCommands(result.text);
       const inferredSleep = !command.sleep && this.shouldInferSleepCommand(result.text, segment);
-      const text = inferredSleep ? '' : command.text.trim();
+      const text = inferredSleep ? '' : promptTextFromCommand(result.text, command);
       const ignoreEmptyPatchSleep =
         this.promptCaptureTarget === 'patch' &&
         !hasTranscriptContent(this.promptTranscriptText) &&
@@ -1514,7 +1520,7 @@ export class DesktopVoiceService {
         await this.abortPromptRecordingFromTranscript();
         return;
       }
-      if (command.lock && this.mode === 'recording' && this.shouldAcceptCommand('lock:phrase', 1800)) {
+      if (command.lock && !hasTranscriptContent(text) && this.mode === 'recording' && this.shouldAcceptCommand('lock:phrase', 1800)) {
         this.promptTranscriptError = null;
         this.promptTranscribing = false;
         this.enterLockedMode();
@@ -1711,11 +1717,11 @@ export class DesktopVoiceService {
     try {
       const result = await this.opts.transcribeWav(pcm16leToWav(pcm));
       const command = stripCommands(result.text);
-      if (command.lock && this.shouldAcceptCommand('lock:phrase', 1800)) {
+      const text = promptTextFromCommand(result.text, command);
+      if (command.lock && !hasTranscriptContent(text) && this.shouldAcceptCommand('lock:phrase', 1800)) {
         this.enterLockedMode();
         return;
       }
-      const text = command.text.trim();
       if (text) await this.opts.submitAssistantPrompt(text);
       this.mode = 'sleeping';
       this.message = text ? 'Awake: sent assistant voice prompt.' : 'Awake: no assistant prompt detected.';

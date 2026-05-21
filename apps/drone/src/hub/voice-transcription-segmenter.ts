@@ -222,7 +222,7 @@ function normalizeWords(text: string): string[] {
   return String(text ?? '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
 }
 
-function normalizeTranscriptWhitespace(text: string): string {
+export function normalizeTranscriptWhitespace(text: string): string {
   return text
     .replace(/\s+([,.:;!?])/g, '$1')
     .replace(/([([{])\s+/g, '$1')
