@@ -288,6 +288,19 @@ class MainActivity : ComponentActivity() {
             showStatus(error.message ?: "Invalid pairing payload.")
             return
         }
+        val minClientVersion = config.minClientVersion ?: 1L
+        if (BuildConfig.VERSION_CODE.toLong() < minClientVersion) {
+            showStatus("App version ${BuildConfig.VERSION_NAME} is below required client version $minClientVersion.")
+            return
+        }
+        config.expiresAt?.let { expiresAt ->
+            runCatching { java.time.Instant.parse(expiresAt) }.getOrNull()?.let { expiry ->
+                if (expiry.isBefore(java.time.Instant.now())) {
+                    showStatus("Pairing payload expired at $expiresAt.")
+                    return
+                }
+            }
+        }
         api.savePairing(config)
         loadConfigIntoForm()
         showStatus("Paired ${config.deviceId.take(14)} from QR payload.")

@@ -170,8 +170,14 @@ class VoiceSessionService : Service() {
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
                     val message = runCatching { JSONObject(text) }.getOrNull() ?: return
-                    if (message.optString("type") == "server_ping") {
-                        webSocket.send(JSONObject().put("type", "client_ping").put("sentAt", java.time.Instant.now().toString()).toString())
+                    when (message.optString("type")) {
+                        "server_ping" -> webSocket.send(
+                            JSONObject()
+                                .put("type", "client_ping")
+                                .put("sentAt", java.time.Instant.now().toString())
+                                .toString()
+                        )
+                        "server_command" -> handleRemoteControlCommand(webSocket, message)
                     }
                 }
 
@@ -199,11 +205,47 @@ class VoiceSessionService : Service() {
                 .put("mode", mode)
                 .put("status", status)
                 .put("protocolVersion", 1)
+                .put("clientVersion", 1)
                 .put("appVersion", BuildConfig.VERSION_NAME)
                 .put("lastError", if (mode == Constants.MODE_ERROR) status else JSONObject.NULL)
                 .put("reportedAt", java.time.Instant.now().toString())
                 .toString()
         )
+    }
+
+    private fun handleRemoteControlCommand(webSocket: WebSocket, message: JSONObject) {
+        val command = message.optString("command")
+        val commandId = message.optString("commandId")
+        fun ack(ok: Boolean, mode: String = lastMode, status: String = lastStatus, error: String? = null) {
+            val payload = JSONObject()
+                .put("type", "command_ack")
+                .put("commandId", commandId)
+                .put("command", command)
+                .put("ok", ok)
+                .put("mode", mode)
+                .put("status", status)
+            if (error != null) payload.put("error", error)
+            webSocket.send(payload.toString())
+        }
+        when (command) {
+            "query_status" -> {
+                ack(true)
+                publishStatus(lastStatus, lastMode)
+            }
+            "sleep" -> {
+                enterSleep()
+                ack(true, Constants.MODE_SLEEPING, lastStatus)
+            }
+            "off" -> {
+                stopVoice()
+                ack(true, Constants.MODE_OFF, "Off.")
+            }
+            "awake" -> {
+                startAwake()
+                ack(true, Constants.MODE_AWAKE, lastStatus)
+            }
+            else -> ack(false, lastMode, lastStatus, "unknown command")
+        }
     }
 
     private fun buildControlUrl(serverUrl: String, deviceId: String, token: String): String {

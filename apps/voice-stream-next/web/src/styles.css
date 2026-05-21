@@ -398,6 +398,29 @@ h2 {
   font-size: 12px;
 }
 
+.pairing-meta {
+  color: var(--blueprint);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.pairing-actions,
+.device-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.managed-device-row {
+  display: grid;
+  gap: 8px;
+}
+
+.managed-device-row > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
 .lower-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(360px, 0.75fr);

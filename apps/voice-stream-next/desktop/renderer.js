@@ -180,6 +180,10 @@ function ensureControlSocket() {
     const message = JSON.parse(event.data);
     if (message.type === 'server_ping') {
       socket.send(JSON.stringify({ type: 'client_ping', sentAt: new Date().toISOString() }));
+      return;
+    }
+    if (message.type === 'server_command') {
+      handleRemoteControlCommand(message, socket);
     }
   };
   socket.onclose = () => {
@@ -189,6 +193,38 @@ function ensureControlSocket() {
     if (state.controlSocket === socket) state.controlSocket = null;
   };
   state.controlSocket = socket;
+}
+
+function handleRemoteControlCommand(message, socket) {
+  const command = String(message?.command ?? '');
+  const commandId = String(message?.commandId ?? '');
+  const ack = (payload) => {
+    if (socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify({ type: 'command_ack', commandId, command, ...payload }));
+  };
+  try {
+    if (command === 'query_status') {
+      ack({ ok: true, mode: state.mode, status: els.micStatus.textContent || state.mode });
+      void reportClientStatus(state.mode, els.micStatus.textContent || state.mode);
+      return;
+    }
+    if (command === 'sleep') {
+      void enterSleep().then(() => ack({ ok: true, mode: 'sleeping', status: els.micStatus.textContent || 'Sleeping.' }));
+      return;
+    }
+    if (command === 'off') {
+      void turnOff().then(() => ack({ ok: true, mode: 'off', status: 'Off.' }));
+      return;
+    }
+    if (command === 'awake') {
+      enterAwake();
+      ack({ ok: true, mode: 'awake', status: els.micStatus.textContent || 'Awake.' });
+      return;
+    }
+    ack({ ok: false, error: 'unknown command' });
+  } catch (err) {
+    ack({ ok: false, error: err?.message ?? String(err) });
+  }
 }
 
 function updateVoiceButtons() {

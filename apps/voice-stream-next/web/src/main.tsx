@@ -28,6 +28,16 @@ type DeviceRecord = {
   tokenHint: string;
   lastSeenAt: string;
   createdAt: string;
+  revokedAt?: string | null;
+};
+
+type PairingSessionRecord = {
+  id: string;
+  userId: string;
+  deviceId: string;
+  expiresAt: string;
+  claimedAt: string | null;
+  createdAt: string;
 };
 
 type LogRecord = {
@@ -93,6 +103,7 @@ type DashboardData = {
   clientStatuses: ClientStatusRecord[];
   approvalCodes: { id: string; code: string; source: string; createdAt: string }[];
   devices: DeviceRecord[];
+  pairingSessions: PairingSessionRecord[];
   adminDevices: DeviceRecord[];
   adminClientStatuses: ClientStatusRecord[];
   stats: { threadCount: number; deviceCount: number; logCount: number };
@@ -220,6 +231,8 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
   const [deviceType, setDeviceType] = React.useState('desktop');
   const [pairingText, setPairingText] = React.useState('');
   const [pairingQr, setPairingQr] = React.useState('');
+  const [pairingExpiresAt, setPairingExpiresAt] = React.useState<string | null>(null);
+  const [pairingDeviceId, setPairingDeviceId] = React.useState<string | null>(null);
   const [codes, setCodes] = React.useState({ unlockCode: '1234', lockCode: '4321', offCode: '0000' });
 
   const activeThread = dashboard?.threads.find((thread) => thread.id === activeThreadId) ?? dashboard?.threads[0] ?? null;
@@ -330,15 +343,113 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
     setBusy(true);
     setError(null);
     try {
-      const data = await client.request<{ ok: true; device: DeviceRecord; token: string; payloadUri: string }>('/api/pairing/payload', {
+      const data = await client.request<{
+        ok: true;
+        device: DeviceRecord;
+        token: string;
+        payloadUri: string;
+        expiresAt: string;
+      }>('/api/pairing/payload', {
         method: 'POST',
         body: JSON.stringify({ deviceType, displayName: deviceName }),
       });
       setPairingText(data.payloadUri);
+      setPairingExpiresAt(data.expiresAt);
+      setPairingDeviceId(data.device.id);
       setPairingQr(await QRCode.toDataURL(data.payloadUri, { margin: 1, width: 220 }));
       await navigator.clipboard?.writeText(data.payloadUri).catch(() => undefined);
       await loadDashboard();
       setNotice(`Created ${data.device.displayName}. Pairing payload copied when clipboard access was available.`);
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copyPairingPayload() {
+    if (!pairingText) return;
+    await navigator.clipboard?.writeText(pairingText);
+    setNotice('Copied pairing payload.');
+  }
+
+  async function sharePairingPayload() {
+    if (!pairingText) return;
+    if (navigator.share) {
+      await navigator.share({
+        title: 'VoiceStream pairing',
+        text: 'Scan or open this VoiceStream pairing payload.',
+        url: pairingText,
+      });
+      setNotice('Shared pairing payload.');
+      return;
+    }
+    await copyPairingPayload();
+  }
+
+  async function revokeDevice(deviceId: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await client.request(`/api/devices/${encodeURIComponent(deviceId)}/revoke`, { method: 'POST', body: '{}' });
+      if (pairingDeviceId === deviceId) {
+        setPairingText('');
+        setPairingQr('');
+        setPairingExpiresAt(null);
+        setPairingDeviceId(null);
+      }
+      await loadDashboard();
+      setNotice('Device revoked.');
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function rotateDeviceToken(deviceId: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await client.request<{
+        ok: true;
+        device: DeviceRecord;
+        payloadUri?: string;
+        expiresAt?: string;
+      }>(`/api/devices/${encodeURIComponent(deviceId)}/rotate-token`, {
+        method: 'POST',
+        body: JSON.stringify({ includePayload: true }),
+      });
+      if (data.payloadUri) {
+        setPairingText(data.payloadUri);
+        setPairingExpiresAt(data.expiresAt ?? null);
+        setPairingDeviceId(data.device.id);
+        setPairingQr(await QRCode.toDataURL(data.payloadUri, { margin: 1, width: 220 }));
+        await navigator.clipboard?.writeText(data.payloadUri).catch(() => undefined);
+      }
+      await loadDashboard();
+      setNotice(`Rotated token for ${data.device.displayName}.`);
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function sendDeviceCommand(deviceId: string, command: 'sleep' | 'off' | 'awake' | 'query_status') {
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await client.request<{ ok: true; delivered: boolean; ack?: { status?: string; mode?: string } }>(
+        `/api/devices/${encodeURIComponent(deviceId)}/command`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ command }),
+        },
+      );
+      const detail = data.ack?.status ? ` ${data.ack.status}` : '';
+      setNotice(data.delivered ? `Sent ${command}.${detail}` : `Device is offline; ${command} was not delivered.`);
+      await loadDashboard();
     } catch (err: any) {
       setError(err?.message ?? String(err));
     } finally {
@@ -505,13 +616,57 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
             {pairingText ? (
               <div className="pairing-payload">
                 <small>QR / pairing payload</small>
+                {pairingExpiresAt ? <div className="pairing-meta">Expires {timeLabel(pairingExpiresAt)}</div> : null}
                 {pairingQr ? <img src={pairingQr} alt="Device pairing QR" /> : null}
                 <textarea readOnly value={pairingText} onFocus={(event) => event.currentTarget.select()} />
-                <button type="button" onClick={() => void navigator.clipboard?.writeText(pairingText)}>
-                  Copy Payload
-                </button>
+                <div className="pairing-actions">
+                  <button type="button" onClick={() => void copyPairingPayload()}>
+                    Copy Payload
+                  </button>
+                  <button type="button" onClick={() => void sharePairingPayload()}>
+                    Share
+                  </button>
+                </div>
               </div>
             ) : null}
+          </section>
+
+          <section className="panel">
+            <h2>Your Devices</h2>
+            <div className="device-list">
+              {(dashboard?.devices ?? []).map((device) => {
+                const status = dashboard?.clientStatuses.find((entry) => entry.deviceId === device.id);
+                const pairing = dashboard?.pairingSessions.find((entry) => entry.deviceId === device.id);
+                return (
+                  <article key={device.id} className="device-row managed-device-row">
+                    <div>
+                      <strong>{device.displayName}</strong>
+                      <span>{device.deviceType}</span>
+                      <span>{status ? `${status.mode} / ${status.status}` : 'No live status'}</span>
+                      {pairing && !pairing.claimedAt ? <span>Pairing expires {timeLabel(pairing.expiresAt)}</span> : null}
+                    </div>
+                    <div className="device-actions">
+                      <button type="button" disabled={busy} onClick={() => void sendDeviceCommand(device.id, 'query_status')}>
+                        Query
+                      </button>
+                      <button type="button" disabled={busy} onClick={() => void sendDeviceCommand(device.id, 'sleep')}>
+                        Sleep
+                      </button>
+                      <button type="button" disabled={busy} onClick={() => void sendDeviceCommand(device.id, 'off')}>
+                        Off
+                      </button>
+                      <button type="button" disabled={busy} onClick={() => void rotateDeviceToken(device.id)}>
+                        Rotate
+                      </button>
+                      <button type="button" disabled={busy} onClick={() => void revokeDevice(device.id)}>
+                        Revoke
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
+              {dashboard?.devices.length === 0 ? <div className="empty-note">No paired devices yet.</div> : null}
+            </div>
           </section>
         </aside>
       </section>
@@ -789,6 +944,10 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
       const message = JSON.parse(event.data);
       if (message.type === 'server_ping') {
         socket.send(JSON.stringify({ type: 'client_ping', sentAt: new Date().toISOString() }));
+        return;
+      }
+      if (message.type === 'server_command') {
+        void handleRemoteControlCommand(message, socket);
       }
     };
     socket.onclose = () => {
@@ -798,6 +957,40 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
       if (controlSocketRef.current === socket) controlSocketRef.current = null;
     };
     controlSocketRef.current = socket;
+  }
+
+  async function handleRemoteControlCommand(message: any, socket: WebSocket) {
+    const command = String(message?.command ?? '');
+    const commandId = String(message?.commandId ?? '');
+    const ack = (payload: Record<string, unknown>) => {
+      if (socket.readyState !== WebSocket.OPEN) return;
+      socket.send(JSON.stringify({ type: 'command_ack', commandId, command, ...payload }));
+    };
+    try {
+      if (command === 'query_status') {
+        ack({ ok: true, mode: modeRef.current, status });
+        void reportDesktopStatus(modeRef.current, status);
+        return;
+      }
+      if (command === 'sleep') {
+        enterSleep();
+        ack({ ok: true, mode: 'sleeping', status: 'Sleeping.' });
+        return;
+      }
+      if (command === 'off') {
+        turnOff();
+        ack({ ok: true, mode: 'off', status: 'Off.' });
+        return;
+      }
+      if (command === 'awake') {
+        enterAwake();
+        ack({ ok: true, mode: 'awake', status: 'Awake.' });
+        return;
+      }
+      ack({ ok: false, error: 'unknown command' });
+    } catch (err: any) {
+      ack({ ok: false, error: err?.message ?? String(err) });
+    }
   }
 
   async function startVoice(target: VoiceStreamTarget = 'assistant') {

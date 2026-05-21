@@ -15,8 +15,13 @@ import {
   MAX_STREAM_DURATION_MS,
   VOICE_STREAM_PROTOCOL_VERSION,
   VoiceCloseCode,
+  parseControlClientMessage,
   parseVoiceClientMessage,
+  type ControlCommand,
 } from './protocol.js';
+import { buildPairingPayload, minClientVersion, pairingExpiresAt, parseClientVersion } from './pairing.js';
+import { ControlChannelRegistry } from './control-channel.js';
+import type { DeviceAuthResult } from './db.js';
 
 type AppOptions = {
   logger?: boolean;
@@ -78,25 +83,50 @@ function serverPublicUrl(req: FastifyRequest): string {
   return `${proto}://${host}`.replace(/\/+$/, '');
 }
 
-function pairingPayload(serverUrl: string, input: { deviceId: string; token: string; deviceType: string; displayName: string }): { payload: any; payloadUri: string } {
-  const payload = {
-    version: 1,
-    serverUrl,
-    deviceId: input.deviceId,
-    token: input.token,
-    deviceType: input.deviceType,
-    displayName: input.displayName,
-    protocolVersion: VOICE_STREAM_PROTOCOL_VERSION,
-    minClientVersion: 1,
-  };
-  const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(payload)) {
-    params.set(key, String(value));
+function deviceAuthFailureMessage(result: Extract<DeviceAuthResult, { ok: false }>): string {
+  switch (result.reason) {
+    case 'revoked':
+      return 'device revoked';
+    case 'pairing_expired':
+      return 'pairing payload expired';
+    case 'client_too_old':
+      return `client version below minimum ${result.minClientVersion ?? minClientVersion()}`;
+    case 'invalid_token':
+      return 'invalid device token';
+    default:
+      return 'unknown device';
   }
-  return {
-    payload,
-    payloadUri: `voicestream://pair?${params.toString()}`,
-  };
+}
+
+function deviceAuthCloseCode(result: Extract<DeviceAuthResult, { ok: false }>): number {
+  switch (result.reason) {
+    case 'revoked':
+      return VoiceCloseCode.Revoked;
+    case 'pairing_expired':
+      return VoiceCloseCode.PairingExpired;
+    case 'client_too_old':
+      return VoiceCloseCode.ClientTooOld;
+    default:
+      return VoiceCloseCode.Unauthorized;
+  }
+}
+
+function verifyDeviceAuth(
+  db: VoiceStreamNextDb,
+  deviceId: string,
+  token: string,
+  clientVersion?: number | null,
+): DeviceAuthResult {
+  return db.verifyDeviceToken(deviceId, token, {
+    clientVersion,
+    minClientVersion: minClientVersion(),
+  });
+}
+
+function cleanControlCommand(raw: unknown): ControlCommand {
+  const value = cleanText(raw).toLowerCase();
+  if (value === 'sleep' || value === 'off' || value === 'awake' || value === 'query_status') return value;
+  throw Object.assign(new Error('command must be sleep, off, awake, or query_status'), { statusCode: 400 });
 }
 
 function concatChunks(chunks: Uint8Array[], totalBytes: number): Uint8Array {
@@ -129,6 +159,7 @@ async function withUser<T>(
 export async function buildApp(options: AppOptions = {}): Promise<{ app: FastifyInstance; db: VoiceStreamNextDb; port: number }> {
   const app = Fastify({ logger: options.logger ?? true });
   const db = new VoiceStreamNextDb();
+  const controlChannels = new ControlChannelRegistry();
   const clerkEnabled = Boolean(process.env.CLERK_SECRET_KEY?.trim());
   const port = parsePort(process.env.VOICE_STREAM_NEXT_API_PORT ?? process.env.PORT, 3299);
 
@@ -222,20 +253,130 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       const deviceType = cleanText(body.deviceType, 'android') || 'android';
       const displayName = cleanText(body.displayName, deviceType === 'desktop' ? 'Desktop voice client' : 'Android voice client');
       const result = db.registerDevice(ctx.user.id, { deviceType, displayName });
-      const payload = pairingPayload(serverPublicUrl(req), {
+      const expiresAt = pairingExpiresAt();
+      const pairingSession = db.createPairingSession(ctx.user.id, result.device.id, expiresAt);
+      const payload = buildPairingPayload({
+        serverUrl: serverPublicUrl(req),
         deviceId: result.device.id,
         token: result.token,
         deviceType,
         displayName,
+        protocolVersion: VOICE_STREAM_PROTOCOL_VERSION,
+        expiresAt,
+        pairingSessionId: pairingSession.id,
       });
       db.addLog(ctx.user.id, {
         deviceId: result.device.id,
         source: 'web',
         level: 'info',
         message: `Pairing payload created: ${displayName}`,
-        detailsJson: JSON.stringify({ deviceType }),
+        detailsJson: JSON.stringify({ deviceType, expiresAt, pairingSessionId: pairingSession.id }),
       });
-      return { ok: true, device: result.device, token: result.token, ...payload };
+      return {
+        ok: true,
+        device: result.device,
+        token: result.token,
+        pairingSession,
+        expiresAt,
+        minClientVersion: minClientVersion(),
+        ...payload,
+      };
+    }),
+  );
+
+  app.get('/api/devices', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => ({
+      ok: true,
+      devices: db.listDevices(ctx.user.id),
+      pairingSessions: db.listDevices(ctx.user.id).map((device) => db.pairingSessionForDevice(device.id)).filter(Boolean),
+      clientStatuses: db.listClientStatuses(ctx.user.id),
+      connectedDeviceIds: controlChannels.connectedDeviceIds().filter((deviceId) => Boolean(db.deviceForUser(ctx.user.id, deviceId))),
+    })),
+  );
+
+  app.post('/api/devices/:deviceId/revoke', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const deviceId = String((req.params as any).deviceId ?? '');
+      const device = db.revokeDevice(ctx.user.id, deviceId);
+      if (!device) throw Object.assign(new Error('unknown device'), { statusCode: 404 });
+      controlChannels.closeDevice(deviceId);
+      db.upsertClientStatus(ctx.user.id, deviceId, {
+        mode: 'off',
+        status: 'Device revoked',
+        protocolVersion: VOICE_STREAM_PROTOCOL_VERSION,
+      });
+      db.addLog(ctx.user.id, {
+        deviceId,
+        source: 'web',
+        level: 'info',
+        message: `Device revoked: ${device.displayName}`,
+      });
+      return { ok: true, device };
+    }),
+  );
+
+  app.post('/api/devices/:deviceId/rotate-token', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const deviceId = String((req.params as any).deviceId ?? '');
+      const rotated = db.rotateDeviceToken(ctx.user.id, deviceId);
+      if (!rotated) throw Object.assign(new Error('unknown device'), { statusCode: 404 });
+      controlChannels.closeDevice(deviceId, VoiceCloseCode.Revoked, 'token rotated');
+      const body = jsonBody(req);
+      const includePayload = body.includePayload !== false;
+      const deviceType = cleanText(body.deviceType, rotated.device.deviceType) || rotated.device.deviceType;
+      const displayName = cleanText(body.displayName, rotated.device.displayName) || rotated.device.displayName;
+      let payload: ReturnType<typeof buildPairingPayload> | null = null;
+      let pairingSession: ReturnType<VoiceStreamNextDb['createPairingSession']> | null = null;
+      let expiresAt: string | null = null;
+      if (includePayload) {
+        expiresAt = pairingExpiresAt();
+        pairingSession = db.createPairingSession(ctx.user.id, rotated.device.id, expiresAt);
+        payload = buildPairingPayload({
+          serverUrl: serverPublicUrl(req),
+          deviceId: rotated.device.id,
+          token: rotated.token,
+          deviceType,
+          displayName,
+          protocolVersion: VOICE_STREAM_PROTOCOL_VERSION,
+          expiresAt,
+          pairingSessionId: pairingSession.id,
+        });
+      }
+      db.addLog(ctx.user.id, {
+        deviceId,
+        source: 'web',
+        level: 'info',
+        message: `Device token rotated: ${rotated.device.displayName}`,
+      });
+      return {
+        ok: true,
+        device: rotated.device,
+        token: rotated.token,
+        pairingSession,
+        expiresAt,
+        minClientVersion: minClientVersion(),
+        ...(payload ?? {}),
+      };
+    }),
+  );
+
+  app.post('/api/devices/:deviceId/command', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const deviceId = String((req.params as any).deviceId ?? '');
+      const device = db.deviceForUser(ctx.user.id, deviceId);
+      if (!device || device.revokedAt) throw Object.assign(new Error('unknown device'), { statusCode: 404 });
+      const body = jsonBody(req);
+      const command = cleanControlCommand(body.command);
+      const reason = cleanText(body.reason, 'dashboard') || 'dashboard';
+      const result = await controlChannels.sendCommand(deviceId, command, reason);
+      db.addLog(ctx.user.id, {
+        deviceId,
+        source: 'web',
+        level: result.delivered ? 'info' : 'warn',
+        message: result.delivered ? `Remote command sent: ${command}` : `Remote command not delivered: ${command}`,
+        detailsJson: JSON.stringify(result),
+      });
+      return { ok: true, ...result };
     }),
   );
 
@@ -279,11 +420,18 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     const deviceId = String((req.params as any).deviceId ?? '');
     const body = jsonBody(req);
     const token = cleanText(body.token || req.headers['x-voice-device-token']);
-    const device = db.verifyDeviceToken(deviceId, token);
-    if (!device) {
-      reply.code(401).send({ ok: false, error: 'invalid device token' });
+    const clientVersion = parseClientVersion(body.clientVersion, parseClientVersion(body.protocolVersion, null));
+    const auth = verifyDeviceAuth(db, deviceId, token, clientVersion);
+    if (!auth.ok) {
+      reply.code(auth.reason === 'client_too_old' ? 426 : 401).send({
+        ok: false,
+        error: deviceAuthFailureMessage(auth),
+        reason: auth.reason,
+        minClientVersion: auth.reason === 'client_too_old' ? auth.minClientVersion : undefined,
+      });
       return;
     }
+    const device = auth.device;
     const status = db.upsertClientStatus(device.userId, device.id, {
       mode: cleanDeviceMode(body.mode),
       status: cleanText(body.status, 'No status') || 'No status',
@@ -299,45 +447,56 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
   app.get('/api/devices/:deviceId/control', { websocket: true }, (socket, req) => {
     const deviceId = String((req.params as any).deviceId ?? '');
     const token = queryValue((req.query as any)?.token);
-    const device = db.verifyDeviceToken(deviceId, token);
-    if (!device) {
-      socket.close(VoiceCloseCode.Unauthorized, 'invalid device token');
+    const clientVersion = parseClientVersion((req.query as any)?.clientVersion, parseClientVersion((req.query as any)?.protocolVersion, null));
+    const auth = verifyDeviceAuth(db, deviceId, token, clientVersion);
+    if (!auth.ok) {
+      socket.close(deviceAuthCloseCode(auth), deviceAuthFailureMessage(auth));
       return;
     }
-    socket.send(JSON.stringify({ type: 'control_hello', protocolVersion: VOICE_STREAM_PROTOCOL_VERSION }));
+    const device = auth.device;
+    controlChannels.register(deviceId, socket);
+    socket.send(JSON.stringify({
+      type: 'control_hello',
+      protocolVersion: VOICE_STREAM_PROTOCOL_VERSION,
+      minClientVersion: minClientVersion(),
+      commands: ['sleep', 'off', 'awake', 'query_status'],
+    }));
     const heartbeat = setInterval(() => {
       if ((socket as any).readyState === 1) {
         socket.send(JSON.stringify({ type: 'server_ping', sentAt: new Date().toISOString() }));
       }
     }, HEARTBEAT_INTERVAL_MS);
     socket.on('message', (data) => {
-      let message: any = null;
-      try {
-        message = JSON.parse(String(data));
-      } catch {
+      const parsed = parseControlClientMessage(String(data));
+      if (!parsed) {
         socket.close(VoiceCloseCode.InvalidMessage, 'invalid control message');
         return;
       }
-      if (message?.type === 'client_ping') {
-        socket.send(JSON.stringify({ type: 'server_pong', sentAt: new Date().toISOString(), clientSentAt: message.sentAt }));
+      if (parsed.type === 'client_ping') {
+        socket.send(JSON.stringify({ type: 'server_pong', sentAt: new Date().toISOString(), clientSentAt: parsed.sentAt }));
         return;
       }
-      if (message?.type === 'client_status') {
+      if (parsed.type === 'client_status') {
         db.upsertClientStatus(device.userId, device.id, {
-          mode: cleanDeviceMode(message.mode),
-          status: cleanText(message.status, 'No status') || 'No status',
-          microphone: cleanText(message.microphone),
-          protocolVersion: Number.isInteger(message.protocolVersion) ? message.protocolVersion : null,
-          appVersion: cleanText(message.appVersion) || null,
-          lastError: cleanText(message.lastError) || null,
-          reportedAt: cleanText(message.reportedAt) || null,
+          mode: cleanDeviceMode(parsed.mode),
+          status: cleanText(parsed.status, 'No status') || 'No status',
+          microphone: cleanText(parsed.microphone),
+          protocolVersion: parsed.protocolVersion ?? null,
+          appVersion: cleanText(parsed.appVersion) || null,
+          lastError: cleanText(parsed.lastError) || null,
+          reportedAt: cleanText(parsed.reportedAt) || null,
         });
+        return;
+      }
+      if (parsed.type === 'command_ack') {
+        controlChannels.handleCommandAck(device.id, parsed);
         return;
       }
       socket.close(VoiceCloseCode.InvalidMessage, 'unknown control message');
     });
     socket.on('close', () => {
       clearInterval(heartbeat);
+      controlChannels.unregister(deviceId, socket);
       db.upsertClientStatus(device.userId, device.id, {
         mode: 'off',
         status: 'Control channel closed',
@@ -434,12 +593,12 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     const token = queryValue(query.token);
     const requestedSessionId = queryValue(query.sessionId);
     const streamMode = cleanVoiceStreamMode(queryValue(query.mode));
-    const verifiedDevice = db.verifyDeviceToken(deviceId, token);
-    if (!verifiedDevice) {
-      socket.close(VoiceCloseCode.Unauthorized, 'invalid device token');
+    const verifiedDevice = verifyDeviceAuth(db, deviceId, token, parseClientVersion(query.clientVersion, parseClientVersion(query.protocolVersion, null)));
+    if (!verifiedDevice.ok) {
+      socket.close(deviceAuthCloseCode(verifiedDevice), deviceAuthFailureMessage(verifiedDevice));
       return;
     }
-    const device = verifiedDevice;
+    const device = verifiedDevice.device;
 
     let frames = 0;
     let bytes = 0;

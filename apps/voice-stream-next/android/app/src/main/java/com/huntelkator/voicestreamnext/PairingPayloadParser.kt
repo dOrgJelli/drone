@@ -11,6 +11,8 @@ data class PairingConfig(
     val deviceName: String? = null,
     val deviceType: String? = null,
     val minClientVersion: Long? = null,
+    val expiresAt: String? = null,
+    val pairingSessionId: String? = null,
 )
 
 object PairingPayloadParser {
@@ -37,6 +39,8 @@ object PairingPayloadParser {
             deviceName = params["displayName"]?.takeIf { it.isNotBlank() },
             deviceType = params["deviceType"]?.takeIf { it.isNotBlank() },
             minClientVersion = params["minClientVersion"]?.toLongOrNull(),
+            expiresAt = params["expiresAt"]?.takeIf { it.isNotBlank() },
+            pairingSessionId = params["pairingSessionId"]?.takeIf { it.isNotBlank() },
         )
     }
 
