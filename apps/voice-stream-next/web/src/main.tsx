@@ -85,7 +85,7 @@ const desktopDeviceStorageKey = 'voiceStreamNext.desktopDevice';
 
 declare global {
   interface Window {
-    voiceStreamDesktop?: { isDesktop?: boolean };
+    voiceStreamDesktop?: { isDesktop?: boolean; writeClipboard?: (text: string) => void };
   }
 }
 
@@ -493,9 +493,10 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
 function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh: () => Promise<void> }) {
   const [deviceName, setDeviceName] = React.useState('Electron desktop');
   const [status, setStatus] = React.useState('Ready');
-  const [mode, setMode] = React.useState<'off' | 'awake' | 'sleeping' | 'recording'>('off');
+  const [mode, setMode] = React.useState<VoiceMode>('off');
   const [phrase, setPhrase] = React.useState('');
   const [streaming, setStreaming] = React.useState(false);
+  const [voiceSettings, setVoiceSettings] = React.useState<VoiceSettings | null>(null);
   const [device, setDevice] = React.useState<{ id: string; token: string } | null>(() => {
     try {
       return JSON.parse(localStorage.getItem(desktopDeviceStorageKey) || 'null');
@@ -508,7 +509,35 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
     stream?: MediaStream;
     context?: AudioContext;
     processor?: ScriptProcessorNode;
+    recognition?: any;
   }>({});
+  const modeRef = React.useRef(mode);
+  const streamingRef = React.useRef(streaming);
+  const lastRecognizedRef = React.useRef({ text: '', at: 0 });
+
+  React.useEffect(() => {
+    void loadVoiceSettings();
+  }, []);
+
+  React.useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
+
+  React.useEffect(() => {
+    streamingRef.current = streaming;
+  }, [streaming]);
+
+  async function loadVoiceSettings(): Promise<VoiceSettings> {
+    const data = await client.request<{ ok: true; settings: { unlockCode: string; lockCode: string; lockedOffCode: string } }>('/api/settings/voice-approval');
+    const next = {
+      unlockCode: data.settings.unlockCode,
+      lockCode: data.settings.lockCode,
+      offCode: data.settings.lockedOffCode,
+      updatedAt: '',
+    };
+    setVoiceSettings(next);
+    return next;
+  }
 
   async function pairDesktop() {
     const data = await client.request<{ ok: true; device: DeviceRecord; token: string }>('/api/devices', {
@@ -522,7 +551,8 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
     await onRefresh();
   }
 
-  async function startVoice() {
+  async function startVoice(target: VoiceStreamTarget = 'assistant') {
+    stopWakeListener();
     let activeDevice = device;
     if (!activeDevice) {
       await pairDesktop();
@@ -531,36 +561,48 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
     if (!activeDevice) return;
     const session = await client.request<{ ok: true; session: { id: string } }>('/api/voice/sessions', {
       method: 'POST',
-      body: JSON.stringify({ deviceId: activeDevice.id }),
+      body: JSON.stringify({ deviceId: activeDevice.id, mode: target }),
     });
     const media = await navigator.mediaDevices.getUserMedia({ audio: true });
     const context = new AudioContext({ sampleRate: 16_000 });
     const source = context.createMediaStreamSource(media);
     const processor = context.createScriptProcessor(4096, 1, 1);
-    const socket = openDesktopVoiceSocket(activeDevice, session.session.id);
+    const socket = openDesktopVoiceSocket(activeDevice, session.session.id, target);
     socket.onopen = () => {
-      socket.send(JSON.stringify({ type: 'client_hello', protocolVersion: 1, client: 'electron-web' }));
+      socket.send(JSON.stringify({ type: 'client_hello', protocolVersion: 1, client: 'electron-web', mode: target }));
     };
     processor.onaudioprocess = (event) => {
       if (socket.readyState !== WebSocket.OPEN) return;
       socket.send(floatToPcm16(event.inputBuffer.getChannelData(0)));
     };
-    socket.onmessage = (event) => {
+    socket.onmessage = async (event) => {
       if (typeof event.data === 'string') {
         try {
           const message = JSON.parse(event.data);
           if (message.type === 'assistant_result') {
             setStatus(`Transcript: ${message.transcript || 'empty'} / Reply: ${message.assistantText || 'empty'}`);
-            const approvalCode = approvalCodeFromText(message.transcript || '');
-            if (approvalCode) {
-              void client.request('/api/voice/approval-codes', {
-                method: 'POST',
-                body: JSON.stringify({ code: approvalCode, source: 'desktop' }),
-              });
+            setStreaming(false);
+            setMode('awake');
+            void onRefresh();
+          } else if (message.type === 'transcript_result') {
+            setStatus(message.status || 'Transcript patched into chat.');
+            setStreaming(false);
+            setMode('awake');
+            void onRefresh();
+          } else if (message.type === 'sleep') {
+            if (target === 'clipboard') {
+              const copied = await copyText(message.transcriptText || '');
+              setStatus(copied ? 'Copied voice transcription.' : 'No voice transcription detected.');
+            } else {
+              setStatus('Awake. Waiting for wake phrase.');
             }
+            setStreaming(false);
+            setMode('awake');
             void onRefresh();
           } else if (message.type === 'assistant_error') {
             setStatus(message.error || 'Voice runtime failed.');
+            setStreaming(false);
+            setMode('awake');
           } else if (message.type === 'server_ping') {
             socket.send(JSON.stringify({ type: 'client_ping', sentAt: new Date().toISOString() }));
           }
@@ -577,41 +619,57 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
     refs.current = { socket, stream: media, context, processor };
     setStreaming(true);
     setMode('recording');
-    setStatus('Streaming desktop microphone.');
+    setStatus(recordingStatus(target));
   }
 
-  async function stopVoice() {
-    refs.current.socket?.send(JSON.stringify({ type: 'end' }));
-    setTimeout(() => refs.current.socket?.close(), 1200);
+  async function stopVoice(nextMode: VoiceMode = 'awake') {
+    const socket = refs.current.socket;
+    socket?.send(JSON.stringify({ type: 'end' }));
+    setTimeout(() => socket?.close(), 1200);
     refs.current.processor?.disconnect();
     refs.current.stream?.getTracks().forEach((track) => track.stop());
     await refs.current.context?.close().catch(() => undefined);
     refs.current = {};
     setStreaming(false);
-    setMode('awake');
+    setMode(nextMode);
     setStatus('Voice stream stopped.');
+    if (nextMode !== 'off') startWakeListener();
   }
 
   function enterAwake() {
     setMode('awake');
-    setStatus('Awake. Say or enter "hey sebastian" to start recording.');
+    startWakeListener();
   }
 
   function enterSleep() {
-    if (streaming) void stopVoice();
+    if (streaming) void stopVoice('sleeping');
     setMode('sleeping');
-    setStatus('Sleeping.');
+    const settings = voiceSettings;
+    setStatus(settings ? `Sleep: ${settings.unlockCode} awake, ${settings.offCode} off.` : 'Sleeping.');
+    startWakeListener();
   }
 
   function turnOff() {
-    if (streaming) void stopVoice();
+    if (streaming) void stopVoice('off');
+    stopWakeListener();
     setMode('off');
     setStatus('Off.');
   }
 
   async function processWakePhrase() {
-    const match = wakePhraseMatch(phrase);
+    const text = phrase;
     setPhrase('');
+    await processPhraseText(text);
+  }
+
+  async function processPhraseText(text: string) {
+    const currentMode = modeRef.current;
+    const approvalCode = approvalCodeFromText(text);
+    if (approvalCode) {
+      await processApprovalCode(approvalCode);
+      return;
+    }
+    const match = wakePhraseMatch(text);
     if (!match) {
       setStatus('No wake command matched.');
       return;
@@ -621,15 +679,95 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
       return;
     }
     if (match === 'status') {
-      setStatus(`Mode: ${mode}. Device: ${device?.id ? device.id.slice(0, 12) : 'unpaired'}.`);
+      setStatus(`Mode: ${currentMode}. Device: ${device?.id ? device.id.slice(0, 12) : 'unpaired'}.`);
       return;
     }
-    if (mode === 'sleeping') {
+    if (currentMode === 'sleeping') {
       setStatus('Sleeping. Wake the app manually first.');
       return;
     }
-    if (mode === 'off') enterAwake();
-    await startVoice();
+    if (currentMode === 'off') enterAwake();
+    await startVoice(match === 'patch' || match === 'clipboard' ? match : 'assistant');
+  }
+
+  function startWakeListener() {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setStatus('Awake. Type a wake phrase for this desktop runtime.');
+      return;
+    }
+    if (refs.current.recognition) {
+      setStatus('Awake. Listening for wake phrases.');
+      return;
+    }
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = 'en-US';
+    recognition.onresult = (event: any) => {
+      const result = event.results[event.results.length - 1];
+      const text = result?.[0]?.transcript?.trim();
+      if (!text) return;
+      const now = Date.now();
+      if (text === lastRecognizedRef.current.text && now - lastRecognizedRef.current.at < 1500) return;
+      lastRecognizedRef.current = { text, at: now };
+      void processPhraseText(text);
+    };
+    recognition.onerror = () => setStatus('Wake listener paused. Type a wake phrase if needed.');
+    recognition.onend = () => {
+      refs.current.recognition = undefined;
+      if (modeRef.current !== 'off' && !streamingRef.current) {
+        window.setTimeout(() => startWakeListener(), 350);
+      }
+    };
+    refs.current.recognition = recognition;
+    try {
+      recognition.start();
+      setStatus('Awake. Listening for wake phrases.');
+    } catch {
+      refs.current.recognition = undefined;
+      setStatus('Awake. Type a wake phrase for this desktop runtime.');
+    }
+  }
+
+  function stopWakeListener() {
+    const recognition = refs.current.recognition;
+    if (!recognition) return;
+    recognition.onend = null;
+    refs.current.recognition = undefined;
+    try {
+      recognition.stop();
+    } catch {
+      // Ignore SpeechRecognition stop errors from already-ended sessions.
+    }
+  }
+
+  async function processApprovalCode(code: string) {
+    const settings = voiceSettings ?? await loadVoiceSettings();
+    const currentMode = modeRef.current;
+    if (currentMode === 'sleeping' && code === settings.unlockCode) {
+      setMode('awake');
+      setStatus('Unlocked.');
+      return;
+    }
+    if (code === settings.offCode) {
+      turnOff();
+      return;
+    }
+    if (currentMode !== 'sleeping' && code === settings.lockCode) {
+      enterSleep();
+      return;
+    }
+    if (currentMode === 'sleeping') {
+      setStatus(`Sleep: ${settings.unlockCode} awake, ${settings.offCode} off.`);
+      return;
+    }
+    await client.request('/api/voice/approval-codes', {
+      method: 'POST',
+      body: JSON.stringify({ code, source: 'desktop' }),
+    });
+    setStatus(`Approval sent: ${code}.`);
+    await onRefresh();
   }
 
   return (
@@ -673,6 +811,9 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
   );
 }
 
+type VoiceMode = 'off' | 'awake' | 'sleeping' | 'recording';
+type VoiceStreamTarget = 'assistant' | 'patch' | 'clipboard';
+
 function wakePhraseMatch(text: string): 'start' | 'patch' | 'clipboard' | 'sleep' | 'status' | null {
   const words = text.toLowerCase().split(/[^a-z]+/).filter(Boolean);
   const compact = words.join('');
@@ -694,12 +835,35 @@ function approvalCodeFromText(text: string): string | null {
   return digits.length >= 4 ? digits : null;
 }
 
-function openDesktopVoiceSocket(device: { id: string; token: string }, sessionId: string): WebSocket {
+function recordingStatus(target: VoiceStreamTarget): string {
+  if (target === 'patch') return 'Patching voice transcript into chat.';
+  if (target === 'clipboard') return 'Recording clipboard transcription.';
+  return 'Streaming desktop microphone.';
+}
+
+async function copyText(text: string): Promise<boolean> {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (window.voiceStreamDesktop?.writeClipboard) {
+    window.voiceStreamDesktop.writeClipboard(trimmed);
+    return true;
+  }
+  if (!navigator.clipboard) return false;
+  try {
+    await navigator.clipboard.writeText(trimmed);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function openDesktopVoiceSocket(device: { id: string; token: string }, sessionId: string, target: VoiceStreamTarget): WebSocket {
   const url = new URL('/api/voice/stream', window.location.href);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   url.searchParams.set('deviceId', device.id);
   url.searchParams.set('token', device.token);
   url.searchParams.set('sessionId', sessionId);
+  url.searchParams.set('mode', target);
   return new WebSocket(url);
 }
 

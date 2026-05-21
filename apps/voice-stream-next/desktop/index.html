@@ -80,9 +80,16 @@
               <div id="meterBar" class="meter-bar"></div>
             </div>
             <div class="voice-actions">
-              <button id="startMicButton" class="primary" type="button">Start</button>
+              <button id="awakeButton" type="button">Awake</button>
+              <button id="startMicButton" class="primary" type="button">Record</button>
+              <button id="sleepButton" type="button">Sleep</button>
               <button id="stopMicButton" type="button" disabled>Stop</button>
+              <button id="offButton" type="button">Off</button>
             </div>
+            <form id="wakePhraseForm" class="composer">
+              <input id="wakePhraseInput" placeholder="Type wake phrase or approval code" autocomplete="off" />
+              <button type="submit">Run</button>
+            </form>
             <p id="micStatus" class="muted">Pair this desktop, then start a capture session.</p>
           </section>
 
