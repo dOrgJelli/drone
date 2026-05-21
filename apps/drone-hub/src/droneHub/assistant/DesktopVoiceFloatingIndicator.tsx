@@ -25,10 +25,9 @@ export function DesktopVoiceFloatingIndicator() {
   if (status.mode === 'off' || status.suspended?.active || clipboardBusy) return null;
 
   const active = isDesktopAssistantVoiceActive(status);
-  const sleeping = status.mode === 'dormant';
-  const locked = status.mode === 'locked';
+  const sleeping = status.mode === 'sleeping';
   const busy = isDesktopAssistantVoiceBusy(status);
-  const awake = active && !sleeping && !locked;
+  const awake = active && !sleeping;
   const controlTitle = desktopAssistantVoiceControlTitle(status);
   const controlLabel = desktopAssistantVoiceControlLabel(status);
 
@@ -40,7 +39,7 @@ export function DesktopVoiceFloatingIndicator() {
       <button
         type="button"
         onClick={dispatchAssistantDesktopVoiceToggle}
-        aria-pressed={active && status.mode !== 'dormant'}
+        aria-pressed={active && status.mode !== 'sleeping'}
         aria-label="Toggle desktop assistant voice awake or sleep"
         title={controlTitle}
         className={`relative flex h-10 w-10 items-center justify-center rounded-full border transition-all duration-300 ${
@@ -48,9 +47,7 @@ export function DesktopVoiceFloatingIndicator() {
             ? 'border-[rgba(255,90,90,.5)] bg-[rgba(255,90,90,.1)] text-[var(--red)] hover:bg-[rgba(255,90,90,.14)]'
             : sleeping
               ? 'border-[rgba(148,163,184,.42)] bg-[rgba(148,163,184,.08)] text-[var(--muted)] hover:border-[var(--accent-muted)] hover:text-[var(--fg-secondary)]'
-              : locked
-                ? 'border-[rgba(251,191,36,.45)] bg-[rgba(251,191,36,.1)] text-[rgb(251,191,36)] shadow-[0_0_18px_rgba(251,191,36,.18)]'
-                : 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)] shadow-[0_0_22px_rgba(45,212,191,.34)] hover:bg-[rgba(45,212,191,.14)]'
+              : 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)] shadow-[0_0_22px_rgba(45,212,191,.34)] hover:bg-[rgba(45,212,191,.14)]'
         }`}
       >
         {awake ? (

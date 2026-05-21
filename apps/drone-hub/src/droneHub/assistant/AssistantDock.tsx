@@ -1516,13 +1516,13 @@ function AssistantThreadSidebar({
           <button
             type="button"
             onClick={onToggleDesktopVoice}
-            aria-pressed={desktopVoiceActive && desktopVoiceStatus.mode !== 'dormant'}
+            aria-pressed={desktopVoiceActive && desktopVoiceStatus.mode !== 'sleeping'}
             aria-label="Toggle desktop assistant voice awake or sleep"
             title={desktopVoiceMainTitle}
             className={`relative flex h-16 w-16 items-center justify-center rounded-full border transition-all duration-200 ${
               desktopVoiceStatus.mode === 'error'
                 ? 'border-[rgba(255,90,90,.5)] bg-[rgba(255,90,90,.1)] text-[var(--red)]'
-                : desktopVoiceStatus.mode === 'dormant'
+                : desktopVoiceStatus.mode === 'sleeping'
                   ? 'border-[rgba(148,163,184,.45)] bg-[rgba(148,163,184,.08)] text-[var(--muted)]'
                 : desktopVoiceActive
                   ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)] shadow-[0_0_24px_rgba(45,212,191,.22)]'
@@ -3439,25 +3439,25 @@ export function AssistantDock() {
             <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
               {activeThread ? <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${assistantThreadStatusTone(activeThread.status)}`} /> : null}
               <span className="truncate">{assistantThreadStatusLabel(activeThread?.status, loading ? 'loading' : 'idle')}</span>
-              {voiceEnabled && voiceAndroidMode === 'listening' ? (
+              {voiceEnabled && voiceAndroidMode === 'awake' ? (
                 <span
                   className="inline-flex h-5 flex-shrink-0 items-center gap-1 rounded-full border border-[rgba(74,222,128,.32)] bg-[rgba(74,222,128,.08)] px-1.5 text-[9px] font-semibold text-[var(--green)]"
-                  title={voiceAndroidStatus || 'Android app listening for wake phrase'}
+                  title={voiceAndroidStatus || 'Android app awake and waiting for wake phrase'}
                 >
                   <span className="h-1.5 w-1.5 rounded-full bg-[var(--green)]" />
-                  Listening
+                  Awake
                 </span>
               ) : null}
-              {voiceEnabled && voiceAndroidMode === 'streaming' ? (
+              {voiceEnabled && voiceAndroidMode === 'recording' ? (
                 <span
                   className="inline-flex h-5 flex-shrink-0 items-center gap-1 rounded-full border border-[var(--accent-muted)] bg-[var(--accent-subtle)] px-1.5 text-[9px] font-semibold text-[var(--accent)] shadow-[0_0_14px_rgba(59,130,246,.28)]"
-                  title={voiceAndroidStatus || 'Android app streaming audio'}
+                  title={voiceAndroidStatus || 'Android app recording audio'}
                 >
                   <span className="relative flex h-1.5 w-1.5">
                     <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--accent)] opacity-60" />
                     <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
                   </span>
-                  Streaming
+                  Recording
                 </span>
               ) : null}
               {voiceEnabled && voiceTranscriptionActive ? (
@@ -3481,8 +3481,8 @@ export function AssistantDock() {
                   className={`inline-flex h-5 flex-shrink-0 items-center gap-1 rounded-full border px-1.5 text-[9px] font-semibold ${
                     desktopVoiceStatus.mode === 'error'
                       ? 'border-[rgba(255,90,90,.35)] bg-[rgba(255,90,90,.08)] text-[var(--red)]'
-                      : desktopVoiceStatus.mode === 'locked'
-                        ? 'border-[rgba(255,200,80,.32)] bg-[rgba(255,200,80,.08)] text-[var(--yellow)]'
+                      : desktopVoiceStatus.mode === 'sleeping'
+                        ? 'border-[rgba(148,163,184,.36)] bg-[rgba(148,163,184,.08)] text-[var(--muted)]'
                       : desktopVoiceStatus.mode === 'recording' || desktopVoiceStatus.mode === 'transcribing'
                         ? 'border-[var(--accent-muted)] bg-[var(--accent-subtle)] text-[var(--accent)]'
                         : 'border-[rgba(74,222,128,.32)] bg-[rgba(74,222,128,.08)] text-[var(--green)]'
@@ -3495,8 +3495,8 @@ export function AssistantDock() {
                         ? 'animate-pulse bg-[var(--accent)]'
                         : desktopVoiceStatus.mode === 'error'
                           ? 'bg-[var(--red)]'
-                          : desktopVoiceStatus.mode === 'locked'
-                            ? 'bg-[var(--yellow)]'
+                          : desktopVoiceStatus.mode === 'sleeping'
+                            ? 'bg-[var(--muted)]'
                           : 'bg-[var(--green)]'
                     }`}
                   />

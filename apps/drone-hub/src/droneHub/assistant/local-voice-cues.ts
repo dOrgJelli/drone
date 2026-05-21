@@ -2,8 +2,7 @@ export type LocalVoiceCue =
   | 'start_button'
   | 'stop_button'
   | 'unlock'
-  | 'lock'
-  | 'locked_off'
+  | 'sleeping_off'
   | 'wake'
   | 'sleep'
   | 'status'
@@ -24,12 +23,7 @@ const CUE_TONES: Record<LocalVoiceCue, Array<{ frequencyHz: number; durationMs: 
     { frequencyHz: 560, durationMs: 80 },
     { frequencyHz: 820, durationMs: 130 },
   ],
-  lock: [
-    { frequencyHz: 820, durationMs: 70 },
-    { frequencyHz: 520, durationMs: 80 },
-    { frequencyHz: 300, durationMs: 150 },
-  ],
-  locked_off: [
+  sleeping_off: [
     { frequencyHz: 460, durationMs: 120 },
     { frequencyHz: 0, durationMs: 50 },
     { frequencyHz: 330, durationMs: 150 },

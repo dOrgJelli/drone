@@ -1028,8 +1028,8 @@ export class DesktopVoiceService {
       this.emitChange();
     });
     this.recognizer.on('ready', () => {
-      if (this.mode === 'sleeping') this.message = 'Awake: waiting for hey Sebastian.';
-      if (this.mode === 'locked') this.message = this.lockedMessage();
+      if (this.mode === 'awake') this.message = 'Awake: waiting for hey Sebastian.';
+      if (this.mode === 'sleeping') this.message = this.sleepingMessage();
       this.touch();
       this.emitChange();
     });
@@ -1092,7 +1092,7 @@ export class DesktopVoiceService {
       collectTimeoutMs: settings.collectTimeoutMs,
       duplicateCooldownMs: settings.duplicateCooldownMs,
     });
-    if (this.mode === 'locked') this.message = this.lockedMessage();
+    if (this.mode === 'sleeping') this.message = this.sleepingMessage();
     this.touch();
     this.emitChange();
     return this.snapshot();
@@ -1139,45 +1139,52 @@ export class DesktopVoiceService {
       void this.abortPromptRecordingFromTranscript();
       return this.snapshot();
     }
-    if (this.mode === 'sleeping') return this.enterDormant();
-    if (this.mode === 'dormant') return this.enterListening();
-    if (this.mode === 'locked') return this.enterListening();
+    if (this.mode === 'awake') return this.enterSleeping();
+    if (this.mode === 'sleeping') return this.enterAwake();
     return this.snapshot();
   }
 
   start(): DesktopVoiceStatus {
     desktopVoiceLog('desktop voice start requested');
     const sessionId = ++this.desktopStartSessionId;
-    this.mode = 'sleeping';
+    this.mode = 'awake';
     this.message = 'Awake: waiting for hey Sebastian.';
+    this.lastApprovalCode = '';
     this.resetApprovalCollection();
     this.touch();
     this.emitChange();
     setImmediate(() => {
-      if (this.desktopStartSessionId !== sessionId || this.mode !== 'sleeping') return;
-      this.recognizer.start();
-      this.capture.start();
+      if (this.desktopStartSessionId !== sessionId || (this.mode !== 'awake' && this.mode !== 'sleeping')) return;
+      this.ensureRecognitionActive();
     });
     return this.snapshot();
   }
 
-  private enterDormant(): DesktopVoiceStatus {
-    this.recognizer.stop();
-    this.mode = 'dormant';
-    this.message = 'Sleep: voice paused.';
+  private enterSleeping(): DesktopVoiceStatus {
+    this.desktopStartSessionId += 1;
+    this.mode = 'sleeping';
+    this.message = this.sleepingMessage();
+    this.lastApprovalCode = '';
+    this.ensureRecognitionActive();
     this.resetApprovalCollection();
     this.touch();
     this.emitChange();
     return this.snapshot();
   }
 
-  private enterListening(): DesktopVoiceStatus {
-    this.mode = 'sleeping';
+  private enterAwake(): DesktopVoiceStatus {
+    this.mode = 'awake';
     this.message = 'Awake: waiting for hey Sebastian.';
-    this.recognizer.start();
+    this.lastApprovalCode = '';
+    this.ensureRecognitionActive();
     this.touch();
     this.emitChange();
     return this.snapshot();
+  }
+
+  private ensureRecognitionActive(): void {
+    this.recognizer.start();
+    this.capture.start();
   }
 
   stop(message = 'Desktop voice is off.'): DesktopVoiceStatus {
@@ -1207,8 +1214,8 @@ export class DesktopVoiceService {
     });
     if (this.mode === 'recording' || this.mode === 'transcribing') {
       this.clipboardMode = 'error';
-      this.clipboardError = 'Desktop assistant voice is actively streaming.';
-      this.clipboardMessage = 'Voice transcription is unavailable while desktop assistant voice is streaming.';
+      this.clipboardError = 'Desktop assistant voice is actively recording.';
+      this.clipboardMessage = 'Voice transcription is unavailable while desktop assistant voice is recording.';
       this.touch();
       this.emitChange();
       return this.snapshot();
@@ -1292,7 +1299,6 @@ export class DesktopVoiceService {
     if (
       this.mode !== 'off' &&
       this.mode !== 'error' &&
-      this.mode !== 'dormant' &&
       this.mode !== 'recording' &&
       this.mode !== 'transcribing' &&
       this.clipboardMode !== 'recording' &&
@@ -1306,7 +1312,7 @@ export class DesktopVoiceService {
   }
 
   private handleRecognizedText(text: string, _final: boolean): void {
-    if (this.mode === 'off' || this.mode === 'error' || this.mode === 'dormant') return;
+    if (this.mode === 'off' || this.mode === 'error') return;
     this.touch();
     this.emitChange();
 
@@ -1319,6 +1325,7 @@ export class DesktopVoiceService {
     if (approvalUpdate.type !== 'none') {
       return;
     }
+    if (this.mode === 'sleeping') return;
 
     const command = stripCommands(text);
     if (
@@ -1327,26 +1334,26 @@ export class DesktopVoiceService {
     ) {
       return;
     }
-    if (command.lock && this.mode === 'sleeping' && this.shouldAcceptCommand('lock:phrase', 1800)) {
-      this.enterLockedMode();
+    if (command.lock && this.mode === 'awake' && this.shouldAcceptCommand('lock:phrase', 1800)) {
+      this.enterSleepingMode();
       return;
     }
-    if (command.status && this.mode === 'sleeping' && this.shouldAcceptCommand('status', 1000)) {
+    if (command.status && this.mode === 'awake' && this.shouldAcceptCommand('status', 1000)) {
       this.message = 'Awake: status OK.';
       this.touch();
       this.emitChange();
       this.events.emit('event', { type: 'desktop_voice_local_cue', cue: 'status' } satisfies DesktopVoiceEvent);
       return;
     }
-    if (command.wake && this.mode === 'sleeping' && this.shouldAcceptCommand('wake', 1500)) {
+    if (command.wake && this.mode === 'awake' && this.shouldAcceptCommand('wake', 1500)) {
       void this.startPromptRecording('assistant');
       return;
     }
-    if (command.patch && this.mode === 'sleeping' && this.shouldAcceptCommand('patch', 1500)) {
+    if (command.patch && this.mode === 'awake' && this.shouldAcceptCommand('patch', 1500)) {
       void this.startPromptRecording('patch');
       return;
     }
-    if (command.clipboard && this.mode === 'sleeping' && this.shouldAcceptCommand('clipboard', 1500)) {
+    if (command.clipboard && this.mode === 'awake' && this.shouldAcceptCommand('clipboard', 1500)) {
       void this.startPromptRecording('clipboard');
       return;
     }
@@ -1374,9 +1381,9 @@ export class DesktopVoiceService {
     if (update.type === 'none') return;
     if (update.type === 'collecting') {
       if (update.partialCode) {
-        this.message = this.mode === 'locked' ? `Unlock: ${update.partialCode}` : `Approval: ${update.partialCode}`;
+        this.message = this.mode === 'sleeping' ? `Unlock: ${update.partialCode}` : `Approval: ${update.partialCode}`;
       } else {
-        this.message = this.mode === 'locked' ? 'Unlock code...' : 'Approval code...';
+        this.message = this.mode === 'sleeping' ? 'Unlock code...' : 'Approval code...';
       }
       this.touch();
       this.emitChange();
@@ -1394,15 +1401,15 @@ export class DesktopVoiceService {
   private handleApprovalCode(code: string): void {
     if (!this.shouldAcceptCommand(`approval:${code}`, 1800)) return;
     this.lastApprovalCode = code;
-    if (this.mode === 'locked') {
+    if (this.mode === 'sleeping') {
       if (code === this.approvalSettings.unlockCode) {
-        this.mode = 'sleeping';
+        this.mode = 'awake';
         this.message = 'Awake: waiting for hey Sebastian.';
       } else if (code === this.approvalSettings.lockedOffCode) {
         this.stop('Desktop voice is off.');
         return;
       } else {
-        this.message = 'Locked: code ignored.';
+        this.message = 'Sleep: code ignored.';
       }
       this.touch();
       this.emitChange();
@@ -1417,9 +1424,9 @@ export class DesktopVoiceService {
     this.emitChange();
   }
 
-  private enterLockedMode(): void {
-    this.mode = 'locked';
-    this.message = this.lockedMessage();
+  private enterSleepingMode(): void {
+    this.mode = 'sleeping';
+    this.message = this.sleepingMessage();
     this.promptChunks = [];
     this.promptSegments = [];
     this.resetApprovalCollection();
@@ -1429,8 +1436,8 @@ export class DesktopVoiceService {
     this.emitChange();
   }
 
-  private lockedMessage(): string {
-    return `Locked: say ${this.approvalSettings.triggerPhrase} ${formatDigitsForSpeech(this.approvalSettings.unlockCode)}.`;
+  private sleepingMessage(): string {
+    return `Sleep: say ${this.approvalSettings.triggerPhrase} ${formatDigitsForSpeech(this.approvalSettings.unlockCode)} to wake, or ${formatDigitsForSpeech(this.approvalSettings.lockedOffCode)} to turn off.`;
   }
 
   private async startPromptRecording(target: DesktopVoiceCaptureTarget): Promise<void> {
@@ -1523,7 +1530,7 @@ export class DesktopVoiceService {
       if (command.lock && !hasTranscriptContent(text) && this.mode === 'recording' && this.shouldAcceptCommand('lock:phrase', 1800)) {
         this.promptTranscriptError = null;
         this.promptTranscribing = false;
-        this.enterLockedMode();
+        this.enterSleepingMode();
         return;
       }
       if (hasTranscriptContent(text)) {
@@ -1570,7 +1577,7 @@ export class DesktopVoiceService {
     this.promptChunks = [];
     this.promptSegments = [];
     this.promptSegmenter.reset();
-    this.mode = 'sleeping';
+    this.mode = 'awake';
     this.message =
       target === 'patch'
         ? 'Awake: patch-in cancelled.'
@@ -1617,7 +1624,7 @@ export class DesktopVoiceService {
     let text = '';
     try {
       text = useFullRecording ? await this.transcribeFinalPromptRecording(pcm, fallbackText) : fallbackText;
-      this.mode = 'sleeping';
+      this.mode = 'awake';
       this.message = text
         ? target === 'patch'
           ? 'Awake: sending patch to current drone chat.'
@@ -1649,7 +1656,7 @@ export class DesktopVoiceService {
       } else {
         await this.opts.submitAssistantPrompt(text);
       }
-      if (this.mode === 'sleeping') {
+      if (this.mode === 'awake') {
         this.message =
           target === 'patch'
             ? 'Awake: sent patch to current drone chat.'
@@ -1658,7 +1665,7 @@ export class DesktopVoiceService {
               : 'Awake: sent assistant voice prompt.';
       }
     } catch (error: any) {
-      if (this.mode === 'sleeping') {
+      if (this.mode === 'awake') {
         this.message =
           target === 'patch'
             ? `Patch-in failed: ${error?.message ?? String(error)}`
@@ -1666,7 +1673,7 @@ export class DesktopVoiceService {
               ? `Voice transcription failed: ${error?.message ?? String(error)}`
               : `Assistant voice prompt failed: ${error?.message ?? String(error)}`;
       } else {
-        this.mode = 'sleeping';
+        this.mode = 'awake';
         this.message =
           target === 'patch'
             ? `Patch-in failed: ${error?.message ?? String(error)}`
@@ -1719,15 +1726,15 @@ export class DesktopVoiceService {
       const command = stripCommands(result.text);
       const text = promptTextFromCommand(result.text, command);
       if (command.lock && !hasTranscriptContent(text) && this.shouldAcceptCommand('lock:phrase', 1800)) {
-        this.enterLockedMode();
+        this.enterSleepingMode();
         return;
       }
       if (text) await this.opts.submitAssistantPrompt(text);
-      this.mode = 'sleeping';
+      this.mode = 'awake';
       this.message = text ? 'Awake: sent assistant voice prompt.' : 'Awake: no assistant prompt detected.';
       this.suppressPromptCommandsBriefly();
     } catch (error: any) {
-      this.mode = 'sleeping';
+      this.mode = 'awake';
       this.message = `Assistant voice transcription failed: ${error?.message ?? String(error)}`;
       this.suppressPromptCommandsBriefly();
     }
@@ -1803,10 +1810,8 @@ export class DesktopVoiceService {
     this.mode = previousMode;
     this.message = previousMessage ?? this.defaultMessageForMode(previousMode);
     this.desktopStartSessionId += 1;
-    if (previousMode === 'sleeping' || previousMode === 'locked') {
+    if (previousMode === 'awake' || previousMode === 'sleeping') {
       this.recognizer.start();
-      this.capture.start();
-    } else if (previousMode === 'dormant') {
       this.capture.start();
     }
     this.touch();
@@ -1820,9 +1825,8 @@ export class DesktopVoiceService {
   }
 
   private defaultMessageForMode(mode: DesktopVoiceMode): string {
-    if (mode === 'locked') return this.lockedMessage();
-    if (mode === 'dormant') return 'Sleep: voice paused.';
-    if (mode === 'sleeping') return 'Awake: waiting for hey Sebastian.';
+    if (mode === 'sleeping') return this.sleepingMessage();
+    if (mode === 'awake') return 'Awake: waiting for hey Sebastian.';
     if (mode === 'off') return 'Desktop voice is off.';
     if (mode === 'error') return 'Desktop voice failed.';
     if (mode === 'recording') return 'Awake: recording assistant voice prompt.';

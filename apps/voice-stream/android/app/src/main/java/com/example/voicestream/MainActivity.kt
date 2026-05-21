@@ -38,7 +38,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var statusText: TextView
     private lateinit var approvalText: TextView
     private lateinit var microphoneText: TextView
-    private lateinit var listeningButton: Button
+    private lateinit var awakeButton: Button
     private lateinit var offButton: Button
     private lateinit var root: LinearLayout
     private lateinit var settingsPanel: View
@@ -136,11 +136,11 @@ class MainActivity : ComponentActivity() {
                 0,
                 1f
             )
-            listeningButton = Button(this@MainActivity).apply {
+            awakeButton = Button(this@MainActivity).apply {
                 setOnClickListener { toggleAwakeSleep() }
                 styleActionButton(SessionMode.OFF)
             }
-            addView(listeningButton, LinearLayout.LayoutParams(
+            addView(awakeButton, LinearLayout.LayoutParams(
                 166.dp(),
                 166.dp()
             ))
@@ -445,11 +445,10 @@ class MainActivity : ComponentActivity() {
         text = when (mode) {
             SessionMode.OFF,
             SessionMode.ERROR -> "Start"
-            SessionMode.DORMANT -> "Sleep"
-            SessionMode.LOCKED -> "Locked"
+            SessionMode.SLEEPING -> "Sleep"
             SessionMode.LOADING,
-            SessionMode.LISTENING,
-            SessionMode.STREAMING -> "Awake"
+            SessionMode.AWAKE,
+            SessionMode.RECORDING -> "Awake"
         }
         background = actionBackground(mode)
         minHeight = 0
@@ -493,20 +492,18 @@ class MainActivity : ComponentActivity() {
         val colors = when (mode) {
             SessionMode.OFF,
             SessionMode.ERROR -> intArrayOf(Color.rgb(37, 51, 67), Color.rgb(14, 22, 34))
-            SessionMode.DORMANT -> intArrayOf(Color.rgb(42, 52, 68), Color.rgb(18, 24, 34))
-            SessionMode.LOCKED,
+            SessionMode.SLEEPING -> intArrayOf(Color.rgb(42, 52, 68), Color.rgb(18, 24, 34))
             SessionMode.LOADING -> intArrayOf(Color.rgb(64, 48, 24), Color.rgb(34, 28, 18))
-            SessionMode.LISTENING,
-            SessionMode.STREAMING -> intArrayOf(Color.rgb(18, 88, 82), Color.rgb(10, 52, 58))
+            SessionMode.AWAKE,
+            SessionMode.RECORDING -> intArrayOf(Color.rgb(18, 88, 82), Color.rgb(10, 52, 58))
         }
         val stroke = when (mode) {
             SessionMode.OFF,
             SessionMode.ERROR -> COLOR_STROKE
-            SessionMode.DORMANT -> Color.rgb(100, 116, 139)
-            SessionMode.LOCKED,
+            SessionMode.SLEEPING -> Color.rgb(100, 116, 139)
             SessionMode.LOADING -> Color.rgb(251, 191, 36)
-            SessionMode.LISTENING,
-            SessionMode.STREAMING -> COLOR_ACCENT
+            SessionMode.AWAKE,
+            SessionMode.RECORDING -> COLOR_ACCENT
         }
         return GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, colors).apply {
             shape = GradientDrawable.OVAL
@@ -558,15 +555,15 @@ class MainActivity : ComponentActivity() {
             .onFailure { error -> DroneLog.w("Activity", "Status receiver was not registered", error) }
     }
 
-    private fun startListening() {
-        startWithUrl(Constants.ACTION_START_LISTENING)
+    private fun startAwake() {
+        startWithUrl(Constants.ACTION_START_AWAKE)
     }
 
     private fun toggleAwakeSleep() {
         if (sessionMode == SessionMode.OFF || sessionMode == SessionMode.ERROR) {
             cuePlayer.play(LocalCue.START_BUTTON)
             updateSessionUi(SessionMode.LOADING, "Waking local detector")
-            startListening()
+            startAwake()
         } else {
             sendServiceAction(Constants.ACTION_TOGGLE_AWAKE_SLEEP)
         }
@@ -574,7 +571,7 @@ class MainActivity : ComponentActivity() {
 
     private fun turnOff() {
         cuePlayer.play(LocalCue.STOP_BUTTON)
-        stopListening()
+        stopAwake()
         updateSessionUi(SessionMode.OFF, "Off")
     }
 
@@ -612,8 +609,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun stopListening() {
-        sendServiceAction(Constants.ACTION_STOP_LISTENING)
+    private fun stopAwake() {
+        sendServiceAction(Constants.ACTION_STOP_AWAKE)
     }
 
     private fun sendServiceAction(actionName: String) {
@@ -800,20 +797,19 @@ class MainActivity : ComponentActivity() {
             statusText.setTextColor(statusStrokeColor(mode))
             statusText.background = null
         }
-        if (!::listeningButton.isInitialized) {
+        if (!::awakeButton.isInitialized) {
             return
         }
 
-        listeningButton.text = when (mode) {
+        awakeButton.text = when (mode) {
             SessionMode.OFF,
             SessionMode.ERROR -> "Start"
-            SessionMode.DORMANT -> "Sleep"
-            SessionMode.LOCKED -> "Locked"
+            SessionMode.SLEEPING -> "Sleep"
             SessionMode.LOADING,
-            SessionMode.LISTENING,
-            SessionMode.STREAMING -> "Awake"
+            SessionMode.AWAKE,
+            SessionMode.RECORDING -> "Awake"
         }
-        listeningButton.styleActionButton(mode)
+        awakeButton.styleActionButton(mode)
         if (::offButton.isInitialized) {
             offButton.visibility = if (mode == SessionMode.OFF || mode == SessionMode.ERROR) View.GONE else View.VISIBLE
         }
@@ -870,11 +866,10 @@ class MainActivity : ComponentActivity() {
     private fun statusFillColor(mode: SessionMode): Int {
         return when (mode) {
             SessionMode.OFF -> Color.rgb(30, 41, 59)
-            SessionMode.DORMANT -> Color.rgb(42, 52, 68)
-            SessionMode.LOCKED -> Color.rgb(64, 48, 24)
+            SessionMode.SLEEPING -> Color.rgb(42, 52, 68)
             SessionMode.LOADING -> Color.rgb(64, 48, 24)
-            SessionMode.LISTENING -> Color.rgb(13, 54, 48)
-            SessionMode.STREAMING -> Color.rgb(20, 54, 92)
+            SessionMode.AWAKE -> Color.rgb(13, 54, 48)
+            SessionMode.RECORDING -> Color.rgb(20, 54, 92)
             SessionMode.ERROR -> Color.rgb(80, 29, 34)
         }
     }
@@ -882,33 +877,30 @@ class MainActivity : ComponentActivity() {
     private fun statusStrokeColor(mode: SessionMode): Int {
         return when (mode) {
             SessionMode.OFF -> Color.rgb(51, 65, 85)
-            SessionMode.DORMANT -> Color.rgb(148, 163, 184)
-            SessionMode.LOCKED -> Color.rgb(251, 191, 36)
+            SessionMode.SLEEPING -> Color.rgb(148, 163, 184)
             SessionMode.LOADING -> Color.rgb(180, 120, 36)
-            SessionMode.LISTENING -> Color.rgb(45, 212, 191)
-            SessionMode.STREAMING -> Color.rgb(96, 165, 250)
+            SessionMode.AWAKE -> Color.rgb(45, 212, 191)
+            SessionMode.RECORDING -> Color.rgb(96, 165, 250)
             SessionMode.ERROR -> Color.rgb(248, 113, 113)
         }
     }
 
     private enum class SessionMode {
         OFF,
-        LOCKED,
+        SLEEPING,
         LOADING,
-        LISTENING,
-        DORMANT,
-        STREAMING,
+        AWAKE,
+        RECORDING,
         ERROR;
 
         companion object {
             fun fromValue(value: String?, status: String): SessionMode {
                 return when (value) {
                     Constants.MODE_OFF -> OFF
-                    Constants.MODE_LOCKED -> LOCKED
+                    Constants.MODE_SLEEPING -> SLEEPING
                     Constants.MODE_LOADING -> LOADING
-                    Constants.MODE_LISTENING -> LISTENING
-                    Constants.MODE_DORMANT -> DORMANT
-                    Constants.MODE_STREAMING -> STREAMING
+                    Constants.MODE_AWAKE -> AWAKE
+                    Constants.MODE_RECORDING -> RECORDING
                     Constants.MODE_ERROR -> ERROR
                     else -> fromStatus(status)
                 }
@@ -918,12 +910,13 @@ class MainActivity : ComponentActivity() {
                 return when {
                     status == "Off" -> OFF
                     status.startsWith("Error:") -> ERROR
-                    status.startsWith("Awake") -> STREAMING
-                    status.startsWith("Sleep") -> DORMANT
-                    status.startsWith("Asleep") -> LISTENING
-                    status.startsWith("Locked") -> LOCKED
+                    status.startsWith("Awake: waiting") -> AWAKE
+                    status.startsWith("Awake: status") -> AWAKE
+                    status.startsWith("Awake") -> RECORDING
+                    status.startsWith("Sleep") -> SLEEPING
+                    status.startsWith("Asleep") -> AWAKE
                     status.startsWith("Waking") -> LOADING
-                    else -> LISTENING
+                    else -> AWAKE
                 }
             }
         }

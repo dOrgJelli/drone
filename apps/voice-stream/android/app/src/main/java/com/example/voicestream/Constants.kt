@@ -8,10 +8,10 @@ object Constants {
 
     const val ACTION_START = "com.example.voicestream.action.START"
     const val ACTION_STOP = "com.example.voicestream.action.STOP"
-    const val ACTION_START_LISTENING = "com.example.voicestream.action.START_LISTENING"
-    const val ACTION_STOP_LISTENING = "com.example.voicestream.action.STOP_LISTENING"
-    const val ACTION_START_STREAMING = "com.example.voicestream.action.START_STREAMING"
-    const val ACTION_STOP_STREAMING = "com.example.voicestream.action.STOP_STREAMING"
+    const val ACTION_START_AWAKE = "com.example.voicestream.action.START_AWAKE"
+    const val ACTION_STOP_AWAKE = "com.example.voicestream.action.STOP_AWAKE"
+    const val ACTION_START_RECORDING = "com.example.voicestream.action.START_RECORDING"
+    const val ACTION_STOP_RECORDING = "com.example.voicestream.action.STOP_RECORDING"
     const val ACTION_TOGGLE_AWAKE_SLEEP = "com.example.voicestream.action.TOGGLE_AWAKE_SLEEP"
     const val ACTION_QUERY_STATUS = "com.example.voicestream.action.QUERY_STATUS"
     const val ACTION_STATUS = "com.example.voicestream.action.STATUS"
@@ -24,11 +24,10 @@ object Constants {
     const val EXTRA_APPROVAL_STATUS = "approval_status"
 
     const val MODE_OFF = "off"
-    const val MODE_LOCKED = "locked"
+    const val MODE_SLEEPING = "sleeping"
     const val MODE_LOADING = "loading"
-    const val MODE_LISTENING = "listening"
-    const val MODE_DORMANT = "dormant"
-    const val MODE_STREAMING = "streaming"
+    const val MODE_AWAKE = "awake"
+    const val MODE_RECORDING = "recording"
     const val MODE_ERROR = "error"
 
     const val SAMPLE_RATE_HZ = 16_000

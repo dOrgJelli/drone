@@ -114,9 +114,9 @@ export function VoiceApprovalSettingsTab({ voiceApproval }: VoiceApprovalSetting
     label: string;
     description: string;
   }> = [
-    { key: 'unlockCode', label: 'Unlock code', description: 'Digits that re-enable voice handling after approval locking is on.' },
-    { key: 'lockCode', label: 'Legacy lock code', description: 'Kept for saved settings. Awake voice now locks when you say go to sleep.' },
-    { key: 'lockedOffCode', label: 'Off code', description: 'Digits that fully disable voice while awake or locked.' },
+    { key: 'unlockCode', label: 'Wake code', description: 'Digits that wake voice after it goes to sleep.' },
+    { key: 'lockCode', label: 'Legacy sleep code', description: 'Kept for saved settings. Awake voice now sleeps when you say go to sleep.' },
+    { key: 'lockedOffCode', label: 'Off code', description: 'Digits that fully disable voice while awake or sleeping.' },
   ];
 
   const numberFields: NumberField[] = [

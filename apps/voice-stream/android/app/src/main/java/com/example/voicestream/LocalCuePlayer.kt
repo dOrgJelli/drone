@@ -53,8 +53,7 @@ class LocalCuePlayer {
             LocalCue.START_BUTTON -> listOf(Tone(420.0, 70), Tone(640.0, 120))
             LocalCue.STOP_BUTTON -> listOf(Tone(520.0, 70), Tone(260.0, 150))
             LocalCue.UNLOCK -> listOf(Tone(360.0, 70), Tone(560.0, 80), Tone(820.0, 130))
-            LocalCue.LOCK -> listOf(Tone(820.0, 70), Tone(520.0, 80), Tone(300.0, 150))
-            LocalCue.LOCKED_OFF -> listOf(Tone(460.0, 120), Tone(0.0, 50), Tone(330.0, 150), Tone(220.0, 230))
+            LocalCue.SLEEPING_OFF -> listOf(Tone(460.0, 120), Tone(0.0, 50), Tone(330.0, 150), Tone(220.0, 230))
             LocalCue.WAKE -> listOf(Tone(620.0, 80), Tone(880.0, 130))
             LocalCue.SLEEP -> listOf(Tone(760.0, 90), Tone(420.0, 160))
             LocalCue.STATUS -> listOf(Tone(520.0, 70), Tone(0.0, 45), Tone(520.0, 70), Tone(0.0, 45), Tone(700.0, 90))
@@ -102,8 +101,7 @@ enum class LocalCue {
     START_BUTTON,
     STOP_BUTTON,
     UNLOCK,
-    LOCK,
-    LOCKED_OFF,
+    SLEEPING_OFF,
     WAKE,
     SLEEP,
     STATUS,

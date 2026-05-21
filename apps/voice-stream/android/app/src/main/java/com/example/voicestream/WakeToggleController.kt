@@ -4,27 +4,23 @@ class WakeToggleController {
     var state: WakeState = WakeState.OFF
         private set
 
-    fun startListening(): WakeAction {
-        state = WakeState.WAITING_FOR_WAKE
+    fun startAwake(): WakeAction {
+        state = WakeState.AWAKE
         return WakeAction.NONE
     }
 
     fun toggleAwakeSleep(): WakeAction {
         return when (state) {
-            WakeState.STREAMING -> {
-                state = WakeState.WAITING_FOR_WAKE
-                WakeAction.STOP_STREAMING
+            WakeState.RECORDING -> {
+                state = WakeState.AWAKE
+                WakeAction.STOP_RECORDING
             }
-            WakeState.WAITING_FOR_WAKE -> {
-                state = WakeState.DORMANT
+            WakeState.AWAKE -> {
+                state = WakeState.SLEEPING
                 WakeAction.NONE
             }
-            WakeState.DORMANT -> {
-                state = WakeState.WAITING_FOR_WAKE
-                WakeAction.NONE
-            }
-            WakeState.LOCKED -> {
-                state = WakeState.WAITING_FOR_WAKE
+            WakeState.SLEEPING -> {
+                state = WakeState.AWAKE
                 WakeAction.NONE
             }
             WakeState.OFF,
@@ -33,67 +29,67 @@ class WakeToggleController {
     }
 
     fun stopAll(): WakeAction {
-        val action = if (state == WakeState.STREAMING) WakeAction.STOP_STREAMING else WakeAction.NONE
+        val action = if (state == WakeState.RECORDING) WakeAction.STOP_RECORDING else WakeAction.NONE
         state = WakeState.OFF
         return action
     }
 
     fun wakeDetected(phrase: WakePhrase): WakeAction {
         return when (state) {
-            WakeState.WAITING_FOR_WAKE -> {
+            WakeState.AWAKE -> {
                 if (phrase.hasStart) {
-                    state = WakeState.STREAMING
-                    WakeAction.START_STREAMING
+                    state = WakeState.RECORDING
+                    WakeAction.START_RECORDING
                 } else if (phrase.hasPatch) {
-                    state = WakeState.STREAMING
-                    WakeAction.START_PATCH_STREAMING
+                    state = WakeState.RECORDING
+                    WakeAction.START_PATCH_RECORDING
                 } else if (phrase.hasClipboard) {
-                    state = WakeState.STREAMING
-                    WakeAction.START_CLIPBOARD_STREAMING
+                    state = WakeState.RECORDING
+                    WakeAction.START_CLIPBOARD_RECORDING
                 } else if (phrase.hasSleep) {
-                    state = WakeState.LOCKED
-                    WakeAction.LOCK_LISTENING
+                    state = WakeState.SLEEPING
+                    WakeAction.ENTER_SLEEPING
                 } else if (phrase.hasStatus) {
                     WakeAction.PLAY_STATUS
                 } else {
                     WakeAction.NONE
                 }
             }
-            WakeState.STREAMING -> {
+            WakeState.RECORDING -> {
                 if (phrase.hasSleep) {
-                    state = WakeState.LOCKED
-                    WakeAction.LOCK_LISTENING
+                    state = WakeState.SLEEPING
+                    WakeAction.ENTER_SLEEPING
                 } else {
                     WakeAction.NONE
                 }
             }
-            WakeState.LOCKED, WakeState.DORMANT, WakeState.OFF, WakeState.ERROR -> WakeAction.NONE
+            WakeState.SLEEPING, WakeState.OFF, WakeState.ERROR -> WakeAction.NONE
         }
     }
 
-    fun unlockToListening(): WakeAction {
-        state = WakeState.WAITING_FOR_WAKE
+    fun wakeFromSleep(): WakeAction {
+        state = WakeState.AWAKE
         return WakeAction.NONE
     }
 
-    fun lockListening(): WakeAction {
-        val action = if (state == WakeState.STREAMING) WakeAction.STOP_STREAMING else WakeAction.NONE
-        state = WakeState.LOCKED
+    fun enterSleeping(): WakeAction {
+        val action = if (state == WakeState.RECORDING) WakeAction.STOP_RECORDING else WakeAction.NONE
+        state = WakeState.SLEEPING
         return action
     }
 
-    fun manualStartStreaming(): WakeAction {
-        state = WakeState.STREAMING
-        return WakeAction.START_STREAMING
+    fun manualStartRecording(): WakeAction {
+        state = WakeState.RECORDING
+        return WakeAction.START_RECORDING
     }
 
-    fun manualStopStreaming(returnToListening: Boolean): WakeAction {
-        state = if (returnToListening) WakeState.WAITING_FOR_WAKE else WakeState.OFF
-        return WakeAction.STOP_STREAMING
+    fun manualStopRecording(returnToAwake: Boolean): WakeAction {
+        state = if (returnToAwake) WakeState.AWAKE else WakeState.OFF
+        return WakeAction.STOP_RECORDING
     }
 
     fun error(): WakeAction {
-        val action = if (state == WakeState.STREAMING) WakeAction.STOP_STREAMING else WakeAction.NONE
+        val action = if (state == WakeState.RECORDING) WakeAction.STOP_RECORDING else WakeAction.NONE
         state = WakeState.ERROR
         return action
     }
@@ -101,19 +97,18 @@ class WakeToggleController {
 
 enum class WakeState {
     OFF,
-    LOCKED,
-    WAITING_FOR_WAKE,
-    DORMANT,
-    STREAMING,
+    AWAKE,
+    SLEEPING,
+    RECORDING,
     ERROR,
 }
 
 enum class WakeAction {
     NONE,
-    START_STREAMING,
-    START_PATCH_STREAMING,
-    START_CLIPBOARD_STREAMING,
-    STOP_STREAMING,
-    LOCK_LISTENING,
+    START_RECORDING,
+    START_PATCH_RECORDING,
+    START_CLIPBOARD_RECORDING,
+    STOP_RECORDING,
+    ENTER_SLEEPING,
     PLAY_STATUS,
 }
