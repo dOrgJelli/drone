@@ -8,11 +8,15 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.IBinder
+import android.os.PowerManager
 import kotlin.concurrent.thread
 
 class VoiceSessionService : Service() {
     private lateinit var api: VoiceStreamApi
     private lateinit var streamer: AudioStreamer
+    private var wakeLock: PowerManager.WakeLock? = null
+    @Volatile private var lastStatus = "Off"
+    @Volatile private var lastMode = Constants.MODE_OFF
 
     override fun onCreate() {
         super.onCreate()
@@ -33,15 +37,21 @@ class VoiceSessionService : Service() {
 
     override fun onDestroy() {
         streamer.stop()
+        AssistantAudioPlayer.stopAll()
+        releaseWakeLock()
+        publishStatus("Off", Constants.MODE_OFF)
         super.onDestroy()
     }
 
     private fun startVoice() {
+        publishStatus("Voice stream starting", Constants.MODE_RECORDING)
         startForeground(NOTIFICATION_ID, notification("Voice stream starting"))
+        acquireWakeLock()
         thread(name = "VoiceStreamNextServiceStart") {
             try {
                 val deviceId = api.pairedDeviceId()
                 if (deviceId.isBlank()) {
+                    publishStatus("Pair this device before streaming.", Constants.MODE_ERROR)
                     stopVoice()
                     return@thread
                 }
@@ -50,8 +60,10 @@ class VoiceSessionService : Service() {
                 streamer.start(sessionId) { status ->
                     val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                     manager.notify(NOTIFICATION_ID, notification(status))
+                    publishStatus(status, modeFromStatus(status))
                 }
             } catch (_: Exception) {
+                publishStatus("Voice stream failed to start.", Constants.MODE_ERROR)
                 stopVoice()
             }
         }
@@ -59,8 +71,48 @@ class VoiceSessionService : Service() {
 
     private fun stopVoice() {
         streamer.stop()
+        AssistantAudioPlayer.stopAll()
+        releaseWakeLock()
+        publishStatus("Off", Constants.MODE_OFF)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+    }
+
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        val powerManager = getSystemService(PowerManager::class.java)
+        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VoiceStreamNext:VoiceSession").apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let { lock ->
+            runCatching {
+                if (lock.isHeld) lock.release()
+            }
+        }
+        wakeLock = null
+    }
+
+    private fun publishStatus(status: String, mode: String) {
+        lastStatus = status
+        lastMode = mode
+        sendBroadcast(Intent(Constants.ACTION_STATUS).apply {
+            setPackage(packageName)
+            putExtra(Constants.EXTRA_STATUS, lastStatus)
+            putExtra(Constants.EXTRA_MODE, lastMode)
+        })
+    }
+
+    private fun modeFromStatus(status: String): String {
+        val lower = status.lowercase()
+        return when {
+            lower.contains("missing") || lower.contains("failed") || lower.contains("error") -> Constants.MODE_ERROR
+            lower.contains("closed") || lower == "off" -> Constants.MODE_OFF
+            else -> Constants.MODE_RECORDING
+        }
     }
 
     private fun notification(text: String): Notification {

@@ -1,11 +1,15 @@
 package com.huntelkator.voicestreamnext
 
 import android.Manifest
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
@@ -45,9 +49,22 @@ class MainActivity : ComponentActivity() {
     private lateinit var assistantOutput: TextView
     private val wakeController = WakeToggleController()
     private val approvalCodeRecognizer = ApprovalCodeRecognizer()
+    private val cuePlayer = LocalCuePlayer()
+    private val statusReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val status = intent?.getStringExtra(Constants.EXTRA_STATUS).orEmpty()
+            val mode = intent?.getStringExtra(Constants.EXTRA_MODE).orEmpty()
+            if (status.isNotBlank()) {
+                showStatus(status)
+            }
+            if (mode.isNotBlank()) {
+                wakeController.applyServiceMode(mode)
+            }
+        }
+    }
 
-    private val micPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) startVoiceSession() else showStatus("Microphone permission denied.")
+    private val voicePermissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
+        if (grants.values.all { it }) startVoiceSession() else showStatus("Voice permissions denied.")
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -58,6 +75,21 @@ class MainActivity : ComponentActivity() {
         buildUi()
         loadConfigIntoForm()
         refreshDashboard()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        ContextCompat.registerReceiver(
+            this,
+            statusReceiver,
+            IntentFilter(Constants.ACTION_STATUS),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+    }
+
+    override fun onStop() {
+        runCatching { unregisterReceiver(statusReceiver) }
+        super.onStop()
     }
 
     private fun buildUi() {
@@ -193,21 +225,36 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun ensureMicThenStart() {
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-            startVoiceSession()
+    private fun ensureMicThenStart(playCue: Boolean = true) {
+        val missingPermissions = missingVoicePermissions()
+        if (missingPermissions.isEmpty()) {
+            startVoiceSession(playCue)
         } else {
-            micPermission.launch(Manifest.permission.RECORD_AUDIO)
+            voicePermissions.launch(missingPermissions.toTypedArray())
         }
     }
 
-    private fun startVoiceSession() {
+    private fun missingVoicePermissions(): List<String> {
+        val permissions = mutableListOf<String>()
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            permissions += Manifest.permission.RECORD_AUDIO
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
+        ) {
+            permissions += Manifest.permission.BLUETOOTH_CONNECT
+        }
+        return permissions
+    }
+
+    private fun startVoiceSession(playCue: Boolean = true) {
         val deviceId = api.pairedDeviceId()
         if (deviceId.isBlank()) {
             showStatus("Pair this device first.")
             return
         }
         wakeController.manualStartRecording()
+        if (playCue) cuePlayer.play(LocalCue.START_BUTTON)
         ContextCompat.startForegroundService(
             this,
             Intent(this, VoiceSessionService::class.java).apply { action = Constants.ACTION_START_VOICE }
@@ -215,9 +262,10 @@ class MainActivity : ComponentActivity() {
         showStatus("Foreground voice service started.")
     }
 
-    private fun stopVoiceSession() {
+    private fun stopVoiceSession(playCue: Boolean = true) {
         startService(Intent(this, VoiceSessionService::class.java).apply { action = Constants.ACTION_STOP_VOICE })
         wakeController.manualStopRecording(returnToAwake = true)
+        if (playCue) cuePlayer.play(LocalCue.STOP_BUTTON)
         showStatus("Voice stream stopped.")
     }
 
@@ -225,18 +273,21 @@ class MainActivity : ComponentActivity() {
 
     private fun enterAwake() {
         wakeController.startAwake()
+        cuePlayer.play(LocalCue.WAKE)
         showStatus("Awake. Listening for wake phrases.")
     }
 
     private fun enterSleep() {
-        if (wakeController.state == WakeState.RECORDING) stopVoiceSession()
+        if (wakeController.state == WakeState.RECORDING) stopVoiceSession(playCue = false)
         wakeController.toggleAwakeSleep()
+        cuePlayer.play(LocalCue.SLEEP)
         showStatus("Sleeping.")
     }
 
     private fun turnOff() {
         startService(Intent(this, VoiceSessionService::class.java).apply { action = Constants.ACTION_STOP_VOICE })
         wakeController.stopAll()
+        cuePlayer.play(LocalCue.STOP_BUTTON)
         showStatus("Off.")
     }
 
@@ -244,6 +295,7 @@ class MainActivity : ComponentActivity() {
         val text = wakePhraseInput.text.toString()
         wakePhraseInput.setText("")
         approvalCodeRecognizer.extract(text)?.let { code ->
+            cuePlayer.play(LocalCue.STATUS)
             runApi("Uploading approval code") {
                 api.uploadApprovalCode(code)
                 showStatus("Approval code uploaded.")
@@ -262,10 +314,14 @@ class MainActivity : ComponentActivity() {
             WakeAction.START_CLIPBOARD_RECORDING -> ensureMicThenStart()
             WakeAction.STOP_RECORDING,
             WakeAction.ENTER_SLEEPING -> {
-                stopVoiceSession()
+                cuePlayer.play(LocalCue.SLEEP)
+                stopVoiceSession(playCue = false)
                 showStatus("Sleeping.")
             }
-            WakeAction.PLAY_STATUS -> showStatus("Mode: ${wakeController.state}")
+            WakeAction.PLAY_STATUS -> {
+                cuePlayer.play(LocalCue.STATUS)
+                showStatus("Mode: ${wakeController.state}")
+            }
             WakeAction.NONE -> showStatus("Mode: ${wakeController.state}")
         }
     }

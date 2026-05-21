@@ -13,6 +13,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import org.json.JSONObject
 import java.net.URLEncoder
@@ -22,12 +23,18 @@ import kotlin.concurrent.thread
 
 class AudioStreamer(private val context: Context, private val api: VoiceStreamApi) {
     private val active = AtomicBoolean(false)
+    private val reconnecting = AtomicBoolean(false)
+    private val microphoneRouter = MicrophoneRouter(context)
     private val client = OkHttpClient.Builder()
         .pingInterval(15, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build()
 
     private var recorder: AudioRecord? = null
     private var socket: WebSocket? = null
+    @Volatile private var currentSocketUrl = ""
+    @Volatile private var currentOnStatus: ((String) -> Unit)? = null
+    @Volatile private var reconnectAttempt = 0
 
     fun start(sessionId: String, onStatus: (String) -> Unit) {
         if (!active.compareAndSet(false, true)) return
@@ -47,32 +54,9 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
         }
 
         val socketUrl = buildSocketUrl(config.serverUrl, deviceId, token, sessionId)
-        socket = client.newWebSocket(
-            Request.Builder().url(socketUrl).build(),
-            object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    webSocket.send(JSONObject().put("type", "client_hello").put("protocolVersion", 1).put("client", "android").toString())
-                    onStatus("Voice stream connected.")
-                }
-
-                override fun onMessage(webSocket: WebSocket, text: String) {
-                    val message = runCatching { JSONObject(text) }.getOrNull() ?: return
-                    when (message.optString("type")) {
-                        "server_ping" -> webSocket.send(JSONObject().put("type", "client_ping").put("sentAt", java.time.Instant.now().toString()).toString())
-                        "assistant_result" -> onStatus("Assistant replied.")
-                        "assistant_error" -> onStatus(message.optString("error", "Voice runtime failed."))
-                    }
-                }
-
-                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                    onStatus("Voice stream closed.")
-                }
-
-                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    onStatus(t.message ?: "Voice stream failed.")
-                }
-            }
-        )
+        currentSocketUrl = socketUrl
+        currentOnStatus = onStatus
+        connectSocket(socketUrl, onStatus)
 
         thread(name = "VoiceStreamNextAudio") {
             runRecorder(onStatus)
@@ -81,12 +65,95 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
 
     fun stop() {
         active.set(false)
-        socket?.send("""{"type":"end"}""")
-        recorder?.stop()
-        recorder?.release()
-        recorder = null
-        socket?.close(1000, "stopped")
+        reconnecting.set(false)
+        currentSocketUrl = ""
+        currentOnStatus = null
+        AssistantAudioPlayer.stopAll()
+        val localSocket = socket
         socket = null
+        localSocket?.send("""{"type":"end"}""")
+        localSocket?.close(1000, "stopped")
+        runCatching { recorder?.stop() }
+    }
+
+    private fun connectSocket(socketUrl: String, onStatus: (String) -> Unit) {
+        if (!active.get()) return
+        val newSocket = client.newWebSocket(
+            Request.Builder().url(socketUrl).build(),
+            object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    reconnectAttempt = 0
+                    webSocket.send(JSONObject().put("type", "client_hello").put("protocolVersion", 1).put("client", "android").toString())
+                    onStatus("Voice stream connected.")
+                }
+
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    if (!active.get()) return
+                    val message = runCatching { JSONObject(text) }.getOrNull() ?: return
+                    when (message.optString("type")) {
+                        "server_ping" -> webSocket.send(JSONObject().put("type", "client_ping").put("sentAt", java.time.Instant.now().toString()).toString())
+                        "assistant_result" -> onStatus("Assistant replied.")
+                        "assistant_error" -> onStatus(message.optString("error", "Voice runtime failed."))
+                    }
+                }
+
+                override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                    if (!active.get()) return
+                    val data = bytes.toByteArray()
+                    if (data.isNotEmpty()) {
+                        AssistantAudioPlayer.playWav(data)
+                        onStatus("Assistant audio received.")
+                    }
+                }
+
+                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                    webSocket.close(code, reason)
+                }
+
+                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    if (socket === webSocket) socket = null
+                    if (active.get()) {
+                        onStatus("Voice stream disconnected.")
+                        scheduleReconnect()
+                    } else {
+                        onStatus("Voice stream closed.")
+                    }
+                }
+
+                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    if (socket === webSocket) socket = null
+                    if (!active.get()) return
+                    onStatus(t.message ?: "Voice stream failed.")
+                    scheduleReconnect()
+                }
+            }
+        )
+        socket = newSocket
+    }
+
+    private fun scheduleReconnect() {
+        if (!active.get() || currentSocketUrl.isBlank()) return
+        if (!reconnecting.compareAndSet(false, true)) return
+        val attempt = reconnectAttempt.coerceAtMost(MAX_RECONNECT_EXPONENT)
+        reconnectAttempt += 1
+        val delayMs = minOf(MAX_RECONNECT_DELAY_MS, BASE_RECONNECT_DELAY_MS * (1L shl attempt))
+        currentOnStatus?.invoke("Reconnecting voice stream in ${delayLabel(delayMs)}.")
+        thread(name = "VoiceStreamNextReconnect") {
+            try {
+                Thread.sleep(delayMs)
+            } finally {
+                reconnecting.set(false)
+            }
+            val onStatus = currentOnStatus ?: return@thread
+            val socketUrl = currentSocketUrl
+            if (active.get() && socketUrl.isNotBlank()) {
+                connectSocket(socketUrl, onStatus)
+            }
+        }
+    }
+
+    private fun delayLabel(delayMs: Long): String {
+        return if (delayMs < 1000L) "${delayMs}ms" else "${delayMs / 1000L}s"
     }
 
     @SuppressLint("MissingPermission")
@@ -103,8 +170,9 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
         recorder = audioRecord
         val buffer = ByteArray(bufferSize)
         try {
+            val microphone = microphoneRouter.routeForRecording(audioRecord)
             audioRecord.startRecording()
-            onStatus("Streaming microphone frames.")
+            onStatus("Streaming microphone frames. ${microphone.label}.")
             while (active.get()) {
                 val read = audioRecord.read(buffer, 0, buffer.size)
                 if (read > 0) {
@@ -112,14 +180,19 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
                 }
             }
         } catch (error: Exception) {
-            onStatus(error.message ?: "Audio capture failed.")
+            if (active.get()) {
+                onStatus(error.message ?: "Audio capture failed.")
+            }
         } finally {
+            microphoneRouter.releaseRouting()
             runCatching { audioRecord.stop() }
-            audioRecord.release()
+            runCatching { audioRecord.release() }
             if (recorder === audioRecord) recorder = null
-            socket?.close(1000, "recorder stopped")
-            socket = null
             active.set(false)
+            reconnecting.set(false)
+            val localSocket = socket
+            socket = null
+            localSocket?.close(1000, "recorder stopped")
         }
     }
 
@@ -139,5 +212,8 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
 
     private companion object {
         const val SAMPLE_RATE = 16_000
+        const val BASE_RECONNECT_DELAY_MS = 500L
+        const val MAX_RECONNECT_DELAY_MS = 10_000L
+        const val MAX_RECONNECT_EXPONENT = 4
     }
 }

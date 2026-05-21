@@ -76,6 +76,16 @@ class WakeToggleController {
         state = if (returnToAwake) WakeState.AWAKE else WakeState.OFF
         return WakeAction.STOP_RECORDING
     }
+
+    fun applyServiceMode(mode: String) {
+        state = when (mode) {
+            Constants.MODE_AWAKE -> WakeState.AWAKE
+            Constants.MODE_SLEEPING -> WakeState.SLEEPING
+            Constants.MODE_RECORDING -> WakeState.RECORDING
+            Constants.MODE_ERROR -> WakeState.ERROR
+            else -> WakeState.OFF
+        }
+    }
 }
 
 enum class WakeState {

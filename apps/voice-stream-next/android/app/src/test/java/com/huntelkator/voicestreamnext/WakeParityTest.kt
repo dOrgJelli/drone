@@ -22,4 +22,17 @@ class WakeParityTest {
         assertEquals("9087", recognizer.extract("approval code nine oh eight seven"))
         assertNull(recognizer.extract("approval code one two"))
     }
+
+    @Test
+    fun syncsWakeStateFromServiceMode() {
+        val controller = WakeToggleController()
+        controller.applyServiceMode(Constants.MODE_RECORDING)
+        assertEquals(WakeState.RECORDING, controller.state)
+
+        controller.applyServiceMode(Constants.MODE_SLEEPING)
+        assertEquals(WakeState.SLEEPING, controller.state)
+
+        controller.applyServiceMode(Constants.MODE_OFF)
+        assertEquals(WakeState.OFF, controller.state)
+    }
 }
