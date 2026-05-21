@@ -132,6 +132,14 @@ type AssistantToolSummary = {
 type AssistantProviderId = 'openai' | 'gemini' | 'codex';
 
 type AssistantAccessScope = { readMode: 'all' | 'selected'; writeMode: 'all' | 'selected'; droneIds: string[]; updatedAt: string };
+type AssistantScopeUpdateResult = { ok: true; accessScope?: AssistantAccessScope };
+type AssistantScopeDraft = { readMode: AssistantScopeMode; writeMode: AssistantScopeMode; drones: AssistantScopeDrone[] };
+type PendingAssistantScopeSave = {
+  requestId: number;
+  threadId: string;
+  key: string;
+  promise: Promise<boolean>;
+};
 
 type AssistantSnapshot = {
   ok: true;
@@ -249,6 +257,37 @@ function readInitialOverviewIntervalMs(): number {
 
 function assistantScopeSyncKey(readMode: AssistantScopeMode, writeMode: AssistantScopeMode, droneIds: string[]): string {
   return `${readMode}\u0000${writeMode}\u0000${droneIds.join('\u0000')}`;
+}
+
+function cleanAssistantScopeIds(ids: unknown[]): string[] {
+  return Array.from(new Set(ids.map((id) => String(id ?? '').trim()).filter(Boolean)));
+}
+
+function cleanAssistantScopeDrones(drones: AssistantScopeDrone[]): AssistantScopeDrone[] {
+  const byId = new Map<string, AssistantScopeDrone>();
+  for (const drone of drones) {
+    const id = String(drone.id ?? '').trim();
+    if (!id) continue;
+    byId.set(id, { id, name: String(drone.name ?? id).trim() || id });
+  }
+  return Array.from(byId.values());
+}
+
+function assistantScopeDroneIds(readMode: AssistantScopeMode, writeMode: AssistantScopeMode, drones: AssistantScopeDrone[]): string[] {
+  if (readMode !== 'selected' && writeMode !== 'selected') return [];
+  return cleanAssistantScopeDrones(drones).map((drone) => drone.id);
+}
+
+function assistantScopeKeyFromScope(scope: AssistantAccessScope): string {
+  const readMode: AssistantScopeMode = scope.readMode === 'selected' ? 'selected' : 'all';
+  const writeMode: AssistantScopeMode = scope.writeMode === 'selected' ? 'selected' : 'all';
+  const ids = readMode === 'selected' || writeMode === 'selected' ? cleanAssistantScopeIds(scope.droneIds) : [];
+  return assistantScopeSyncKey(readMode, writeMode, ids);
+}
+
+function assistantScopeUpdatedAtMs(scope: AssistantAccessScope | null | undefined): number {
+  const ms = Date.parse(String(scope?.updatedAt ?? ''));
+  return Number.isFinite(ms) ? ms : 0;
 }
 
 type AssistantToolCall = { id: string; name: string; args: any };
@@ -2233,7 +2272,6 @@ export function AssistantDock() {
   const [scopeReadMode, setScopeReadMode] = React.useState<AssistantScopeMode>('all');
   const [scopeWriteMode, setScopeWriteMode] = React.useState<AssistantScopeMode>('all');
   const [scopeDrones, setScopeDrones] = React.useState<AssistantScopeDrone[]>([]);
-  const [scopeSyncReady, setScopeSyncReady] = React.useState(false);
   const [scopeSyncBusy, setScopeSyncBusy] = React.useState(false);
   const [droneNameById, setDroneNameById] = React.useState<AssistantDroneNameMap>({});
   const [approvalBusyId, setApprovalBusyId] = React.useState<string | null>(null);
@@ -2292,8 +2330,11 @@ export function AssistantDock() {
   const inputRef = React.useRef<HTMLTextAreaElement | null>(null);
   const refocusInputWhenIdleRef = React.useRef(false);
   const activeThreadIdRef = React.useRef('');
+  const currentScopeKeyRef = React.useRef('');
   const lastSyncedScopeKeyRef = React.useRef('');
-  const scopeSyncPromiseRef = React.useRef<{ key: string; promise: Promise<boolean> } | null>(null);
+  const lastSyncedScopeUpdatedAtMsRef = React.useRef(0);
+  const scopeSaveRequestIdRef = React.useRef(0);
+  const scopeSyncPromiseRef = React.useRef<PendingAssistantScopeSave | null>(null);
   const updateThreadRequestRef = React.useRef(0);
   const enabledToolDraftNamesRef = React.useRef<string[]>([]);
   const assistantEventRefreshTimerRef = React.useRef<number | null>(null);
@@ -2839,22 +2880,30 @@ export function AssistantDock() {
     const scope = activeAccessScope;
     if (!scope) return;
     let cancelled = false;
-    const ids = Array.from(new Set((Array.isArray(scope.droneIds) ? scope.droneIds : []).map((id) => String(id ?? '').trim()).filter(Boolean)));
+    const ids = cleanAssistantScopeIds(Array.isArray(scope.droneIds) ? scope.droneIds : []);
     const readMode: AssistantScopeMode = scope.readMode === 'selected' ? 'selected' : 'all';
     const writeMode: AssistantScopeMode = scope.writeMode === 'selected' ? 'selected' : 'all';
-    lastSyncedScopeKeyRef.current = assistantScopeSyncKey(readMode, writeMode, ids);
-    setScopeSyncReady(false);
+    const incomingKey = assistantScopeKeyFromScope(scope);
+    const incomingUpdatedAtMs = assistantScopeUpdatedAtMs(scope);
+    const pending = scopeSyncPromiseRef.current;
+    if (pending && pending.threadId === activeThreadId && incomingKey !== pending.key) {
+      return;
+    }
+    if (!pending && incomingUpdatedAtMs > 0 && lastSyncedScopeUpdatedAtMsRef.current > 0 && incomingUpdatedAtMs < lastSyncedScopeUpdatedAtMsRef.current) {
+      return;
+    }
+    lastSyncedScopeKeyRef.current = incomingKey;
+    currentScopeKeyRef.current = incomingKey;
+    lastSyncedScopeUpdatedAtMsRef.current = incomingUpdatedAtMs;
     setScopeReadMode(readMode);
     setScopeWriteMode(writeMode);
     if (ids.length === 0) {
       setScopeDrones([]);
-      setScopeSyncReady(true);
       return;
     }
     void resolveScopeDroneNames(ids).then((drones) => {
       if (cancelled) return;
       setScopeDrones(drones);
-      setScopeSyncReady(true);
     });
     return () => {
       cancelled = true;
@@ -2868,74 +2917,87 @@ export function AssistantDock() {
     snapshot?.activeThreadId,
   ]);
 
-  const addScopeDrones = React.useCallback((drones: AssistantScopeDrone[]) => {
-    const clean = drones.map((drone) => ({
-      id: String(drone.id ?? '').trim(),
-      name: String(drone.name ?? drone.id ?? '').trim(),
-    })).filter((drone) => drone.id);
-    if (clean.length === 0) return;
-    setScopeReadMode('selected');
-    setScopeWriteMode('selected');
-    setScopeDrones((prev) => {
-      const byId = new Map(prev.map((drone) => [drone.id, drone]));
-      for (const drone of clean) byId.set(drone.id, drone);
-      return Array.from(byId.values());
-    });
-  }, []);
-
-  const removeScopeDrone = React.useCallback((droneId: string) => {
-    setScopeDrones((prev) => prev.filter((drone) => drone.id !== droneId));
-  }, []);
-
-  const syncScopeToBackend = React.useCallback(async (): Promise<boolean> => {
-    if (!scopeSyncReady || !activeThread) return true;
-    const selectedDroneIds = scopeDrones.map((drone) => drone.id);
-    const scopedDroneIds = scopeReadMode === 'selected' || scopeWriteMode === 'selected' ? selectedDroneIds : [];
-    const syncKey = assistantScopeSyncKey(scopeReadMode, scopeWriteMode, scopedDroneIds);
-    if (lastSyncedScopeKeyRef.current === syncKey) return true;
+  const saveScopeDraft = React.useCallback(async (draft: AssistantScopeDraft): Promise<boolean> => {
+    const readMode = draft.readMode === 'selected' ? 'selected' : 'all';
+    const writeMode = draft.writeMode === 'selected' ? 'selected' : 'all';
+    const cleanDrones = cleanAssistantScopeDrones(draft.drones);
+    const visibleDrones = readMode === 'selected' || writeMode === 'selected' ? cleanDrones : [];
+    const scopedDroneIds = assistantScopeDroneIds(readMode, writeMode, visibleDrones);
+    const syncKey = assistantScopeSyncKey(readMode, writeMode, scopedDroneIds);
+    currentScopeKeyRef.current = syncKey;
+    setScopeReadMode(readMode);
+    setScopeWriteMode(writeMode);
+    setScopeDrones(visibleDrones);
+    if (!activeThread) return true;
+    if (lastSyncedScopeKeyRef.current === syncKey && !scopeSyncPromiseRef.current) return true;
     if (scopeSyncPromiseRef.current?.key === syncKey) return await scopeSyncPromiseRef.current.promise;
+    const requestId = scopeSaveRequestIdRef.current + 1;
+    scopeSaveRequestIdRef.current = requestId;
+    const threadId = activeThread.id;
     setScopeSyncBusy(true);
-    const promise = fetch('/api/assistant/scope', {
+    const promise = requestJson<AssistantScopeUpdateResult>('/api/assistant/scope', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        threadId: activeThread.id,
-        readMode: scopeReadMode,
-        writeMode: scopeWriteMode,
+        threadId,
+        readMode,
+        writeMode,
         droneIds: scopedDroneIds,
       }),
     })
-      .then(async (response) => {
-        if (!response.ok) {
-          let message = 'Failed to update assistant scope.';
-          try {
-            const data = await response.json();
-            message = String(data?.error ?? message);
-          } catch {
-            // keep fallback message
-          }
-          throw new Error(message);
-        }
-        lastSyncedScopeKeyRef.current = syncKey;
+      .then((data) => {
+        if (scopeSaveRequestIdRef.current !== requestId) return true;
+        const savedScope = data.accessScope ?? { readMode, writeMode, droneIds: scopedDroneIds, updatedAt: new Date().toISOString() };
+        lastSyncedScopeKeyRef.current = assistantScopeKeyFromScope(savedScope);
+        lastSyncedScopeUpdatedAtMsRef.current = assistantScopeUpdatedAtMs(savedScope);
         return true;
       })
       .catch((err: any) => {
-        setError(err?.message ?? String(err));
+        if (scopeSaveRequestIdRef.current === requestId) setError(err?.message ?? String(err));
         return false;
       })
       .finally(() => {
-        if (scopeSyncPromiseRef.current?.key === syncKey) {
+        if (scopeSyncPromiseRef.current?.requestId === requestId) {
           scopeSyncPromiseRef.current = null;
           setScopeSyncBusy(false);
         }
       });
-    scopeSyncPromiseRef.current = { key: syncKey, promise };
+    scopeSyncPromiseRef.current = { requestId, threadId, key: syncKey, promise };
     return await promise;
-  }, [activeThread, scopeDrones, scopeReadMode, scopeSyncReady, scopeWriteMode]);
+  }, [activeThread]);
 
-  React.useEffect(() => {
-    void syncScopeToBackend();
-  }, [syncScopeToBackend]);
+  const waitForScopeSave = React.useCallback(async (): Promise<boolean> => {
+    if (scopeSyncPromiseRef.current && !(await scopeSyncPromiseRef.current.promise)) return false;
+    if (currentScopeKeyRef.current && lastSyncedScopeKeyRef.current !== currentScopeKeyRef.current) {
+      setError('Assistant access changes are not saved yet.');
+      return false;
+    }
+    return true;
+  }, []);
+
+  const addScopeDrones = React.useCallback((drones: AssistantScopeDrone[]) => {
+    const clean = cleanAssistantScopeDrones(drones);
+    if (clean.length === 0) return;
+    const byId = new Map(scopeDrones.map((drone) => [drone.id, drone]));
+    for (const drone of clean) byId.set(drone.id, drone);
+    void saveScopeDraft({ readMode: 'selected', writeMode: 'selected', drones: Array.from(byId.values()) });
+  }, [saveScopeDraft, scopeDrones]);
+
+  const removeScopeDrone = React.useCallback((droneId: string) => {
+    void saveScopeDraft({
+      readMode: scopeReadMode,
+      writeMode: scopeWriteMode,
+      drones: scopeDrones.filter((drone) => drone.id !== droneId),
+    });
+  }, [saveScopeDraft, scopeDrones, scopeReadMode, scopeWriteMode]);
+
+  const updateScopeReadMode = React.useCallback((mode: AssistantScopeMode) => {
+    void saveScopeDraft({ readMode: mode, writeMode: scopeWriteMode, drones: scopeDrones });
+  }, [saveScopeDraft, scopeDrones, scopeWriteMode]);
+
+  const updateScopeWriteMode = React.useCallback((mode: AssistantScopeMode) => {
+    void saveScopeDraft({ readMode: scopeReadMode, writeMode: mode, drones: scopeDrones });
+  }, [saveScopeDraft, scopeDrones, scopeReadMode]);
 
   useDndMonitor({
     onDragEnd: (event) => {
@@ -3088,7 +3150,7 @@ export function AssistantDock() {
     const prompt = draft.trim();
     if (!prompt) return;
     setError(null);
-    if (!(await syncScopeToBackend())) return;
+    if (!(await waitForScopeSave())) return;
     setDraft('');
     scrollAssistantToBottom({ force: true });
     refocusInputWhenIdleRef.current = true;
@@ -3114,7 +3176,7 @@ export function AssistantDock() {
     } finally {
       void refresh();
     }
-  }, [activeThread, draft, refresh, scrollAssistantToBottom, syncScopeToBackend]);
+  }, [activeThread, draft, refresh, scrollAssistantToBottom, waitForScopeSave]);
 
   const stop = React.useCallback(async () => {
     if (!activeThread) return;
@@ -3566,8 +3628,8 @@ export function AssistantDock() {
             Access
           </div>
           <div className="flex flex-shrink-0 items-center gap-1">
-            <ScopeModeControl label="R" mode={scopeReadMode} onChange={setScopeReadMode} />
-            <ScopeModeControl label="W" mode={scopeWriteMode} onChange={setScopeWriteMode} />
+            <ScopeModeControl label="R" mode={scopeReadMode} onChange={updateScopeReadMode} />
+            <ScopeModeControl label="W" mode={scopeWriteMode} onChange={updateScopeWriteMode} />
           </div>
           <div className="min-w-[120px] flex-1 overflow-hidden">
             {scopeDrones.length === 0 ? (

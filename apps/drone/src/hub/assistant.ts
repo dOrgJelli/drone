@@ -2031,7 +2031,7 @@ export class HubAssistantService {
     };
   }
 
-  async updateAccessScope(input: { threadId?: unknown; mode?: unknown; readMode?: unknown; writeMode?: unknown; droneIds?: unknown }): Promise<void> {
+  async updateAccessScope(input: { threadId?: unknown; mode?: unknown; readMode?: unknown; writeMode?: unknown; droneIds?: unknown }): Promise<AssistantAccessScope> {
     await this.ensureLoaded();
     const threadId = cleanOptionalString(input.threadId) || this.activeThreadId;
     const thread = this.threads.find((item) => item.id === threadId);
@@ -2044,6 +2044,7 @@ export class HubAssistantService {
     });
     thread.updatedAt = nowIso();
     await this.persist();
+    return thread.accessScope;
   }
 
   private addDroneToSelectedAccessScope(threadId: string, droneIdRaw: unknown): void {
