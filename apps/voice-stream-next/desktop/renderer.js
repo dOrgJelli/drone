@@ -21,6 +21,8 @@ const state = {
   wakeStarting: false,
   lastRecognizedText: '',
   lastRecognizedAt: 0,
+  approvalRecognizer: new ApprovalCodeRecognizer(),
+  approvalFinalizeTimer: null,
   analyser: null,
   meterFrame: 0,
 };
@@ -465,6 +467,62 @@ function playWav(data) {
   void audio.play().catch(() => undefined);
 }
 
+function resetApprovalCollection() {
+  if (state.approvalFinalizeTimer) {
+    window.clearTimeout(state.approvalFinalizeTimer);
+    state.approvalFinalizeTimer = null;
+  }
+  state.approvalRecognizer.reset();
+}
+
+function scheduleApprovalFinalize() {
+  if (state.approvalFinalizeTimer) window.clearTimeout(state.approvalFinalizeTimer);
+  state.approvalFinalizeTimer = window.setTimeout(() => {
+    state.approvalFinalizeTimer = null;
+    handleApprovalUpdate(state.approvalRecognizer.flush(Date.now()));
+    if (state.approvalRecognizer.isCollecting && state.mode !== 'off') {
+      scheduleApprovalFinalize();
+    }
+  }, state.approvalRecognizer.finalizeCheckIntervalMs());
+}
+
+function showCollectingStatus(partialCode) {
+  const nextStatus = partialCode
+    ? (state.mode === 'sleeping' ? `Unlock: ${partialCode}` : `Approval: ${partialCode}`)
+    : (state.mode === 'sleeping' ? 'Unlock code...' : 'Approval code...');
+  showStatus(nextStatus);
+}
+
+function handleApprovalUpdate(update) {
+  if (update.type === 'none') return false;
+  if (update.type === 'collecting') {
+    showCollectingStatus(update.partialCode);
+    return true;
+  }
+  if (update.type === 'cancelled') {
+    showStatus('Approval cancelled.');
+    return true;
+  }
+  void processApprovalCode(update.code);
+  return true;
+}
+
+function acceptApprovalText(text, finalizeNow = false) {
+  const now = Date.now();
+  let update = state.approvalRecognizer.accept(text, now);
+  if (state.approvalRecognizer.isCollecting) {
+    if (finalizeNow) {
+      update = state.approvalRecognizer.flush(now + 900);
+    } else {
+      scheduleApprovalFinalize();
+    }
+  }
+  if (update.type === 'none') {
+    return state.approvalRecognizer.isCollecting;
+  }
+  return handleApprovalUpdate(update);
+}
+
 function wakePhraseMatch(text) {
   const words = String(text || '').toLowerCase().split(/[^a-z]+/).filter(Boolean);
   const compact = words.join('');
@@ -476,22 +534,15 @@ function wakePhraseMatch(text) {
   return null;
 }
 
-function approvalCodeFromText(text) {
-  const words = String(text || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
-  const start = words.findIndex((word, index) => word === 'approval' && words[index + 1] === 'code');
-  if (start < 0) return null;
-  const digitMap = { zero: '0', oh: '0', o: '0', one: '1', won: '1', two: '2', too: '2', to: '2', three: '3', tree: '3', four: '4', for: '4', five: '5', six: '6', seven: '7', eight: '8', ate: '8', nine: '9', niner: '9' };
-  const digits = words.slice(start + 2).map((word) => digitMap[word] || (/^\d$/.test(word) ? word : '')).join('').slice(0, 8);
-  return digits.length >= 4 ? digits : null;
-}
-
 function enterAwake() {
+  resetApprovalCollection();
   setMode('awake', 'Awake. Say or enter "hey sebastian" to start recording.');
   startWakeListener();
 }
 
 async function enterSleep() {
   if (state.voiceSocket || state.stream) await stopMic('sleeping');
+  resetApprovalCollection();
   const settings = await loadVoiceSettings().catch(() => null);
   setMode('sleeping', settings ? `Sleep: ${settings.unlockCode} awake, ${settings.offCode} off.` : 'Sleeping.');
   startWakeListener();
@@ -500,6 +551,7 @@ async function enterSleep() {
 async function turnOff() {
   if (state.voiceSocket || state.stream) await stopMic('off');
   stopWakeListener();
+  resetApprovalCollection();
   setMode('off', 'Off.');
 }
 
@@ -530,15 +582,11 @@ async function processWakePhrase(event) {
   event.preventDefault();
   const text = els.wakePhraseInput.value.trim();
   els.wakePhraseInput.value = '';
-  await processPhraseText(text);
+  await processPhraseText(text, true);
 }
 
-async function processPhraseText(text) {
-  const approvalCode = approvalCodeFromText(text);
-  if (approvalCode) {
-    await processApprovalCode(approvalCode);
-    return;
-  }
+async function processPhraseText(text, finalizeNow = false) {
+  if (acceptApprovalText(text, finalizeNow)) return;
   if (state.mode === 'recording') {
     showStatus('Recording. Wake commands are ignored until capture stops.');
     return;

@@ -11,6 +11,7 @@ import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
@@ -390,10 +391,7 @@ class MainActivity : ComponentActivity() {
     private fun processWakePhrase() {
         val text = wakePhraseInput.text.toString()
         wakePhraseInput.setText("")
-        approvalCodeRecognizer.extract(text)?.let { code ->
-            processApprovalCode(code)
-            return
-        }
+        if (tryHandleApprovalText(text, finalizeNow = true)) return
         val phrase = WakePhraseMatcher.match(text)
         if (phrase == null) {
             showStatus("No wake phrase matched.")
@@ -415,6 +413,42 @@ class MainActivity : ComponentActivity() {
             }
             WakeAction.NONE -> showStatus("Mode: ${wakeController.state}")
         }
+    }
+
+    private fun tryHandleApprovalText(text: String, finalizeNow: Boolean = false): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        var update = approvalCodeRecognizer.accept(text, now)
+        if (approvalCodeRecognizer.isCollecting && finalizeNow) {
+            update = approvalCodeRecognizer.flush(now + 900)
+        }
+        return when (update) {
+            ApprovalCodeUpdate.None -> approvalCodeRecognizer.isCollecting
+            is ApprovalCodeUpdate.Collecting -> {
+                showCollectingStatus(update.partialCode)
+                true
+            }
+            ApprovalCodeUpdate.Cancelled -> {
+                showStatus("Approval cancelled")
+                true
+            }
+            is ApprovalCodeUpdate.Completed -> {
+                processApprovalCode(update.code)
+                true
+            }
+        }
+    }
+
+    private fun showCollectingStatus(partialCode: String) {
+        val sleeping = wakeController.state == WakeState.SLEEPING
+        showStatus(
+            if (partialCode.isBlank()) {
+                if (sleeping) "Unlock code..." else "Approval code..."
+            } else if (sleeping) {
+                "Unlock: $partialCode"
+            } else {
+                "Approval: $partialCode"
+            }
+        )
     }
 
     private fun processApprovalCode(code: String) = runApi("Processing approval code") {

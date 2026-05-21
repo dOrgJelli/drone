@@ -8,6 +8,7 @@ import { clerkPlugin } from '@clerk/fastify';
 import { VoiceStreamNextDb } from './db.js';
 import { requireAdmin, resolveRequestUser, type AuthContext } from './auth.js';
 import { generateAssistantReply, synthesizeSpeech, transcribePcm16 } from './assistant-runtime.js';
+import { approvalCodeFromText } from './approval-code.js';
 import {
   HEARTBEAT_INTERVAL_MS,
   MAX_STREAM_BYTES,
@@ -47,24 +48,6 @@ function cleanVoiceStreamMode(raw: string): 'assistant' | 'patch' | 'clipboard' 
 function cleanDeviceMode(raw: unknown): string {
   const mode = cleanText(raw, 'off').toLowerCase();
   return ['off', 'awake', 'sleeping', 'recording', 'transcribing', 'error'].includes(mode) ? mode : 'error';
-}
-
-function approvalCodeFromText(text: string): string | null {
-  const words = text
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter(Boolean);
-  const phraseIndex = words.findIndex((word, index) => word === 'approval' && words[index + 1] === 'code');
-  if (phraseIndex < 0) return null;
-  const digits = words
-    .slice(phraseIndex + 2)
-    .map((word) => {
-      if (/^\d$/.test(word)) return word;
-      return ({ zero: '0', oh: '0', o: '0', one: '1', won: '1', two: '2', too: '2', to: '2', three: '3', tree: '3', four: '4', for: '4', five: '5', six: '6', seven: '7', eight: '8', ate: '8', nine: '9', niner: '9' } as Record<string, string>)[word] ?? '';
-    })
-    .join('')
-    .slice(0, 8);
-  return digits.length >= 4 ? digits : null;
 }
 
 function queryValue(value: unknown): string {

@@ -2,6 +2,7 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { ClerkProvider, SignedIn, SignedOut, SignIn, UserButton, useAuth, useUser } from '@clerk/clerk-react';
 import QRCode from 'qrcode';
+import { ApprovalCodeRecognizer, type ApprovalCodeUpdate } from '../../server/src/approval-code.js';
 import './styles.css';
 
 type UserProfile = {
@@ -624,9 +625,16 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
   const streamingRef = React.useRef(streaming);
   const lastRecognizedRef = React.useRef({ text: '', at: 0 });
   const controlSocketRef = React.useRef<WebSocket | null>(null);
+  const approvalRecognizerRef = React.useRef(new ApprovalCodeRecognizer());
+  const approvalFinalizeTimerRef = React.useRef<number | null>(null);
 
   React.useEffect(() => {
     void loadVoiceSettings();
+    return () => {
+      if (approvalFinalizeTimerRef.current !== null) {
+        window.clearTimeout(approvalFinalizeTimerRef.current);
+      }
+    };
   }, []);
 
   React.useEffect(() => {
@@ -644,6 +652,66 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
       controlSocketRef.current = null;
     };
   }, [device?.id]);
+
+  function resetApprovalCollection() {
+    if (approvalFinalizeTimerRef.current !== null) {
+      window.clearTimeout(approvalFinalizeTimerRef.current);
+      approvalFinalizeTimerRef.current = null;
+    }
+    approvalRecognizerRef.current.reset();
+  }
+
+  function scheduleApprovalFinalize() {
+    if (approvalFinalizeTimerRef.current !== null) {
+      window.clearTimeout(approvalFinalizeTimerRef.current);
+    }
+    approvalFinalizeTimerRef.current = window.setTimeout(() => {
+      approvalFinalizeTimerRef.current = null;
+      handleApprovalUpdate(approvalRecognizerRef.current.flush(Date.now()));
+      if (approvalRecognizerRef.current.isCollecting && modeRef.current !== 'off') {
+        scheduleApprovalFinalize();
+      }
+    }, approvalRecognizerRef.current.finalizeCheckIntervalMs());
+  }
+
+  function showCollectingStatus(partialCode: string) {
+    const nextStatus = partialCode
+      ? (modeRef.current === 'sleeping' ? `Unlock: ${partialCode}` : `Approval: ${partialCode}`)
+      : (modeRef.current === 'sleeping' ? 'Unlock code...' : 'Approval code...');
+    setStatus(nextStatus);
+    void reportDesktopStatus(modeRef.current, nextStatus);
+  }
+
+  function handleApprovalUpdate(update: ApprovalCodeUpdate): boolean {
+    if (update.type === 'none') return false;
+    if (update.type === 'collecting') {
+      showCollectingStatus(update.partialCode);
+      return true;
+    }
+    if (update.type === 'cancelled') {
+      setStatus('Approval cancelled.');
+      void reportDesktopStatus(modeRef.current, 'Approval cancelled.');
+      return true;
+    }
+    void processApprovalCode(update.code);
+    return true;
+  }
+
+  function acceptApprovalText(text: string, finalizeNow = false): boolean {
+    const now = Date.now();
+    let update = approvalRecognizerRef.current.accept(text, now);
+    if (approvalRecognizerRef.current.isCollecting) {
+      if (finalizeNow) {
+        update = approvalRecognizerRef.current.flush(now + 900);
+      } else {
+        scheduleApprovalFinalize();
+      }
+    }
+    if (update.type === 'none') {
+      return approvalRecognizerRef.current.isCollecting;
+    }
+    return handleApprovalUpdate(update);
+  }
 
   async function loadVoiceSettings(): Promise<VoiceSettings> {
     const data = await client.request<{ ok: true; settings: { unlockCode: string; lockCode: string; lockedOffCode: string } }>('/api/settings/voice-approval');
@@ -826,6 +894,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
   }
 
   function enterAwake() {
+    resetApprovalCollection();
     setMode('awake');
     void reportDesktopStatus('awake', 'Awake. Listening for wake phrases.');
     startWakeListener();
@@ -833,6 +902,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
 
   function enterSleep() {
     if (streaming) void stopVoice('sleeping');
+    resetApprovalCollection();
     setMode('sleeping');
     const settings = voiceSettings;
     setStatus(settings ? `Sleep: ${settings.unlockCode} awake, ${settings.offCode} off.` : 'Sleeping.');
@@ -843,6 +913,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
   function turnOff() {
     if (streaming) void stopVoice('off');
     stopWakeListener();
+    resetApprovalCollection();
     setMode('off');
     setStatus('Off.');
     void reportDesktopStatus('off', 'Off.');
@@ -851,16 +922,12 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
   async function processWakePhrase() {
     const text = phrase;
     setPhrase('');
-    await processPhraseText(text);
+    await processPhraseText(text, true);
   }
 
-  async function processPhraseText(text: string) {
+  async function processPhraseText(text: string, finalizeNow = false) {
     const currentMode = modeRef.current;
-    const approvalCode = approvalCodeFromText(text);
-    if (approvalCode) {
-      await processApprovalCode(approvalCode);
-      return;
-    }
+    if (acceptApprovalText(text, finalizeNow)) return;
     if (currentMode === 'recording') {
       setStatus('Recording. Wake commands are ignored until capture stops.');
       return;
@@ -1090,16 +1157,6 @@ function wakePhraseMatch(text: string): 'start' | 'patch' | 'clipboard' | 'sleep
   if (words.includes('transcribe')) return 'clipboard';
   if (words.includes('status') || compact === 'stateus' || compact === 'checkstatus') return 'status';
   return null;
-}
-
-function approvalCodeFromText(text: string): string | null {
-  const words = text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
-  const start = words.findIndex((word, index) => word === 'approval' && words[index + 1] === 'code');
-  if (start < 0) return null;
-  const digits = words.slice(start + 2).map((word) => ({
-    zero: '0', oh: '0', o: '0', one: '1', won: '1', two: '2', too: '2', to: '2', three: '3', tree: '3', four: '4', for: '4', five: '5', six: '6', seven: '7', eight: '8', ate: '8', nine: '9', niner: '9',
-  } as Record<string, string>)[word] ?? (/^\d$/.test(word) ? word : '')).join('').slice(0, 8);
-  return digits.length >= 4 ? digits : null;
 }
 
 function recordingStatus(target: VoiceStreamTarget): string {
