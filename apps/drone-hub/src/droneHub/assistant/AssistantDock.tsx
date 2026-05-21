@@ -63,6 +63,7 @@ type AssistantQueuedPrompt = {
 
 type AssistantPromptDeliveryMode = 'queue' | 'asap';
 type AssistantPanelMode = 'normal' | 'voice';
+type AssistantSystemPromptKind = 'normal' | 'voice';
 
 type AssistantRunModel = {
   provider: AssistantProviderId;
@@ -157,6 +158,14 @@ type AssistantSnapshot = {
 type AssistantSystemPromptSettings = {
   ok: true;
   assistantSystemPrompt: {
+    prompt: string;
+    promptSource: 'settings' | 'default';
+    updatedAt: string | null;
+    defaultPrompt: string;
+    maxPromptChars: number;
+    runtimeAppendix: string;
+  };
+  assistantVoiceSystemPrompt: {
     prompt: string;
     promptSource: 'settings' | 'default';
     updatedAt: string | null;
@@ -1848,8 +1857,10 @@ function AssistantPromptDiffView({ oldText, newText }: { oldText: string; newTex
 
 function AssistantSystemPromptModal({
   mode,
+  globalPromptKind,
   settings,
   draft,
+  voiceDraft,
   threadSettings,
   threadDraft,
   loading,
@@ -1859,7 +1870,9 @@ function AssistantSystemPromptModal({
   error,
   notice,
   onModeChange,
+  onGlobalPromptKindChange,
   onDraftChange,
+  onVoiceDraftChange,
   onThreadDraftChange,
   onUseGlobalForThread,
   onUseDefaultForGlobal,
@@ -1869,8 +1882,10 @@ function AssistantSystemPromptModal({
   onPromoteThread,
 }: {
   mode: 'thread' | 'global';
+  globalPromptKind: AssistantSystemPromptKind;
   settings: AssistantSystemPromptSettings | null;
   draft: string;
+  voiceDraft: string;
   threadSettings: AssistantThreadSystemPromptSettings | null;
   threadDraft: string;
   loading: boolean;
@@ -1880,7 +1895,9 @@ function AssistantSystemPromptModal({
   error: string | null;
   notice: string | null;
   onModeChange: (mode: 'thread' | 'global') => void;
+  onGlobalPromptKindChange: (kind: AssistantSystemPromptKind) => void;
   onDraftChange: (value: string) => void;
+  onVoiceDraftChange: (value: string) => void;
   onThreadDraftChange: (value: string) => void;
   onUseGlobalForThread: () => void;
   onUseDefaultForGlobal: () => void;
@@ -1890,19 +1907,21 @@ function AssistantSystemPromptModal({
   onPromoteThread: () => void;
 }) {
   const [diffOpen, setDiffOpen] = React.useState(false);
-  const currentPrompt = settings?.assistantSystemPrompt.prompt ?? '';
+  const activeGlobalSettings = globalPromptKind === 'voice' ? settings?.assistantVoiceSystemPrompt : settings?.assistantSystemPrompt;
+  const currentPrompt = activeGlobalSettings?.prompt ?? '';
   const currentThreadPrompt = threadSettings?.threadSystemPrompt.prompt ?? '';
-  const currentGlobalPrompt = currentPrompt || (threadSettings?.threadSystemPrompt.globalPrompt ?? '');
-  const maxChars = (mode === 'thread' ? threadSettings?.threadSystemPrompt.maxPromptChars : settings?.assistantSystemPrompt.maxPromptChars) ?? 20_000;
-  const globalDirty = draft !== currentPrompt;
+  const currentGlobalPrompt = threadSettings?.threadSystemPrompt.globalPrompt ?? currentPrompt;
+  const maxChars = (mode === 'thread' ? threadSettings?.threadSystemPrompt.maxPromptChars : activeGlobalSettings?.maxPromptChars) ?? 20_000;
+  const activeGlobalDraft = globalPromptKind === 'voice' ? voiceDraft : draft;
+  const globalDirty = activeGlobalDraft !== currentPrompt;
   const threadDirty = threadDraft !== currentThreadPrompt;
-  const globalSaveDisabled = loading || saving || !globalDirty || !draft.trim();
+  const globalSaveDisabled = loading || saving || !globalDirty || !activeGlobalDraft.trim();
   const threadSaveDisabled = loading || threadSaving || !threadDirty || !threadDraft.trim();
-  const activeDraft = mode === 'thread' ? threadDraft : draft;
+  const activeDraft = mode === 'thread' ? threadDraft : activeGlobalDraft;
   const activeSource =
     mode === 'thread'
       ? threadSettings?.threadSystemPrompt.promptSource ?? 'thread'
-      : settings?.assistantSystemPrompt.promptSource ?? 'default';
+      : activeGlobalSettings?.promptSource ?? 'default';
 
   React.useEffect(() => {
     if (mode !== 'thread') setDiffOpen(false);
@@ -1917,7 +1936,7 @@ function AssistantSystemPromptModal({
               Assistant system prompts
             </div>
             <div className="mt-1 text-[11px] text-[var(--muted-dim)]">
-              Thread changes affect only the current thread. Global changes apply to new assistant threads.
+              Thread changes affect only the current thread. Global changes apply to new normal or voice threads.
             </div>
           </div>
           <button
@@ -1960,10 +1979,38 @@ function AssistantSystemPromptModal({
             </div>
           ) : null}
           <label className="flex min-h-0 flex-col gap-2">
-            <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]">Prompt</span>
+            {mode === 'global' ? (
+              <div className="mb-1 grid h-8 w-full max-w-[280px] grid-cols-2 overflow-hidden rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)]">
+                {(['normal', 'voice'] as const).map((item) => (
+                  <button
+                    key={item}
+                    type="button"
+                    onClick={() => onGlobalPromptKindChange(item)}
+                    aria-pressed={globalPromptKind === item}
+                    className={`text-[10px] font-semibold uppercase tracking-wide ${
+                      globalPromptKind === item
+                        ? 'bg-[var(--accent-subtle)] text-[var(--accent)]'
+                        : 'text-[var(--muted)] hover:bg-[rgba(255,255,255,.025)] hover:text-[var(--fg-secondary)]'
+                    }`}
+                    style={{ fontFamily: 'var(--display)' }}
+                  >
+                    {item === 'normal' ? 'Normal' : 'Voice'}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--muted-dim)]">
+              {mode === 'global' && globalPromptKind === 'voice' ? 'Voice prompt' : 'Prompt'}
+            </span>
             <textarea
               value={activeDraft}
-              onChange={(event) => (mode === 'thread' ? onThreadDraftChange(event.target.value) : onDraftChange(event.target.value))}
+              onChange={(event) =>
+                mode === 'thread'
+                  ? onThreadDraftChange(event.target.value)
+                  : globalPromptKind === 'voice'
+                    ? onVoiceDraftChange(event.target.value)
+                    : onDraftChange(event.target.value)
+              }
               disabled={loading || saving || threadSaving || promoting}
               maxLength={maxChars}
               rows={20}
@@ -1978,7 +2025,7 @@ function AssistantSystemPromptModal({
             </span>
           </div>
           <div className="mt-2 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 py-2 text-[11px] leading-relaxed text-[var(--muted-dim)]">
-            {(mode === 'thread' ? threadSettings?.threadSystemPrompt.runtimeAppendix : settings?.assistantSystemPrompt.runtimeAppendix) ??
+            {(mode === 'thread' ? threadSettings?.threadSystemPrompt.runtimeAppendix : activeGlobalSettings?.runtimeAppendix) ??
               'Access-scope instructions are appended at run time.'}
           </div>
           {mode === 'thread' && diffOpen ? <AssistantPromptDiffView oldText={currentGlobalPrompt} newText={threadDraft} /> : null}
@@ -2050,7 +2097,7 @@ function AssistantSystemPromptModal({
                 }`}
                 style={{ fontFamily: 'var(--display)' }}
               >
-                {saving ? 'Saving...' : 'Save for new threads'}
+                {saving ? 'Saving...' : globalPromptKind === 'voice' ? 'Save for new voice threads' : 'Save for new normal threads'}
               </button>
             </>
           )}
@@ -2281,8 +2328,10 @@ export function AssistantDock() {
   const [enabledToolDraftNames, setEnabledToolDraftNames] = React.useState<string[]>([]);
   const [systemPromptOpen, setSystemPromptOpen] = React.useState(false);
   const [systemPromptMode, setSystemPromptMode] = React.useState<'thread' | 'global'>('thread');
+  const [systemPromptGlobalKind, setSystemPromptGlobalKind] = React.useState<AssistantSystemPromptKind>('normal');
   const [systemPromptSettings, setSystemPromptSettings] = React.useState<AssistantSystemPromptSettings | null>(null);
   const [systemPromptDraft, setSystemPromptDraft] = React.useState('');
+  const [voiceSystemPromptDraft, setVoiceSystemPromptDraft] = React.useState('');
   const [threadSystemPromptSettings, setThreadSystemPromptSettings] = React.useState<AssistantThreadSystemPromptSettings | null>(null);
   const [threadSystemPromptDraft, setThreadSystemPromptDraft] = React.useState('');
   const [systemPromptLoading, setSystemPromptLoading] = React.useState(false);
@@ -2510,6 +2559,7 @@ export function AssistantDock() {
       ]);
       setSystemPromptSettings(data);
       setSystemPromptDraft(data.assistantSystemPrompt.prompt);
+      setVoiceSystemPromptDraft(data.assistantVoiceSystemPrompt.prompt);
       setThreadSystemPromptSettings(threadData);
       setThreadSystemPromptDraft(threadData?.threadSystemPrompt.prompt ?? '');
     } catch (err: any) {
@@ -2521,6 +2571,7 @@ export function AssistantDock() {
 
   const openSystemPromptEditor = React.useCallback(() => {
     setSystemPromptMode('thread');
+    setSystemPromptGlobalKind(voiceEnabledRef.current ? 'voice' : 'normal');
     setSystemPromptOpen(true);
     void loadSystemPromptSettings();
   }, [loadSystemPromptSettings]);
@@ -2530,18 +2581,24 @@ export function AssistantDock() {
     setSystemPromptError(null);
     setSystemPromptNotice(null);
     try {
+      const promptType = systemPromptGlobalKind;
+      const prompt = promptType === 'voice' ? voiceSystemPromptDraft : systemPromptDraft;
       const data = await requestJson<AssistantSystemPromptSettings>('/api/assistant/system-prompt', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ prompt: systemPromptDraft }),
+        body: JSON.stringify({ prompt, promptType }),
       });
       setSystemPromptSettings(data);
       setSystemPromptDraft(data.assistantSystemPrompt.prompt);
+      setVoiceSystemPromptDraft(data.assistantVoiceSystemPrompt.prompt);
       setThreadSystemPromptSettings((prev) => {
         if (!prev) return prev;
+        const activeThreadUsesSavedPromptType = Boolean(activeThread?.voiceEnabled) === (promptType === 'voice');
+        if (!activeThreadUsesSavedPromptType) return prev;
+        const savedSettings = promptType === 'voice' ? data.assistantVoiceSystemPrompt : data.assistantSystemPrompt;
         const promptSource =
-          prev.threadSystemPrompt.prompt === data.assistantSystemPrompt.prompt
-            ? data.assistantSystemPrompt.promptSource === 'default'
+          prev.threadSystemPrompt.prompt === savedSettings.prompt
+            ? savedSettings.promptSource === 'default'
               ? 'default'
               : 'global'
             : 'thread';
@@ -2550,19 +2607,19 @@ export function AssistantDock() {
           threadSystemPrompt: {
             ...prev.threadSystemPrompt,
             promptSource,
-            globalPrompt: data.assistantSystemPrompt.prompt,
-            globalPromptSource: data.assistantSystemPrompt.promptSource,
+            globalPrompt: savedSettings.prompt,
+            globalPromptSource: savedSettings.promptSource,
             updatedAt: promptSource === 'thread' ? prev.threadSystemPrompt.updatedAt : null,
           },
         };
       });
-      setSystemPromptNotice('Saved. New assistant threads will use this prompt.');
+      setSystemPromptNotice(promptType === 'voice' ? 'Saved. New voice assistant threads will use this prompt.' : 'Saved. New normal assistant threads will use this prompt.');
     } catch (err: any) {
       setSystemPromptError(err?.message ?? String(err));
     } finally {
       setSystemPromptSaving(false);
     }
-  }, [systemPromptDraft]);
+  }, [activeThread?.voiceEnabled, systemPromptDraft, systemPromptGlobalKind, voiceSystemPromptDraft]);
 
   const saveThreadSystemPromptSettings = React.useCallback(async () => {
     const threadId = activeThreadIdRef.current;
@@ -2590,7 +2647,7 @@ export function AssistantDock() {
   const promoteThreadSystemPrompt = React.useCallback(async () => {
     const threadId = activeThreadIdRef.current;
     if (!threadId) return;
-    const confirmed = window.confirm('Promote this thread system prompt to the global prompt for new assistant threads? Existing threads keep their own prompts.');
+    const confirmed = window.confirm('Promote this thread system prompt to the matching global prompt for new assistant threads? Existing threads keep their own prompts.');
     if (!confirmed) return;
     setPromoteSystemPromptSaving(true);
     setSystemPromptError(null);
@@ -2603,15 +2660,16 @@ export function AssistantDock() {
       });
       setSystemPromptSettings(data);
       setSystemPromptDraft(data.assistantSystemPrompt.prompt);
+      setVoiceSystemPromptDraft(data.assistantVoiceSystemPrompt.prompt);
       await loadSystemPromptSettings();
-      setSystemPromptNotice('Promoted. New assistant threads will use this prompt.');
+      setSystemPromptNotice(activeThread?.voiceEnabled ? 'Promoted. New voice assistant threads will use this prompt.' : 'Promoted. New normal assistant threads will use this prompt.');
       void refresh();
     } catch (err: any) {
       setSystemPromptError(err?.message ?? String(err));
     } finally {
       setPromoteSystemPromptSaving(false);
     }
-  }, [loadSystemPromptSettings, refresh, threadSystemPromptDraft]);
+  }, [activeThread?.voiceEnabled, loadSystemPromptSettings, refresh, threadSystemPromptDraft]);
 
   const loadOverviewPromptSettings = React.useCallback(async () => {
     setOverviewPromptLoading(true);
@@ -3978,8 +4036,10 @@ export function AssistantDock() {
       {systemPromptOpen ? (
         <AssistantSystemPromptModal
           mode={systemPromptMode}
+          globalPromptKind={systemPromptGlobalKind}
           settings={systemPromptSettings}
           draft={systemPromptDraft}
+          voiceDraft={voiceSystemPromptDraft}
           threadSettings={threadSystemPromptSettings}
           threadDraft={threadSystemPromptDraft}
           loading={systemPromptLoading}
@@ -3989,10 +4049,19 @@ export function AssistantDock() {
           error={systemPromptError}
           notice={systemPromptNotice}
           onModeChange={setSystemPromptMode}
+          onGlobalPromptKindChange={setSystemPromptGlobalKind}
           onDraftChange={setSystemPromptDraft}
+          onVoiceDraftChange={setVoiceSystemPromptDraft}
           onThreadDraftChange={setThreadSystemPromptDraft}
-          onUseGlobalForThread={() => setThreadSystemPromptDraft(systemPromptSettings?.assistantSystemPrompt.prompt ?? threadSystemPromptSettings?.threadSystemPrompt.globalPrompt ?? '')}
-          onUseDefaultForGlobal={() => setSystemPromptDraft(systemPromptSettings?.assistantSystemPrompt.defaultPrompt ?? '')}
+          onUseGlobalForThread={() => setThreadSystemPromptDraft(threadSystemPromptSettings?.threadSystemPrompt.globalPrompt ?? '')}
+          onUseDefaultForGlobal={() => {
+            const defaultPrompt =
+              systemPromptGlobalKind === 'voice'
+                ? systemPromptSettings?.assistantVoiceSystemPrompt.defaultPrompt
+                : systemPromptSettings?.assistantSystemPrompt.defaultPrompt;
+            if (systemPromptGlobalKind === 'voice') setVoiceSystemPromptDraft(defaultPrompt ?? '');
+            else setSystemPromptDraft(defaultPrompt ?? '');
+          }}
           onClose={() => setSystemPromptOpen(false)}
           onSaveGlobal={() => void saveSystemPromptSettings()}
           onSaveThread={() => void saveThreadSystemPromptSettings()}
