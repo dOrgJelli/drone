@@ -50,6 +50,8 @@ class MainActivity : ComponentActivity() {
     private val wakeController = WakeToggleController()
     private val approvalCodeRecognizer = ApprovalCodeRecognizer()
     private val cuePlayer = LocalCuePlayer()
+    private var pendingStartAwake = false
+    private var pendingStartTarget = Constants.STREAM_TARGET_ASSISTANT
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val status = intent?.getStringExtra(Constants.EXTRA_STATUS).orEmpty()
@@ -64,7 +66,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private val voicePermissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
-        if (grants.values.all { it }) startVoiceSession() else showStatus("Voice permissions denied.")
+        if (!grants.values.all { it }) {
+            showStatus("Voice permissions denied.")
+            return@registerForActivityResult
+        }
+        if (pendingStartAwake) {
+            startAwakeService()
+        } else {
+            startVoiceSession(pendingStartTarget)
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -225,10 +235,23 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun ensureMicThenStart(playCue: Boolean = true) {
+    private fun ensureMicThenStart(target: String = Constants.STREAM_TARGET_ASSISTANT, playCue: Boolean = true) {
+        pendingStartAwake = false
+        pendingStartTarget = target
         val missingPermissions = missingVoicePermissions()
         if (missingPermissions.isEmpty()) {
-            startVoiceSession(playCue)
+            startVoiceSession(target, playCue)
+        } else {
+            voicePermissions.launch(missingPermissions.toTypedArray())
+        }
+    }
+
+    private fun ensureMicThenStartAwake() {
+        pendingStartAwake = true
+        pendingStartTarget = Constants.STREAM_TARGET_ASSISTANT
+        val missingPermissions = missingVoicePermissions()
+        if (missingPermissions.isEmpty()) {
+            startAwakeService()
         } else {
             voicePermissions.launch(missingPermissions.toTypedArray())
         }
@@ -247,7 +270,7 @@ class MainActivity : ComponentActivity() {
         return permissions
     }
 
-    private fun startVoiceSession(playCue: Boolean = true) {
+    private fun startVoiceSession(target: String = Constants.STREAM_TARGET_ASSISTANT, playCue: Boolean = true) {
         val deviceId = api.pairedDeviceId()
         if (deviceId.isBlank()) {
             showStatus("Pair this device first.")
@@ -257,9 +280,27 @@ class MainActivity : ComponentActivity() {
         if (playCue) cuePlayer.play(LocalCue.START_BUTTON)
         ContextCompat.startForegroundService(
             this,
-            Intent(this, VoiceSessionService::class.java).apply { action = Constants.ACTION_START_VOICE }
+            Intent(this, VoiceSessionService::class.java).apply {
+                action = Constants.ACTION_START_VOICE
+                putExtra(Constants.EXTRA_STREAM_TARGET, target)
+            }
         )
         showStatus("Foreground voice service started.")
+    }
+
+    private fun startAwakeService() {
+        val deviceId = api.pairedDeviceId()
+        if (deviceId.isBlank()) {
+            showStatus("Pair this device first.")
+            return
+        }
+        wakeController.startAwake()
+        cuePlayer.play(LocalCue.WAKE)
+        ContextCompat.startForegroundService(
+            this,
+            Intent(this, VoiceSessionService::class.java).apply { action = Constants.ACTION_START_AWAKE }
+        )
+        showStatus("Waking local detector.")
     }
 
     private fun stopVoiceSession(playCue: Boolean = true) {
@@ -272,15 +313,12 @@ class MainActivity : ComponentActivity() {
     private lateinit var wakePhraseInput: EditText
 
     private fun enterAwake() {
-        wakeController.startAwake()
-        cuePlayer.play(LocalCue.WAKE)
-        showStatus("Awake. Listening for wake phrases.")
+        ensureMicThenStartAwake()
     }
 
     private fun enterSleep() {
-        if (wakeController.state == WakeState.RECORDING) stopVoiceSession(playCue = false)
+        startService(Intent(this, VoiceSessionService::class.java).apply { action = Constants.ACTION_SLEEP })
         wakeController.toggleAwakeSleep()
-        cuePlayer.play(LocalCue.SLEEP)
         showStatus("Sleeping.")
     }
 
@@ -295,11 +333,7 @@ class MainActivity : ComponentActivity() {
         val text = wakePhraseInput.text.toString()
         wakePhraseInput.setText("")
         approvalCodeRecognizer.extract(text)?.let { code ->
-            cuePlayer.play(LocalCue.STATUS)
-            runApi("Uploading approval code") {
-                api.uploadApprovalCode(code)
-                showStatus("Approval code uploaded.")
-            }
+            processApprovalCode(code)
             return
         }
         val phrase = WakePhraseMatcher.match(text)
@@ -309,13 +343,12 @@ class MainActivity : ComponentActivity() {
         }
         val action = wakeController.wakeDetected(phrase)
         when (action) {
-            WakeAction.START_RECORDING,
-            WakeAction.START_PATCH_RECORDING,
-            WakeAction.START_CLIPBOARD_RECORDING -> ensureMicThenStart()
+            WakeAction.START_RECORDING -> ensureMicThenStart(Constants.STREAM_TARGET_ASSISTANT)
+            WakeAction.START_PATCH_RECORDING -> ensureMicThenStart(Constants.STREAM_TARGET_PATCH)
+            WakeAction.START_CLIPBOARD_RECORDING -> ensureMicThenStart(Constants.STREAM_TARGET_CLIPBOARD)
             WakeAction.STOP_RECORDING,
             WakeAction.ENTER_SLEEPING -> {
-                cuePlayer.play(LocalCue.SLEEP)
-                stopVoiceSession(playCue = false)
+                startService(Intent(this, VoiceSessionService::class.java).apply { setAction(Constants.ACTION_SLEEP) })
                 showStatus("Sleeping.")
             }
             WakeAction.PLAY_STATUS -> {
@@ -323,6 +356,25 @@ class MainActivity : ComponentActivity() {
                 showStatus("Mode: ${wakeController.state}")
             }
             WakeAction.NONE -> showStatus("Mode: ${wakeController.state}")
+        }
+    }
+
+    private fun processApprovalCode(code: String) = runApi("Processing approval code") {
+        val settings = api.voiceApprovalSettings()
+        when {
+            wakeController.state == WakeState.SLEEPING && code == settings.unlockCode -> runOnUiThread {
+                wakeController.startAwake()
+                cuePlayer.play(LocalCue.UNLOCK)
+                showStatus("Unlocked.")
+            }
+            code == settings.offCode -> runOnUiThread { turnOff() }
+            wakeController.state != WakeState.SLEEPING && code == settings.lockCode -> runOnUiThread { enterSleep() }
+            wakeController.state != WakeState.SLEEPING -> {
+                api.uploadApprovalCode(code)
+                cuePlayer.play(LocalCue.STATUS)
+                showStatus("Approval code uploaded.")
+            }
+            else -> showStatus("Sleeping.")
         }
     }
 

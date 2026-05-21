@@ -40,6 +40,10 @@ function cleanCode(raw: unknown, label: string): string {
   return value;
 }
 
+function cleanVoiceStreamMode(raw: string): 'assistant' | 'patch' | 'clipboard' {
+  return raw === 'patch' || raw === 'clipboard' ? raw : 'assistant';
+}
+
 function approvalCodeFromText(text: string): string | null {
   const words = text
     .toLowerCase()
@@ -299,8 +303,9 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     withUser(req, reply, db, clerkEnabled, async (ctx) => {
       const body = jsonBody(req);
       const deviceId = cleanText(body.deviceId);
+      const mode = cleanVoiceStreamMode(cleanText(body.mode));
       if (!deviceId) throw Object.assign(new Error('deviceId is required'), { statusCode: 400 });
-      const session = db.createVoiceSession(ctx.user.id, deviceId);
+      const session = db.createVoiceSession(ctx.user.id, deviceId, mode);
       return { ok: true, session };
     }),
   );
@@ -310,6 +315,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     const deviceId = queryValue(query.deviceId);
     const token = queryValue(query.token);
     const requestedSessionId = queryValue(query.sessionId);
+    const streamMode = cleanVoiceStreamMode(queryValue(query.mode));
     const verifiedDevice = db.verifyDeviceToken(deviceId, token);
     if (!verifiedDevice) {
       socket.close(VoiceCloseCode.Unauthorized, 'invalid device token');
@@ -384,7 +390,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       const session =
         (requestedSessionId ? db.voiceSessionForDevice(device.userId, device.id, requestedSessionId) : null) ??
         db.latestVoiceSessionForDevice(device.userId, device.id) ??
-        db.createVoiceSession(device.userId, device.id);
+        db.createVoiceSession(device.userId, device.id, streamMode);
       let transcript = '';
       let assistantText = '';
       let runtime = 'fallback';
@@ -397,26 +403,40 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
           if (approvalCode) {
             db.addApprovalCode(device.userId, { voiceSessionId: session.id, code: approvalCode, source: device.deviceType });
           }
-          db.addMessage(device.userId, session.assistantThreadId, { role: 'user', content: transcript });
-          const history = db.listMessages(device.userId, session.assistantThreadId).map((message) => ({
-            role: message.role,
-            content: message.content,
-          }));
-          const assistant = await generateAssistantReply(history);
-          runtime = assistant.provider;
-          assistantText = assistant.text;
-          db.addMessage(device.userId, session.assistantThreadId, {
-            role: 'assistant',
-            content: assistantText,
-            spokenText: assistantText,
-          });
-          if ((socket as any).readyState === 1) {
-            socket.send(JSON.stringify({ type: 'assistant_result', transcript, assistantText, runtime }));
-            const speech = await synthesizeSpeech(assistantText);
-            if (speech.audio && (socket as any).readyState === 1) {
-              socket.send(Buffer.from(speech.audio));
+          if (streamMode === 'clipboard') {
+            if ((socket as any).readyState === 1) {
+              socket.send(JSON.stringify({ type: 'sleep', mode: streamMode, transcriptText: transcript }));
+            }
+          } else {
+            db.addMessage(device.userId, session.assistantThreadId, { role: 'user', content: transcript });
+            if (streamMode === 'patch') {
+              if ((socket as any).readyState === 1) {
+                socket.send(JSON.stringify({ type: 'transcript_result', mode: streamMode, transcript, status: 'Transcript patched into chat.' }));
+              }
+            } else {
+              const history = db.listMessages(device.userId, session.assistantThreadId).map((message) => ({
+                role: message.role,
+                content: message.content,
+              }));
+              const assistant = await generateAssistantReply(history);
+              runtime = assistant.provider;
+              assistantText = assistant.text;
+              db.addMessage(device.userId, session.assistantThreadId, {
+                role: 'assistant',
+                content: assistantText,
+                spokenText: assistantText,
+              });
+              if ((socket as any).readyState === 1) {
+                socket.send(JSON.stringify({ type: 'assistant_result', transcript, assistantText, runtime }));
+                const speech = await synthesizeSpeech(assistantText);
+                if (speech.audio && (socket as any).readyState === 1) {
+                  socket.send(Buffer.from(speech.audio));
+                }
+              }
             }
           }
+        } else if (streamMode === 'clipboard' && (socket as any).readyState === 1) {
+          socket.send(JSON.stringify({ type: 'sleep', mode: streamMode, transcriptText: '' }));
         }
       } catch (error: any) {
         db.addLog(device.userId, {
@@ -437,8 +457,11 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
         source: device.deviceType,
         level: 'info',
         message: 'Voice stream disconnected',
-        detailsJson: JSON.stringify({ frames, bytes, durationMs: Date.now() - startedAt, transcriptChars: transcript.length, assistantChars: assistantText.length, runtime }),
+        detailsJson: JSON.stringify({ frames, bytes, durationMs: Date.now() - startedAt, transcriptChars: transcript.length, assistantChars: assistantText.length, runtime, mode: streamMode }),
       });
+      if ((socket as any).readyState === 1) {
+        socket.close(1000, 'finalized');
+      }
     }
   });
 

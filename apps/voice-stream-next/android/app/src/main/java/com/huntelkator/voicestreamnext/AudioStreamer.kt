@@ -1,12 +1,15 @@
 package com.huntelkator.voicestreamnext
 
-import android.annotation.SuppressLint
 import android.Manifest
+import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -23,8 +26,13 @@ import kotlin.concurrent.thread
 
 class AudioStreamer(private val context: Context, private val api: VoiceStreamApi) {
     private val active = AtomicBoolean(false)
+    private val recording = AtomicBoolean(false)
+    private val outgoingReady = AtomicBoolean(false)
     private val reconnecting = AtomicBoolean(false)
     private val microphoneRouter = MicrophoneRouter(context)
+    private val cuePlayer = LocalCuePlayer()
+    private val preRollBuffer = PcmFrameBuffer(PRE_ROLL_FRAME_COUNT)
+    private val pendingStreamBuffer = PcmFrameBuffer(MAX_PENDING_STREAM_FRAME_COUNT)
     private val client = OkHttpClient.Builder()
         .pingInterval(15, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
@@ -32,48 +40,141 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
 
     private var recorder: AudioRecord? = null
     private var socket: WebSocket? = null
+    private var wakeDetector: VoskWakeWordDetector? = null
+    private val approvalCodeRecognizer = ApprovalCodeRecognizer()
+    @Volatile private var approvalSettings = VoiceApprovalSettings()
+    @Volatile private var lastApprovalCode = ""
+    @Volatile private var lastApprovalAtMs = 0L
     @Volatile private var currentSocketUrl = ""
+    @Volatile private var currentTarget = Constants.STREAM_TARGET_ASSISTANT
     @Volatile private var currentOnStatus: ((String) -> Unit)? = null
     @Volatile private var reconnectAttempt = 0
+    @Volatile private var awakeMode = false
+    @Volatile private var sleeping = false
 
-    fun start(sessionId: String, onStatus: (String) -> Unit) {
-        if (!active.compareAndSet(false, true)) return
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            active.set(false)
-            onStatus("Microphone permission is missing.")
+    fun startAwake(onStatus: (String) -> Unit) {
+        if (!active.compareAndSet(false, true)) {
+            if (active.get() && awakeMode) {
+                currentOnStatus = onStatus
+                sleeping = false
+                onStatus("Awake: waiting for \"hey sebastian\"")
+            }
             return
         }
-
-        val config = api.loadConfig()
-        val deviceId = api.pairedDeviceId()
-        val token = api.pairedDeviceToken()
-        if (deviceId.isBlank() || token.isBlank()) {
-            active.set(false)
-            onStatus("Pair this device before streaming.")
-            return
-        }
-
-        val socketUrl = buildSocketUrl(config.serverUrl, deviceId, token, sessionId)
-        currentSocketUrl = socketUrl
+        if (!validateReady(onStatus)) return
         currentOnStatus = onStatus
-        connectSocket(socketUrl, onStatus)
-
-        thread(name = "VoiceStreamNextAudio") {
-            runRecorder(onStatus)
+        awakeMode = true
+        sleeping = false
+        approvalSettings = runCatching { api.voiceApprovalSettings() }.getOrDefault(VoiceApprovalSettings())
+        wakeDetector = VoskWakeWordDetector(
+            context,
+            { status -> onStatus(status) },
+            { text -> handleLocalRecognizerText(text, onStatus) },
+        ).also { it.prepare() }
+        onStatus("Waking local detector")
+        thread(name = "VoiceStreamNextAwakeAudio") {
+            runRecorder(onStatus, detectWake = true)
         }
+    }
+
+    fun start(sessionId: String, target: String, onStatus: (String) -> Unit) {
+        val cleanTarget = cleanTarget(target)
+        if (!active.compareAndSet(false, true)) {
+            if (active.get() && awakeMode) {
+                currentOnStatus = onStatus
+                beginRecordingWithSession(sessionId, cleanTarget, onStatus)
+            }
+            return
+        }
+        if (!validateReady(onStatus)) return
+        currentOnStatus = onStatus
+        awakeMode = false
+        sleeping = false
+        beginRecordingWithSession(sessionId, cleanTarget, onStatus)
+        thread(name = "VoiceStreamNextAudio") {
+            runRecorder(onStatus, detectWake = false)
+        }
+    }
+
+    fun enterSleep(): Boolean {
+        val onStatus = currentOnStatus
+        if (!awakeMode) {
+            active.set(false)
+            recording.set(false)
+            outgoingReady.set(false)
+            closeSocket("sleep requested", sendEnd = true)
+            runCatching { recorder?.stop() }
+            onStatus?.invoke("Off")
+            return false
+        }
+        sleeping = true
+        cuePlayer.play(LocalCue.SLEEP)
+        if (recording.get() && onStatus != null) {
+            endRecording(onStatus, sleepingStatus())
+        } else {
+            onStatus?.invoke(sleepingStatus())
+        }
+        return true
     }
 
     fun stop() {
         active.set(false)
+        recording.set(false)
+        outgoingReady.set(false)
         reconnecting.set(false)
+        awakeMode = false
+        sleeping = false
         currentSocketUrl = ""
         currentOnStatus = null
+        wakeDetector?.release()
+        wakeDetector = null
         AssistantAudioPlayer.stopAll()
-        val localSocket = socket
-        socket = null
-        localSocket?.send("""{"type":"end"}""")
-        localSocket?.close(1000, "stopped")
+        closeSocket("stopped", sendEnd = true)
         runCatching { recorder?.stop() }
+    }
+
+    private fun validateReady(onStatus: (String) -> Unit): Boolean {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            active.set(false)
+            onStatus("Microphone permission is missing.")
+            return false
+        }
+        if (api.pairedDeviceId().isBlank() || api.pairedDeviceToken().isBlank()) {
+            active.set(false)
+            onStatus("Pair this device before streaming.")
+            return false
+        }
+        return true
+    }
+
+    private fun beginRecording(target: String, onStatus: (String) -> Unit) {
+        if (recording.get()) return
+        currentTarget = cleanTarget(target)
+        outgoingReady.set(false)
+        reconnectAttempt = 0
+        pendingStreamBuffer.clear()
+        pendingStreamBuffer.pushAll(preRollBuffer.drain())
+        val deviceId = api.pairedDeviceId()
+        val sessionId = api.createVoiceSession(deviceId, currentTarget)
+        beginRecordingWithSession(sessionId, currentTarget, onStatus)
+    }
+
+    private fun beginRecordingWithSession(sessionId: String, target: String, onStatus: (String) -> Unit) {
+        if (recording.getAndSet(true)) return
+        currentTarget = cleanTarget(target)
+        outgoingReady.set(false)
+        reconnectAttempt = 0
+        currentSocketUrl = buildSocketUrl(api.loadConfig().serverUrl, api.pairedDeviceId(), api.pairedDeviceToken(), sessionId, currentTarget)
+        onStatus(recordingStatus(currentTarget))
+        connectSocket(currentSocketUrl, onStatus)
+    }
+
+    private fun endRecording(onStatus: (String) -> Unit, status: String) {
+        if (!recording.getAndSet(false)) return
+        outgoingReady.set(false)
+        sendEnd("recording ended")
+        pendingStreamBuffer.clear()
+        onStatus(status)
     }
 
     private fun connectSocket(socketUrl: String, onStatus: (String) -> Unit) {
@@ -83,8 +184,10 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
             object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
                     reconnectAttempt = 0
-                    webSocket.send(JSONObject().put("type", "client_hello").put("protocolVersion", 1).put("client", "android").toString())
-                    onStatus("Voice stream connected.")
+                    outgoingReady.set(true)
+                    webSocket.send(JSONObject().put("type", "client_hello").put("protocolVersion", 1).put("client", "android").put("mode", currentTarget).toString())
+                    flushPendingFrames()
+                    onStatus(recordingStatus(currentTarget))
                 }
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
@@ -92,8 +195,19 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
                     val message = runCatching { JSONObject(text) }.getOrNull() ?: return
                     when (message.optString("type")) {
                         "server_ping" -> webSocket.send(JSONObject().put("type", "client_ping").put("sentAt", java.time.Instant.now().toString()).toString())
-                        "assistant_result" -> onStatus("Assistant replied.")
-                        "assistant_error" -> onStatus(message.optString("error", "Voice runtime failed."))
+                        "assistant_result" -> {
+                            recording.set(false)
+                            onStatus("Assistant replied.")
+                        }
+                        "transcript_result" -> {
+                            recording.set(false)
+                            onStatus(message.optString("status", "Transcript received."))
+                        }
+                        "sleep" -> handleServerSleep(message, onStatus)
+                        "assistant_error" -> {
+                            recording.set(false)
+                            onStatus(message.optString("error", "Voice runtime failed."))
+                        }
                     }
                 }
 
@@ -112,27 +226,47 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                     if (socket === webSocket) socket = null
-                    if (active.get()) {
+                    outgoingReady.set(false)
+                    if (active.get() && recording.get()) {
                         onStatus("Voice stream disconnected.")
                         scheduleReconnect()
-                    } else {
+                    } else if (!active.get()) {
                         onStatus("Voice stream closed.")
                     }
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                     if (socket === webSocket) socket = null
-                    if (!active.get()) return
+                    outgoingReady.set(false)
+                    if (!active.get() || !recording.get()) return
                     onStatus(t.message ?: "Voice stream failed.")
                     scheduleReconnect()
                 }
-            }
+            },
         )
         socket = newSocket
     }
 
+    private fun handleServerSleep(message: JSONObject, onStatus: (String) -> Unit) {
+        val copied = if (currentTarget == Constants.STREAM_TARGET_CLIPBOARD) {
+            copyTranscriptToClipboard(message.optString("transcriptText"))
+        } else {
+            false
+        }
+        recording.set(false)
+        outgoingReady.set(false)
+        pendingStreamBuffer.clear()
+        closeSocket("server sleep", sendEnd = false)
+        val status = if (currentTarget == Constants.STREAM_TARGET_CLIPBOARD) {
+            if (copied) "Awake: copied voice transcription" else "Awake: no voice transcription detected"
+        } else {
+            "Awake: waiting for \"hey sebastian\""
+        }
+        onStatus(status)
+    }
+
     private fun scheduleReconnect() {
-        if (!active.get() || currentSocketUrl.isBlank()) return
+        if (!active.get() || !recording.get() || currentSocketUrl.isBlank()) return
         if (!reconnecting.compareAndSet(false, true)) return
         val attempt = reconnectAttempt.coerceAtMost(MAX_RECONNECT_EXPONENT)
         reconnectAttempt += 1
@@ -146,7 +280,7 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
             }
             val onStatus = currentOnStatus ?: return@thread
             val socketUrl = currentSocketUrl
-            if (active.get() && socketUrl.isNotBlank()) {
+            if (active.get() && recording.get() && socketUrl.isNotBlank()) {
                 connectSocket(socketUrl, onStatus)
             }
         }
@@ -157,26 +291,31 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
     }
 
     @SuppressLint("MissingPermission")
-    private fun runRecorder(onStatus: (String) -> Unit) {
+    private fun runRecorder(onStatus: (String) -> Unit, detectWake: Boolean) {
         val minBuffer = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        val bufferSize = maxOf(minBuffer, SAMPLE_RATE / 5)
+        val bufferSize = maxOf(minBuffer, CHUNK_BYTES * 8)
         val audioRecord = AudioRecord(
             MediaRecorder.AudioSource.VOICE_RECOGNITION,
             SAMPLE_RATE,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT,
-            bufferSize
+            bufferSize,
         )
         recorder = audioRecord
-        val buffer = ByteArray(bufferSize)
+        val buffer = ByteArray(CHUNK_BYTES)
         try {
             val microphone = microphoneRouter.routeForRecording(audioRecord)
             audioRecord.startRecording()
-            onStatus("Streaming microphone frames. ${microphone.label}.")
+            onStatus(if (detectWake) "Awake: listening. ${microphone.label}." else "Streaming microphone frames. ${microphone.label}.")
             while (active.get()) {
                 val read = audioRecord.read(buffer, 0, buffer.size)
-                if (read > 0) {
-                    socket?.send(buffer.copyOf(read).toByteString())
+                if (read <= 0) continue
+                val frame = if (read == buffer.size) buffer.copyOf() else buffer.copyOf(read)
+                if (detectWake) {
+                    handleDetectorFrame(frame, onStatus)
+                }
+                if (recording.get()) {
+                    sendOrBufferFrame(frame)
                 }
             }
         } catch (error: Exception) {
@@ -189,21 +328,166 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
             runCatching { audioRecord.release() }
             if (recorder === audioRecord) recorder = null
             active.set(false)
+            recording.set(false)
+            outgoingReady.set(false)
             reconnecting.set(false)
-            val localSocket = socket
-            socket = null
-            localSocket?.close(1000, "recorder stopped")
+            closeSocket("recorder stopped", sendEnd = false)
+            wakeDetector?.release()
+            wakeDetector = null
         }
     }
 
-    private fun buildSocketUrl(serverUrl: String, deviceId: String, token: String, sessionId: String): String {
+    private fun handleDetectorFrame(frame: ByteArray, onStatus: (String) -> Unit) {
+        if (!recording.get()) {
+            preRollBuffer.push(frame)
+        }
+        val phrase = wakeDetector?.acceptPcm(frame, frame.size) ?: return
+        when {
+            phrase.hasStart && !sleeping -> {
+                sleeping = false
+                wakeDetector?.reset()
+                cuePlayer.play(LocalCue.WAKE)
+                beginRecording(Constants.STREAM_TARGET_ASSISTANT, onStatus)
+            }
+            phrase.hasPatch && !sleeping -> {
+                wakeDetector?.reset()
+                cuePlayer.play(LocalCue.WAKE)
+                beginRecording(Constants.STREAM_TARGET_PATCH, onStatus)
+            }
+            phrase.hasClipboard && !sleeping -> {
+                wakeDetector?.reset()
+                cuePlayer.play(LocalCue.WAKE)
+                beginRecording(Constants.STREAM_TARGET_CLIPBOARD, onStatus)
+            }
+            phrase.hasSleep -> {
+                wakeDetector?.reset()
+                cuePlayer.play(LocalCue.SLEEP)
+                sleeping = true
+                if (recording.get()) {
+                    endRecording(onStatus, sleepingStatus())
+                } else {
+                    onStatus(sleepingStatus())
+                }
+            }
+            phrase.hasStatus -> {
+                cuePlayer.play(LocalCue.STATUS)
+                onStatus(if (recording.get()) recordingStatus(currentTarget) else "Awake: waiting for \"hey sebastian\"")
+            }
+        }
+    }
+
+    private fun handleLocalRecognizerText(text: String, onStatus: (String) -> Unit) {
+        val code = approvalCodeRecognizer.extract(text) ?: return
+        val now = SystemClock.elapsedRealtime()
+        if (code == lastApprovalCode && now - lastApprovalAtMs < APPROVAL_DUPLICATE_COOLDOWN_MS) return
+        lastApprovalCode = code
+        lastApprovalAtMs = now
+        handleApprovalCode(code, onStatus)
+    }
+
+    private fun handleApprovalCode(code: String, onStatus: (String) -> Unit) {
+        val settings = approvalSettings
+        when {
+            sleeping && code == settings.unlockCode -> {
+                sleeping = false
+                wakeDetector?.reset()
+                cuePlayer.play(LocalCue.UNLOCK)
+                onStatus("Awake: waiting for \"hey sebastian\"")
+            }
+            code == settings.offCode -> {
+                cuePlayer.play(LocalCue.SLEEPING_OFF)
+                active.set(false)
+                recording.set(false)
+                outgoingReady.set(false)
+                closeSocket("approval off", sendEnd = true)
+                runCatching { recorder?.stop() }
+                onStatus("Off")
+            }
+            !sleeping && code == settings.lockCode -> {
+                sleeping = true
+                cuePlayer.play(LocalCue.SLEEP)
+                if (recording.get()) {
+                    endRecording(onStatus, sleepingStatus())
+                } else {
+                    onStatus(sleepingStatus())
+                }
+            }
+            !sleeping -> {
+                cuePlayer.play(LocalCue.STATUS)
+                onStatus("Approval sent: $code")
+                thread(name = "VoiceStreamApprovalUpload") {
+                    runCatching { api.uploadApprovalCode(code) }
+                }
+            }
+        }
+    }
+
+    private fun sendOrBufferFrame(frame: ByteArray) {
+        if (outgoingReady.get()) {
+            flushPendingFrames()
+            socket?.send(frame.toByteString())
+        } else {
+            pendingStreamBuffer.push(frame)
+        }
+    }
+
+    private fun flushPendingFrames() {
+        val localSocket = socket ?: return
+        for (frame in pendingStreamBuffer.drain()) {
+            localSocket.send(frame.toByteString())
+        }
+    }
+
+    private fun closeSocket(reason: String, sendEnd: Boolean) {
+        val localSocket = socket
+        socket = null
+        if (sendEnd) localSocket?.send(JSONObject().put("type", "end").put("reason", reason).toString())
+        localSocket?.close(1000, reason)
+    }
+
+    private fun sendEnd(reason: String) {
+        socket?.send(JSONObject().put("type", "end").put("reason", reason).toString())
+    }
+
+    private fun copyTranscriptToClipboard(text: String): Boolean {
+        val trimmed = text.trim()
+        if (trimmed.isBlank()) return false
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager ?: return false
+        return runCatching {
+            clipboard.setPrimaryClip(ClipData.newPlainText("VoiceStream transcript", trimmed))
+            true
+        }.getOrDefault(false)
+    }
+
+    private fun buildSocketUrl(serverUrl: String, deviceId: String, token: String, sessionId: String, target: String): String {
         val trimmed = serverUrl.trimEnd('/')
         val base = when {
             trimmed.startsWith("https://") -> "wss://${trimmed.removePrefix("https://")}"
             trimmed.startsWith("http://") -> "ws://${trimmed.removePrefix("http://")}"
             else -> trimmed
         }
-        return "$base/api/voice/stream?deviceId=${encode(deviceId)}&token=${encode(token)}&sessionId=${encode(sessionId)}"
+        return "$base/api/voice/stream?deviceId=${encode(deviceId)}&token=${encode(token)}&sessionId=${encode(sessionId)}&mode=${encode(target)}"
+    }
+
+    private fun cleanTarget(target: String): String {
+        return when (target) {
+            Constants.STREAM_TARGET_PATCH,
+            Constants.STREAM_TARGET_CLIPBOARD -> target
+            else -> Constants.STREAM_TARGET_ASSISTANT
+        }
+    }
+
+    private fun recordingStatus(target: String): String {
+        return when (target) {
+            Constants.STREAM_TARGET_PATCH -> "Awake: patching into chat"
+            Constants.STREAM_TARGET_CLIPBOARD -> "Awake: recording clipboard transcription"
+            else -> "Awake: recording"
+        }
+    }
+
+    private fun sleepingStatus(): String {
+        val settings = approvalSettings
+        return "Sleep: ${settings.unlockCode} awake, ${settings.offCode} off"
     }
 
     private fun encode(value: String): String {
@@ -212,8 +496,15 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
 
     private companion object {
         const val SAMPLE_RATE = 16_000
+        const val CHUNK_MS = 20
+        const val CHUNK_BYTES = SAMPLE_RATE * 2 * CHUNK_MS / 1000
+        const val PRE_ROLL_MS = 1_500
+        const val MAX_PENDING_STREAM_MS = 5_000
+        const val PRE_ROLL_FRAME_COUNT = PRE_ROLL_MS / CHUNK_MS
+        const val MAX_PENDING_STREAM_FRAME_COUNT = MAX_PENDING_STREAM_MS / CHUNK_MS
         const val BASE_RECONNECT_DELAY_MS = 500L
         const val MAX_RECONNECT_DELAY_MS = 10_000L
         const val MAX_RECONNECT_EXPONENT = 4
+        const val APPROVAL_DUPLICATE_COOLDOWN_MS = 4_000L
     }
 }

@@ -22,6 +22,11 @@ data class ApiConfig(
 data class DevicePairing(val deviceId: String, val token: String)
 data class DashboardSummary(val displayName: String, val threadCount: Int, val deviceCount: Int, val logCount: Int, val logs: List<String>)
 data class AssistantExchange(val userMessage: String, val assistantMessage: String)
+data class VoiceApprovalSettings(
+    val unlockCode: String = "1234",
+    val lockCode: String = "4321",
+    val offCode: String = "0000",
+)
 
 class VoiceStreamApi(private val context: Context) {
     private val client = OkHttpClient.Builder()
@@ -101,10 +106,19 @@ class VoiceStreamApi(private val context: Context) {
         )
     }
 
-    fun createVoiceSession(deviceId: String): String {
-        return request("POST", "/api/voice/sessions", JSONObject().put("deviceId", deviceId))
+    fun createVoiceSession(deviceId: String, mode: String = Constants.STREAM_TARGET_ASSISTANT): String {
+        return request("POST", "/api/voice/sessions", JSONObject().put("deviceId", deviceId).put("mode", mode))
             .getJSONObject("session")
             .getString("id")
+    }
+
+    fun voiceApprovalSettings(): VoiceApprovalSettings {
+        val settings = request("GET", "/api/settings/voice-approval").getJSONObject("settings")
+        return VoiceApprovalSettings(
+            unlockCode = settings.optString("unlockCode", "1234").filter { it.isDigit() }.ifBlank { "1234" },
+            lockCode = settings.optString("lockCode", "4321").filter { it.isDigit() }.ifBlank { "4321" },
+            offCode = settings.optString("lockedOffCode", "0000").filter { it.isDigit() }.ifBlank { "0000" },
+        )
     }
 
     fun sendAssistantMessage(content: String): AssistantExchange {

@@ -28,7 +28,9 @@ class VoiceSessionService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             Constants.ACTION_STOP_VOICE -> stopVoice()
-            else -> startVoice()
+            Constants.ACTION_SLEEP -> enterSleep()
+            Constants.ACTION_START_AWAKE -> startAwake()
+            else -> startVoice(intent?.getStringExtra(Constants.EXTRA_STREAM_TARGET) ?: Constants.STREAM_TARGET_ASSISTANT)
         }
         return START_STICKY
     }
@@ -43,7 +45,19 @@ class VoiceSessionService : Service() {
         super.onDestroy()
     }
 
-    private fun startVoice() {
+    private fun startAwake() {
+        publishStatus("Waking local detector", Constants.MODE_AWAKE)
+        startForeground(NOTIFICATION_ID, notification("Waking local detector"))
+        acquireWakeLock()
+        streamer.startAwake { status ->
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.notify(NOTIFICATION_ID, notification(status))
+            publishStatus(status, modeFromStatus(status))
+            if (status == "Off") stopVoice()
+        }
+    }
+
+    private fun startVoice(target: String) {
         publishStatus("Voice stream starting", Constants.MODE_RECORDING)
         startForeground(NOTIFICATION_ID, notification("Voice stream starting"))
         acquireWakeLock()
@@ -55,12 +69,13 @@ class VoiceSessionService : Service() {
                     stopVoice()
                     return@thread
                 }
-                val sessionId = api.createVoiceSession(deviceId)
+                val sessionId = api.createVoiceSession(deviceId, target)
                 api.uploadLog("Android foreground voice service started")
-                streamer.start(sessionId) { status ->
+                streamer.start(sessionId, target) { status ->
                     val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                     manager.notify(NOTIFICATION_ID, notification(status))
                     publishStatus(status, modeFromStatus(status))
+                    if (status == "Off") stopVoice()
                 }
             } catch (_: Exception) {
                 publishStatus("Voice stream failed to start.", Constants.MODE_ERROR)
@@ -76,6 +91,12 @@ class VoiceSessionService : Service() {
         publishStatus("Off", Constants.MODE_OFF)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+    }
+
+    private fun enterSleep() {
+        if (!streamer.enterSleep()) {
+            stopVoice()
+        }
     }
 
     private fun acquireWakeLock() {
@@ -110,6 +131,8 @@ class VoiceSessionService : Service() {
         val lower = status.lowercase()
         return when {
             lower.contains("missing") || lower.contains("failed") || lower.contains("error") -> Constants.MODE_ERROR
+            lower.contains("sleeping") || lower.startsWith("sleep") -> Constants.MODE_SLEEPING
+            lower.contains("waiting") || lower.contains("waking") -> Constants.MODE_AWAKE
             lower.contains("closed") || lower == "off" -> Constants.MODE_OFF
             else -> Constants.MODE_RECORDING
         }

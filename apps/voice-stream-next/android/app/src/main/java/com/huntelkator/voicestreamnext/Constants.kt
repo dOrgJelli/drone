@@ -13,11 +13,14 @@ object Constants {
     const val PREF_DEVICE_NAME = "device_name"
 
     const val ACTION_START_VOICE = "com.huntelkator.voicestreamnext.action.START_VOICE"
+    const val ACTION_START_AWAKE = "com.huntelkator.voicestreamnext.action.START_AWAKE"
+    const val ACTION_SLEEP = "com.huntelkator.voicestreamnext.action.SLEEP"
     const val ACTION_STOP_VOICE = "com.huntelkator.voicestreamnext.action.STOP_VOICE"
     const val ACTION_STATUS = "com.huntelkator.voicestreamnext.action.STATUS"
 
     const val EXTRA_STATUS = "status"
     const val EXTRA_MODE = "mode"
+    const val EXTRA_STREAM_TARGET = "stream_target"
 
     const val MODE_OFF = "off"
     const val MODE_AWAKE = "awake"
@@ -27,6 +30,9 @@ object Constants {
 
     const val AUTH_DEV = "dev"
     const val AUTH_BEARER = "bearer"
+    const val STREAM_TARGET_ASSISTANT = "assistant"
+    const val STREAM_TARGET_PATCH = "patch"
+    const val STREAM_TARGET_CLIPBOARD = "clipboard"
     const val DEFAULT_SERVER_URL = "http://10.0.2.2:3299"
     const val DEFAULT_DEV_EMAIL = "android@example.local"
     const val DEFAULT_DEV_NAME = "Android Operator"

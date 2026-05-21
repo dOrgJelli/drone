@@ -11,7 +11,7 @@ export const VoiceCloseCode = {
 } as const;
 
 export type VoiceClientMessage =
-  | { type: 'client_hello'; protocolVersion?: number; client?: string }
+  | { type: 'client_hello'; protocolVersion?: number; client?: string; mode?: string }
   | { type: 'client_ping'; sentAt?: string }
   | { type: 'end'; reason?: string };
 
@@ -29,6 +29,7 @@ export function parseVoiceClientMessage(raw: unknown): VoiceClientMessage | null
       type: 'client_hello',
       protocolVersion: Number.isInteger(parsed.protocolVersion) ? parsed.protocolVersion : undefined,
       client: typeof parsed.client === 'string' ? parsed.client.slice(0, 80) : undefined,
+      mode: typeof parsed.mode === 'string' ? parsed.mode.slice(0, 40) : undefined,
     };
   }
   if (parsed.type === 'client_ping') {

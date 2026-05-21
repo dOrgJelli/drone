@@ -24,6 +24,12 @@ android {
         buildConfig = true
     }
 
+    sourceSets {
+        getByName("main") {
+            assets.srcDir("../../../voice-stream/android/app/src/main/assets")
+        }
+    }
+
     if (releaseKeystorePath.isNotBlank() && releaseKeyAlias.isNotBlank() && releaseKeyPassword.isNotBlank() && releaseStorePassword.isNotBlank()) {
         signingConfigs {
             create("release") {
@@ -62,5 +68,6 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.clerk:clerk-android-api:1.0.13")
+    implementation("com.alphacephei:vosk-android:0.3.47")
     testImplementation("junit:junit:4.13.2")
 }

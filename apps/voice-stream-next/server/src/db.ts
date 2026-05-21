@@ -584,18 +584,19 @@ export class VoiceStreamNextDb {
       .map(rowMessage);
   }
 
-  createVoiceSession(userId: string, deviceId: string): VoiceSession {
+  createVoiceSession(userId: string, deviceId: string, mode = 'recording'): VoiceSession {
     const thread = this.latestVoiceThreadForDevice(userId, deviceId);
     const id = newId('vsn');
     const at = nowIso();
+    const cleanMode = mode.trim() || 'recording';
     this.db
       .query(
         `
         INSERT INTO voice_sessions (id, user_id, device_id, assistant_thread_id, mode, started_at)
-        VALUES ($id, $userId, $deviceId, $assistantThreadId, 'recording', $startedAt)
+        VALUES ($id, $userId, $deviceId, $assistantThreadId, $mode, $startedAt)
       `,
       )
-      .run({ $id: id, $userId: userId, $deviceId: deviceId, $assistantThreadId: thread.id, $startedAt: at });
+      .run({ $id: id, $userId: userId, $deviceId: deviceId, $assistantThreadId: thread.id, $mode: cleanMode, $startedAt: at });
     const row = this.db.query('SELECT * FROM voice_sessions WHERE id = $id').get({ $id: id });
     return rowVoiceSession(row);
   }
