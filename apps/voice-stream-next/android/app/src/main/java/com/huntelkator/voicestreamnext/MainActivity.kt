@@ -139,12 +139,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        ClientLog.i("Activity", "MainActivity started")
         ContextCompat.registerReceiver(
             this,
             statusReceiver,
             IntentFilter(Constants.ACTION_STATUS),
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
+    }
+
+    override fun onResume() {
+        super.onResume()
+        resyncServiceStatus()
     }
 
     override fun onStop() {
@@ -583,16 +589,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun missingVoicePermissions(): List<String> {
-        val permissions = mutableListOf<String>()
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            permissions += Manifest.permission.RECORD_AUDIO
+        return VoicePermissions.missingPermissions(Build.VERSION.SDK_INT) { permission ->
+            checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-            checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
-        ) {
-            permissions += Manifest.permission.BLUETOOTH_CONNECT
-        }
-        return permissions
+    }
+
+    private fun resyncServiceStatus() {
+        startService(Intent(this, VoiceSessionService::class.java).apply {
+            action = Constants.ACTION_QUERY_STATUS
+        })
     }
 
     private fun startVoiceSession(target: String = Constants.STREAM_TARGET_ASSISTANT, playCue: Boolean = true) {

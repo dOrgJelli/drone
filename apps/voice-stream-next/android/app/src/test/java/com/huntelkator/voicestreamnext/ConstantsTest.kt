@@ -8,4 +8,12 @@ class ConstantsTest {
     fun defaultServerUrlTargetsAndroidEmulatorHost() {
         assertEquals("http://10.0.2.2:3299", Constants.DEFAULT_SERVER_URL)
     }
+
+    @Test
+    fun queryStatusActionIsDefined() {
+        assertEquals(
+            "com.huntelkator.voicestreamnext.action.QUERY_STATUS",
+            Constants.ACTION_QUERY_STATUS,
+        )
+    }
 }

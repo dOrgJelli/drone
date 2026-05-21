@@ -3,6 +3,10 @@ const fs = require('node:fs');
 const { createRequire } = require('node:module');
 const path = require('node:path');
 
+const PROTOCOL = 'voicestream';
+const pendingPairingPayloads = [];
+let mainWindow = null;
+
 const sampleRate = 16_000;
 const wakeGrammar = [
   'hey sebastian',
@@ -50,6 +54,7 @@ const defaultConfig = {
   deviceId: '',
   deviceToken: '',
   deviceName: 'Desktop voice client',
+  authSavedAt: '',
 };
 
 const voskState = {
@@ -195,6 +200,29 @@ function handleVoskFrame(sender, frame) {
   }
 }
 
+function extractPairingPayloadFromArgv(argv) {
+  return argv.find((entry) => /^voicestream:\/\//i.test(String(entry || '').trim())) || null;
+}
+
+function queuePairingPayload(payload) {
+  const trimmed = String(payload || '').trim();
+  if (!trimmed) return;
+  pendingPairingPayloads.push(trimmed);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('pairing:payload', trimmed);
+  }
+}
+
+function registerProtocolClient() {
+  if (process.defaultApp) {
+    if (process.argv.length >= 2) {
+      app.setAsDefaultProtocolClient(PROTOCOL, process.execPath, [path.resolve(process.argv[1])]);
+      return;
+    }
+  }
+  app.setAsDefaultProtocolClient(PROTOCOL);
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1180,
@@ -215,33 +243,63 @@ function createWindow() {
   win.loadURL(appUrl).catch(() => {
     win.loadFile(path.join(__dirname, 'index.html'));
   });
+  mainWindow = win;
+  win.on('closed', () => {
+    if (mainWindow === win) mainWindow = null;
+  });
 }
 
-ipcMain.handle('config:read', () => readConfig());
-ipcMain.handle('config:write', (_event, config) => writeConfig(config));
-ipcMain.handle('app:openExternal', (_event, url) => shell.openExternal(url));
-ipcMain.handle('vosk:status', () => statusForVosk());
-ipcMain.handle('vosk:start', () => ensureVoskRecognizer());
-ipcMain.handle('vosk:stop', () => {
-  releaseVosk();
-  return statusForVosk(false);
-});
-ipcMain.handle('vosk:reset', () => {
-  resetVosk();
-  return statusForVosk();
-});
-ipcMain.on('vosk:frame', (event, frame) => handleVoskFrame(event.sender, frame));
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (_event, argv) => {
+    const payload = extractPairingPayloadFromArgv(argv);
+    if (payload) queuePairingPayload(payload);
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
 
-app.whenReady().then(createWindow);
+  app.on('open-url', (event, url) => {
+    event.preventDefault();
+    queuePairingPayload(url);
+  });
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
-});
+  registerProtocolClient();
 
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow();
-});
+  ipcMain.handle('config:read', () => readConfig());
+  ipcMain.handle('pairing:takePending', () => pendingPairingPayloads.splice(0));
+  ipcMain.handle('config:write', (_event, config) => writeConfig(config));
+  ipcMain.handle('app:openExternal', (_event, url) => shell.openExternal(url));
+  ipcMain.handle('vosk:status', () => statusForVosk());
+  ipcMain.handle('vosk:start', () => ensureVoskRecognizer());
+  ipcMain.handle('vosk:stop', () => {
+    releaseVosk();
+    return statusForVosk(false);
+  });
+  ipcMain.handle('vosk:reset', () => {
+    resetVosk();
+    return statusForVosk();
+  });
+  ipcMain.on('vosk:frame', (event, frame) => handleVoskFrame(event.sender, frame));
 
-app.on('before-quit', () => {
-  releaseVosk();
-});
+  app.whenReady().then(() => {
+    const launchPayload = extractPairingPayloadFromArgv(process.argv);
+    if (launchPayload) queuePairingPayload(launchPayload);
+    createWindow();
+  });
+
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') app.quit();
+  });
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  });
+
+  app.on('before-quit', () => {
+    releaseVosk();
+  });
+}

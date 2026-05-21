@@ -66,12 +66,29 @@ class VoiceSessionService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        serviceActive = true
         when (intent?.action) {
+            Constants.ACTION_QUERY_STATUS -> {
+                publishStatus(lastStatus, lastMode, currentMicrophone, lastApprovalStatus)
+                if (!serviceActive) {
+                    stopSelf(startId)
+                }
+            }
             Constants.ACTION_STOP_VOICE -> stopVoice()
-            Constants.ACTION_SLEEP -> enterSleep()
-            Constants.ACTION_START_AWAKE -> startAwake()
-            else -> startVoice(intent?.getStringExtra(Constants.EXTRA_STREAM_TARGET) ?: Constants.STREAM_TARGET_ASSISTANT)
+            Constants.ACTION_SLEEP -> {
+                if (serviceActive) {
+                    enterSleep()
+                } else {
+                    stopSelf(startId)
+                }
+            }
+            Constants.ACTION_START_AWAKE -> {
+                serviceActive = true
+                startAwake()
+            }
+            else -> {
+                serviceActive = true
+                startVoice(intent?.getStringExtra(Constants.EXTRA_STREAM_TARGET) ?: Constants.STREAM_TARGET_ASSISTANT)
+            }
         }
         return START_STICKY
     }

@@ -47,6 +47,7 @@ const els = {
   connectionLabel: document.querySelector('#connectionLabel'),
   deviceLabel: document.querySelector('#deviceLabel'),
   openWebButton: document.querySelector('#openWebButton'),
+  signInButton: document.querySelector('#signInButton'),
   saveButton: document.querySelector('#saveButton'),
   serverUrlInput: document.querySelector('#serverUrlInput'),
   deviceNameInput: document.querySelector('#deviceNameInput'),
@@ -55,6 +56,11 @@ const els = {
   devEmailInput: document.querySelector('#devEmailInput'),
   devNameInput: document.querySelector('#devNameInput'),
   devAdminInput: document.querySelector('#devAdminInput'),
+  authStatus: document.querySelector('#authStatus'),
+  pairingPayloadInput: document.querySelector('#pairingPayloadInput'),
+  applyPairingButton: document.querySelector('#applyPairingButton'),
+  pastePairingButton: document.querySelector('#pastePairingButton'),
+  pairingMessage: document.querySelector('#pairingMessage'),
   pairButton: document.querySelector('#pairButton'),
   awakeButton: document.querySelector('#awakeButton'),
   startMicButton: document.querySelector('#startMicButton'),
@@ -75,6 +81,50 @@ const els = {
 
 function trimSlash(value) {
   return String(value || '').replace(/\/+$/, '');
+}
+
+function deriveWebUrl(config) {
+  if (config.webUrl) return trimSlash(config.webUrl);
+  const serverUrl = trimSlash(config.serverUrl);
+  if (!serverUrl) return '';
+  try {
+    const url = new URL(serverUrl);
+    if (url.port === '3299') {
+      url.port = '5185';
+      return trimSlash(url.toString());
+    }
+  } catch {
+    // Fall back to the server URL when it is not a valid absolute URL.
+  }
+  return serverUrl;
+}
+
+function authSessionFields(config) {
+  const next = { ...config };
+  if (next.authMode === 'bearer' && next.bearerToken) {
+    next.authSavedAt = new Date().toISOString();
+  }
+  if (next.authMode !== 'bearer') {
+    next.authSavedAt = '';
+  }
+  return next;
+}
+
+function updateAuthStatus(kind, message) {
+  els.authStatus.className = `auth-status ${kind === 'ok' ? 'ok' : kind === 'error' ? 'error' : 'muted'}`;
+  els.authStatus.textContent = message;
+}
+
+function authGuidance(config) {
+  const webUrl = deriveWebUrl(config);
+  return webUrl
+    ? `Sign in at ${webUrl}, copy your Clerk session token, choose Clerk session token, save, then retry.`
+    : 'Sign in on the web dashboard, copy your Clerk session token, choose Clerk session token, save, then retry.';
+}
+
+function showPairingMessage(message, kind = 'muted') {
+  els.pairingMessage.textContent = message;
+  els.pairingMessage.className = kind === 'error' ? 'error' : 'muted';
 }
 
 function readFormConfig() {
@@ -100,6 +150,15 @@ function applyConfig(config) {
   els.devNameInput.value = config.devName;
   els.devAdminInput.checked = Boolean(config.devAdmin);
   updateConnection('idle', config.deviceId ? 'Device paired' : 'Ready', config.deviceId ? `${config.deviceName} · ${config.deviceId.slice(0, 12)}` : 'No device paired');
+  if (config.authMode === 'bearer') {
+    if (config.bearerToken) {
+      updateAuthStatus('idle', config.authSavedAt ? `Clerk token saved ${new Date(config.authSavedAt).toLocaleString()}.` : 'Clerk token saved locally.');
+    } else {
+      updateAuthStatus('error', 'Clerk mode selected but no session token saved yet.');
+    }
+  } else {
+    updateAuthStatus('idle', 'Using local dev auth headers.');
+  }
 }
 
 function headers() {
@@ -122,8 +181,28 @@ async function api(path, init = {}) {
     headers: { ...headers(), ...(init.headers || {}) },
   });
   const text = await response.text();
-  const body = text ? JSON.parse(text) : null;
-  if (!response.ok) throw new Error(body?.error || `${response.status} ${response.statusText}`);
+  let body = null;
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = { error: text };
+    }
+  }
+  if (!response.ok) {
+    const err = new Error(body?.error || `${response.status} ${response.statusText}`);
+    err.statusCode = response.status;
+    if (response.status === 401 || response.status === 403) {
+      err.authFailure = true;
+      updateAuthStatus('error', `Auth failed (${response.status}). ${authGuidance(config)}`);
+    }
+    throw err;
+  }
+  if (config.authMode === 'bearer' && config.bearerToken) {
+    updateAuthStatus('ok', `Clerk session accepted${config.authSavedAt ? ` · saved ${new Date(config.authSavedAt).toLocaleString()}` : ''}.`);
+  } else if (config.authMode === 'dev') {
+    updateAuthStatus('ok', 'Dev auth accepted by server.');
+  }
   return body;
 }
 
@@ -364,24 +443,96 @@ function escapeHtml(value) {
 
 async function loadDashboard() {
   updateConnection('pending', 'Connecting', 'Loading dashboard');
-  const dashboard = await api('/api/dashboard');
-  state.dashboard = dashboard;
-  state.voiceSettings = dashboard.settings;
-  if (state.voiceSettings) {
-    state.approvalRecognizer.configure({
-      triggerPhrase: state.voiceSettings.triggerPhrase,
-      minDigits: state.voiceSettings.minDigits,
-      maxDigits: state.voiceSettings.maxDigits,
-      stableMs: state.voiceSettings.stableMs,
-      collectTimeoutMs: state.voiceSettings.collectTimeoutMs,
-      duplicateCooldownMs: state.voiceSettings.duplicateCooldownMs,
-      finalizeCheckIntervalMs: state.voiceSettings.finalizeCheckIntervalMs,
-    });
+  try {
+    const dashboard = await api('/api/dashboard');
+    state.dashboard = dashboard;
+    state.voiceSettings = dashboard.settings;
+    if (state.voiceSettings) {
+      state.approvalRecognizer.configure({
+        triggerPhrase: state.voiceSettings.triggerPhrase,
+        minDigits: state.voiceSettings.minDigits,
+        maxDigits: state.voiceSettings.maxDigits,
+        stableMs: state.voiceSettings.stableMs,
+        collectTimeoutMs: state.voiceSettings.collectTimeoutMs,
+        duplicateCooldownMs: state.voiceSettings.duplicateCooldownMs,
+        finalizeCheckIntervalMs: state.voiceSettings.finalizeCheckIntervalMs,
+      });
+    }
+    state.activeThreadId = state.activeThreadId || dashboard.threads[0]?.id || null;
+    renderLogs(dashboard.logs);
+    updateConnection('ok', 'Connected', state.config.deviceId ? `${state.config.deviceName} · ${state.config.deviceId.slice(0, 12)}` : `${dashboard.user.displayName}`);
+    if (state.activeThreadId) await loadMessages();
+  } catch (err) {
+    updateConnection('error', 'Connection failed', err?.message || 'Could not reach server');
+    if (err?.authFailure) {
+      showStatus(err.message);
+    }
+    throw err;
   }
-  state.activeThreadId = state.activeThreadId || dashboard.threads[0]?.id || null;
-  renderLogs(dashboard.logs);
-  updateConnection('ok', 'Connected', state.config.deviceId ? `${state.config.deviceName} · ${state.config.deviceId.slice(0, 12)}` : `${dashboard.user.displayName}`);
-  if (state.activeThreadId) await loadMessages();
+}
+
+async function applyPairingPayload(rawPayload) {
+  const payload = String(rawPayload || '').trim();
+  if (!payload) {
+    showPairingMessage('Paste a pairing payload or ws:// server URL first.', 'error');
+    return;
+  }
+  els.pairingPayloadInput.value = payload;
+
+  if (isUpdatePayload(payload)) {
+    handleUpdatePayload(parseUpdatePayload(payload));
+    return;
+  }
+
+  let config;
+  try {
+    config = parsePairingPayload(payload);
+  } catch (err) {
+    showPairingMessage(`Pairing failed: ${err.message}`, 'error');
+    return;
+  }
+
+  if (!clientVersionSupported(config.minClientVersion)) {
+    showPairingMessage(`This server requires desktop client version ${config.minClientVersion} or newer.`, 'error');
+    return;
+  }
+  if (pairingPayloadExpired(config.expiresAt)) {
+    showPairingMessage(`Pairing payload expired at ${config.expiresAt}. Generate a new payload from the dashboard.`, 'error');
+    return;
+  }
+
+  const current = readFormConfig();
+  const nextConfig = {
+    ...current,
+    serverUrl: config.serverUrl,
+    deviceName: config.deviceName || current.deviceName,
+  };
+
+  if (!config.deviceId) {
+    applyConfig(await desktop.writeConfig(nextConfig));
+    showPairingMessage('Server URL saved from pairing payload. Pair this desktop or paste a full payload with device credentials.');
+    showStatus('Server URL saved from pairing payload.');
+    await loadDashboard().catch((err) => showStatus(err.message));
+    return;
+  }
+
+  const paired = await desktop.writeConfig({
+    ...nextConfig,
+    deviceId: config.deviceId,
+    deviceToken: config.token,
+  });
+  applyConfig(paired);
+  ensureControlSocket();
+  showPairingMessage(`Paired ${config.deviceId.slice(0, 14)} from pairing payload.`);
+  showStatus(`Paired ${config.deviceId.slice(0, 14)} from pairing payload.`);
+  await loadDashboard().catch((err) => showStatus(err.message));
+}
+
+function handleUpdatePayload(update) {
+  showPairingMessage(`Update QR targets Android build ${update.versionCode}. Desktop updates are installed separately from the dashboard APK flow.`);
+  if (update.apkUrl) {
+    void desktop.openExternal(update.apkUrl);
+  }
 }
 
 async function loadVoiceSettings() {
@@ -939,8 +1090,22 @@ function renderMeter() {
 }
 
 els.saveButton.addEventListener('click', async () => {
-  applyConfig(await desktop.writeConfig(readFormConfig()));
+  applyConfig(await desktop.writeConfig(authSessionFields(readFormConfig())));
   await loadDashboard().catch((err) => showStatus(err.message));
+});
+els.applyPairingButton.addEventListener('click', () => applyPairingPayload(els.pairingPayloadInput.value).catch((err) => showPairingMessage(err.message, 'error')));
+els.pastePairingButton.addEventListener('click', async () => {
+  try {
+    const text = await navigator.clipboard.readText();
+    if (!text?.trim()) {
+      showPairingMessage('Clipboard is empty.', 'error');
+      return;
+    }
+    els.pairingPayloadInput.value = text.trim();
+    showPairingMessage('Pasted pairing payload. Review it, then click Apply pairing.');
+  } catch (err) {
+    showPairingMessage(err?.message || 'Could not read clipboard.', 'error');
+  }
 });
 els.pairButton.addEventListener('click', () => pairDevice().catch((err) => showStatus(err.message)));
 els.refreshButton.addEventListener('click', () => loadDashboard().catch((err) => showStatus(err.message)));
@@ -954,8 +1119,19 @@ els.offButton.addEventListener('click', () => turnOff().catch((err) => showStatu
 els.wakePhraseForm.addEventListener('submit', (event) => processWakePhrase(event).catch((err) => showStatus(err.message)));
 els.openWebButton.addEventListener('click', () => {
   const config = readFormConfig();
-  void desktop.openExternal(config.webUrl || config.serverUrl);
+  void desktop.openExternal(deriveWebUrl(config) || config.serverUrl);
 });
+els.signInButton.addEventListener('click', () => {
+  const config = readFormConfig();
+  void desktop.openExternal(deriveWebUrl(config) || config.serverUrl);
+  updateAuthStatus('idle', 'Opened web dashboard. Sign in, copy your Clerk session token, paste it here, save, then refresh.');
+});
+
+if (desktop.onPairingPayload) {
+  desktop.onPairingPayload((payload) => {
+    void applyPairingPayload(payload).catch((err) => showPairingMessage(err.message, 'error'));
+  });
+}
 
 desktop.readConfig().then((config) => {
   applyConfig(config);

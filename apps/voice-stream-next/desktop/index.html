@@ -21,6 +21,7 @@
           </div>
         </div>
         <button id="openWebButton" class="ghost" type="button">Open web dashboard</button>
+        <button id="signInButton" class="ghost" type="button">Sign in on web</button>
       </aside>
 
       <section class="workspace">
@@ -65,6 +66,29 @@
             <input id="devAdminInput" type="checkbox" />
             Dev user is admin
           </label>
+          <p id="authStatus" class="auth-status muted">Auth not checked yet.</p>
+          <p class="pairing-help muted">
+            For Clerk production servers, sign in on the web dashboard, copy your session token here, choose
+            <strong>Clerk session token</strong>, then save. Deep links use the <code>voicestream://</code> protocol when the packaged app registers it.
+          </p>
+        </section>
+
+        <section class="panel pairing-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Pairing</p>
+              <h2>QR / deep link / server URL</h2>
+            </div>
+            <div class="pairing-actions">
+              <button id="pastePairingButton" type="button">Paste</button>
+              <button id="applyPairingButton" type="button">Apply pairing</button>
+            </div>
+          </div>
+          <label class="pairing-label">
+            Pairing payload
+            <textarea id="pairingPayloadInput" rows="3" placeholder="voicestream://pair?... or ws://host:3299/audio?token=..."></textarea>
+          </label>
+          <p id="pairingMessage" class="muted">Paste a dashboard pairing payload, open a voicestream:// link, or use Pair device for manual registration.</p>
         </section>
 
         <section class="main-grid">
@@ -124,6 +148,7 @@
     <script src="../shared/approval-code.js"></script>
     <script src="../shared/pcm-capture-buffer.js"></script>
     <script src="../shared/local-voice-cues.js"></script>
+    <script src="../shared/pairing-payload-parser.js"></script>
     <script src="./renderer.js"></script>
   </body>
 </html>
