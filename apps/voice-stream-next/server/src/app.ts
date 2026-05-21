@@ -44,6 +44,11 @@ function cleanVoiceStreamMode(raw: string): 'assistant' | 'patch' | 'clipboard' 
   return raw === 'patch' || raw === 'clipboard' ? raw : 'assistant';
 }
 
+function cleanDeviceMode(raw: unknown): string {
+  const mode = cleanText(raw, 'off').toLowerCase();
+  return ['off', 'awake', 'sleeping', 'recording', 'transcribing', 'error'].includes(mode) ? mode : 'error';
+}
+
 function approvalCodeFromText(text: string): string | null {
   const words = text
     .toLowerCase()
@@ -80,6 +85,35 @@ function binaryChunk(data: unknown): Uint8Array | null {
   if (data instanceof ArrayBuffer) return new Uint8Array(data);
   if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
   return null;
+}
+
+function serverPublicUrl(req: FastifyRequest): string {
+  const configured = process.env.VOICE_STREAM_NEXT_PUBLIC_URL?.trim();
+  if (configured) return configured.replace(/\/+$/, '');
+  const proto = String(req.headers['x-forwarded-proto'] ?? '').split(',')[0].trim() || String((req as any).protocol ?? 'http');
+  const host = String(req.headers['x-forwarded-host'] ?? req.headers.host ?? '').split(',')[0].trim();
+  return `${proto}://${host}`.replace(/\/+$/, '');
+}
+
+function pairingPayload(serverUrl: string, input: { deviceId: string; token: string; deviceType: string; displayName: string }): { payload: any; payloadUri: string } {
+  const payload = {
+    version: 1,
+    serverUrl,
+    deviceId: input.deviceId,
+    token: input.token,
+    deviceType: input.deviceType,
+    displayName: input.displayName,
+    protocolVersion: VOICE_STREAM_PROTOCOL_VERSION,
+    minClientVersion: 1,
+  };
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(payload)) {
+    params.set(key, String(value));
+  }
+  return {
+    payload,
+    payloadUri: `voicestream://pair?${params.toString()}`,
+  };
 }
 
 function concatChunks(chunks: Uint8Array[], totalBytes: number): Uint8Array {
@@ -199,6 +233,29 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     }),
   );
 
+  app.post('/api/pairing/payload', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const body = jsonBody(req);
+      const deviceType = cleanText(body.deviceType, 'android') || 'android';
+      const displayName = cleanText(body.displayName, deviceType === 'desktop' ? 'Desktop voice client' : 'Android voice client');
+      const result = db.registerDevice(ctx.user.id, { deviceType, displayName });
+      const payload = pairingPayload(serverPublicUrl(req), {
+        deviceId: result.device.id,
+        token: result.token,
+        deviceType,
+        displayName,
+      });
+      db.addLog(ctx.user.id, {
+        deviceId: result.device.id,
+        source: 'web',
+        level: 'info',
+        message: `Pairing payload created: ${displayName}`,
+        detailsJson: JSON.stringify({ deviceType }),
+      });
+      return { ok: true, device: result.device, token: result.token, ...payload };
+    }),
+  );
+
   app.get('/api/admin/devices', async (req, reply) =>
     withUser(req, reply, db, clerkEnabled, async (ctx) => {
       requireAdmin(ctx);
@@ -227,6 +284,84 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       return { ok: true, log };
     }),
   );
+
+  app.get('/api/transcripts', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => ({
+      ok: true,
+      transcripts: db.listTranscripts(ctx.user.id, 200),
+    })),
+  );
+
+  app.post('/api/devices/:deviceId/status', async (req, reply) => {
+    const deviceId = String((req.params as any).deviceId ?? '');
+    const body = jsonBody(req);
+    const token = cleanText(body.token || req.headers['x-voice-device-token']);
+    const device = db.verifyDeviceToken(deviceId, token);
+    if (!device) {
+      reply.code(401).send({ ok: false, error: 'invalid device token' });
+      return;
+    }
+    const status = db.upsertClientStatus(device.userId, device.id, {
+      mode: cleanDeviceMode(body.mode),
+      status: cleanText(body.status, 'No status') || 'No status',
+      microphone: cleanText(body.microphone),
+      protocolVersion: Number.isInteger(body.protocolVersion) ? body.protocolVersion : null,
+      appVersion: cleanText(body.appVersion) || null,
+      lastError: cleanText(body.lastError) || null,
+      reportedAt: cleanText(body.reportedAt) || null,
+    });
+    return { ok: true, status };
+  });
+
+  app.get('/api/devices/:deviceId/control', { websocket: true }, (socket, req) => {
+    const deviceId = String((req.params as any).deviceId ?? '');
+    const token = queryValue((req.query as any)?.token);
+    const device = db.verifyDeviceToken(deviceId, token);
+    if (!device) {
+      socket.close(VoiceCloseCode.Unauthorized, 'invalid device token');
+      return;
+    }
+    socket.send(JSON.stringify({ type: 'control_hello', protocolVersion: VOICE_STREAM_PROTOCOL_VERSION }));
+    const heartbeat = setInterval(() => {
+      if ((socket as any).readyState === 1) {
+        socket.send(JSON.stringify({ type: 'server_ping', sentAt: new Date().toISOString() }));
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+    socket.on('message', (data) => {
+      let message: any = null;
+      try {
+        message = JSON.parse(String(data));
+      } catch {
+        socket.close(VoiceCloseCode.InvalidMessage, 'invalid control message');
+        return;
+      }
+      if (message?.type === 'client_ping') {
+        socket.send(JSON.stringify({ type: 'server_pong', sentAt: new Date().toISOString(), clientSentAt: message.sentAt }));
+        return;
+      }
+      if (message?.type === 'client_status') {
+        db.upsertClientStatus(device.userId, device.id, {
+          mode: cleanDeviceMode(message.mode),
+          status: cleanText(message.status, 'No status') || 'No status',
+          microphone: cleanText(message.microphone),
+          protocolVersion: Number.isInteger(message.protocolVersion) ? message.protocolVersion : null,
+          appVersion: cleanText(message.appVersion) || null,
+          lastError: cleanText(message.lastError) || null,
+          reportedAt: cleanText(message.reportedAt) || null,
+        });
+        return;
+      }
+      socket.close(VoiceCloseCode.InvalidMessage, 'unknown control message');
+    });
+    socket.on('close', () => {
+      clearInterval(heartbeat);
+      db.upsertClientStatus(device.userId, device.id, {
+        mode: 'off',
+        status: 'Control channel closed',
+        protocolVersion: VOICE_STREAM_PROTOCOL_VERSION,
+      });
+    });
+  });
 
   app.post('/api/voice/approval-codes', async (req, reply) =>
     withUser(req, reply, db, clerkEnabled, async (ctx) => {
@@ -347,6 +482,11 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       message: 'Voice stream connected',
       detailsJson: JSON.stringify({ deviceId: device.id }),
     });
+    db.upsertClientStatus(device.userId, device.id, {
+      mode: 'recording',
+      status: 'Voice stream connected',
+      protocolVersion: VOICE_STREAM_PROTOCOL_VERSION,
+    });
 
     socket.on('message', (data, isBinary) => {
       if (!isBinary) {
@@ -452,6 +592,11 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       } finally {
         db.endVoiceSession(device.userId, session.id);
       }
+      db.upsertClientStatus(device.userId, device.id, {
+        mode: 'awake',
+        status: 'Voice stream disconnected',
+        protocolVersion: VOICE_STREAM_PROTOCOL_VERSION,
+      });
       db.addLog(device.userId, {
         deviceId: device.id,
         source: device.deviceType,

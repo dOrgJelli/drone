@@ -1,6 +1,7 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { ClerkProvider, SignedIn, SignedOut, SignIn, UserButton, useAuth, useUser } from '@clerk/clerk-react';
+import QRCode from 'qrcode';
 import './styles.css';
 
 type UserProfile = {
@@ -55,6 +56,31 @@ type AssistantMessage = {
   createdAt: string;
 };
 
+type TranscriptRecord = {
+  id: string;
+  voiceSessionId: string;
+  deviceId: string;
+  deviceName: string;
+  mode: string;
+  text: string;
+  final: boolean;
+  createdAt: string;
+};
+
+type ClientStatusRecord = {
+  deviceId: string;
+  deviceType: string;
+  displayName: string;
+  mode: string;
+  status: string;
+  microphone: string;
+  protocolVersion: number | null;
+  appVersion: string | null;
+  lastError: string | null;
+  reportedAt: string;
+  updatedAt: string;
+};
+
 type DashboardData = {
   ok: true;
   authMode: 'clerk' | 'dev';
@@ -62,9 +88,12 @@ type DashboardData = {
   settings: VoiceSettings;
   threads: AssistantThread[];
   logs: LogRecord[];
+  transcripts: TranscriptRecord[];
+  clientStatuses: ClientStatusRecord[];
   approvalCodes: { id: string; code: string; source: string; createdAt: string }[];
   devices: DeviceRecord[];
   adminDevices: DeviceRecord[];
+  adminClientStatuses: ClientStatusRecord[];
   stats: { threadCount: number; deviceCount: number; logCount: number };
   dbPath: string;
 };
@@ -188,6 +217,8 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
   const [messageDraft, setMessageDraft] = React.useState('');
   const [deviceName, setDeviceName] = React.useState('Desktop dev client');
   const [deviceType, setDeviceType] = React.useState('desktop');
+  const [pairingText, setPairingText] = React.useState('');
+  const [pairingQr, setPairingQr] = React.useState('');
   const [codes, setCodes] = React.useState({ unlockCode: '1234', lockCode: '4321', offCode: '0000' });
 
   const activeThread = dashboard?.threads.find((thread) => thread.id === activeThreadId) ?? dashboard?.threads[0] ?? null;
@@ -298,13 +329,15 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
     setBusy(true);
     setError(null);
     try {
-      const data = await client.request<{ ok: true; device: DeviceRecord; token: string }>('/api/devices', {
+      const data = await client.request<{ ok: true; device: DeviceRecord; token: string; payloadUri: string }>('/api/pairing/payload', {
         method: 'POST',
         body: JSON.stringify({ deviceType, displayName: deviceName }),
       });
-      await navigator.clipboard?.writeText(data.token).catch(() => undefined);
+      setPairingText(data.payloadUri);
+      setPairingQr(await QRCode.toDataURL(data.payloadUri, { margin: 1, width: 220 }));
+      await navigator.clipboard?.writeText(data.payloadUri).catch(() => undefined);
       await loadDashboard();
-      setNotice(`Created ${data.device.displayName}. Pairing token copied when clipboard access was available.`);
+      setNotice(`Created ${data.device.displayName}. Pairing payload copied when clipboard access was available.`);
     } catch (err: any) {
       setError(err?.message ?? String(err));
     } finally {
@@ -318,6 +351,14 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
       .join('\n');
     await navigator.clipboard?.writeText(text);
     setNotice('Copied visible logs.');
+  }
+
+  async function copyTranscripts() {
+    const text = (dashboard?.transcripts ?? [])
+      .map((transcript) => `[${transcript.createdAt}] ${transcript.deviceName || transcript.deviceId} ${transcript.mode}: ${transcript.text}`)
+      .join('\n');
+    await navigator.clipboard?.writeText(text);
+    setNotice('Copied visible transcripts.');
   }
 
   if (loading) {
@@ -457,14 +498,48 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
                 <input value={deviceName} onChange={(event) => setDeviceName(event.target.value)} />
               </label>
               <button type="submit" disabled={busy || !deviceName.trim()}>
-                Create Token
+                Create QR Payload
               </button>
             </form>
+            {pairingText ? (
+              <div className="pairing-payload">
+                <small>QR / pairing payload</small>
+                {pairingQr ? <img src={pairingQr} alt="Device pairing QR" /> : null}
+                <textarea readOnly value={pairingText} onFocus={(event) => event.currentTarget.select()} />
+                <button type="button" onClick={() => void navigator.clipboard?.writeText(pairingText)}>
+                  Copy Payload
+                </button>
+              </div>
+            ) : null}
           </section>
         </aside>
       </section>
 
       <section className="lower-grid">
+        <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <h2>Transcripts</h2>
+              <p>Recent final voice transcripts stored for this user.</p>
+            </div>
+            <button type="button" onClick={() => void copyTranscripts()}>
+              Copy Transcripts
+            </button>
+          </div>
+          <div className="transcript-list">
+            {(dashboard?.transcripts ?? []).map((transcript) => (
+              <article key={transcript.id} className="transcript-row">
+                <div>
+                  <strong>{transcript.deviceName || transcript.deviceId}</strong>
+                  <span>{transcript.mode} / {timeLabel(transcript.createdAt)}</span>
+                </div>
+                <p>{transcript.text}</p>
+              </article>
+            ))}
+            {dashboard?.transcripts.length === 0 ? <div className="empty-note">No transcripts yet.</div> : null}
+          </div>
+        </section>
+
         <section className="panel">
           <div className="panel-heading">
             <div>
@@ -498,6 +573,14 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
                   <span>{device.deviceType}</span>
                   <span>token {device.tokenHint}...</span>
                   <time>{timeLabel(device.lastSeenAt)}</time>
+                </article>
+              ))}
+              {dashboard.adminClientStatuses.map((status) => (
+                <article key={`status-${status.deviceId}`} className="device-row status-row">
+                  <strong>{status.displayName}</strong>
+                  <span>{status.mode}</span>
+                  <span>{status.microphone || status.status}</span>
+                  <time>{timeLabel(status.updatedAt)}</time>
                 </article>
               ))}
               {dashboard.adminDevices.length === 0 ? <div className="empty-note">No connected devices yet.</div> : null}
@@ -540,6 +623,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
   const modeRef = React.useRef(mode);
   const streamingRef = React.useRef(streaming);
   const lastRecognizedRef = React.useRef({ text: '', at: 0 });
+  const controlSocketRef = React.useRef<WebSocket | null>(null);
 
   React.useEffect(() => {
     void loadVoiceSettings();
@@ -552,6 +636,14 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
   React.useEffect(() => {
     streamingRef.current = streaming;
   }, [streaming]);
+
+  React.useEffect(() => {
+    ensureControlSocket(device);
+    return () => {
+      controlSocketRef.current?.close();
+      controlSocketRef.current = null;
+    };
+  }, [device?.id]);
 
   async function loadVoiceSettings(): Promise<VoiceSettings> {
     const data = await client.request<{ ok: true; settings: { unlockCode: string; lockCode: string; lockedOffCode: string } }>('/api/settings/voice-approval');
@@ -573,8 +665,71 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
     const next = { id: data.device.id, token: data.token };
     localStorage.setItem(desktopDeviceStorageKey, JSON.stringify(next));
     setDevice(next);
+    ensureControlSocket(next);
     setStatus(`Paired ${data.device.displayName}.`);
     await onRefresh();
+  }
+
+  async function reportDesktopStatus(nextMode = modeRef.current, nextStatus = status) {
+    const activeDevice = device;
+    if (!activeDevice) return;
+    if (controlSocketRef.current?.readyState === WebSocket.OPEN) {
+      controlSocketRef.current.send(JSON.stringify({
+        type: 'client_status',
+        mode: nextMode,
+        status: nextStatus,
+        microphone: 'Desktop microphone',
+        protocolVersion: 1,
+        appVersion: 'electron',
+        reportedAt: new Date().toISOString(),
+      }));
+      return;
+    }
+    ensureControlSocket(activeDevice);
+    await client.request(`/api/devices/${encodeURIComponent(activeDevice.id)}/status`, {
+      method: 'POST',
+      body: JSON.stringify({
+        token: activeDevice.token,
+        mode: nextMode,
+        status: nextStatus,
+        microphone: window.voiceStreamDesktop?.isDesktop ? 'Desktop microphone' : '',
+        protocolVersion: 1,
+        appVersion: 'electron',
+      }),
+    }).catch(() => undefined);
+  }
+
+  function ensureControlSocket(activeDevice = device) {
+    if (!activeDevice || controlSocketRef.current?.readyState === WebSocket.OPEN || controlSocketRef.current?.readyState === WebSocket.CONNECTING) return;
+    const url = new URL(`/api/devices/${encodeURIComponent(activeDevice.id)}/control`, window.location.href);
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    url.searchParams.set('token', activeDevice.token);
+    const socket = new WebSocket(url);
+    socket.onopen = () => {
+      socket.send(JSON.stringify({
+        type: 'client_status',
+        mode: modeRef.current,
+        status,
+        microphone: 'Desktop microphone',
+        protocolVersion: 1,
+        appVersion: 'electron',
+        reportedAt: new Date().toISOString(),
+      }));
+    };
+    socket.onmessage = (event) => {
+      if (typeof event.data !== 'string') return;
+      const message = JSON.parse(event.data);
+      if (message.type === 'server_ping') {
+        socket.send(JSON.stringify({ type: 'client_ping', sentAt: new Date().toISOString() }));
+      }
+    };
+    socket.onclose = () => {
+      if (controlSocketRef.current === socket) controlSocketRef.current = null;
+    };
+    socket.onerror = () => {
+      if (controlSocketRef.current === socket) controlSocketRef.current = null;
+    };
+    controlSocketRef.current = socket;
   }
 
   async function startVoice(target: VoiceStreamTarget = 'assistant') {
@@ -606,29 +761,22 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
         try {
           const message = JSON.parse(event.data);
           if (message.type === 'assistant_result') {
-            setStatus(`Transcript: ${message.transcript || 'empty'} / Reply: ${message.assistantText || 'empty'}`);
-            setStreaming(false);
-            setMode('awake');
+            const nextStatus = `Transcript: ${message.transcript || 'empty'} / Reply: ${message.assistantText || 'empty'}`;
+            await finishVoiceFromServer(nextStatus);
             void onRefresh();
           } else if (message.type === 'transcript_result') {
-            setStatus(message.status || 'Transcript patched into chat.');
-            setStreaming(false);
-            setMode('awake');
+            await finishVoiceFromServer(message.status || 'Transcript patched into chat.');
             void onRefresh();
           } else if (message.type === 'sleep') {
+            let nextStatus = 'Awake. Waiting for wake phrase.';
             if (target === 'clipboard') {
               const copied = await copyText(message.transcriptText || '');
-              setStatus(copied ? 'Copied voice transcription.' : 'No voice transcription detected.');
-            } else {
-              setStatus('Awake. Waiting for wake phrase.');
+              nextStatus = copied ? 'Copied voice transcription.' : 'No voice transcription detected.';
             }
-            setStreaming(false);
-            setMode('awake');
+            await finishVoiceFromServer(nextStatus);
             void onRefresh();
           } else if (message.type === 'assistant_error') {
-            setStatus(message.error || 'Voice runtime failed.');
-            setStreaming(false);
-            setMode('awake');
+            await finishVoiceFromServer(message.error || 'Voice runtime failed.');
           } else if (message.type === 'server_ping') {
             socket.send(JSON.stringify({ type: 'client_ping', sentAt: new Date().toISOString() }));
           }
@@ -646,6 +794,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
     setStreaming(true);
     setMode('recording');
     setStatus(recordingStatus(target));
+    void reportDesktopStatus('recording', recordingStatus(target));
   }
 
   async function stopVoice(nextMode: VoiceMode = 'awake') {
@@ -659,11 +808,26 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
     setStreaming(false);
     setMode(nextMode);
     setStatus('Voice stream stopped.');
+    void reportDesktopStatus(nextMode, 'Voice stream stopped.');
     if (nextMode !== 'off') startWakeListener();
+  }
+
+  async function finishVoiceFromServer(nextStatus: string) {
+    refs.current.socket?.close();
+    refs.current.processor?.disconnect();
+    refs.current.stream?.getTracks().forEach((track) => track.stop());
+    await refs.current.context?.close().catch(() => undefined);
+    refs.current = {};
+    setStreaming(false);
+    setMode('awake');
+    setStatus(nextStatus);
+    void reportDesktopStatus('awake', nextStatus);
+    startWakeListener();
   }
 
   function enterAwake() {
     setMode('awake');
+    void reportDesktopStatus('awake', 'Awake. Listening for wake phrases.');
     startWakeListener();
   }
 
@@ -672,6 +836,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
     setMode('sleeping');
     const settings = voiceSettings;
     setStatus(settings ? `Sleep: ${settings.unlockCode} awake, ${settings.offCode} off.` : 'Sleeping.');
+    void reportDesktopStatus('sleeping', settings ? `Sleep: ${settings.unlockCode} awake, ${settings.offCode} off.` : 'Sleeping.');
     startWakeListener();
   }
 
@@ -680,6 +845,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
     stopWakeListener();
     setMode('off');
     setStatus('Off.');
+    void reportDesktopStatus('off', 'Off.');
   }
 
   async function processWakePhrase() {
@@ -693,6 +859,10 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
     const approvalCode = approvalCodeFromText(text);
     if (approvalCode) {
       await processApprovalCode(approvalCode);
+      return;
+    }
+    if (currentMode === 'recording') {
+      setStatus('Recording. Wake commands are ignored until capture stops.');
       return;
     }
     const match = wakePhraseMatch(text);

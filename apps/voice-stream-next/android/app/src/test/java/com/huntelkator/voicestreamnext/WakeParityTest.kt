@@ -35,4 +35,16 @@ class WakeParityTest {
         controller.applyServiceMode(Constants.MODE_OFF)
         assertEquals(WakeState.OFF, controller.state)
     }
+
+    @Test
+    fun recordingIgnoresWakeCommands() {
+        val controller = WakeToggleController()
+        controller.startAwake()
+        assertEquals(WakeAction.START_RECORDING, controller.wakeDetected(WakePhrase.START))
+        assertEquals(WakeState.RECORDING, controller.state)
+
+        assertEquals(WakeAction.NONE, controller.wakeDetected(WakePhrase.SLEEP))
+        assertEquals(WakeAction.NONE, controller.wakeDetected(WakePhrase.STATUS))
+        assertEquals(WakeState.RECORDING, controller.state)
+    }
 }

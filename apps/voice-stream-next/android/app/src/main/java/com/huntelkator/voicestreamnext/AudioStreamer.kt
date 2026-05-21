@@ -342,6 +342,10 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
             preRollBuffer.push(frame)
         }
         val phrase = wakeDetector?.acceptPcm(frame, frame.size) ?: return
+        if (recording.get()) {
+            wakeDetector?.reset()
+            return
+        }
         when {
             phrase.hasStart && !sleeping -> {
                 sleeping = false

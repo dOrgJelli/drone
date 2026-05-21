@@ -75,6 +75,12 @@ class VoiceStreamApi(private val context: Context) {
             .apply()
     }
 
+    fun savePairing(config: PairingConfig) {
+        val next = loadConfig().copy(serverUrl = config.serverUrl)
+        saveConfig(next)
+        savePairing(DevicePairing(config.deviceId, config.token), config.deviceName ?: Constants.DEFAULT_DEVICE_NAME)
+    }
+
     fun dashboard(): DashboardSummary {
         val json = request("GET", "/api/dashboard")
         val user = json.getJSONObject("user")
@@ -143,6 +149,25 @@ class VoiceStreamApi(private val context: Context) {
                 .put("source", "android")
                 .put("level", "info")
                 .put("message", message)
+        )
+    }
+
+    fun uploadClientStatus(mode: String, status: String, microphone: String = "", lastError: String? = null) {
+        val deviceId = pairedDeviceId()
+        val token = pairedDeviceToken()
+        if (deviceId.isBlank() || token.isBlank()) return
+        request(
+            "POST",
+            "/api/devices/$deviceId/status",
+            JSONObject()
+                .put("token", token)
+                .put("mode", mode)
+                .put("status", status)
+                .put("microphone", microphone)
+                .put("protocolVersion", 1)
+                .put("appVersion", BuildConfig.VERSION_NAME)
+                .put("lastError", lastError ?: JSONObject.NULL)
+                .put("reportedAt", java.time.Instant.now().toString())
         )
     }
 

@@ -8,6 +8,7 @@ const state = {
   audioContext: null,
   processor: null,
   voiceSocket: null,
+  controlSocket: null,
   voiceSessionId: null,
   voiceTarget: 'assistant',
   mode: 'off',
@@ -123,6 +124,69 @@ function setMode(mode, status) {
   state.mode = mode;
   if (status) showStatus(status);
   updateVoiceButtons();
+  void reportClientStatus(mode, status || els.micStatus.textContent || mode);
+}
+
+async function reportClientStatus(mode, status) {
+  if (!state.config?.deviceId || !state.config?.deviceToken) return;
+  if (state.controlSocket?.readyState === WebSocket.OPEN) {
+    state.controlSocket.send(JSON.stringify({
+      type: 'client_status',
+      mode,
+      status,
+      microphone: 'Desktop microphone',
+      protocolVersion: 1,
+      appVersion: 'electron-fallback',
+      reportedAt: new Date().toISOString(),
+    }));
+    return;
+  }
+  ensureControlSocket();
+  await api(`/api/devices/${encodeURIComponent(state.config.deviceId)}/status`, {
+    method: 'POST',
+    body: JSON.stringify({
+      token: state.config.deviceToken,
+      mode,
+      status,
+      microphone: 'Desktop microphone',
+      protocolVersion: 1,
+      appVersion: 'electron-fallback',
+    }),
+  }).catch(() => undefined);
+}
+
+function ensureControlSocket() {
+  if (!state.config?.deviceId || !state.config?.deviceToken) return;
+  if (state.controlSocket && state.controlSocket.readyState <= WebSocket.OPEN) return;
+  const url = new URL(`/api/devices/${encodeURIComponent(state.config.deviceId)}/control`, trimSlash(state.config.serverUrl));
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  url.searchParams.set('token', state.config.deviceToken);
+  const socket = new WebSocket(url.toString());
+  socket.onopen = () => {
+    socket.send(JSON.stringify({
+      type: 'client_status',
+      mode: state.mode,
+      status: els.micStatus.textContent || state.mode,
+      microphone: 'Desktop microphone',
+      protocolVersion: 1,
+      appVersion: 'electron-fallback',
+      reportedAt: new Date().toISOString(),
+    }));
+  };
+  socket.onmessage = (event) => {
+    if (typeof event.data !== 'string') return;
+    const message = JSON.parse(event.data);
+    if (message.type === 'server_ping') {
+      socket.send(JSON.stringify({ type: 'client_ping', sentAt: new Date().toISOString() }));
+    }
+  };
+  socket.onclose = () => {
+    if (state.controlSocket === socket) state.controlSocket = null;
+  };
+  socket.onerror = () => {
+    if (state.controlSocket === socket) state.controlSocket = null;
+  };
+  state.controlSocket = socket;
 }
 
 function updateVoiceButtons() {
@@ -204,6 +268,7 @@ async function pairDevice() {
     body: JSON.stringify({ deviceType: 'desktop', displayName: config.deviceName }),
   });
   applyConfig(await desktop.writeConfig({ ...config, deviceId: data.device.id, deviceToken: data.token }));
+  ensureControlSocket();
   showStatus('Desktop device paired.');
   await loadDashboard();
 }
@@ -315,11 +380,11 @@ function openVoiceSocket(target) {
       }
       if (message.type === 'assistant_result') {
         showStatus(`Transcript: ${message.transcript || 'empty'} / Reply: ${message.assistantText || 'empty'}`);
-        setMode('awake');
+        await finishMicFromServer();
       }
       if (message.type === 'transcript_result') {
         showStatus(message.status || 'Transcript patched into chat.');
-        setMode('awake');
+        await finishMicFromServer();
       }
       if (message.type === 'sleep') {
         if (target === 'clipboard') {
@@ -328,11 +393,11 @@ function openVoiceSocket(target) {
         } else {
           showStatus('Awake. Waiting for wake phrase.');
         }
-        setMode('awake');
+        await finishMicFromServer();
       }
       if (message.type === 'assistant_error') {
         showStatus(message.error || 'Voice runtime failed.');
-        setMode('awake');
+        await finishMicFromServer();
       }
     } catch {
       // Ignore non-protocol text frames in the fallback desktop shell.
@@ -341,6 +406,23 @@ function openVoiceSocket(target) {
   socket.onclose = () => showStatus('Voice stream closed.');
   socket.onerror = () => showStatus('Voice stream error.');
   return socket;
+}
+
+async function finishMicFromServer() {
+  if (state.processor) state.processor.disconnect();
+  if (state.audioContext) await state.audioContext.close().catch(() => {});
+  if (state.stream) state.stream.getTracks().forEach((track) => track.stop());
+  if (state.voiceSocket) state.voiceSocket.close();
+  state.stream = null;
+  state.audioContext = null;
+  state.processor = null;
+  state.voiceSocket = null;
+  state.voiceSessionId = null;
+  cancelAnimationFrame(state.meterFrame);
+  els.meterBar.style.width = '0%';
+  setMode('awake', els.micStatus.textContent || 'Awake. Waiting for wake phrase.');
+  startWakeListener();
+  await loadDashboard().catch(() => {});
 }
 
 function floatToPcm16(input) {
@@ -455,6 +537,10 @@ async function processPhraseText(text) {
   const approvalCode = approvalCodeFromText(text);
   if (approvalCode) {
     await processApprovalCode(approvalCode);
+    return;
+  }
+  if (state.mode === 'recording') {
+    showStatus('Recording. Wake commands are ignored until capture stops.');
     return;
   }
   const match = wakePhraseMatch(text);
@@ -632,6 +718,7 @@ els.openWebButton.addEventListener('click', () => {
 
 desktop.readConfig().then((config) => {
   applyConfig(config);
+  ensureControlSocket();
   updateVoiceButtons();
   return loadDashboard();
 }).catch((err) => showStatus(err.message));

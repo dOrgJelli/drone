@@ -69,5 +69,6 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.clerk:clerk-android-api:1.0.13")
     implementation("com.alphacephei:vosk-android:0.3.47")
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     testImplementation("junit:junit:4.13.2")
 }

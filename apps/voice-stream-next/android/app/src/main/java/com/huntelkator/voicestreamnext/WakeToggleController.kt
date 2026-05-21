@@ -56,12 +56,7 @@ class WakeToggleController {
                 }
             }
             WakeState.RECORDING -> {
-                if (phrase.hasSleep) {
-                    state = WakeState.SLEEPING
-                    WakeAction.ENTER_SLEEPING
-                } else {
-                    WakeAction.NONE
-                }
+                WakeAction.NONE
             }
             WakeState.SLEEPING, WakeState.OFF, WakeState.ERROR -> WakeAction.NONE
         }

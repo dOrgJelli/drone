@@ -71,6 +71,18 @@ export type VoiceSession = {
   endedAt: string | null;
 };
 
+export type TranscriptRecord = {
+  id: string;
+  voiceSessionId: string;
+  userId: string;
+  deviceId: string;
+  deviceName: string;
+  mode: string;
+  text: string;
+  final: boolean;
+  createdAt: string;
+};
+
 export type ApprovalCodeRecord = {
   id: string;
   voiceSessionId: string | null;
@@ -78,6 +90,21 @@ export type ApprovalCodeRecord = {
   code: string;
   source: string;
   createdAt: string;
+};
+
+export type ClientStatusRecord = {
+  deviceId: string;
+  userId: string;
+  deviceType: string;
+  displayName: string;
+  mode: string;
+  status: string;
+  microphone: string;
+  protocolVersion: number | null;
+  appVersion: string | null;
+  lastError: string | null;
+  reportedAt: string;
+  updatedAt: string;
 };
 
 type UpsertUserInput = {
@@ -201,6 +228,37 @@ function rowApprovalCode(row: any): ApprovalCodeRecord {
   };
 }
 
+function rowTranscript(row: any): TranscriptRecord {
+  return {
+    id: String(row.id),
+    voiceSessionId: String(row.voice_session_id),
+    userId: String(row.user_id),
+    deviceId: String(row.device_id ?? ''),
+    deviceName: String(row.device_name ?? ''),
+    mode: String(row.mode ?? ''),
+    text: String(row.text ?? ''),
+    final: asBool(row.final),
+    createdAt: String(row.created_at),
+  };
+}
+
+function rowClientStatus(row: any): ClientStatusRecord {
+  return {
+    deviceId: String(row.device_id),
+    userId: String(row.user_id),
+    deviceType: String(row.device_type ?? ''),
+    displayName: String(row.display_name ?? ''),
+    mode: String(row.mode ?? 'off'),
+    status: String(row.status ?? ''),
+    microphone: String(row.microphone ?? ''),
+    protocolVersion: row.protocol_version == null ? null : Number(row.protocol_version),
+    appVersion: row.app_version == null ? null : String(row.app_version),
+    lastError: row.last_error == null ? null : String(row.last_error),
+    reportedAt: String(row.reported_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
 export class VoiceStreamNextDb {
   readonly db: Database;
   readonly path: string;
@@ -302,6 +360,20 @@ export class VoiceStreamNextDb {
         text TEXT NOT NULL,
         final INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL
+      )
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS client_status (
+        device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        mode TEXT NOT NULL,
+        status TEXT NOT NULL,
+        microphone TEXT NOT NULL,
+        protocol_version INTEGER,
+        app_version TEXT,
+        last_error TEXT,
+        reported_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
       )
     `);
     this.db.run(`
@@ -642,6 +714,94 @@ export class VoiceStreamNextDb {
       .run({ $id: newId('trn'), $voiceSessionId: voiceSessionId, $userId: userId, $text: trimmed, $createdAt: nowIso() });
   }
 
+  listTranscripts(userId: string, limit = 100): TranscriptRecord[] {
+    return this.db
+      .query(
+        `
+        SELECT transcripts.*,
+               voice_sessions.device_id,
+               voice_sessions.mode,
+               devices.display_name AS device_name
+        FROM transcripts
+        JOIN voice_sessions ON voice_sessions.id = transcripts.voice_session_id
+        LEFT JOIN devices ON devices.id = voice_sessions.device_id
+        WHERE transcripts.user_id = $userId
+        ORDER BY transcripts.created_at DESC
+        LIMIT $limit
+      `,
+      )
+      .all({ $userId: userId, $limit: limit })
+      .map(rowTranscript);
+  }
+
+  upsertClientStatus(
+    userId: string,
+    deviceId: string,
+    input: {
+      mode: string;
+      status: string;
+      microphone?: string;
+      protocolVersion?: number | null;
+      appVersion?: string | null;
+      lastError?: string | null;
+      reportedAt?: string | null;
+    },
+  ): ClientStatusRecord {
+    const at = nowIso();
+    const reportedAt = input.reportedAt?.trim() || at;
+    this.db
+      .query(
+        `
+        INSERT INTO client_status (device_id, user_id, mode, status, microphone, protocol_version, app_version, last_error, reported_at, updated_at)
+        VALUES ($deviceId, $userId, $mode, $status, $microphone, $protocolVersion, $appVersion, $lastError, $reportedAt, $updatedAt)
+        ON CONFLICT(device_id) DO UPDATE SET
+          mode = excluded.mode,
+          status = excluded.status,
+          microphone = excluded.microphone,
+          protocol_version = excluded.protocol_version,
+          app_version = excluded.app_version,
+          last_error = excluded.last_error,
+          reported_at = excluded.reported_at,
+          updated_at = excluded.updated_at
+      `,
+      )
+      .run({
+        $deviceId: deviceId,
+        $userId: userId,
+        $mode: input.mode.trim() || 'off',
+        $status: input.status.trim() || 'No status',
+        $microphone: input.microphone?.trim() || '',
+        $protocolVersion: input.protocolVersion ?? null,
+        $appVersion: input.appVersion?.trim() || null,
+        $lastError: input.lastError?.trim() || null,
+        $reportedAt: reportedAt,
+        $updatedAt: at,
+      });
+    const row = this.db
+      .query(
+        `
+        SELECT client_status.*, devices.device_type, devices.display_name
+        FROM client_status
+        JOIN devices ON devices.id = client_status.device_id
+        WHERE client_status.device_id = $deviceId
+      `,
+      )
+      .get({ $deviceId: deviceId });
+    return rowClientStatus(row);
+  }
+
+  listClientStatuses(userId?: string): ClientStatusRecord[] {
+    const query = `
+      SELECT client_status.*, devices.device_type, devices.display_name
+      FROM client_status
+      JOIN devices ON devices.id = client_status.device_id
+      ${userId ? 'WHERE client_status.user_id = $userId' : ''}
+      ORDER BY client_status.updated_at DESC
+    `;
+    const rows = userId ? this.db.query(query).all({ $userId: userId }) : this.db.query(query).all();
+    return rows.map(rowClientStatus);
+  }
+
   addApprovalCode(userId: string, input: { voiceSessionId?: string | null; code: string; source: string }): ApprovalCodeRecord {
     const id = newId('apv');
     this.db
@@ -688,7 +848,10 @@ export class VoiceStreamNextDb {
       logs,
       approvalCodes: this.listApprovalCodes(user.id, 40),
       devices,
+      transcripts: this.listTranscripts(user.id, 40),
+      clientStatuses: this.listClientStatuses(user.id),
       adminDevices: user.admin ? this.listDevices() : [],
+      adminClientStatuses: user.admin ? this.listClientStatuses() : [],
       stats: {
         threadCount: threads.length,
         deviceCount: devices.length,

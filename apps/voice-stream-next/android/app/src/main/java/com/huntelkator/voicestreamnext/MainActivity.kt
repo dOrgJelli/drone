@@ -27,6 +27,8 @@ import androidx.core.content.ContextCompat
 import com.clerk.api.Clerk
 import com.clerk.api.network.serialization.ClerkResult
 import com.clerk.api.session.GetTokenOptions
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -42,6 +44,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var deviceNameInput: EditText
     private lateinit var clerkEmailInput: EditText
     private lateinit var clerkPasswordInput: EditText
+    private lateinit var pairingPayloadInput: EditText
     private lateinit var devAdminInput: CheckBox
     private lateinit var statusText: TextView
     private lateinit var summaryText: TextView
@@ -74,6 +77,24 @@ class MainActivity : ComponentActivity() {
             startAwakeService()
         } else {
             startVoiceSession(pendingStartTarget)
+        }
+    }
+
+    private val qrScanLauncher = registerForActivityResult(ScanContract()) { result ->
+        val text = result.contents
+        if (text.isNullOrBlank()) {
+            showStatus("QR scan cancelled.")
+        } else {
+            pairingPayloadInput.setText(text)
+            applyPairingPayload(text)
+        }
+    }
+
+    private val cameraPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            launchQrScanner()
+        } else {
+            showStatus("Camera permission denied. Paste the QR payload instead.")
         }
     }
 
@@ -126,6 +147,7 @@ class MainActivity : ComponentActivity() {
         clerkPasswordInput = field("Clerk password").apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         }
+        pairingPayloadInput = field("voicestream://pair?... QR payload")
         devAdminInput = CheckBox(this).apply {
             text = "Dev user is admin"
             setTextColor(COLOR_MUTED)
@@ -154,10 +176,13 @@ class MainActivity : ComponentActivity() {
             addView(statusText)
             addView(row(
                 button("Pair") { pairDevice() },
+                button("Scan QR") { startQrScan() },
                 button("Start voice") { ensureMicThenStart() },
                 button("Stop voice") { stopVoiceSession() },
                 button("Refresh") { refreshDashboard() }
             ))
+            addView(pairingPayloadInput)
+            addView(button("Apply QR Payload") { applyPairingPayload(pairingPayloadInput.text.toString()) })
             addView(summaryText)
         })
 
@@ -233,6 +258,39 @@ class MainActivity : ComponentActivity() {
             val logText = dashboard.logs.take(4).joinToString("\n")
             showSummary("${dashboard.displayName}\nThreads: ${dashboard.threadCount}  Devices: ${dashboard.deviceCount}  Logs: ${dashboard.logCount}\n$logText")
         }
+    }
+
+    private fun startQrScan() {
+        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            launchQrScanner()
+        } else {
+            cameraPermission.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    private fun launchQrScanner() {
+        runCatching {
+            qrScanLauncher.launch(
+                ScanOptions()
+                    .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                    .setPrompt("Scan VoiceStream pairing QR")
+                    .setBeepEnabled(false)
+                    .setOrientationLocked(false)
+            )
+        }.onFailure { error ->
+            showStatus("Scanner unavailable: ${error.message}. Paste the QR payload instead.")
+        }
+    }
+
+    private fun applyPairingPayload(payload: String) {
+        val config = PairingPayloadParser.parse(payload).getOrElse { error ->
+            showStatus(error.message ?: "Invalid pairing payload.")
+            return
+        }
+        api.savePairing(config)
+        loadConfigIntoForm()
+        showStatus("Paired ${config.deviceId.take(14)} from QR payload.")
+        refreshDashboard()
     }
 
     private fun ensureMicThenStart(target: String = Constants.STREAM_TARGET_ASSISTANT, playCue: Boolean = true) {
