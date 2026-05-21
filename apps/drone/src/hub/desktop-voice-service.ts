@@ -17,7 +17,6 @@ import {
 import { ApprovalCodeRecognizer, type ApprovalCodeUpdate } from './voice-approval-code';
 import {
   hasTranscriptContent,
-  isLikelyShortSleepMistranscription,
   normalizeTranscriptWhitespace,
   pcm16leRms,
   pcm16leToWav,
@@ -1503,21 +1502,19 @@ export class DesktopVoiceService {
     try {
       const result = await this.opts.transcribeWav(pcm16leToWav(segment.pcm));
       const command = stripCommands(result.text);
-      const inferredSleep = !command.sleep && this.shouldInferSleepCommand(result.text, segment);
-      const text = inferredSleep ? '' : promptTextFromCommand(result.text, command);
+      const text = promptTextFromCommand(result.text, command);
       const ignoreEmptyPatchSleep =
         this.promptCaptureTarget === 'patch' &&
         !hasTranscriptContent(this.promptTranscriptText) &&
         !hasTranscriptContent(text);
-      const sleep = (command.sleep || inferredSleep) && !ignoreEmptyPatchSleep;
+      const sleep = command.sleep && !ignoreEmptyPatchSleep;
       const abort = command.abort;
       desktopVoiceLog('prompt transcript segment', {
         sequence: segment.sequence,
         model: result.model,
         sleep,
         abort,
-        sleepInferred: inferredSleep,
-        sleepIgnored: ignoreEmptyPatchSleep && (command.sleep || inferredSleep),
+        sleepIgnored: ignoreEmptyPatchSleep && command.sleep,
         rawText: result.text,
         text,
       });
@@ -1565,11 +1562,6 @@ export class DesktopVoiceService {
       this.emitChange();
       this.processPromptTranscriptQueue();
     }
-  }
-
-  private shouldInferSleepCommand(text: string, segment: PromptSpeechSegment): boolean {
-    if (segment.speechMs > 900) return false;
-    return isLikelyShortSleepMistranscription(text);
   }
 
   private async abortPromptRecordingFromTranscript(): Promise<void> {
