@@ -216,6 +216,7 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
                             onStatus(message.optString("status", "Transcript received."))
                         }
                         "sleep" -> handleServerSleep(message, onStatus)
+                        "abort" -> handleServerAbort(onStatus)
                         "assistant_error" -> {
                             recording.set(false)
                             onStatus(message.optString("error", "Voice runtime failed."))
@@ -257,6 +258,19 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
             },
         )
         socket = newSocket
+    }
+
+    private fun handleServerAbort(onStatus: (String) -> Unit) {
+        recording.set(false)
+        outgoingReady.set(false)
+        pendingStreamBuffer.clear()
+        closeSocket("server abort", sendEnd = false)
+        val status = if (currentTarget == Constants.STREAM_TARGET_CLIPBOARD) {
+            "Awake: voice transcription cancelled"
+        } else {
+            "Awake: waiting for \"hey sebastian\""
+        }
+        onStatus(status)
     }
 
     private fun handleServerSleep(message: JSONObject, onStatus: (String) -> Unit) {

@@ -88,6 +88,60 @@ describe('voice integration', () => {
     expect(dashboard.clientStatuses.some((entry: any) => entry.deviceId === registered.device.id && entry.status === 'Ready for commands')).toBe(true);
   });
 
+  test('auto-finishes patch streams when a sleep phrase is detected during recording', async () => {
+    process.env.VOICE_STREAM_NEXT_TEST_TRANSCRIPT = "Please capture this note, that's it.";
+
+    const registered = await fetch(`${baseUrl}/api/devices`, {
+      method: 'POST',
+      headers: devHeaders,
+      body: JSON.stringify({ deviceType: 'desktop', displayName: 'Sleep Desktop' }),
+    }).then((response) => response.json());
+
+    const session = await fetch(`${baseUrl}/api/voice/sessions`, {
+      method: 'POST',
+      headers: devHeaders,
+      body: JSON.stringify({ deviceId: registered.device.id, mode: 'patch' }),
+    }).then((response) => response.json());
+
+    const wsUrl = new URL('/api/voice/stream', baseUrl);
+    wsUrl.protocol = 'ws:';
+    wsUrl.searchParams.set('deviceId', registered.device.id);
+    wsUrl.searchParams.set('token', registered.token);
+    wsUrl.searchParams.set('sessionId', session.session.id);
+    wsUrl.searchParams.set('mode', 'patch');
+
+    const socket = new WebSocket(wsUrl);
+    const speechChunk = samplePcmChunk();
+    const silenceChunk = new ArrayBuffer(4096 * 2);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.addEventListener('open', () => resolve());
+        socket.addEventListener('error', () => reject(new Error('websocket failed to open')));
+      });
+      socket.send(JSON.stringify({ type: 'client_hello', protocolVersion: 1, client: 'test', mode: 'patch' }));
+      for (let index = 0; index < 8; index += 1) {
+        socket.send(speechChunk);
+      }
+      for (let index = 0; index < 12; index += 1) {
+        socket.send(silenceChunk);
+      }
+
+      const user = db.userByClerkId('dev_voice_integration_example_local');
+      expect(user).toBeTruthy();
+      await waitForCondition('auto-finalized transcript', () =>
+        db.listTranscripts(user!.id, 20, { voiceSessionId: session.session.id }).length === 1,
+      );
+
+      const transcripts = db.listTranscripts(user!.id, 20, { voiceSessionId: session.session.id });
+      expect(transcripts[0]?.text).toContain('Please capture this note');
+    } finally {
+      if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+        socket.close();
+      }
+      process.env.VOICE_STREAM_NEXT_TEST_TRANSCRIPT = 'finalize this transcript';
+    }
+  });
+
   test('finalizes patch voice streams into stored transcripts and assistant threads', async () => {
     const registered = await fetch(`${baseUrl}/api/devices`, {
       method: 'POST',
