@@ -132,6 +132,8 @@ type StoredAssistantState = {
   chatIdleSubscriptions?: AssistantChatIdleSubscription[];
   systemPrompt?: string;
   systemPromptUpdatedAt?: string;
+  voiceSystemPrompt?: string;
+  voiceSystemPromptUpdatedAt?: string;
   overviewPrompt?: string;
   overviewPromptUpdatedAt?: string;
   updatedAt?: string;
@@ -474,6 +476,14 @@ export type AssistantToolSummary = {
 export type AssistantSystemPromptSettings = {
   ok: true;
   assistantSystemPrompt: {
+    prompt: string;
+    promptSource: 'settings' | 'default';
+    updatedAt: string | null;
+    defaultPrompt: string;
+    maxPromptChars: number;
+    runtimeAppendix: string;
+  };
+  assistantVoiceSystemPrompt: {
     prompt: string;
     promptSource: 'settings' | 'default';
     updatedAt: string | null;
@@ -1074,6 +1084,11 @@ function normalizeAssistantEnabledTools(raw: unknown, fallback: string[] = ASSIS
     tools.push(name);
   }
   return tools;
+}
+
+function normalizeAssistantSystemPromptKind(raw: unknown): 'normal' | 'voice' {
+  const value = String(raw ?? '').trim().toLowerCase();
+  return value === 'voice' ? 'voice' : 'normal';
 }
 
 function normalizeAssistantVoiceEnabled(raw: unknown): boolean {
@@ -1752,10 +1767,13 @@ function serializeState(input: {
   chatIdleSubscriptions: AssistantChatIdleSubscription[];
   systemPrompt: string;
   systemPromptUpdatedAt: string | null;
+  voiceSystemPrompt: string;
+  voiceSystemPromptUpdatedAt: string | null;
   overviewPrompt: string;
   overviewPromptUpdatedAt: string | null;
 }): StoredAssistantState {
   const systemPrompt = normalizeAssistantSystemPrompt(input.systemPrompt) || ASSISTANT_SYSTEM_PROMPT_DEFAULT;
+  const voiceSystemPrompt = normalizeAssistantSystemPrompt(input.voiceSystemPrompt) || ASSISTANT_SYSTEM_PROMPT_DEFAULT;
   const overviewPrompt = normalizeAssistantOverviewPrompt(input.overviewPrompt) || ASSISTANT_OVERVIEW_PROMPT_DEFAULT;
   const chatIdleSubscriptions = input.chatIdleSubscriptions
     .slice(-CHAT_IDLE_MAX_SUBSCRIPTIONS)
@@ -1768,6 +1786,14 @@ function serializeState(input: {
       ? {
           systemPrompt,
           systemPromptUpdatedAt: input.systemPromptUpdatedAt ?? nowIso(),
+        }
+      : {}),
+    ...(voiceSystemPrompt !== ASSISTANT_SYSTEM_PROMPT_DEFAULT || systemPrompt !== ASSISTANT_SYSTEM_PROMPT_DEFAULT
+      ? {
+          voiceSystemPrompt,
+          ...(voiceSystemPrompt !== ASSISTANT_SYSTEM_PROMPT_DEFAULT
+            ? { voiceSystemPromptUpdatedAt: input.voiceSystemPromptUpdatedAt ?? nowIso() }
+            : {}),
         }
       : {}),
     ...(overviewPrompt !== ASSISTANT_OVERVIEW_PROMPT_DEFAULT
@@ -1835,6 +1861,8 @@ export class HubAssistantService {
   private chatIdleSubscriptionCheck: Promise<void> | null = null;
   private defaultSystemPrompt = ASSISTANT_SYSTEM_PROMPT_DEFAULT;
   private defaultSystemPromptUpdatedAt: string | null = null;
+  private defaultVoiceSystemPrompt = ASSISTANT_SYSTEM_PROMPT_DEFAULT;
+  private defaultVoiceSystemPromptUpdatedAt: string | null = null;
   private defaultOverviewPrompt = ASSISTANT_OVERVIEW_PROMPT_DEFAULT;
   private defaultOverviewPromptUpdatedAt: string | null = null;
   private overviewCache = new Map<string, AssistantThreadOverviewCacheEntry>();
@@ -2411,12 +2439,18 @@ export class HubAssistantService {
     return this.systemPromptSettingsSync();
   }
 
-  async updateSystemPrompt(input: { prompt?: unknown }): Promise<AssistantSystemPromptSettings> {
+  async updateSystemPrompt(input: { prompt?: unknown; promptType?: unknown; assistantType?: unknown; type?: unknown }): Promise<AssistantSystemPromptSettings> {
     await this.ensureLoaded();
     const prompt = normalizeAssistantSystemPrompt(input.prompt);
     if (!prompt) throw new Error('missing system prompt');
-    this.defaultSystemPrompt = prompt;
-    this.defaultSystemPromptUpdatedAt = prompt === ASSISTANT_SYSTEM_PROMPT_DEFAULT ? null : nowIso();
+    const promptKind = normalizeAssistantSystemPromptKind(input.promptType ?? input.assistantType ?? input.type);
+    if (promptKind === 'voice') {
+      this.defaultVoiceSystemPrompt = prompt;
+      this.defaultVoiceSystemPromptUpdatedAt = prompt === ASSISTANT_SYSTEM_PROMPT_DEFAULT ? null : nowIso();
+    } else {
+      this.defaultSystemPrompt = prompt;
+      this.defaultSystemPromptUpdatedAt = prompt === ASSISTANT_SYSTEM_PROMPT_DEFAULT ? null : nowIso();
+    }
     await this.persist();
     return this.systemPromptSettingsSync();
   }
@@ -2435,7 +2469,7 @@ export class HubAssistantService {
       : applyAssistantSystemPromptPatches(thread.systemPrompt, input.patches);
     if (!prompt) throw new Error('missing system prompt');
     thread.systemPrompt = prompt;
-    thread.systemPromptUpdatedAt = prompt === this.defaultSystemPrompt ? null : nowIso();
+    thread.systemPromptUpdatedAt = prompt === this.defaultSystemPromptForThread(thread) ? null : nowIso();
     thread.updatedAt = nowIso();
     await this.persist();
     return this.threadSystemPromptSettingsSync(thread.id);
@@ -2447,8 +2481,13 @@ export class HubAssistantService {
     const prompt = normalizeAssistantSystemPrompt(input?.prompt) || normalizeAssistantSystemPrompt(thread.systemPrompt);
     if (!prompt) throw new Error('missing thread system prompt');
     thread.systemPrompt = prompt;
-    this.defaultSystemPrompt = prompt;
-    this.defaultSystemPromptUpdatedAt = prompt === ASSISTANT_SYSTEM_PROMPT_DEFAULT ? null : nowIso();
+    if (thread.voiceEnabled) {
+      this.defaultVoiceSystemPrompt = prompt;
+      this.defaultVoiceSystemPromptUpdatedAt = prompt === ASSISTANT_SYSTEM_PROMPT_DEFAULT ? null : nowIso();
+    } else {
+      this.defaultSystemPrompt = prompt;
+      this.defaultSystemPromptUpdatedAt = prompt === ASSISTANT_SYSTEM_PROMPT_DEFAULT ? null : nowIso();
+    }
     thread.systemPromptUpdatedAt = null;
     thread.updatedAt = nowIso();
     await this.persist();
@@ -3040,12 +3079,22 @@ export class HubAssistantService {
     if (this.loaded) return;
     const stored = await readAssistantStateFile() ?? undefined;
     const storedSystemPrompt = normalizeAssistantSystemPrompt(stored?.systemPrompt);
+    const storedVoiceSystemPrompt = normalizeAssistantSystemPrompt(stored?.voiceSystemPrompt);
     const storedOverviewPrompt = normalizeAssistantOverviewPrompt(stored?.overviewPrompt);
     this.defaultSystemPrompt = storedSystemPrompt || ASSISTANT_SYSTEM_PROMPT_DEFAULT;
     this.defaultSystemPromptUpdatedAt =
       storedSystemPrompt && typeof stored?.systemPromptUpdatedAt === 'string' && stored.systemPromptUpdatedAt.trim()
         ? stored.systemPromptUpdatedAt.trim()
         : null;
+    this.defaultVoiceSystemPrompt = storedVoiceSystemPrompt || storedSystemPrompt || ASSISTANT_SYSTEM_PROMPT_DEFAULT;
+    this.defaultVoiceSystemPromptUpdatedAt =
+      storedVoiceSystemPrompt && typeof stored?.voiceSystemPromptUpdatedAt === 'string' && stored.voiceSystemPromptUpdatedAt.trim()
+        ? stored.voiceSystemPromptUpdatedAt.trim()
+        : storedVoiceSystemPrompt
+          ? nowIso()
+          : storedSystemPrompt && typeof stored?.systemPromptUpdatedAt === 'string' && stored.systemPromptUpdatedAt.trim()
+            ? stored.systemPromptUpdatedAt.trim()
+            : null;
     this.defaultOverviewPrompt = storedOverviewPrompt || ASSISTANT_OVERVIEW_PROMPT_DEFAULT;
     this.defaultOverviewPromptUpdatedAt =
       storedOverviewPrompt && typeof stored?.overviewPromptUpdatedAt === 'string' && stored.overviewPromptUpdatedAt.trim()
@@ -3103,7 +3152,7 @@ export class HubAssistantService {
       provider,
       model: allowedModelForProvider(provider, input?.model),
       thinkingLevel: allowedThinkingLevelForModel(provider, allowedModelForProvider(provider, input?.model), 'off'),
-      systemPrompt: normalizeAssistantSystemPrompt(input?.systemPrompt) || this.defaultSystemPrompt,
+      systemPrompt: normalizeAssistantSystemPrompt(input?.systemPrompt) || this.defaultSystemPromptForVoiceMode(voiceEnabled),
       systemPromptUpdatedAt: null,
       enabledTools: [...(voiceEnabled ? ASSISTANT_VOICE_DEFAULT_ENABLED_TOOL_NAMES : ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES)],
       accessScope: input?.accessScope ?? this.defaultAccessScopeForNewThread({ voiceEnabled }),
@@ -3114,6 +3163,14 @@ export class HubAssistantService {
       status: 'idle',
       error: null,
     };
+  }
+
+  private defaultSystemPromptForVoiceMode(voiceEnabled: boolean): string {
+    return normalizeAssistantSystemPrompt(voiceEnabled ? this.defaultVoiceSystemPrompt : this.defaultSystemPrompt) || ASSISTANT_SYSTEM_PROMPT_DEFAULT;
+  }
+
+  private defaultSystemPromptForThread(thread: AssistantThread): string {
+    return this.defaultSystemPromptForVoiceMode(normalizeAssistantVoiceEnabled(thread.voiceEnabled));
   }
 
   private getThread(threadId: string): AssistantThread {
@@ -3146,6 +3203,8 @@ export class HubAssistantService {
       chatIdleSubscriptions: this.chatIdleSubscriptions,
       systemPrompt: this.defaultSystemPrompt,
       systemPromptUpdatedAt: this.defaultSystemPromptUpdatedAt,
+      voiceSystemPrompt: this.defaultVoiceSystemPrompt,
+      voiceSystemPromptUpdatedAt: this.defaultVoiceSystemPromptUpdatedAt,
       overviewPrompt: this.defaultOverviewPrompt,
       overviewPromptUpdatedAt: this.defaultOverviewPromptUpdatedAt,
     });
@@ -4068,6 +4127,7 @@ export class HubAssistantService {
 
   private systemPromptSettingsSync(): AssistantSystemPromptSettings {
     const prompt = normalizeAssistantSystemPrompt(this.defaultSystemPrompt) || ASSISTANT_SYSTEM_PROMPT_DEFAULT;
+    const voicePrompt = normalizeAssistantSystemPrompt(this.defaultVoiceSystemPrompt) || ASSISTANT_SYSTEM_PROMPT_DEFAULT;
     return {
       ok: true,
       assistantSystemPrompt: {
@@ -4078,12 +4138,20 @@ export class HubAssistantService {
         maxPromptChars: ASSISTANT_SYSTEM_PROMPT_MAX_CHARS,
         runtimeAppendix: ASSISTANT_SYSTEM_PROMPT_RUNTIME_APPENDIX,
       },
+      assistantVoiceSystemPrompt: {
+        prompt: voicePrompt,
+        promptSource: voicePrompt === ASSISTANT_SYSTEM_PROMPT_DEFAULT ? 'default' : 'settings',
+        updatedAt: voicePrompt === ASSISTANT_SYSTEM_PROMPT_DEFAULT ? null : this.defaultVoiceSystemPromptUpdatedAt,
+        defaultPrompt: ASSISTANT_SYSTEM_PROMPT_DEFAULT,
+        maxPromptChars: ASSISTANT_SYSTEM_PROMPT_MAX_CHARS,
+        runtimeAppendix: ASSISTANT_SYSTEM_PROMPT_RUNTIME_APPENDIX,
+      },
     };
   }
 
   private threadSystemPromptSettingsSync(threadId: string): AssistantThreadSystemPromptSettings {
     const thread = this.getThread(threadId);
-    const globalPrompt = normalizeAssistantSystemPrompt(this.defaultSystemPrompt) || ASSISTANT_SYSTEM_PROMPT_DEFAULT;
+    const globalPrompt = this.defaultSystemPromptForThread(thread);
     const prompt = normalizeAssistantSystemPrompt(thread.systemPrompt) || globalPrompt;
     const globalPromptSource = globalPrompt === ASSISTANT_SYSTEM_PROMPT_DEFAULT ? 'default' : 'settings';
     const promptSource =
@@ -4128,7 +4196,7 @@ export class HubAssistantService {
     const readScope = describeAssistantAccessMode(accessScope.readMode, accessScope.droneIds);
     const writeScope = describeAssistantAccessMode(accessScope.writeMode, accessScope.droneIds);
     const scopeText = `Current access scope: read=${readScope}; write=${writeScope}. Do not claim read or write access outside those scopes.`;
-    const basePrompt = normalizeAssistantSystemPrompt(thread?.systemPrompt) || this.defaultSystemPrompt;
+    const basePrompt = normalizeAssistantSystemPrompt(thread?.systemPrompt) || (thread ? this.defaultSystemPromptForThread(thread) : this.defaultSystemPrompt);
     return [basePrompt, scopeText].join('\n\n');
   }
 }

@@ -51,6 +51,77 @@ describe('assistant system prompt settings', () => {
     });
   });
 
+  test('keeps normal and voice default prompts independently configurable', async () => {
+    await withTempDroneDataDir('assistant-voice-system-prompt-', async (droneDataDir) => {
+      const service = makeAssistantService();
+
+      const settings = await service.updateSystemPrompt({ prompt: 'Normal assistant prompt.' });
+      expect(settings.assistantSystemPrompt.prompt).toBe('Normal assistant prompt.');
+      expect(settings.assistantVoiceSystemPrompt.prompt).toBe(settings.assistantVoiceSystemPrompt.defaultPrompt);
+
+      let assistantState = JSON.parse(await fs.readFile(path.join(droneDataDir, 'assistant.json'), 'utf8'));
+      expect(assistantState.systemPrompt).toBe('Normal assistant prompt.');
+      expect(assistantState.voiceSystemPrompt).toBe(settings.assistantVoiceSystemPrompt.defaultPrompt);
+
+      const reloadedService = makeAssistantService();
+      const reloadedSettings = await reloadedService.systemPromptSettings();
+      expect(reloadedSettings.assistantSystemPrompt.prompt).toBe('Normal assistant prompt.');
+      expect(reloadedSettings.assistantVoiceSystemPrompt.prompt).toBe(settings.assistantVoiceSystemPrompt.defaultPrompt);
+
+      const voiceSettings = await reloadedService.updateSystemPrompt({ promptType: 'voice', prompt: 'Voice assistant prompt.' });
+      expect(voiceSettings.assistantSystemPrompt.prompt).toBe('Normal assistant prompt.');
+      expect(voiceSettings.assistantVoiceSystemPrompt.prompt).toBe('Voice assistant prompt.');
+
+      let snapshot = await reloadedService.createThread({ title: 'normal' });
+      const normalThread = snapshot.threads.find((thread) => thread.id === snapshot.activeThreadId) as any;
+      expect(normalThread.voiceEnabled).toBe(false);
+      expect(normalThread.systemPrompt).toBe('Normal assistant prompt.');
+
+      const voiceThread = await reloadedService.ensureLatestVoiceThread({ title: 'voice' });
+      expect(voiceThread.thread.voiceEnabled).toBe(true);
+      expect(voiceThread.thread.systemPrompt).toBe('Voice assistant prompt.');
+
+      assistantState = JSON.parse(await fs.readFile(path.join(droneDataDir, 'assistant.json'), 'utf8'));
+      expect(assistantState.systemPrompt).toBe('Normal assistant prompt.');
+      expect(assistantState.voiceSystemPrompt).toBe('Voice assistant prompt.');
+
+      await reloadedService.updateThreadSystemPrompt(voiceThread.threadId, { prompt: 'Voice thread prompt.' });
+      await reloadedService.promoteThreadSystemPrompt(voiceThread.threadId);
+      const promotedSettings = await reloadedService.systemPromptSettings();
+      expect(promotedSettings.assistantSystemPrompt.prompt).toBe('Normal assistant prompt.');
+      expect(promotedSettings.assistantVoiceSystemPrompt.prompt).toBe('Voice thread prompt.');
+
+      snapshot = await reloadedService.createThread({ title: 'another normal' });
+      const anotherNormalThread = snapshot.threads.find((thread) => thread.id === snapshot.activeThreadId) as any;
+      expect(anotherNormalThread.systemPrompt).toBe('Normal assistant prompt.');
+    });
+  });
+
+  test('migrates old single global prompt into the voice prompt default', async () => {
+    await withTempDroneDataDir('assistant-legacy-system-prompt-', async (droneDataDir) => {
+      await fs.writeFile(
+        path.join(droneDataDir, 'assistant.json'),
+        JSON.stringify(
+          {
+            systemPrompt: 'Legacy shared prompt.',
+            systemPromptUpdatedAt: '2026-01-02T03:04:05.000Z',
+          },
+          null,
+          2,
+        ),
+        'utf8',
+      );
+
+      const service = makeAssistantService();
+      const settings = await service.systemPromptSettings();
+      expect(settings.assistantSystemPrompt.prompt).toBe('Legacy shared prompt.');
+      expect(settings.assistantVoiceSystemPrompt.prompt).toBe('Legacy shared prompt.');
+
+      const voiceThread = await service.ensureLatestVoiceThread({ title: 'voice' });
+      expect(voiceThread.thread.systemPrompt).toBe('Legacy shared prompt.');
+    });
+  });
+
   test('updates thread prompts independently and can promote one to the global prompt', async () => {
     await withTempDroneDataDir('assistant-thread-system-prompt-', async () => {
       const service = makeAssistantService();
