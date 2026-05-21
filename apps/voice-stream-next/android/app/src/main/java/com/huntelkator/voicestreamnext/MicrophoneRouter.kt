@@ -11,6 +11,8 @@ import android.os.Build
 
 class MicrophoneRouter(private val context: Context) {
     private val audioManager = context.getSystemService(AudioManager::class.java)
+
+    fun describeBestAvailable(): String = choosePreferredInput().label
     private var originalMode: Int? = null
     private var bluetoothScoStarted = false
     private var communicationDeviceSet = false

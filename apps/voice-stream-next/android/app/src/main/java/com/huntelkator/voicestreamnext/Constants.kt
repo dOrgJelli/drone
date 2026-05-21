@@ -20,6 +20,8 @@ object Constants {
 
     const val EXTRA_STATUS = "status"
     const val EXTRA_MODE = "mode"
+    const val EXTRA_MICROPHONE = "microphone"
+    const val EXTRA_APPROVAL_STATUS = "approval_status"
     const val EXTRA_STREAM_TARGET = "stream_target"
 
     const val MODE_OFF = "off"

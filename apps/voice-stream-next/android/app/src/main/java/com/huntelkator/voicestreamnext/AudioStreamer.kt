@@ -59,6 +59,17 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
     @Volatile private var reconnectAttempt = 0
     @Volatile private var awakeMode = false
     @Volatile private var sleeping = false
+    @Volatile private var currentMicrophone = "Mic: phone"
+
+    var statusListener: ((StreamStatus) -> Unit)? = null
+
+    private fun emitStatus(onStatus: (String) -> Unit, text: String, microphone: String? = null, approvalStatus: String = "") {
+        if (!microphone.isNullOrBlank()) {
+            currentMicrophone = microphone
+        }
+        onStatus(text)
+        statusListener?.invoke(StreamStatus(text, currentMicrophone, approvalStatus))
+    }
 
     fun startAwake(onStatus: (String) -> Unit) {
         if (!active.compareAndSet(false, true)) {
@@ -318,7 +329,11 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
         try {
             val microphone = microphoneRouter.routeForRecording(audioRecord)
             audioRecord.startRecording()
-            onStatus(if (detectWake) "Awake: listening. ${microphone.label}." else "Streaming microphone frames. ${microphone.label}.")
+            emitStatus(
+                onStatus,
+                if (detectWake) "Awake: listening. ${microphone.label}." else "Streaming microphone frames. ${microphone.label}.",
+                microphone = microphone.label,
+            )
             while (active.get()) {
                 val read = audioRecord.read(buffer, 0, buffer.size)
                 if (read <= 0) continue
@@ -415,17 +430,16 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
         when (update) {
             ApprovalCodeUpdate.None -> Unit
             is ApprovalCodeUpdate.Collecting -> {
-                onStatus(
-                    if (update.partialCode.isBlank()) {
-                        if (sleeping) "Unlock code..." else "Approval code..."
-                    } else if (sleeping) {
-                        "Unlock: ${update.partialCode}"
-                    } else {
-                        "Approval: ${update.partialCode}"
-                    }
-                )
+                val text = if (update.partialCode.isBlank()) {
+                    if (sleeping) "Unlock code..." else "Approval code..."
+                } else if (sleeping) {
+                    "Unlock: ${update.partialCode}"
+                } else {
+                    "Approval: ${update.partialCode}"
+                }
+                emitStatus(onStatus, text, approvalStatus = text)
             }
-            ApprovalCodeUpdate.Cancelled -> onStatus("Approval cancelled")
+            ApprovalCodeUpdate.Cancelled -> emitStatus(onStatus, "Approval cancelled", approvalStatus = "Approval cancelled")
             is ApprovalCodeUpdate.Completed -> handleApprovalCode(update.code, onStatus)
         }
     }
@@ -459,7 +473,8 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
             }
             !sleeping -> {
                 cuePlayer.play(LocalCue.STATUS)
-                onStatus("Approval sent: $code")
+                val text = "Approval sent: $code"
+                emitStatus(onStatus, text, approvalStatus = text)
                 thread(name = "VoiceStreamApprovalUpload") {
                     runCatching { api.uploadApprovalCode(code) }
                 }

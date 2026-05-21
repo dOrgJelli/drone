@@ -13,13 +13,67 @@ data class PairingConfig(
     val minClientVersion: Long? = null,
     val expiresAt: String? = null,
     val pairingSessionId: String? = null,
+    val apkUrl: String? = null,
+)
+
+data class UpdateConfig(
+    val versionCode: Long,
+    val apkUrl: String? = null,
 )
 
 object PairingPayloadParser {
     fun parse(payload: String): Result<PairingConfig> = runCatching {
         val trimmed = payload.trim()
         if (trimmed.isBlank()) throw IllegalArgumentException("Pairing text is empty")
+
+        when {
+            trimmed.startsWith("voicestream://", ignoreCase = true) -> parseVoiceStreamPairing(trimmed)
+            trimmed.startsWith("ws://", ignoreCase = true) || trimmed.startsWith("wss://", ignoreCase = true) ->
+                parseWebSocketUrl(trimmed)
+            else -> throw IllegalArgumentException("QR must be a VoiceStream pairing payload or ws:// server URL")
+        }
+    }
+
+    fun isUpdatePayload(payload: String): Boolean = runCatching {
+        val uri = URI(payload.trim())
+        uri.scheme.equals("voicestream", ignoreCase = true) && uri.host.equals("update", ignoreCase = true)
+    }.getOrDefault(false)
+
+    fun parseUpdate(payload: String): Result<UpdateConfig> = runCatching {
+        val trimmed = payload.trim()
+        if (trimmed.isBlank()) throw IllegalArgumentException("Update QR is empty")
+
         val uri = URI(trimmed)
+        if (!uri.scheme.equals("voicestream", ignoreCase = true) || !uri.host.equals("update", ignoreCase = true)) {
+            throw IllegalArgumentException("QR does not contain VoiceStream update data")
+        }
+
+        val params = parseQuery(uri.rawQuery)
+        val versionCode = params["versionCode"]?.toLongOrNull()
+            ?: throw IllegalArgumentException("QR does not contain an app version")
+        if (versionCode < 1) {
+            throw IllegalArgumentException("QR contains an invalid app version")
+        }
+
+        UpdateConfig(versionCode, params["apk"]?.takeIf { it.isNotBlank() })
+    }
+
+    fun webSocketToHttpUrl(rawUrl: String): String {
+        val uri = URI(rawUrl.trim())
+        val scheme = when (uri.scheme?.lowercase()) {
+            "wss" -> "https"
+            "ws" -> "http"
+            else -> throw IllegalArgumentException("Server URL must use ws:// or wss://")
+        }
+        if (uri.host.isNullOrBlank()) {
+            throw IllegalArgumentException("Server URL is missing a host")
+        }
+        val portPart = if (uri.port > 0) ":${uri.port}" else ""
+        return "$scheme://${uri.host}$portPart"
+    }
+
+    private fun parseVoiceStreamPairing(payload: String): PairingConfig {
+        val uri = URI(payload)
         if (!uri.scheme.equals("voicestream", ignoreCase = true) || !uri.host.equals("pair", ignoreCase = true)) {
             throw IllegalArgumentException("QR does not contain VoiceStream pairing data")
         }
@@ -32,7 +86,7 @@ object PairingPayloadParser {
         val token = params["token"]?.takeIf { it.isNotBlank() }
             ?: throw IllegalArgumentException("QR does not contain a device token")
 
-        PairingConfig(
+        return PairingConfig(
             serverUrl = serverUrl,
             deviceId = deviceId,
             token = token,
@@ -41,6 +95,33 @@ object PairingPayloadParser {
             minClientVersion = params["minClientVersion"]?.toLongOrNull(),
             expiresAt = params["expiresAt"]?.takeIf { it.isNotBlank() },
             pairingSessionId = params["pairingSessionId"]?.takeIf { it.isNotBlank() },
+            apkUrl = params["apk"]?.takeIf { it.isNotBlank() },
+        )
+    }
+
+    private fun parseWebSocketUrl(rawUrl: String): PairingConfig {
+        val uri = URI(rawUrl)
+        if (!uri.scheme.equals("ws", ignoreCase = true) && !uri.scheme.equals("wss", ignoreCase = true)) {
+            throw IllegalArgumentException("Server URL must use ws:// or wss://")
+        }
+        if (uri.host.isNullOrBlank()) {
+            throw IllegalArgumentException("Server URL is missing a host")
+        }
+
+        val params = parseQuery(uri.rawQuery)
+        val token = params["token"]?.takeIf { it.isNotBlank() }
+            ?: throw IllegalArgumentException("QR does not contain a pairing token")
+        val deviceId = params["deviceId"]?.takeIf { it.isNotBlank() }.orEmpty()
+
+        return PairingConfig(
+            serverUrl = webSocketToHttpUrl(rawUrl),
+            deviceId = deviceId,
+            token = token,
+            deviceName = params["displayName"]?.takeIf { it.isNotBlank() },
+            deviceType = params["deviceType"]?.takeIf { it.isNotBlank() },
+            minClientVersion = params["minClientVersion"]?.toLongOrNull()
+                ?: params["minVersionCode"]?.toLongOrNull(),
+            apkUrl = params["apk"]?.takeIf { it.isNotBlank() },
         )
     }
 

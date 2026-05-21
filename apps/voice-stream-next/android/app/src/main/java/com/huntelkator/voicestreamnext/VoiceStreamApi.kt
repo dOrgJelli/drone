@@ -152,6 +152,17 @@ class VoiceStreamApi(private val context: Context) {
         )
     }
 
+    fun uploadDiagnostics(reason: String, logText: String) {
+        val deviceId = pairedDeviceId().takeIf { it.isNotBlank() }
+        val body = JSONObject()
+            .put("source", "android")
+            .put("level", "info")
+            .put("message", "Android diagnostics ($reason)")
+            .put("details", JSONObject().put("reason", reason).put("log", logText))
+        if (deviceId != null) body.put("deviceId", deviceId)
+        request("POST", "/api/logs", body)
+    }
+
     fun uploadClientStatus(mode: String, status: String, microphone: String = "", lastError: String? = null) {
         val deviceId = pairedDeviceId()
         val token = pairedDeviceToken()
