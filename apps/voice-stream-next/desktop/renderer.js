@@ -1,5 +1,14 @@
 const desktop = window.voiceStreamDesktop;
 
+const PRE_ROLL_MAX_BYTES = pcmBytesForMs(1500);
+const MAX_PENDING_STREAM_BYTES = pcmBytesForMs(5000);
+const BASE_RECONNECT_DELAY_MS = 500;
+const MAX_RECONNECT_DELAY_MS = 10_000;
+const MAX_RECONNECT_EXPONENT = 4;
+
+const preRollBuffer = new PcmCaptureBuffer(PRE_ROLL_MAX_BYTES);
+const pendingStreamBuffer = new PcmCaptureBuffer(MAX_PENDING_STREAM_BYTES);
+
 const state = {
   config: null,
   dashboard: null,
@@ -8,6 +17,12 @@ const state = {
   audioContext: null,
   processor: null,
   voiceSocket: null,
+  voiceOutgoingReady: false,
+  voiceReconnectAttempt: 0,
+  voiceReconnecting: false,
+  voiceReconnectTimer: null,
+  voiceStreamEnding: false,
+  wakeUsesVosk: false,
   controlSocket: null,
   voiceSessionId: null,
   voiceTarget: 'assistant',
@@ -235,6 +250,85 @@ function updateVoiceButtons() {
   els.sleepButton.disabled = state.mode === 'off' && !streaming;
 }
 
+function clearVoiceReconnectTimer() {
+  if (state.voiceReconnectTimer) {
+    window.clearTimeout(state.voiceReconnectTimer);
+    state.voiceReconnectTimer = null;
+  }
+  state.voiceReconnecting = false;
+}
+
+function flushPendingStreamFrames() {
+  const socket = state.voiceSocket;
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  for (const frame of pendingStreamBuffer.drain()) {
+    socket.send(frame);
+  }
+}
+
+function sendOrBufferStreamFrame(pcmBuffer) {
+  if (state.voiceOutgoingReady && state.voiceSocket?.readyState === WebSocket.OPEN) {
+    flushPendingStreamFrames();
+    state.voiceSocket.send(pcmBuffer);
+    return;
+  }
+  if (state.mode === 'recording') {
+    pendingStreamBuffer.push(pcmBuffer);
+  }
+}
+
+function pushPreRollFrame(pcmBuffer) {
+  if (state.mode === 'recording' || state.mode === 'off') return;
+  preRollBuffer.push(pcmBuffer);
+}
+
+function handleWakeAudioFrame(pcmBuffer) {
+  pushPreRollFrame(pcmBuffer);
+  if (state.wakeUsesVosk && desktop.sendVoskFrame) {
+    desktop.sendVoskFrame(pcmBuffer);
+  }
+}
+
+function reconnectDelayLabel(delayMs) {
+  return delayMs < 1000 ? `${delayMs}ms` : `${Math.round(delayMs / 1000)}s`;
+}
+
+function scheduleVoiceReconnect() {
+  if (state.mode !== 'recording' || state.voiceStreamEnding || !state.voiceSessionId) return;
+  if (state.voiceReconnecting) return;
+  state.voiceReconnecting = true;
+  const attempt = Math.min(state.voiceReconnectAttempt, MAX_RECONNECT_EXPONENT);
+  state.voiceReconnectAttempt += 1;
+  const delayMs = Math.min(MAX_RECONNECT_DELAY_MS, BASE_RECONNECT_DELAY_MS * (2 ** attempt));
+  showStatus(`Reconnecting voice stream in ${reconnectDelayLabel(delayMs)}.`);
+  state.voiceReconnectTimer = window.setTimeout(() => {
+    state.voiceReconnectTimer = null;
+    state.voiceReconnecting = false;
+    if (state.mode !== 'recording' || state.voiceStreamEnding) return;
+    state.voiceOutgoingReady = false;
+    const previousSocket = state.voiceSocket;
+    if (previousSocket) {
+      previousSocket.onclose = null;
+      previousSocket.onerror = null;
+      previousSocket.onmessage = null;
+      try {
+        previousSocket.close();
+      } catch {
+        // Ignore stale socket cleanup errors during reconnect.
+      }
+    }
+    state.voiceSocket = openVoiceSocket(state.voiceTarget);
+  }, delayMs);
+}
+
+function resetVoiceStreamState() {
+  clearVoiceReconnectTimer();
+  state.voiceOutgoingReady = false;
+  state.voiceReconnectAttempt = 0;
+  state.voiceStreamEnding = false;
+  pendingStreamBuffer.clear();
+}
+
 function renderMessages(messages) {
   els.messages.innerHTML = '';
   if (!messages.length) {
@@ -273,6 +367,17 @@ async function loadDashboard() {
   const dashboard = await api('/api/dashboard');
   state.dashboard = dashboard;
   state.voiceSettings = dashboard.settings;
+  if (state.voiceSettings) {
+    state.approvalRecognizer.configure({
+      triggerPhrase: state.voiceSettings.triggerPhrase,
+      minDigits: state.voiceSettings.minDigits,
+      maxDigits: state.voiceSettings.maxDigits,
+      stableMs: state.voiceSettings.stableMs,
+      collectTimeoutMs: state.voiceSettings.collectTimeoutMs,
+      duplicateCooldownMs: state.voiceSettings.duplicateCooldownMs,
+      finalizeCheckIntervalMs: state.voiceSettings.finalizeCheckIntervalMs,
+    });
+  }
   state.activeThreadId = state.activeThreadId || dashboard.threads[0]?.id || null;
   renderLogs(dashboard.logs);
   updateConnection('ok', 'Connected', state.config.deviceId ? `${state.config.deviceName} · ${state.config.deviceId.slice(0, 12)}` : `${dashboard.user.displayName}`);
@@ -282,11 +387,16 @@ async function loadDashboard() {
 async function loadVoiceSettings() {
   if (state.voiceSettings) return state.voiceSettings;
   const data = await api('/api/settings/voice-approval');
-  state.voiceSettings = {
-    unlockCode: data.settings.unlockCode,
-    lockCode: data.settings.lockCode,
-    offCode: data.settings.lockedOffCode,
-  };
+  state.voiceSettings = data.settings;
+  state.approvalRecognizer.configure({
+    triggerPhrase: data.settings.triggerPhrase,
+    minDigits: data.settings.minDigits,
+    maxDigits: data.settings.maxDigits,
+    stableMs: data.settings.stableMs,
+    collectTimeoutMs: data.settings.collectTimeoutMs,
+    duplicateCooldownMs: data.settings.duplicateCooldownMs,
+    finalizeCheckIntervalMs: data.settings.finalizeCheckIntervalMs,
+  });
   return state.voiceSettings;
 }
 
@@ -334,7 +444,7 @@ async function sendMessage(event) {
   await loadMessages();
 }
 
-async function startMic(target = 'assistant') {
+async function startMic(target = 'assistant', options = {}) {
   stopWakeListener();
   if (!state.config.deviceId) await pairDevice();
   const session = await api('/api/voice/sessions', {
@@ -343,6 +453,9 @@ async function startMic(target = 'assistant') {
   });
   state.voiceSessionId = session.session.id;
   state.voiceTarget = cleanVoiceTarget(target);
+  resetVoiceStreamState();
+  pendingStreamBuffer.pushAll(preRollBuffer.drain());
+  if (options.cue) playLocalVoiceCue(options.cue);
   state.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   const context = new AudioContext({ sampleRate: 16000 });
   state.audioContext = context;
@@ -352,9 +465,7 @@ async function startMic(target = 'assistant') {
   state.processor = context.createScriptProcessor(4096, 1, 1);
   state.voiceSocket = openVoiceSocket(state.voiceTarget);
   state.processor.onaudioprocess = (event) => {
-    if (!state.voiceSocket || state.voiceSocket.readyState !== WebSocket.OPEN) return;
-    const input = event.inputBuffer.getChannelData(0);
-    state.voiceSocket.send(floatToPcm16(input));
+    sendOrBufferStreamFrame(floatToPcm16(event.inputBuffer.getChannelData(0)));
   };
   source.connect(state.analyser);
   source.connect(state.processor);
@@ -364,7 +475,9 @@ async function startMic(target = 'assistant') {
   renderMeter();
 }
 
-async function stopMic(nextMode = 'awake') {
+async function stopMic(nextMode = 'awake', options = {}) {
+  state.voiceStreamEnding = true;
+  clearVoiceReconnectTimer();
   const localSocket = state.voiceSocket;
   if (localSocket) {
     localSocket.send(JSON.stringify({ type: 'end' }));
@@ -384,8 +497,12 @@ async function stopMic(nextMode = 'awake') {
   state.processor = null;
   state.voiceSocket = null;
   state.voiceSessionId = null;
+  resetVoiceStreamState();
   cancelAnimationFrame(state.meterFrame);
   els.meterBar.style.width = '0%';
+  if (options.cue !== null) {
+    playLocalVoiceCue(options.cue ?? 'stop_button');
+  }
   setMode(nextMode, 'Capture stopped.');
   if (nextMode !== 'off') startWakeListener();
   await api('/api/logs', { method: 'POST', body: JSON.stringify({ source: 'desktop', level: 'info', message: 'Desktop microphone capture stopped' }) });
@@ -403,8 +520,11 @@ function openVoiceSocket(target) {
   const socket = new WebSocket(url.toString());
   socket.binaryType = 'arraybuffer';
   socket.onopen = () => {
+    state.voiceReconnectAttempt = 0;
+    state.voiceOutgoingReady = true;
     socket.send(JSON.stringify({ type: 'client_hello', protocolVersion: 1, client: 'electron-fallback', mode: target }));
-    showStatus('Voice stream connected.');
+    flushPendingStreamFrames();
+    showStatus(recordingStatus(target));
   };
   socket.onmessage = async (event) => {
     if (typeof event.data !== 'string') {
@@ -441,12 +561,30 @@ function openVoiceSocket(target) {
       // Ignore non-protocol text frames in the fallback desktop shell.
     }
   };
-  socket.onclose = () => showStatus('Voice stream closed.');
-  socket.onerror = () => showStatus('Voice stream error.');
+  socket.onclose = () => {
+    state.voiceOutgoingReady = false;
+    if (state.mode === 'recording' && !state.voiceStreamEnding) {
+      showStatus('Voice stream disconnected.');
+      scheduleVoiceReconnect();
+      return;
+    }
+    if (!state.voiceStreamEnding) {
+      showStatus('Voice stream closed.');
+    }
+  };
+  socket.onerror = () => {
+    state.voiceOutgoingReady = false;
+    if (state.mode === 'recording' && !state.voiceStreamEnding) {
+      showStatus('Voice stream error.');
+      scheduleVoiceReconnect();
+    }
+  };
   return socket;
 }
 
 async function finishMicFromServer() {
+  state.voiceStreamEnding = true;
+  clearVoiceReconnectTimer();
   if (state.processor) state.processor.disconnect();
   if (state.audioContext) await state.audioContext.close().catch(() => {});
   if (state.stream) state.stream.getTracks().forEach((track) => track.stop());
@@ -456,6 +594,7 @@ async function finishMicFromServer() {
   state.processor = null;
   state.voiceSocket = null;
   state.voiceSessionId = null;
+  resetVoiceStreamState();
   cancelAnimationFrame(state.meterFrame);
   els.meterBar.style.width = '0%';
   setMode('awake', els.micStatus.textContent || 'Awake. Waiting for wake phrase.');
@@ -548,7 +687,7 @@ function acceptApprovalText(text, finalizeNow = false) {
   let update = state.approvalRecognizer.accept(text, now);
   if (state.approvalRecognizer.isCollecting) {
     if (finalizeNow) {
-      update = state.approvalRecognizer.flush(now + 900);
+      update = state.approvalRecognizer.flush(now + (state.voiceSettings?.stableMs ?? 900));
     } else {
       scheduleApprovalFinalize();
     }
@@ -570,35 +709,40 @@ function wakePhraseMatch(text) {
   return null;
 }
 
-function enterAwake() {
+async function enterAwake() {
   resetApprovalCollection();
+  await loadVoiceSettings().catch(() => null);
   setMode('awake', 'Awake. Say or enter "hey sebastian" to start recording.');
   startWakeListener();
 }
 
 async function enterSleep() {
-  if (state.voiceSocket || state.stream) await stopMic('sleeping');
+  if (state.voiceSocket || state.stream) await stopMic('sleeping', { cue: null });
   resetApprovalCollection();
+  playLocalVoiceCue('sleep');
   const settings = await loadVoiceSettings().catch(() => null);
-  setMode('sleeping', settings ? `Sleep: ${settings.unlockCode} awake, ${settings.offCode} off.` : 'Sleeping.');
+  setMode('sleeping', settings ? `Sleep: ${settings.unlockCode} awake, ${settings.lockedOffCode} off.` : 'Sleeping.');
   startWakeListener();
 }
 
-async function turnOff() {
-  if (state.voiceSocket || state.stream) await stopMic('off');
+async function turnOff(options = {}) {
+  if (state.voiceSocket || state.stream) await stopMic('off', { cue: null });
   stopWakeListener();
   resetApprovalCollection();
+  preRollBuffer.clear();
+  playLocalVoiceCue(options.cue || 'stop_button');
   setMode('off', 'Off.');
 }
 
 async function processApprovalCode(code) {
   const settings = await loadVoiceSettings();
   if (state.mode === 'sleeping' && code === settings.unlockCode) {
+    playLocalVoiceCue('unlock');
     setMode('awake', 'Unlocked.');
     return;
   }
-  if (code === settings.offCode) {
-    await turnOff();
+  if (code === settings.lockedOffCode) {
+    await turnOff({ cue: 'sleeping_off' });
     return;
   }
   if (state.mode !== 'sleeping' && code === settings.lockCode) {
@@ -606,9 +750,10 @@ async function processApprovalCode(code) {
     return;
   }
   if (state.mode === 'sleeping') {
-    showStatus(`Sleep: ${settings.unlockCode} awake, ${settings.offCode} off.`);
+    showStatus(`Sleep: ${settings.unlockCode} awake, ${settings.lockedOffCode} off.`);
     return;
   }
+  playLocalVoiceCue('status');
   await api('/api/voice/approval-codes', { method: 'POST', body: JSON.stringify({ code, source: 'desktop' }) });
   showStatus(`Approval sent: ${code}.`);
   await loadDashboard();
@@ -637,6 +782,7 @@ async function processPhraseText(text, finalizeNow = false) {
     return;
   }
   if (match === 'status') {
+    playLocalVoiceCue('status');
     showStatus(`Mode: ${state.mode}. Device: ${state.config?.deviceId ? state.config.deviceId.slice(0, 12) : 'unpaired'}.`);
     return;
   }
@@ -645,7 +791,23 @@ async function processPhraseText(text, finalizeNow = false) {
     return;
   }
   if (state.mode === 'off') enterAwake();
-  await startMic(match === 'patch' || match === 'clipboard' ? match : 'assistant');
+  await startMic(match === 'patch' || match === 'clipboard' ? match : 'assistant', { cue: 'wake' });
+}
+
+async function startWakeAudioCapture() {
+  const media = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const context = new AudioContext({ sampleRate: 16000 });
+  const source = context.createMediaStreamSource(media);
+  const processor = context.createScriptProcessor(4096, 1, 1);
+  processor.onaudioprocess = (event) => {
+    handleWakeAudioFrame(floatToPcm16(event.inputBuffer.getChannelData(0)));
+  };
+  source.connect(processor);
+  processor.connect(context.destination);
+  state.wakeStream = media;
+  state.wakeAudioContext = context;
+  state.wakeProcessor = processor;
+  return true;
 }
 
 function startWakeListener() {
@@ -671,10 +833,7 @@ async function startVoskWakeListener() {
       return false;
     }
 
-    const media = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const context = new AudioContext({ sampleRate: 16000 });
-    const source = context.createMediaStreamSource(media);
-    const processor = context.createScriptProcessor(4096, 1, 1);
+    state.wakeUsesVosk = true;
     const unsubscribe = desktop.onVoskText((result) => {
       const text = String(result?.text || '').trim();
       if (!text) return;
@@ -685,14 +844,7 @@ async function startVoskWakeListener() {
       void processPhraseText(text).catch((err) => showStatus(err.message));
     });
 
-    processor.onaudioprocess = (event) => {
-      desktop.sendVoskFrame(floatToPcm16(event.inputBuffer.getChannelData(0)));
-    };
-    source.connect(processor);
-    processor.connect(context.destination);
-    state.wakeStream = media;
-    state.wakeAudioContext = context;
-    state.wakeProcessor = processor;
+    await startWakeAudioCapture();
     state.wakeUnsubscribe = unsubscribe;
     showStatus('Awake. Listening with Vosk.');
     return true;
@@ -708,13 +860,17 @@ async function startVoskWakeListener() {
 function startSpeechWakeListener() {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRecognition) {
-    showStatus('Awake. Type a wake phrase for this desktop runtime.');
+    void startWakeAudioCapture()
+      .then(() => showStatus('Awake. Type a wake phrase for this desktop runtime.'))
+      .catch((err) => showStatus(err?.message || 'Wake audio capture failed.'));
     return;
   }
   if (state.recognition) {
     showStatus('Awake. Listening for wake phrases.');
     return;
   }
+  state.wakeUsesVosk = false;
+  void startWakeAudioCapture().catch((err) => showStatus(err?.message || 'Wake audio capture failed.'));
   const recognition = new SpeechRecognition();
   recognition.continuous = true;
   recognition.interimResults = true;
@@ -762,6 +918,7 @@ function stopWakeListener() {
 function stopVoskWakeListener() {
   if (state.wakeUnsubscribe) state.wakeUnsubscribe();
   state.wakeUnsubscribe = null;
+  state.wakeUsesVosk = false;
   if (state.wakeProcessor) state.wakeProcessor.disconnect();
   state.wakeProcessor = null;
   if (state.wakeStream) state.wakeStream.getTracks().forEach((track) => track.stop());
@@ -789,9 +946,9 @@ els.pairButton.addEventListener('click', () => pairDevice().catch((err) => showS
 els.refreshButton.addEventListener('click', () => loadDashboard().catch((err) => showStatus(err.message)));
 els.newThreadButton.addEventListener('click', () => createThread().catch((err) => showStatus(err.message)));
 els.messageForm.addEventListener('submit', (event) => sendMessage(event).catch((err) => showStatus(err.message)));
-els.startMicButton.addEventListener('click', () => startMic().catch((err) => showStatus(err.message)));
+els.startMicButton.addEventListener('click', () => startMic('assistant', { cue: 'start_button' }).catch((err) => showStatus(err.message)));
 els.stopMicButton.addEventListener('click', () => stopMic().catch((err) => showStatus(err.message)));
-els.awakeButton.addEventListener('click', () => enterAwake());
+els.awakeButton.addEventListener('click', () => enterAwake().catch((err) => showStatus(err.message)));
 els.sleepButton.addEventListener('click', () => enterSleep().catch((err) => showStatus(err.message)));
 els.offButton.addEventListener('click', () => turnOff().catch((err) => showStatus(err.message)));
 els.wakePhraseForm.addEventListener('submit', (event) => processWakePhrase(event).catch((err) => showStatus(err.message)));

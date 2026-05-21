@@ -8,7 +8,14 @@ import { clerkPlugin } from '@clerk/fastify';
 import { VoiceStreamNextDb } from './db.js';
 import { requireAdmin, resolveRequestUser, type AuthContext } from './auth.js';
 import { generateAssistantReply, synthesizeSpeech, transcribePcm16 } from './assistant-runtime.js';
+import {
+  StreamingTranscriptionManager,
+  buildStreamingTranscriptionConfigFromEnv,
+  streamingTranscriptionEnabled,
+  type TerminalCommand,
+} from './streaming-transcription.js';
 import { approvalCodeFromText } from './approval-code.js';
+import { parseVoiceApprovalSettings, voiceApprovalSettingsResponse } from './voice-approval-settings.js';
 import {
   HEARTBEAT_INTERVAL_MS,
   MAX_STREAM_BYTES,
@@ -200,33 +207,30 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
   app.patch('/api/settings/voice-codes', async (req, reply) =>
     withUser(req, reply, db, clerkEnabled, async (ctx) => {
       const body = jsonBody(req);
+      const current = db.ensureVoiceSettings(ctx.user.id);
       const settings = db.updateVoiceSettings(ctx.user.id, {
         unlockCode: cleanCode(body.unlockCode, 'unlock code'),
         lockCode: cleanCode(body.lockCode, 'lock code'),
-        offCode: cleanCode(body.offCode, 'off code'),
+        lockedOffCode: cleanCode(body.offCode ?? body.lockedOffCode ?? current.lockedOffCode, 'off code'),
       });
       return { ok: true, settings };
     }),
   );
 
   app.get('/api/settings/voice-approval', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => voiceApprovalSettingsResponse(db.ensureVoiceSettings(ctx.user.id))),
+  );
+
+  app.post('/api/settings/voice-approval', async (req, reply) =>
     withUser(req, reply, db, clerkEnabled, async (ctx) => {
-      const settings = db.ensureVoiceSettings(ctx.user.id);
-      return {
-        ok: true,
-        settings: {
-          triggerPhrase: 'approval code',
-          unlockCode: settings.unlockCode,
-          lockCode: settings.lockCode,
-          lockedOffCode: settings.offCode,
-          minDigits: 4,
-          maxDigits: 8,
-          stableMs: 900,
-          collectTimeoutMs: 5000,
-          duplicateCooldownMs: 4000,
-          finalizeCheckIntervalMs: 250,
-        },
-      };
+      const body = jsonBody(req);
+      const payload = body.settings ?? body.voiceApproval ?? body;
+      const parsed = parseVoiceApprovalSettings(payload);
+      if (!parsed) {
+        throw Object.assign(new Error('Invalid voice approval settings.'), { statusCode: 400 });
+      }
+      const settings = db.updateVoiceApprovalSettings(ctx.user.id, parsed);
+      return voiceApprovalSettingsResponse(settings);
     }),
   );
 
@@ -609,8 +613,33 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     let bytes = 0;
     let storedBytes = 0;
     let finalized = false;
+    let terminalFinalize: TerminalCommand | null = null;
     const chunks: Uint8Array[] = [];
     const startedAt = Date.now();
+    const streamingEnabled = streamingTranscriptionEnabled();
+    const streamingManager = streamingEnabled
+      ? new StreamingTranscriptionManager(buildStreamingTranscriptionConfigFromEnv(), (command) => {
+          if (finalized || terminalFinalize) return;
+          terminalFinalize = command;
+          if ((socket as any).readyState === 1) {
+            socket.send(
+              JSON.stringify({
+                type: command.type,
+                phrase: command.phrase,
+                detectedAt: command.detectedAt,
+                transcriptText: command.transcriptText,
+                mode: streamMode,
+              }),
+            );
+          }
+          db.upsertClientStatus(device.userId, device.id, {
+            mode: 'transcribing',
+            status: command.type === 'abort' ? 'Voice command cancelled' : 'Voice command detected',
+            protocolVersion: VOICE_STREAM_PROTOCOL_VERSION,
+          });
+          void finalizeVoiceStream();
+        })
+      : null;
     socket.send(JSON.stringify({ type: 'server_hello', protocolVersion: VOICE_STREAM_PROTOCOL_VERSION, maxBytes: MAX_STREAM_BYTES, maxDurationMs: MAX_STREAM_DURATION_MS }));
     const heartbeat = setInterval(() => {
       if ((socket as any).readyState === 1) {
@@ -660,18 +689,22 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       }
       const chunk = binaryChunk(data);
       if (chunk) {
-        chunks.push(new Uint8Array(chunk));
-        storedBytes += chunk.byteLength;
+        const copy = new Uint8Array(chunk);
+        chunks.push(copy);
+        storedBytes += copy.byteLength;
+        streamingManager?.appendPcm(copy);
       }
     });
 
     socket.on('close', () => {
+      streamingManager?.flushPending();
       void finalizeVoiceStream();
     });
 
     async function finalizeVoiceStream(): Promise<void> {
       if (finalized) return;
       finalized = true;
+      streamingManager?.stop();
       clearInterval(heartbeat);
       clearTimeout(durationLimit);
       const session =
@@ -682,8 +715,15 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       let assistantText = '';
       let runtime = 'fallback';
       try {
-        const transcription = await transcribePcm16(concatChunks(chunks, storedBytes));
-        transcript = transcription.text;
+        if (terminalFinalize?.type === 'abort') {
+          transcript = '';
+        } else if (terminalFinalize?.transcriptText) {
+          transcript = terminalFinalize.transcriptText.trim();
+        } else {
+          const transcription = await transcribePcm16(concatChunks(chunks, storedBytes));
+          transcript = transcription.text;
+          runtime = transcription.provider;
+        }
         if (transcript) {
           db.addTranscript(device.userId, session.id, transcript);
           const approvalCode = approvalCodeFromText(transcript);
@@ -722,6 +762,8 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
               }
             }
           }
+        } else if (terminalFinalize?.type === 'abort' && (socket as any).readyState === 1) {
+          socket.send(JSON.stringify({ type: 'abort', mode: streamMode, transcriptText: '' }));
         } else if (streamMode === 'clipboard' && (socket as any).readyState === 1) {
           socket.send(JSON.stringify({ type: 'sleep', mode: streamMode, transcriptText: '' }));
         }

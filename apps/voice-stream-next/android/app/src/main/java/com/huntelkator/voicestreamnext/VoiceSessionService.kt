@@ -7,7 +7,9 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -22,6 +24,8 @@ import kotlin.concurrent.thread
 class VoiceSessionService : Service() {
     private lateinit var api: VoiceStreamApi
     private lateinit var streamer: AudioStreamer
+    private lateinit var microphoneRouter: MicrophoneRouter
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val controlClient = OkHttpClient.Builder()
         .pingInterval(15, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
@@ -30,15 +34,39 @@ class VoiceSessionService : Service() {
     @Volatile private var controlSocket: WebSocket? = null
     @Volatile private var lastStatus = "Off"
     @Volatile private var lastMode = Constants.MODE_OFF
+    @Volatile private var currentMicrophone = "Mic: phone"
+    @Volatile private var lastApprovalStatus = ""
+    @Volatile private var serviceActive = false
+
+    private val logUploadRunnable = object : Runnable {
+        override fun run() {
+            if (serviceActive) {
+                uploadDiagnostics("periodic", force = false)
+                mainHandler.postDelayed(this, LOG_UPLOAD_INTERVAL_MS)
+            }
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
         api = VoiceStreamApi(applicationContext)
         streamer = AudioStreamer(applicationContext, api)
+        microphoneRouter = MicrophoneRouter(applicationContext)
+        currentMicrophone = microphoneRouter.describeBestAvailable()
+        streamer.statusListener = { update ->
+            if (update.microphone.isNotBlank()) {
+                currentMicrophone = update.microphone
+            }
+            if (update.approvalStatus.isNotBlank()) {
+                publishApprovalStatus(update.approvalStatus)
+            }
+        }
         createNotificationChannel()
+        ClientLog.i("Service", "VoiceSessionService created")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        serviceActive = true
         when (intent?.action) {
             Constants.ACTION_STOP_VOICE -> stopVoice()
             Constants.ACTION_SLEEP -> enterSleep()
@@ -51,29 +79,36 @@ class VoiceSessionService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        serviceActive = false
+        mainHandler.removeCallbacks(logUploadRunnable)
+        streamer.statusListener = null
         streamer.stop()
         AssistantAudioPlayer.stopAll()
         closeControlChannel()
         releaseWakeLock()
-        publishStatus("Off", Constants.MODE_OFF)
+        publishStatus("Off", Constants.MODE_OFF, currentMicrophone, "")
         super.onDestroy()
     }
 
     private fun startAwake() {
-        publishStatus("Waking local detector", Constants.MODE_AWAKE)
+        uploadDiagnostics("awake-start", force = true)
+        schedulePeriodicDiagnostics()
+        publishStatus("Waking local detector", Constants.MODE_AWAKE, currentMicrophone, lastApprovalStatus)
         startForeground(NOTIFICATION_ID, notification("Waking local detector"))
         acquireWakeLock()
         connectControlChannel()
         streamer.startAwake { status ->
             val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             manager.notify(NOTIFICATION_ID, notification(status))
-            publishStatus(status, modeFromStatus(status))
+            publishStatus(status, modeFromStatus(status), currentMicrophone, lastApprovalStatus)
             if (status == "Off") stopVoice()
         }
     }
 
     private fun startVoice(target: String) {
-        publishStatus("Voice stream starting", Constants.MODE_RECORDING)
+        uploadDiagnostics("voice-start", force = true)
+        schedulePeriodicDiagnostics()
+        publishStatus("Voice stream starting", Constants.MODE_RECORDING, currentMicrophone, lastApprovalStatus)
         startForeground(NOTIFICATION_ID, notification("Voice stream starting"))
         acquireWakeLock()
         connectControlChannel()
@@ -81,31 +116,36 @@ class VoiceSessionService : Service() {
             try {
                 val deviceId = api.pairedDeviceId()
                 if (deviceId.isBlank()) {
-                    publishStatus("Pair this device before streaming.", Constants.MODE_ERROR)
+                    publishStatus("Pair this device before streaming.", Constants.MODE_ERROR, currentMicrophone, lastApprovalStatus)
                     stopVoice()
                     return@thread
                 }
                 val sessionId = api.createVoiceSession(deviceId, target)
                 api.uploadLog("Android foreground voice service started")
+                ClientLog.i("Service", "Voice session started target=$target sessionId=$sessionId")
                 streamer.start(sessionId, target) { status ->
                     val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                     manager.notify(NOTIFICATION_ID, notification(status))
-                    publishStatus(status, modeFromStatus(status))
+                    publishStatus(status, modeFromStatus(status), currentMicrophone, lastApprovalStatus)
                     if (status == "Off") stopVoice()
                 }
-            } catch (_: Exception) {
-                publishStatus("Voice stream failed to start.", Constants.MODE_ERROR)
+            } catch (error: Exception) {
+                ClientLog.w("Service", "Voice stream failed to start", error)
+                publishStatus("Voice stream failed to start.", Constants.MODE_ERROR, currentMicrophone, lastApprovalStatus)
                 stopVoice()
             }
         }
     }
 
     private fun stopVoice() {
+        uploadDiagnostics("service-stop", force = true)
+        serviceActive = false
+        mainHandler.removeCallbacks(logUploadRunnable)
         streamer.stop()
         AssistantAudioPlayer.stopAll()
         closeControlChannel()
         releaseWakeLock()
-        publishStatus("Off", Constants.MODE_OFF)
+        publishStatus("Off", Constants.MODE_OFF, currentMicrophone, "")
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -114,6 +154,15 @@ class VoiceSessionService : Service() {
         if (!streamer.enterSleep()) {
             stopVoice()
         }
+    }
+
+    private fun schedulePeriodicDiagnostics() {
+        mainHandler.removeCallbacks(logUploadRunnable)
+        mainHandler.postDelayed(logUploadRunnable, LOG_UPLOAD_INTERVAL_MS)
+    }
+
+    private fun uploadDiagnostics(reason: String, force: Boolean) {
+        DiagnosticsUploader.upload(applicationContext, api, reason, force)
     }
 
     private fun acquireWakeLock() {
@@ -134,25 +183,48 @@ class VoiceSessionService : Service() {
         wakeLock = null
     }
 
-    private fun publishStatus(status: String, mode: String) {
+    private fun publishApprovalStatus(status: String) {
+        lastApprovalStatus = status
+        broadcastState()
+        sendControlStatus(lastStatus, lastMode, currentMicrophone, lastApprovalStatus)
+        mainHandler.postDelayed({
+            if (lastApprovalStatus == status) {
+                lastApprovalStatus = ""
+                broadcastState()
+            }
+        }, APPROVAL_STATUS_MS)
+    }
+
+    private fun publishStatus(status: String, mode: String, microphone: String, approvalStatus: String) {
         lastStatus = status
         lastMode = mode
-        sendBroadcast(Intent(Constants.ACTION_STATUS).apply {
-            setPackage(packageName)
-            putExtra(Constants.EXTRA_STATUS, lastStatus)
-            putExtra(Constants.EXTRA_MODE, lastMode)
-        })
-        if (!sendControlStatus(status, mode)) {
+        currentMicrophone = microphone.ifBlank { currentMicrophone }
+        if (approvalStatus.isNotBlank()) {
+            lastApprovalStatus = approvalStatus
+        }
+        broadcastState()
+        if (!sendControlStatus(status, mode, currentMicrophone, lastApprovalStatus)) {
             thread(name = "VoiceStreamNextStatusUpload") {
                 runCatching {
                     api.uploadClientStatus(
                         mode = mode,
                         status = status,
+                        microphone = currentMicrophone,
                         lastError = if (mode == Constants.MODE_ERROR) status else null,
                     )
                 }
             }
         }
+    }
+
+    private fun broadcastState() {
+        sendBroadcast(Intent(Constants.ACTION_STATUS).apply {
+            setPackage(packageName)
+            putExtra(Constants.EXTRA_STATUS, lastStatus)
+            putExtra(Constants.EXTRA_MODE, lastMode)
+            putExtra(Constants.EXTRA_MICROPHONE, currentMicrophone)
+            putExtra(Constants.EXTRA_APPROVAL_STATUS, lastApprovalStatus)
+        })
     }
 
     private fun connectControlChannel() {
@@ -165,7 +237,7 @@ class VoiceSessionService : Service() {
             Request.Builder().url(url).build(),
             object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
-                    sendControlStatus(lastStatus, lastMode)
+                    sendControlStatus(lastStatus, lastMode, currentMicrophone, lastApprovalStatus, webSocket)
                 }
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
@@ -197,20 +269,25 @@ class VoiceSessionService : Service() {
         controlSocket = null
     }
 
-    private fun sendControlStatus(status: String, mode: String): Boolean {
-        val socket = controlSocket ?: return false
-        return socket.send(
-            JSONObject()
-                .put("type", "client_status")
-                .put("mode", mode)
-                .put("status", status)
-                .put("protocolVersion", 1)
-                .put("clientVersion", 1)
-                .put("appVersion", BuildConfig.VERSION_NAME)
-                .put("lastError", if (mode == Constants.MODE_ERROR) status else JSONObject.NULL)
-                .put("reportedAt", java.time.Instant.now().toString())
-                .toString()
-        )
+    private fun sendControlStatus(
+        status: String,
+        mode: String,
+        microphone: String,
+        approvalStatus: String,
+        socket: WebSocket? = controlSocket,
+    ): Boolean {
+        val localSocket = socket ?: return false
+        val payload = JSONObject()
+            .put("type", "client_status")
+            .put("mode", mode)
+            .put("status", if (approvalStatus.isNotBlank()) "$status | $approvalStatus" else status)
+            .put("microphone", microphone)
+            .put("protocolVersion", 1)
+            .put("clientVersion", BuildConfig.VERSION_CODE)
+            .put("appVersion", BuildConfig.VERSION_NAME)
+            .put("lastError", if (mode == Constants.MODE_ERROR) status else JSONObject.NULL)
+            .put("reportedAt", java.time.Instant.now().toString())
+        return localSocket.send(payload.toString())
     }
 
     private fun handleRemoteControlCommand(webSocket: WebSocket, message: JSONObject) {
@@ -230,7 +307,7 @@ class VoiceSessionService : Service() {
         when (command) {
             "query_status" -> {
                 ack(true)
-                publishStatus(lastStatus, lastMode)
+                publishStatus(lastStatus, lastMode, currentMicrophone, lastApprovalStatus)
             }
             "sleep" -> {
                 enterSleep()
@@ -264,9 +341,10 @@ class VoiceSessionService : Service() {
         val lower = status.lowercase()
         return when {
             lower.contains("missing") || lower.contains("failed") || lower.contains("error") -> Constants.MODE_ERROR
-            lower.contains("sleeping") || lower.startsWith("sleep") -> Constants.MODE_SLEEPING
-            lower.contains("waiting") || lower.contains("waking") -> Constants.MODE_AWAKE
+            lower.contains("sleeping") || lower.startsWith("sleep") || lower.startsWith("unlock:") -> Constants.MODE_SLEEPING
+            lower.contains("waiting") || lower.contains("waking") || lower.contains("listening") -> Constants.MODE_AWAKE
             lower.contains("closed") || lower == "off" -> Constants.MODE_OFF
+            lower.contains("approval") -> if (lower.contains("sent")) Constants.MODE_AWAKE else lastMode
             else -> Constants.MODE_RECORDING
         }
     }
@@ -298,5 +376,7 @@ class VoiceSessionService : Service() {
     private companion object {
         const val CHANNEL_ID = "voice_stream_next_capture"
         const val NOTIFICATION_ID = 821
+        const val LOG_UPLOAD_INTERVAL_MS = 60_000L
+        const val APPROVAL_STATUS_MS = 4_000L
     }
 }
