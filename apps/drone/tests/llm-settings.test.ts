@@ -11,9 +11,12 @@ import {
   AGENT_SUGGESTION_POLICY_DEFAULT,
   AGENT_SUGGESTION_ENABLED_BY_DEFAULT,
   AGENT_SUGGESTION_POLICY_MAX_CHARS,
+  VOICE_APPROVAL_SETTINGS_DEFAULT,
   resolveAgentSuggestionSettingsResponse,
+  resolveEffectiveVoiceApprovalSettings,
   upsertStoredProviderApiKey,
   upsertStoredAgentSuggestionSettings,
+  upsertStoredVoiceApprovalSettings,
 } from '../src/hub/hub-settings';
 import { getSocketListenSupport } from './socket-listen-support';
 
@@ -169,6 +172,24 @@ describe('assistant suggestion settings', () => {
       expect(resolved.agentSuggestion.enabledByDefaultSource).toBe('settings');
       expect(resolved.agentSuggestion.updatedAt).not.toBeNull();
       expect(resolved.agentSuggestion.policyFingerprint).toHaveLength(12);
+    });
+  });
+});
+
+describe('voice approval settings', () => {
+  test('normalizes minimum digits down to the shortest configured code', async () => {
+    await withTempDroneDataDirAndEnv({}, async () => {
+      await upsertStoredVoiceApprovalSettings({
+        ...VOICE_APPROVAL_SETTINGS_DEFAULT,
+        unlockCode: '123',
+        minDigits: 4,
+        maxDigits: 4,
+      });
+
+      const settings = await resolveEffectiveVoiceApprovalSettings();
+      expect(settings.unlockCode).toBe('123');
+      expect(settings.minDigits).toBe(3);
+      expect(settings.maxDigits).toBe(4);
     });
   });
 });
@@ -337,6 +358,29 @@ describeSocketSuite('LLM settings api', () => {
     expect(reset.data.voiceTranscription.finalMode).toBe('full-recording');
     expect(reset.data.voiceTranscription.source).toBe('default');
     expect(voiceTranscriptionSettingsChangeNotifications).toBe(notificationCountBefore + 2);
+  });
+
+  test('normalizes voice approval digit bounds to configured codes', async () => {
+    const initial = await apiFetch('/api/settings/voice-approval');
+    expect(initial.r.status).toBe(200);
+
+    const saved = await apiFetch('/api/settings/voice-approval', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        voiceApproval: {
+          ...initial.data.voiceApproval,
+          unlockCode: '123',
+          minDigits: 4,
+          maxDigits: 4,
+        },
+      }),
+    });
+
+    expect(saved.r.status).toBe(200);
+    expect(saved.data.voiceApproval.unlockCode).toBe('123');
+    expect(saved.data.voiceApproval.minDigits).toBe(3);
+    expect(saved.data.voiceApproval.maxDigits).toBe(4);
   });
 
   test('reads and updates agent auto-continue settings', async () => {
