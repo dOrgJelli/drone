@@ -3,9 +3,11 @@ import { existsSync } from 'node:fs';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
+import websocket from '@fastify/websocket';
 import { clerkPlugin } from '@clerk/fastify';
 import { VoiceStreamNextDb } from './db.js';
 import { requireAdmin, resolveRequestUser, type AuthContext } from './auth.js';
+import { generateAssistantReply, synthesizeSpeech, transcribePcm16 } from './assistant-runtime.js';
 
 type AppOptions = {
   logger?: boolean;
@@ -30,16 +32,34 @@ function cleanCode(raw: unknown, label: string): string {
   return value;
 }
 
-function assistantReply(prompt: string): string {
-  const trimmed = prompt.trim();
-  if (!trimmed) return 'I need a message before I can respond.';
-  return [
-    'I captured that in this new Voice Stream thread.',
-    '',
-    `You said: "${trimmed}"`,
-    '',
-    'The assistant runtime is wired for thread storage now; model-backed responses can plug into this module next.',
-  ].join('\n');
+function queryValue(value: unknown): string {
+  return Array.isArray(value) ? String(value[0] ?? '') : String(value ?? '');
+}
+
+function binarySize(data: unknown): number {
+  if (typeof data === 'string') return Buffer.byteLength(data);
+  if (Buffer.isBuffer(data)) return data.byteLength;
+  if (Array.isArray(data)) return data.reduce((total, item) => total + binarySize(item), 0);
+  if (data instanceof ArrayBuffer) return data.byteLength;
+  if (ArrayBuffer.isView(data)) return data.byteLength;
+  return 0;
+}
+
+function binaryChunk(data: unknown): Uint8Array | null {
+  if (Buffer.isBuffer(data)) return new Uint8Array(data);
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  return null;
+}
+
+function concatChunks(chunks: Uint8Array[], totalBytes: number): Uint8Array {
+  const output = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return output;
 }
 
 async function withUser<T>(
@@ -69,6 +89,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     origin: true,
     credentials: true,
   });
+  await app.register(websocket);
 
   if (clerkEnabled) {
     await app.register(clerkPlugin);
@@ -190,13 +211,27 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       const content = cleanText(body.content);
       if (!content) throw Object.assign(new Error('message content is required'), { statusCode: 400 });
       const userMessage = db.addMessage(ctx.user.id, threadId, { role: 'user', content });
-      const replyText = assistantReply(content);
+      const history = db.listMessages(ctx.user.id, threadId).map((message) => ({ role: message.role, content: message.content }));
+      const reply = await generateAssistantReply(history);
+      const replyText = reply.text;
       const assistantMessage = db.addMessage(ctx.user.id, threadId, {
         role: 'assistant',
         content: replyText,
         spokenText: replyText,
       });
-      return { ok: true, messages: [userMessage, assistantMessage] };
+      return { ok: true, runtime: reply.provider, messages: [userMessage, assistantMessage] };
+    }),
+  );
+
+  app.post('/api/assistant/speech', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async () => {
+      const body = jsonBody(req);
+      const text = cleanText(body.text);
+      if (!text) throw Object.assign(new Error('text is required'), { statusCode: 400 });
+      const speech = await synthesizeSpeech(text);
+      if (!speech.audio) throw Object.assign(new Error('TTS is not configured'), { statusCode: 501 });
+      reply.header('content-type', 'audio/wav').send(Buffer.from(speech.audio));
+      return undefined;
     }),
   );
 
@@ -209,6 +244,117 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       return { ok: true, session };
     }),
   );
+
+  app.get('/api/voice/stream', { websocket: true }, (socket, req) => {
+    const query = (req.query ?? {}) as Record<string, unknown>;
+    const deviceId = queryValue(query.deviceId);
+    const token = queryValue(query.token);
+    const requestedSessionId = queryValue(query.sessionId);
+    const verifiedDevice = db.verifyDeviceToken(deviceId, token);
+    if (!verifiedDevice) {
+      socket.close(1008, 'invalid device token');
+      return;
+    }
+    const device = verifiedDevice
+
+    let frames = 0;
+    let bytes = 0;
+    let finalized = false;
+    const chunks: Uint8Array[] = [];
+    const startedAt = Date.now();
+    db.addLog(device.userId, {
+      deviceId: device.id,
+      source: device.deviceType,
+      level: 'info',
+      message: 'Voice stream connected',
+      detailsJson: JSON.stringify({ deviceId: device.id }),
+    });
+
+    socket.on('message', (data, isBinary) => {
+      if (!isBinary) {
+        let parsed: any = null;
+        try {
+          parsed = JSON.parse(String(data));
+        } catch {
+          parsed = null;
+        }
+        if (parsed?.type === 'end') {
+          void finalizeVoiceStream();
+        }
+        return;
+      }
+      frames += 1;
+      const size = binarySize(data);
+      bytes += size;
+      if (bytes <= 24 * 1024 * 1024) {
+        const chunk = binaryChunk(data);
+        if (chunk) chunks.push(new Uint8Array(chunk));
+      }
+    });
+
+    socket.on('close', () => {
+      void finalizeVoiceStream();
+    });
+
+    async function finalizeVoiceStream(): Promise<void> {
+      if (finalized) return;
+      finalized = true;
+      const session =
+        (requestedSessionId ? db.voiceSession(device.userId, requestedSessionId) : null) ??
+        db.latestVoiceSessionForDevice(device.userId, device.id) ??
+        db.createVoiceSession(device.userId, device.id);
+      let transcript = '';
+      let assistantText = '';
+      let runtime = 'fallback';
+      try {
+        const transcription = await transcribePcm16(concatChunks(chunks, Math.min(bytes, 24 * 1024 * 1024)));
+        transcript = transcription.text;
+        if (transcript) {
+          db.addTranscript(device.userId, session.id, transcript);
+          db.addMessage(device.userId, session.assistantThreadId, { role: 'user', content: transcript });
+          const history = db.listMessages(device.userId, session.assistantThreadId).map((message) => ({
+            role: message.role,
+            content: message.content,
+          }));
+          const assistant = await generateAssistantReply(history);
+          runtime = assistant.provider;
+          assistantText = assistant.text;
+          db.addMessage(device.userId, session.assistantThreadId, {
+            role: 'assistant',
+            content: assistantText,
+            spokenText: assistantText,
+          });
+          if ((socket as any).readyState === 1) {
+            socket.send(JSON.stringify({ type: 'assistant_result', transcript, assistantText, runtime }));
+            const speech = await synthesizeSpeech(assistantText);
+            if (speech.audio && (socket as any).readyState === 1) {
+              socket.send(Buffer.from(speech.audio));
+            }
+          }
+        }
+      } catch (error: any) {
+        db.addLog(device.userId, {
+          deviceId: device.id,
+          source: device.deviceType,
+          level: 'error',
+          message: 'Voice runtime failed',
+          detailsJson: JSON.stringify({ error: error?.message ?? String(error) }),
+        });
+        if ((socket as any).readyState === 1) {
+          socket.send(JSON.stringify({ type: 'assistant_error', error: error?.message ?? String(error) }));
+        }
+      } finally {
+        db.endVoiceSession(device.userId, session.id);
+      }
+      db.addLog(device.userId, {
+        deviceId: device.id,
+        source: device.deviceType,
+        level: 'info',
+        message: 'Voice stream disconnected',
+        detailsJson: JSON.stringify({ frames, bytes, durationMs: Date.now() - startedAt, transcriptChars: transcript.length, assistantChars: assistantText.length, runtime }),
+      });
+    }
+  });
 
   const webDist = path.resolve(process.cwd(), 'dist', 'web');
   if (existsSync(webDist)) {

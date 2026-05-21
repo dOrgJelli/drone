@@ -1,0 +1,268 @@
+:root {
+  color-scheme: light;
+  font-family: "Aptos", "Segoe UI", sans-serif;
+  background: #f6f3eb;
+  color: #1d211f;
+  --ink: #1d211f;
+  --muted: #69716c;
+  --line: #d8d2c4;
+  --paper: #fffcf4;
+  --field: #f3efe4;
+  --green: #2f6d56;
+  --coral: #c8644b;
+  --dark: #202724;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--field);
+}
+
+button, input, select {
+  font: inherit;
+}
+
+button {
+  border: 1px solid var(--dark);
+  border-radius: 6px;
+  background: var(--dark);
+  color: white;
+  min-height: 38px;
+  padding: 0 14px;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+button.ghost {
+  background: transparent;
+  color: white;
+  border-color: rgba(255,255,255,0.34);
+}
+
+button.primary {
+  background: var(--green);
+  border-color: var(--green);
+}
+
+input, select {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: white;
+  min-height: 38px;
+  padding: 8px 10px;
+  color: var(--ink);
+}
+
+.shell {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  min-height: 100vh;
+}
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 28px;
+  padding: 28px;
+  background: #202724;
+  color: white;
+}
+
+.rail h1 {
+  font-size: 34px;
+  line-height: 0.98;
+  margin: 8px 0 0;
+}
+
+.eyebrow {
+  margin: 0;
+  color: var(--coral);
+  text-transform: uppercase;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.status-block {
+  display: grid;
+  grid-template-columns: 13px 1fr;
+  gap: 12px;
+  align-items: start;
+}
+
+.status-block span:last-child {
+  display: block;
+  color: rgba(255,255,255,0.68);
+  font-size: 13px;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+
+.dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #9b5d4b;
+  margin-top: 4px;
+}
+
+.dot.ok { background: #72b293; }
+.dot.pending { background: #d6a43f; }
+
+.workspace {
+  padding: 22px;
+  display: grid;
+  gap: 18px;
+  align-content: start;
+}
+
+.panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  padding: 18px;
+}
+
+.panel-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.panel h2 {
+  margin: 4px 0 0;
+  font-size: 20px;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.check-row input {
+  width: auto;
+  min-height: auto;
+}
+
+.main-grid {
+  display: grid;
+  grid-template-columns: 0.8fr 1.2fr;
+  gap: 18px;
+}
+
+.meter-shell {
+  height: 18px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+  background: white;
+}
+
+.meter-bar {
+  width: 0%;
+  height: 100%;
+  background: var(--green);
+  transition: width 80ms linear;
+}
+
+.voice-actions {
+  display: flex;
+  gap: 10px;
+  margin: 18px 0 10px;
+}
+
+.muted, .empty {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.messages {
+  height: 280px;
+  overflow: auto;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding: 12px;
+  background: #f8f5ec;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.message {
+  max-width: 82%;
+  border-radius: 8px;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  line-height: 1.4;
+}
+
+.message.user {
+  justify-self: end;
+  background: var(--dark);
+  color: white;
+}
+
+.message.assistant {
+  justify-self: start;
+  background: white;
+  border: 1px solid var(--line);
+}
+
+.composer {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.logs {
+  display: grid;
+  gap: 8px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.log-row {
+  display: grid;
+  grid-template-columns: 68px 90px 1fr;
+  gap: 10px;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 8px;
+  font-size: 13px;
+}
+
+.log-row span {
+  color: var(--muted);
+}
+
+.log-row p {
+  margin: 0;
+}

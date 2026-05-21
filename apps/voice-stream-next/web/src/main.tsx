@@ -80,6 +80,13 @@ type DevUser = {
 
 const publishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string | undefined;
 const devUserStorageKey = 'voiceStreamNext.devUser';
+const desktopDeviceStorageKey = 'voiceStreamNext.desktopDevice';
+
+declare global {
+  interface Window {
+    voiceStreamDesktop?: { isDesktop?: boolean };
+  }
+}
 
 function defaultDevUser(): DevUser {
   return { email: 'developer@example.local', name: 'Local Developer', admin: true };
@@ -318,6 +325,8 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
         <Metric label="Role" value={dashboard?.user.admin ? 'Admin' : 'User'} />
       </section>
 
+      {window.voiceStreamDesktop?.isDesktop ? <DesktopVoicePanel client={client} onRefresh={loadDashboard} /> : null}
+
       <section className="dashboard-grid">
         <section className="panel assistant-panel">
           <div className="panel-heading">
@@ -478,6 +487,138 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
       </section>
     </main>
   );
+}
+
+function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh: () => Promise<void> }) {
+  const [deviceName, setDeviceName] = React.useState('Electron desktop');
+  const [status, setStatus] = React.useState('Ready');
+  const [streaming, setStreaming] = React.useState(false);
+  const [device, setDevice] = React.useState<{ id: string; token: string } | null>(() => {
+    try {
+      return JSON.parse(localStorage.getItem(desktopDeviceStorageKey) || 'null');
+    } catch {
+      return null;
+    }
+  });
+  const refs = React.useRef<{
+    socket?: WebSocket;
+    stream?: MediaStream;
+    context?: AudioContext;
+    processor?: ScriptProcessorNode;
+  }>({});
+
+  async function pairDesktop() {
+    const data = await client.request<{ ok: true; device: DeviceRecord; token: string }>('/api/devices', {
+      method: 'POST',
+      body: JSON.stringify({ deviceType: 'desktop', displayName: deviceName }),
+    });
+    const next = { id: data.device.id, token: data.token };
+    localStorage.setItem(desktopDeviceStorageKey, JSON.stringify(next));
+    setDevice(next);
+    setStatus(`Paired ${data.device.displayName}.`);
+    await onRefresh();
+  }
+
+  async function startVoice() {
+    let activeDevice = device;
+    if (!activeDevice) {
+      await pairDesktop();
+      activeDevice = JSON.parse(localStorage.getItem(desktopDeviceStorageKey) || 'null');
+    }
+    if (!activeDevice) return;
+    const session = await client.request<{ ok: true; session: { id: string } }>('/api/voice/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ deviceId: activeDevice.id }),
+    });
+    const media = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const context = new AudioContext({ sampleRate: 16_000 });
+    const source = context.createMediaStreamSource(media);
+    const processor = context.createScriptProcessor(4096, 1, 1);
+    const socket = openDesktopVoiceSocket(activeDevice, session.session.id);
+    processor.onaudioprocess = (event) => {
+      if (socket.readyState !== WebSocket.OPEN) return;
+      socket.send(floatToPcm16(event.inputBuffer.getChannelData(0)));
+    };
+    socket.onmessage = (event) => {
+      if (typeof event.data === 'string') {
+        try {
+          const message = JSON.parse(event.data);
+          if (message.type === 'assistant_result') {
+            setStatus(`Transcript: ${message.transcript || 'empty'} / Reply: ${message.assistantText || 'empty'}`);
+            void onRefresh();
+          } else if (message.type === 'assistant_error') {
+            setStatus(message.error || 'Voice runtime failed.');
+          }
+        } catch {
+          setStatus(event.data);
+        }
+        return;
+      }
+      const audio = new Audio(URL.createObjectURL(new Blob([event.data], { type: 'audio/wav' })));
+      void audio.play().catch(() => undefined);
+    };
+    source.connect(processor);
+    processor.connect(context.destination);
+    refs.current = { socket, stream: media, context, processor };
+    setStreaming(true);
+    setStatus('Streaming desktop microphone.');
+  }
+
+  async function stopVoice() {
+    refs.current.socket?.send(JSON.stringify({ type: 'end' }));
+    setTimeout(() => refs.current.socket?.close(), 1200);
+    refs.current.processor?.disconnect();
+    refs.current.stream?.getTracks().forEach((track) => track.stop());
+    await refs.current.context?.close().catch(() => undefined);
+    refs.current = {};
+    setStreaming(false);
+    setStatus('Voice stream stopped.');
+  }
+
+  return (
+    <section className="panel desktop-voice-panel">
+      <div className="panel-heading">
+        <div>
+          <h2>Desktop Voice</h2>
+          <p>Signed in with Clerk in Electron. Streams microphone audio to the assistant runtime.</p>
+        </div>
+        <div className="voice-actions">
+          <button type="button" onClick={() => void pairDesktop()} disabled={streaming}>
+            Pair
+          </button>
+          <button type="button" onClick={() => void startVoice()} disabled={streaming}>
+            Start
+          </button>
+          <button type="button" onClick={() => void stopVoice()} disabled={!streaming}>
+            Stop
+          </button>
+        </div>
+      </div>
+      <label>
+        Desktop name
+        <input value={deviceName} onChange={(event) => setDeviceName(event.target.value)} disabled={streaming} />
+      </label>
+      <p className="runtime-status">{status}</p>
+    </section>
+  );
+}
+
+function openDesktopVoiceSocket(device: { id: string; token: string }, sessionId: string): WebSocket {
+  const url = new URL('/api/voice/stream', window.location.href);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  url.searchParams.set('deviceId', device.id);
+  url.searchParams.set('token', device.token);
+  url.searchParams.set('sessionId', sessionId);
+  return new WebSocket(url);
+}
+
+function floatToPcm16(input: Float32Array): ArrayBuffer {
+  const output = new Int16Array(input.length);
+  for (let index = 0; index < input.length; index += 1) {
+    const sample = Math.max(-1, Math.min(1, input[index]));
+    output[index] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+  }
+  return output.buffer;
 }
 
 function Metric({ label, value }: { label: string; value: React.ReactNode }) {

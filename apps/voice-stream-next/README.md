@@ -2,7 +2,7 @@
 
 Voice Stream Next is the planned parallel voice and assistant product for Drone. It is intentionally separate from the current `apps/voice-stream` implementation so the existing Android voice, desktop voice, assistant side panel, and Drone Hub workflow can keep working while the new product is designed and built.
 
-This directory starts as documentation only. It should not affect the current monorepo build, Hub launch flow, or Android APK.
+This directory is the parallel Voice Stream product. It should not affect the current monorepo build, Hub launch flow, or legacy Android APK.
 
 Internal monorepo name: `voice-stream-next`.
 
@@ -43,3 +43,15 @@ Voice Stream Next should not import implementation code from `apps/voice-stream`
 - [Architecture](docs/architecture.md)
 - [Parity And Migration Plan](docs/parity-and-migration.md)
 - [Open Questions](docs/open-questions.md)
+
+## Development
+
+```bash
+bun run voice-stream-next
+bun run voice-stream-next:desktop
+bun run voice-stream-next:apk
+```
+
+The server defaults to `http://127.0.0.1:3299`, the web dashboard defaults to `http://127.0.0.1:5185`, and the Android emulator defaults to `http://10.0.2.2:3299`.
+
+Clerk-backed server auth is enabled when `CLERK_SECRET_KEY` is set. Local development can use the built-in dev headers. Android initializes the Clerk SDK when `VOICE_STREAM_NEXT_ANDROID_CLERK_PUBLISHABLE_KEY` is present at build time.

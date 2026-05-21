@@ -148,6 +148,29 @@ h2 {
   margin: 16px 0;
 }
 
+.desktop-voice-panel {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.desktop-voice-panel .voice-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.desktop-voice-panel label {
+  max-width: 360px;
+}
+
+.runtime-status {
+  margin: 0;
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+
 .metric,
 .panel {
   border: 1px solid var(--line-strong);
@@ -499,4 +522,3 @@ h2 {
     max-width: 100%;
   }
 }
-

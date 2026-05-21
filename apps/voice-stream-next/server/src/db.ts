@@ -432,6 +432,16 @@ export class VoiceStreamNextDb {
     return rows.map(rowDevice);
   }
 
+  verifyDeviceToken(deviceId: string, token: string): DeviceRecord | null {
+    const row = this.db.query('SELECT * FROM devices WHERE id = $id').get({ $id: deviceId });
+    if (!row) return null;
+    const tokenHash = new Bun.CryptoHasher('sha256').update(token).digest('hex');
+    if (String((row as any).token_hash) !== tokenHash) return null;
+    const at = nowIso();
+    this.db.query('UPDATE devices SET last_seen_at = $lastSeenAt WHERE id = $id').run({ $lastSeenAt: at, $id: deviceId });
+    return rowDevice({ ...(row as any), last_seen_at: at });
+  }
+
   addLog(userId: string, input: { deviceId?: string | null; source: string; level: string; message: string; detailsJson?: string | null }): LogRecord {
     const id = newId('log');
     const at = nowIso();
@@ -568,6 +578,46 @@ export class VoiceStreamNextDb {
       .run({ $id: id, $userId: userId, $deviceId: deviceId, $assistantThreadId: thread.id, $startedAt: at });
     const row = this.db.query('SELECT * FROM voice_sessions WHERE id = $id').get({ $id: id });
     return rowVoiceSession(row);
+  }
+
+  voiceSession(userId: string, sessionId: string): VoiceSession | null {
+    const row = this.db
+      .query('SELECT * FROM voice_sessions WHERE user_id = $userId AND id = $sessionId')
+      .get({ $userId: userId, $sessionId: sessionId });
+    return row ? rowVoiceSession(row) : null;
+  }
+
+  latestVoiceSessionForDevice(userId: string, deviceId: string): VoiceSession | null {
+    const row = this.db
+      .query(
+        `
+        SELECT * FROM voice_sessions
+        WHERE user_id = $userId AND device_id = $deviceId
+        ORDER BY started_at DESC
+        LIMIT 1
+      `,
+      )
+      .get({ $userId: userId, $deviceId: deviceId });
+    return row ? rowVoiceSession(row) : null;
+  }
+
+  addTranscript(userId: string, voiceSessionId: string, text: string): void {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    this.db
+      .query(
+        `
+        INSERT INTO transcripts (id, voice_session_id, user_id, text, final, created_at)
+        VALUES ($id, $voiceSessionId, $userId, $text, 1, $createdAt)
+      `,
+      )
+      .run({ $id: newId('trn'), $voiceSessionId: voiceSessionId, $userId: userId, $text: trimmed, $createdAt: nowIso() });
+  }
+
+  endVoiceSession(userId: string, sessionId: string): void {
+    this.db
+      .query('UPDATE voice_sessions SET ended_at = $endedAt WHERE user_id = $userId AND id = $sessionId AND ended_at IS NULL')
+      .run({ $endedAt: nowIso(), $userId: userId, $sessionId: sessionId });
   }
 
   dashboard(user: UserProfile): any {
