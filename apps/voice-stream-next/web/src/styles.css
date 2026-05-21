@@ -398,6 +398,29 @@ h2 {
   font-size: 12px;
 }
 
+.pairing-meta {
+  color: var(--blueprint);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.pairing-actions,
+.device-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.managed-device-row {
+  display: grid;
+  gap: 8px;
+}
+
+.managed-device-row > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
 .lower-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(360px, 0.75fr);
@@ -418,6 +441,88 @@ h2 {
   border: 1px solid var(--line);
   background: rgba(242, 238, 229, 0.55);
   overflow: auto;
+}
+
+.transcript-panel {
+  min-width: 0;
+}
+
+.transcript-toolbar {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.35fr) minmax(120px, 0.25fr) minmax(0, 1fr);
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.transcript-toolbar label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.transcript-search {
+  min-width: 0;
+}
+
+.transcript-session {
+  border: 1px solid var(--line-strong);
+  background: var(--paper-strong);
+}
+
+.transcript-session-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(220, 236, 228, 0.45);
+}
+
+.transcript-session-header div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.transcript-session-header span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.transcript-session-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.transcript-session-body {
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+}
+
+.link-button {
+  border-color: var(--blueprint);
+  background: #e8f0f7;
+  color: var(--blueprint);
+  box-shadow: 2px 2px 0 rgba(35, 75, 104, 0.18);
+}
+
+.transcript-mode-pill {
+  display: inline-block;
+  width: fit-content;
+  border: 1px solid var(--line);
+  padding: 2px 6px;
+  color: var(--rail);
+  background: var(--rail-soft);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .log-row,
@@ -443,7 +548,7 @@ h2 {
 }
 
 .transcript-row {
-  grid-template-columns: minmax(180px, 0.35fr) minmax(0, 1fr);
+  grid-template-columns: minmax(140px, 0.28fr) minmax(0, 1fr);
   align-items: start;
 }
 
@@ -581,7 +686,8 @@ h2 {
   .composer,
   .log-row,
   .device-row,
-  .dev-auth {
+  .dev-auth,
+  .transcript-toolbar {
     grid-template-columns: 1fr;
   }
 

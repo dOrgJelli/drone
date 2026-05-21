@@ -165,6 +165,7 @@ class VoiceStreamApi(private val context: Context) {
                 .put("status", status)
                 .put("microphone", microphone)
                 .put("protocolVersion", 1)
+                .put("clientVersion", BuildConfig.VERSION_CODE)
                 .put("appVersion", BuildConfig.VERSION_NAME)
                 .put("lastError", lastError ?: JSONObject.NULL)
                 .put("reportedAt", java.time.Instant.now().toString())

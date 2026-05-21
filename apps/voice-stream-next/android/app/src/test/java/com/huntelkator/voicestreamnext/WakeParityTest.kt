@@ -16,11 +16,53 @@ class WakeParityTest {
     }
 
     @Test
-    fun extractsApprovalCodes() {
-        val recognizer = ApprovalCodeRecognizer()
-        assertEquals("1234", recognizer.extract("approval code one two three four"))
-        assertEquals("9087", recognizer.extract("approval code nine oh eight seven"))
-        assertNull(recognizer.extract("approval code one two"))
+    fun approvalCodeRequiresPhraseAndStableDigits() {
+        val recognizer = ApprovalCodeRecognizer(stableMs = 500, collectTimeoutMs = 3_000)
+
+        assertEquals(ApprovalCodeUpdate.None, recognizer.accept("one one five nine", 0))
+        assertEquals(ApprovalCodeUpdate.Collecting(""), recognizer.accept("approval code", 100))
+        assertEquals(ApprovalCodeUpdate.Collecting("11"), recognizer.accept("approval code one one", 200))
+        assertEquals(ApprovalCodeUpdate.Collecting("1159"), recognizer.accept("approval code one one five nine", 300))
+        assertEquals(ApprovalCodeUpdate.None, recognizer.flush(700))
+        assertEquals(ApprovalCodeUpdate.Completed("1159"), recognizer.flush(850))
+    }
+
+    @Test
+    fun approvalCodeRecognizesModeTransitionCodes() {
+        val unlockRecognizer = ApprovalCodeRecognizer(stableMs = 500, collectTimeoutMs = 3_000)
+        unlockRecognizer.accept("approval code one two three four", 0)
+        assertEquals(ApprovalCodeUpdate.Completed("1234"), unlockRecognizer.flush(600))
+
+        val lockRecognizer = ApprovalCodeRecognizer(stableMs = 500, collectTimeoutMs = 3_000)
+        lockRecognizer.accept("approval code four three two one", 0)
+        assertEquals(ApprovalCodeUpdate.Completed("4321"), lockRecognizer.flush(600))
+
+        val offRecognizer = ApprovalCodeRecognizer(stableMs = 500, collectTimeoutMs = 3_000)
+        offRecognizer.accept("approval code zero zero zero zero", 0)
+        assertEquals(ApprovalCodeUpdate.Completed("0000"), offRecognizer.flush(600))
+    }
+
+    @Test
+    fun approvalCodeCancelsWhenTooShort() {
+        val recognizer = ApprovalCodeRecognizer(stableMs = 500, collectTimeoutMs = 1_000)
+
+        assertEquals(ApprovalCodeUpdate.Collecting(""), recognizer.accept("approval code", 0))
+        assertEquals(ApprovalCodeUpdate.Collecting("12"), recognizer.accept("approval code one two", 100))
+        assertEquals(ApprovalCodeUpdate.Cancelled, recognizer.flush(1_100))
+    }
+
+    @Test
+    fun approvalCodeSuppressesImmediateDuplicateCompletion() {
+        val recognizer = ApprovalCodeRecognizer(stableMs = 500, duplicateCooldownMs = 4_000)
+
+        recognizer.accept("approval code one two three four five six", 0)
+        assertEquals(ApprovalCodeUpdate.Completed("123456"), recognizer.flush(600))
+
+        recognizer.accept("approval code one two three four five six", 1_000)
+        assertEquals(ApprovalCodeUpdate.None, recognizer.flush(1_600))
+
+        recognizer.accept("approval code one two three four five six", 5_000)
+        assertEquals(ApprovalCodeUpdate.Completed("123456"), recognizer.flush(5_600))
     }
 
     @Test

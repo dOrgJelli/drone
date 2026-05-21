@@ -9,6 +9,8 @@ import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import okhttp3.OkHttpClient
@@ -42,9 +44,15 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
     private var socket: WebSocket? = null
     private var wakeDetector: VoskWakeWordDetector? = null
     private val approvalCodeRecognizer = ApprovalCodeRecognizer()
+    private var approvalCodeSettings = ApprovalCodeSettings()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val approvalFinalizeRunnable = Runnable {
+        handleApprovalUpdate(approvalCodeRecognizer.flush(SystemClock.elapsedRealtime()))
+        if (approvalCodeRecognizer.isCollecting && active.get()) {
+            scheduleApprovalFinalize()
+        }
+    }
     @Volatile private var approvalSettings = VoiceApprovalSettings()
-    @Volatile private var lastApprovalCode = ""
-    @Volatile private var lastApprovalAtMs = 0L
     @Volatile private var currentSocketUrl = ""
     @Volatile private var currentTarget = Constants.STREAM_TARGET_ASSISTANT
     @Volatile private var currentOnStatus: ((String) -> Unit)? = null
@@ -66,6 +74,8 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
         awakeMode = true
         sleeping = false
         approvalSettings = runCatching { api.voiceApprovalSettings() }.getOrDefault(VoiceApprovalSettings())
+        approvalCodeSettings = ApprovalCodeSettings()
+        approvalCodeRecognizer.configure(approvalCodeSettings)
         wakeDetector = VoskWakeWordDetector(
             context,
             { status -> onStatus(status) },
@@ -108,6 +118,7 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
             return false
         }
         sleeping = true
+        resetApprovalCollection()
         cuePlayer.play(LocalCue.SLEEP)
         if (recording.get() && onStatus != null) {
             endRecording(onStatus, sleepingStatus())
@@ -126,6 +137,7 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
         sleeping = false
         currentSocketUrl = ""
         currentOnStatus = null
+        resetApprovalCollection()
         wakeDetector?.release()
         wakeDetector = null
         AssistantAudioPlayer.stopAll()
@@ -381,12 +393,41 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
     }
 
     private fun handleLocalRecognizerText(text: String, onStatus: (String) -> Unit) {
-        val code = approvalCodeRecognizer.extract(text) ?: return
-        val now = SystemClock.elapsedRealtime()
-        if (code == lastApprovalCode && now - lastApprovalAtMs < APPROVAL_DUPLICATE_COOLDOWN_MS) return
-        lastApprovalCode = code
-        lastApprovalAtMs = now
-        handleApprovalCode(code, onStatus)
+        if (!active.get()) return
+        val update = approvalCodeRecognizer.accept(text, SystemClock.elapsedRealtime())
+        handleApprovalUpdate(update, onStatus)
+        if (approvalCodeRecognizer.isCollecting) {
+            scheduleApprovalFinalize()
+        }
+    }
+
+    private fun scheduleApprovalFinalize() {
+        mainHandler.removeCallbacks(approvalFinalizeRunnable)
+        mainHandler.postDelayed(approvalFinalizeRunnable, approvalCodeSettings.finalizeCheckIntervalMs)
+    }
+
+    private fun resetApprovalCollection() {
+        mainHandler.removeCallbacks(approvalFinalizeRunnable)
+        approvalCodeRecognizer.reset()
+    }
+
+    private fun handleApprovalUpdate(update: ApprovalCodeUpdate, onStatus: (String) -> Unit) {
+        when (update) {
+            ApprovalCodeUpdate.None -> Unit
+            is ApprovalCodeUpdate.Collecting -> {
+                onStatus(
+                    if (update.partialCode.isBlank()) {
+                        if (sleeping) "Unlock code..." else "Approval code..."
+                    } else if (sleeping) {
+                        "Unlock: ${update.partialCode}"
+                    } else {
+                        "Approval: ${update.partialCode}"
+                    }
+                )
+            }
+            ApprovalCodeUpdate.Cancelled -> onStatus("Approval cancelled")
+            is ApprovalCodeUpdate.Completed -> handleApprovalCode(update.code, onStatus)
+        }
     }
 
     private fun handleApprovalCode(code: String, onStatus: (String) -> Unit) {
@@ -509,6 +550,5 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
         const val BASE_RECONNECT_DELAY_MS = 500L
         const val MAX_RECONNECT_DELAY_MS = 10_000L
         const val MAX_RECONNECT_EXPONENT = 4
-        const val APPROVAL_DUPLICATE_COOLDOWN_MS = 4_000L
     }
 }

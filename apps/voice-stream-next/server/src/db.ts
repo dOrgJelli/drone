@@ -28,7 +28,23 @@ export type DeviceRecord = {
   tokenHint: string;
   lastSeenAt: string;
   createdAt: string;
+  revokedAt: string | null;
 };
+
+export type PairingSessionRecord = {
+  id: string;
+  userId: string;
+  deviceId: string;
+  expiresAt: string;
+  claimedAt: string | null;
+  createdAt: string;
+};
+
+export type DeviceAuthFailureReason = 'not_found' | 'invalid_token' | 'revoked' | 'pairing_expired' | 'client_too_old';
+
+export type DeviceAuthResult =
+  | { ok: true; device: DeviceRecord }
+  | { ok: false; reason: DeviceAuthFailureReason; minClientVersion?: number };
 
 export type LogRecord = {
   id: string;
@@ -74,12 +90,15 @@ export type VoiceSession = {
 export type TranscriptRecord = {
   id: string;
   voiceSessionId: string;
+  assistantThreadId: string;
   userId: string;
   deviceId: string;
   deviceName: string;
   mode: string;
   text: string;
   final: boolean;
+  sessionStartedAt: string;
+  sessionEndedAt: string | null;
   createdAt: string;
 };
 
@@ -165,6 +184,18 @@ function rowDevice(row: any): DeviceRecord {
     tokenHint: String(row.token_hint ?? ''),
     lastSeenAt: String(row.last_seen_at),
     createdAt: String(row.created_at),
+    revokedAt: row.revoked_at == null ? null : String(row.revoked_at),
+  };
+}
+
+function rowPairingSession(row: any): PairingSessionRecord {
+  return {
+    id: String(row.id),
+    userId: String(row.user_id),
+    deviceId: String(row.device_id),
+    expiresAt: String(row.expires_at),
+    claimedAt: row.claimed_at == null ? null : String(row.claimed_at),
+    createdAt: String(row.created_at),
   };
 }
 
@@ -232,12 +263,15 @@ function rowTranscript(row: any): TranscriptRecord {
   return {
     id: String(row.id),
     voiceSessionId: String(row.voice_session_id),
+    assistantThreadId: String(row.assistant_thread_id ?? ''),
     userId: String(row.user_id),
     deviceId: String(row.device_id ?? ''),
     deviceName: String(row.device_name ?? ''),
     mode: String(row.mode ?? ''),
     text: String(row.text ?? ''),
     final: asBool(row.final),
+    sessionStartedAt: String(row.session_started_at ?? row.created_at),
+    sessionEndedAt: row.session_ended_at == null ? null : String(row.session_ended_at),
     createdAt: String(row.created_at),
   };
 }
@@ -386,6 +420,23 @@ export class VoiceStreamNextDb {
         created_at TEXT NOT NULL
       )
     `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS pairing_sessions (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        device_id TEXT NOT NULL UNIQUE REFERENCES devices(id) ON DELETE CASCADE,
+        expires_at TEXT NOT NULL,
+        claimed_at TEXT,
+        created_at TEXT NOT NULL
+      )
+    `);
+    this.ensureColumn('devices', 'revoked_at', 'TEXT');
+  }
+
+  private ensureColumn(table: string, column: string, definition: string): void {
+    const rows = this.db.query(`PRAGMA table_info(${table})`).all() as Array<{ name?: string }>;
+    if (rows.some((row) => String(row.name) === column)) return;
+    this.db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 
   upsertUser(input: UpsertUserInput): UserProfile {
@@ -484,6 +535,49 @@ export class VoiceStreamNextDb {
     return this.ensureVoiceSettings(userId);
   }
 
+  createPairingSession(userId: string, deviceId: string, expiresAt: string): PairingSessionRecord {
+    const at = nowIso();
+    const id = newId('pair');
+    this.db
+      .query(
+        `
+        INSERT INTO pairing_sessions (id, user_id, device_id, expires_at, claimed_at, created_at)
+        VALUES ($id, $userId, $deviceId, $expiresAt, NULL, $createdAt)
+        ON CONFLICT(device_id) DO UPDATE SET
+          expires_at = excluded.expires_at,
+          claimed_at = NULL,
+          created_at = excluded.created_at
+      `,
+      )
+      .run({
+        $id: id,
+        $userId: userId,
+        $deviceId: deviceId,
+        $expiresAt: expiresAt,
+        $createdAt: at,
+      });
+    const row = this.db.query('SELECT * FROM pairing_sessions WHERE device_id = $deviceId').get({ $deviceId: deviceId });
+    return rowPairingSession(row);
+  }
+
+  pairingSessionForDevice(deviceId: string): PairingSessionRecord | null {
+    const row = this.db.query('SELECT * FROM pairing_sessions WHERE device_id = $deviceId').get({ $deviceId: deviceId });
+    return row ? rowPairingSession(row) : null;
+  }
+
+  claimPairingSession(deviceId: string): void {
+    const at = nowIso();
+    this.db
+      .query(
+        `
+        UPDATE pairing_sessions
+        SET claimed_at = COALESCE(claimed_at, $claimedAt)
+        WHERE device_id = $deviceId
+      `,
+      )
+      .run({ $deviceId: deviceId, $claimedAt: at });
+  }
+
   registerDevice(userId: string, input: { deviceType: string; displayName: string }): { device: DeviceRecord; token: string } {
     const at = nowIso();
     const id = newId('dev');
@@ -515,23 +609,96 @@ export class VoiceStreamNextDb {
     return { device, token };
   }
 
-  listDevices(userId?: string): DeviceRecord[] {
+  listDevices(userId?: string, includeRevoked = false): DeviceRecord[] {
     const rows = userId
       ? this.db
-          .query('SELECT * FROM devices WHERE user_id = $userId ORDER BY last_seen_at DESC, created_at DESC')
+          .query(
+            `
+            SELECT * FROM devices
+            WHERE user_id = $userId ${includeRevoked ? '' : 'AND revoked_at IS NULL'}
+            ORDER BY last_seen_at DESC, created_at DESC
+          `,
+          )
           .all({ $userId: userId })
-      : this.db.query('SELECT * FROM devices ORDER BY last_seen_at DESC, created_at DESC').all();
+      : this.db
+          .query(
+            `
+            SELECT * FROM devices
+            ${includeRevoked ? '' : 'WHERE revoked_at IS NULL'}
+            ORDER BY last_seen_at DESC, created_at DESC
+          `,
+          )
+          .all();
     return rows.map(rowDevice);
   }
 
-  verifyDeviceToken(deviceId: string, token: string): DeviceRecord | null {
+  deviceForUser(userId: string, deviceId: string): DeviceRecord | null {
+    const row = this.db.query('SELECT * FROM devices WHERE user_id = $userId AND id = $deviceId').get({ $userId: userId, $deviceId: deviceId });
+    return row ? rowDevice(row) : null;
+  }
+
+  verifyDeviceToken(deviceId: string, token: string, options: { clientVersion?: number | null; minClientVersion?: number } = {}): DeviceAuthResult {
     const row = this.db.query('SELECT * FROM devices WHERE id = $id').get({ $id: deviceId });
-    if (!row) return null;
+    if (!row) return { ok: false, reason: 'not_found' };
+    if ((row as any).revoked_at != null) return { ok: false, reason: 'revoked' };
     const tokenHash = new Bun.CryptoHasher('sha256').update(token).digest('hex');
-    if (String((row as any).token_hash) !== tokenHash) return null;
+    if (String((row as any).token_hash) !== tokenHash) return { ok: false, reason: 'invalid_token' };
+
+    const pairing = this.pairingSessionForDevice(deviceId);
+    if (pairing && !pairing.claimedAt && Date.parse(pairing.expiresAt) < Date.now()) {
+      return { ok: false, reason: 'pairing_expired' };
+    }
+
+    const minClientVersion = options.minClientVersion ?? 1;
+    if (options.clientVersion != null && options.clientVersion < minClientVersion) {
+      return { ok: false, reason: 'client_too_old', minClientVersion };
+    }
+
     const at = nowIso();
     this.db.query('UPDATE devices SET last_seen_at = $lastSeenAt WHERE id = $id').run({ $lastSeenAt: at, $id: deviceId });
-    return rowDevice({ ...(row as any), last_seen_at: at });
+    if (pairing && !pairing.claimedAt) this.claimPairingSession(deviceId);
+    return { ok: true, device: rowDevice({ ...(row as any), last_seen_at: at }) };
+  }
+
+  revokeDevice(userId: string, deviceId: string): DeviceRecord | null {
+    const device = this.deviceForUser(userId, deviceId);
+    if (!device || device.revokedAt) return null;
+    const at = nowIso();
+    this.db.query('UPDATE devices SET revoked_at = $revokedAt WHERE id = $deviceId AND user_id = $userId').run({
+      $revokedAt: at,
+      $deviceId: deviceId,
+      $userId: userId,
+    });
+    this.db.query('DELETE FROM pairing_sessions WHERE device_id = $deviceId').run({ $deviceId: deviceId });
+    return { ...device, revokedAt: at };
+  }
+
+  rotateDeviceToken(userId: string, deviceId: string): { device: DeviceRecord; token: string } | null {
+    const device = this.deviceForUser(userId, deviceId);
+    if (!device || device.revokedAt) return null;
+    const token = crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '');
+    const tokenHash = new Bun.CryptoHasher('sha256').update(token).digest('hex');
+    const tokenHint = token.slice(0, 6);
+    const at = nowIso();
+    this.db
+      .query(
+        `
+        UPDATE devices
+        SET token_hash = $tokenHash,
+            token_hint = $tokenHint,
+            last_seen_at = $lastSeenAt
+        WHERE id = $deviceId AND user_id = $userId
+      `,
+      )
+      .run({
+        $tokenHash: tokenHash,
+        $tokenHint: tokenHint,
+        $lastSeenAt: at,
+        $deviceId: deviceId,
+        $userId: userId,
+      });
+    const row = this.db.query('SELECT * FROM devices WHERE id = $deviceId').get({ $deviceId: deviceId });
+    return row ? { device: rowDevice(row), token } : null;
   }
 
   addLog(userId: string, input: { deviceId?: string | null; source: string; level: string; message: string; detailsJson?: string | null }): LogRecord {
@@ -714,23 +881,39 @@ export class VoiceStreamNextDb {
       .run({ $id: newId('trn'), $voiceSessionId: voiceSessionId, $userId: userId, $text: trimmed, $createdAt: nowIso() });
   }
 
-  listTranscripts(userId: string, limit = 100): TranscriptRecord[] {
+  listTranscripts(userId: string, limit = 100, options: { deviceId?: string; voiceSessionId?: string } = {}): TranscriptRecord[] {
+    const filters = ['transcripts.user_id = $userId'];
+    const params: { $userId: string; $limit: number; $deviceId?: string; $voiceSessionId?: string } = {
+      $userId: userId,
+      $limit: limit,
+    };
+    if (options.deviceId) {
+      filters.push('voice_sessions.device_id = $deviceId');
+      params.$deviceId = options.deviceId;
+    }
+    if (options.voiceSessionId) {
+      filters.push('transcripts.voice_session_id = $voiceSessionId');
+      params.$voiceSessionId = options.voiceSessionId;
+    }
     return this.db
       .query(
         `
         SELECT transcripts.*,
                voice_sessions.device_id,
                voice_sessions.mode,
+               voice_sessions.assistant_thread_id,
+               voice_sessions.started_at AS session_started_at,
+               voice_sessions.ended_at AS session_ended_at,
                devices.display_name AS device_name
         FROM transcripts
         JOIN voice_sessions ON voice_sessions.id = transcripts.voice_session_id
         LEFT JOIN devices ON devices.id = voice_sessions.device_id
-        WHERE transcripts.user_id = $userId
+        WHERE ${filters.join(' AND ')}
         ORDER BY transcripts.created_at DESC
         LIMIT $limit
       `,
       )
-      .all({ $userId: userId, $limit: limit })
+      .all(params)
       .map(rowTranscript);
   }
 
@@ -841,6 +1024,9 @@ export class VoiceStreamNextDb {
     const threads = this.listThreads(user.id);
     const logs = this.listLogs(user.id, 60);
     const devices = this.listDevices(user.id);
+    const pairingSessions = devices
+      .map((device) => this.pairingSessionForDevice(device.id))
+      .filter((session): session is PairingSessionRecord => session != null);
     return {
       user,
       settings,
@@ -848,6 +1034,7 @@ export class VoiceStreamNextDb {
       logs,
       approvalCodes: this.listApprovalCodes(user.id, 40),
       devices,
+      pairingSessions,
       transcripts: this.listTranscripts(user.id, 40),
       clientStatuses: this.listClientStatuses(user.id),
       adminDevices: user.admin ? this.listDevices() : [],
@@ -856,6 +1043,7 @@ export class VoiceStreamNextDb {
         threadCount: threads.length,
         deviceCount: devices.length,
         logCount: logs.length,
+        transcriptCount: this.listTranscripts(user.id, 200).length,
       },
       dbPath: this.path,
     };

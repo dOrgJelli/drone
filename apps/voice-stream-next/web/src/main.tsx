@@ -2,6 +2,7 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { ClerkProvider, SignedIn, SignedOut, SignIn, UserButton, useAuth, useUser } from '@clerk/clerk-react';
 import QRCode from 'qrcode';
+import { ApprovalCodeRecognizer, type ApprovalCodeUpdate } from '../../server/src/approval-code.js';
 import './styles.css';
 
 type UserProfile = {
@@ -26,6 +27,16 @@ type DeviceRecord = {
   displayName: string;
   tokenHint: string;
   lastSeenAt: string;
+  createdAt: string;
+  revokedAt?: string | null;
+};
+
+type PairingSessionRecord = {
+  id: string;
+  userId: string;
+  deviceId: string;
+  expiresAt: string;
+  claimedAt: string | null;
   createdAt: string;
 };
 
@@ -59,12 +70,26 @@ type AssistantMessage = {
 type TranscriptRecord = {
   id: string;
   voiceSessionId: string;
+  assistantThreadId: string;
   deviceId: string;
   deviceName: string;
   mode: string;
   text: string;
   final: boolean;
+  sessionStartedAt: string;
+  sessionEndedAt: string | null;
   createdAt: string;
+};
+
+type TranscriptSessionGroup = {
+  voiceSessionId: string;
+  assistantThreadId: string;
+  deviceId: string;
+  deviceName: string;
+  mode: string;
+  sessionStartedAt: string;
+  sessionEndedAt: string | null;
+  transcripts: TranscriptRecord[];
 };
 
 type ClientStatusRecord = {
@@ -92,9 +117,10 @@ type DashboardData = {
   clientStatuses: ClientStatusRecord[];
   approvalCodes: { id: string; code: string; source: string; createdAt: string }[];
   devices: DeviceRecord[];
+  pairingSessions: PairingSessionRecord[];
   adminDevices: DeviceRecord[];
   adminClientStatuses: ClientStatusRecord[];
-  stats: { threadCount: number; deviceCount: number; logCount: number };
+  stats: { threadCount: number; deviceCount: number; logCount: number; transcriptCount: number };
   dbPath: string;
 };
 
@@ -202,6 +228,168 @@ function timeLabel(iso: string): string {
   return date.toLocaleString();
 }
 
+function groupTranscriptsBySession(transcripts: TranscriptRecord[]): TranscriptSessionGroup[] {
+  const groups = new Map<string, TranscriptSessionGroup>();
+  for (const transcript of transcripts) {
+    const existing = groups.get(transcript.voiceSessionId);
+    if (existing) {
+      existing.transcripts.push(transcript);
+      continue;
+    }
+    groups.set(transcript.voiceSessionId, {
+      voiceSessionId: transcript.voiceSessionId,
+      assistantThreadId: transcript.assistantThreadId,
+      deviceId: transcript.deviceId,
+      deviceName: transcript.deviceName,
+      mode: transcript.mode,
+      sessionStartedAt: transcript.sessionStartedAt,
+      sessionEndedAt: transcript.sessionEndedAt,
+      transcripts: [transcript],
+    });
+  }
+  return [...groups.values()].sort(
+    (left, right) => Date.parse(right.sessionStartedAt) - Date.parse(left.sessionStartedAt),
+  );
+}
+
+function TranscriptPanel({
+  transcripts,
+  devices,
+  threads,
+  onOpenThread,
+}: {
+  transcripts: TranscriptRecord[];
+  devices: DeviceRecord[];
+  threads: AssistantThread[];
+  onOpenThread: (threadId: string) => void;
+}) {
+  const [deviceFilter, setDeviceFilter] = React.useState('all');
+  const [modeFilter, setModeFilter] = React.useState('all');
+  const [query, setQuery] = React.useState('');
+
+  const filtered = React.useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return transcripts.filter((transcript) => {
+      if (deviceFilter !== 'all' && transcript.deviceId !== deviceFilter) return false;
+      if (modeFilter !== 'all' && transcript.mode !== modeFilter) return false;
+      if (!needle) return true;
+      return (
+        transcript.text.toLowerCase().includes(needle) ||
+        transcript.deviceName.toLowerCase().includes(needle) ||
+        transcript.mode.toLowerCase().includes(needle)
+      );
+    });
+  }, [deviceFilter, modeFilter, query, transcripts]);
+
+  const groups = React.useMemo(() => groupTranscriptsBySession(filtered), [filtered]);
+  const modes = React.useMemo(
+    () => [...new Set(transcripts.map((transcript) => transcript.mode).filter(Boolean))].sort(),
+    [transcripts],
+  );
+
+  async function copyVisibleTranscripts() {
+    const text = filtered
+      .map((transcript) => `[${transcript.createdAt}] ${transcript.deviceName || transcript.deviceId} ${transcript.mode}: ${transcript.text}`)
+      .join('\n');
+    await navigator.clipboard?.writeText(text);
+  }
+
+  function threadTitle(threadId: string): string {
+    return threads.find((thread) => thread.id === threadId)?.title ?? 'Voice thread';
+  }
+
+  return (
+    <section className="panel transcript-panel">
+      <div className="panel-heading">
+        <div>
+          <h2>Transcripts</h2>
+          <p>
+            {filtered.length} of {transcripts.length} final transcripts grouped by voice session.
+          </p>
+        </div>
+        <button type="button" onClick={() => void copyVisibleTranscripts()} disabled={filtered.length === 0}>
+          Copy Visible
+        </button>
+      </div>
+
+      <div className="transcript-toolbar">
+        <label>
+          Device
+          <select value={deviceFilter} onChange={(event) => setDeviceFilter(event.target.value)}>
+            <option value="all">All devices</option>
+            {devices.map((device) => (
+              <option key={device.id} value={device.id}>
+                {device.displayName}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Mode
+          <select value={modeFilter} onChange={(event) => setModeFilter(event.target.value)}>
+            <option value="all">All modes</option>
+            {modes.map((mode) => (
+              <option key={mode} value={mode}>
+                {mode}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="transcript-search">
+          Search
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Filter transcript text..."
+          />
+        </label>
+      </div>
+
+      <div className="transcript-list">
+        {groups.map((group) => (
+          <article key={group.voiceSessionId} className="transcript-session">
+            <header className="transcript-session-header">
+              <div>
+                <strong>{group.deviceName || group.deviceId}</strong>
+                <span>
+                  {group.mode} / {group.transcripts.length} transcript{group.transcripts.length === 1 ? '' : 's'}
+                </span>
+                <span>
+                  {timeLabel(group.sessionStartedAt)}
+                  {group.sessionEndedAt ? ` – ${timeLabel(group.sessionEndedAt)}` : ' – active'}
+                </span>
+              </div>
+              <div className="transcript-session-actions">
+                {group.assistantThreadId ? (
+                  <button type="button" className="link-button" onClick={() => onOpenThread(group.assistantThreadId)}>
+                    Open {threadTitle(group.assistantThreadId)}
+                  </button>
+                ) : null}
+              </div>
+            </header>
+            <div className="transcript-session-body">
+              {group.transcripts.map((transcript) => (
+                <article key={transcript.id} className="transcript-row">
+                  <div>
+                    <span>{timeLabel(transcript.createdAt)}</span>
+                    <span className="transcript-mode-pill">{transcript.mode}</span>
+                  </div>
+                  <p>{transcript.text}</p>
+                </article>
+              ))}
+            </div>
+          </article>
+        ))}
+        {groups.length === 0 ? (
+          <div className="empty-note">
+            {transcripts.length === 0 ? 'No transcripts yet.' : 'No transcripts match the current filters.'}
+          </div>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
 function codeValue(raw: string): string {
   return raw.replace(/\D/g, '').slice(0, 12);
 }
@@ -219,6 +407,8 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
   const [deviceType, setDeviceType] = React.useState('desktop');
   const [pairingText, setPairingText] = React.useState('');
   const [pairingQr, setPairingQr] = React.useState('');
+  const [pairingExpiresAt, setPairingExpiresAt] = React.useState<string | null>(null);
+  const [pairingDeviceId, setPairingDeviceId] = React.useState<string | null>(null);
   const [codes, setCodes] = React.useState({ unlockCode: '1234', lockCode: '4321', offCode: '0000' });
 
   const activeThread = dashboard?.threads.find((thread) => thread.id === activeThreadId) ?? dashboard?.threads[0] ?? null;
@@ -329,15 +519,113 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
     setBusy(true);
     setError(null);
     try {
-      const data = await client.request<{ ok: true; device: DeviceRecord; token: string; payloadUri: string }>('/api/pairing/payload', {
+      const data = await client.request<{
+        ok: true;
+        device: DeviceRecord;
+        token: string;
+        payloadUri: string;
+        expiresAt: string;
+      }>('/api/pairing/payload', {
         method: 'POST',
         body: JSON.stringify({ deviceType, displayName: deviceName }),
       });
       setPairingText(data.payloadUri);
+      setPairingExpiresAt(data.expiresAt);
+      setPairingDeviceId(data.device.id);
       setPairingQr(await QRCode.toDataURL(data.payloadUri, { margin: 1, width: 220 }));
       await navigator.clipboard?.writeText(data.payloadUri).catch(() => undefined);
       await loadDashboard();
       setNotice(`Created ${data.device.displayName}. Pairing payload copied when clipboard access was available.`);
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copyPairingPayload() {
+    if (!pairingText) return;
+    await navigator.clipboard?.writeText(pairingText);
+    setNotice('Copied pairing payload.');
+  }
+
+  async function sharePairingPayload() {
+    if (!pairingText) return;
+    if (navigator.share) {
+      await navigator.share({
+        title: 'VoiceStream pairing',
+        text: 'Scan or open this VoiceStream pairing payload.',
+        url: pairingText,
+      });
+      setNotice('Shared pairing payload.');
+      return;
+    }
+    await copyPairingPayload();
+  }
+
+  async function revokeDevice(deviceId: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await client.request(`/api/devices/${encodeURIComponent(deviceId)}/revoke`, { method: 'POST', body: '{}' });
+      if (pairingDeviceId === deviceId) {
+        setPairingText('');
+        setPairingQr('');
+        setPairingExpiresAt(null);
+        setPairingDeviceId(null);
+      }
+      await loadDashboard();
+      setNotice('Device revoked.');
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function rotateDeviceToken(deviceId: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await client.request<{
+        ok: true;
+        device: DeviceRecord;
+        payloadUri?: string;
+        expiresAt?: string;
+      }>(`/api/devices/${encodeURIComponent(deviceId)}/rotate-token`, {
+        method: 'POST',
+        body: JSON.stringify({ includePayload: true }),
+      });
+      if (data.payloadUri) {
+        setPairingText(data.payloadUri);
+        setPairingExpiresAt(data.expiresAt ?? null);
+        setPairingDeviceId(data.device.id);
+        setPairingQr(await QRCode.toDataURL(data.payloadUri, { margin: 1, width: 220 }));
+        await navigator.clipboard?.writeText(data.payloadUri).catch(() => undefined);
+      }
+      await loadDashboard();
+      setNotice(`Rotated token for ${data.device.displayName}.`);
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function sendDeviceCommand(deviceId: string, command: 'sleep' | 'off' | 'awake' | 'query_status') {
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await client.request<{ ok: true; delivered: boolean; ack?: { status?: string; mode?: string } }>(
+        `/api/devices/${encodeURIComponent(deviceId)}/command`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ command }),
+        },
+      );
+      const detail = data.ack?.status ? ` ${data.ack.status}` : '';
+      setNotice(data.delivered ? `Sent ${command}.${detail}` : `Device is offline; ${command} was not delivered.`);
+      await loadDashboard();
     } catch (err: any) {
       setError(err?.message ?? String(err));
     } finally {
@@ -353,12 +641,10 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
     setNotice('Copied visible logs.');
   }
 
-  async function copyTranscripts() {
-    const text = (dashboard?.transcripts ?? [])
-      .map((transcript) => `[${transcript.createdAt}] ${transcript.deviceName || transcript.deviceId} ${transcript.mode}: ${transcript.text}`)
-      .join('\n');
-    await navigator.clipboard?.writeText(text);
-    setNotice('Copied visible transcripts.');
+  function openThreadFromTranscript(threadId: string) {
+    setActiveThreadId(threadId);
+    setNotice('Opened assistant thread from transcript session.');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   if (loading) {
@@ -504,41 +790,68 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
             {pairingText ? (
               <div className="pairing-payload">
                 <small>QR / pairing payload</small>
+                {pairingExpiresAt ? <div className="pairing-meta">Expires {timeLabel(pairingExpiresAt)}</div> : null}
                 {pairingQr ? <img src={pairingQr} alt="Device pairing QR" /> : null}
                 <textarea readOnly value={pairingText} onFocus={(event) => event.currentTarget.select()} />
-                <button type="button" onClick={() => void navigator.clipboard?.writeText(pairingText)}>
-                  Copy Payload
-                </button>
+                <div className="pairing-actions">
+                  <button type="button" onClick={() => void copyPairingPayload()}>
+                    Copy Payload
+                  </button>
+                  <button type="button" onClick={() => void sharePairingPayload()}>
+                    Share
+                  </button>
+                </div>
               </div>
             ) : null}
+          </section>
+
+          <section className="panel">
+            <h2>Your Devices</h2>
+            <div className="device-list">
+              {(dashboard?.devices ?? []).map((device) => {
+                const status = dashboard?.clientStatuses.find((entry) => entry.deviceId === device.id);
+                const pairing = dashboard?.pairingSessions.find((entry) => entry.deviceId === device.id);
+                return (
+                  <article key={device.id} className="device-row managed-device-row">
+                    <div>
+                      <strong>{device.displayName}</strong>
+                      <span>{device.deviceType}</span>
+                      <span>{status ? `${status.mode} / ${status.status}` : 'No live status'}</span>
+                      {pairing && !pairing.claimedAt ? <span>Pairing expires {timeLabel(pairing.expiresAt)}</span> : null}
+                    </div>
+                    <div className="device-actions">
+                      <button type="button" disabled={busy} onClick={() => void sendDeviceCommand(device.id, 'query_status')}>
+                        Query
+                      </button>
+                      <button type="button" disabled={busy} onClick={() => void sendDeviceCommand(device.id, 'sleep')}>
+                        Sleep
+                      </button>
+                      <button type="button" disabled={busy} onClick={() => void sendDeviceCommand(device.id, 'off')}>
+                        Off
+                      </button>
+                      <button type="button" disabled={busy} onClick={() => void rotateDeviceToken(device.id)}>
+                        Rotate
+                      </button>
+                      <button type="button" disabled={busy} onClick={() => void revokeDevice(device.id)}>
+                        Revoke
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
+              {dashboard?.devices.length === 0 ? <div className="empty-note">No paired devices yet.</div> : null}
+            </div>
           </section>
         </aside>
       </section>
 
       <section className="lower-grid">
-        <section className="panel">
-          <div className="panel-heading">
-            <div>
-              <h2>Transcripts</h2>
-              <p>Recent final voice transcripts stored for this user.</p>
-            </div>
-            <button type="button" onClick={() => void copyTranscripts()}>
-              Copy Transcripts
-            </button>
-          </div>
-          <div className="transcript-list">
-            {(dashboard?.transcripts ?? []).map((transcript) => (
-              <article key={transcript.id} className="transcript-row">
-                <div>
-                  <strong>{transcript.deviceName || transcript.deviceId}</strong>
-                  <span>{transcript.mode} / {timeLabel(transcript.createdAt)}</span>
-                </div>
-                <p>{transcript.text}</p>
-              </article>
-            ))}
-            {dashboard?.transcripts.length === 0 ? <div className="empty-note">No transcripts yet.</div> : null}
-          </div>
-        </section>
+        <TranscriptPanel
+          transcripts={dashboard?.transcripts ?? []}
+          devices={dashboard?.devices ?? []}
+          threads={dashboard?.threads ?? []}
+          onOpenThread={openThreadFromTranscript}
+        />
 
         <section className="panel">
           <div className="panel-heading">
@@ -624,9 +937,16 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
   const streamingRef = React.useRef(streaming);
   const lastRecognizedRef = React.useRef({ text: '', at: 0 });
   const controlSocketRef = React.useRef<WebSocket | null>(null);
+  const approvalRecognizerRef = React.useRef(new ApprovalCodeRecognizer());
+  const approvalFinalizeTimerRef = React.useRef<number | null>(null);
 
   React.useEffect(() => {
     void loadVoiceSettings();
+    return () => {
+      if (approvalFinalizeTimerRef.current !== null) {
+        window.clearTimeout(approvalFinalizeTimerRef.current);
+      }
+    };
   }, []);
 
   React.useEffect(() => {
@@ -644,6 +964,66 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
       controlSocketRef.current = null;
     };
   }, [device?.id]);
+
+  function resetApprovalCollection() {
+    if (approvalFinalizeTimerRef.current !== null) {
+      window.clearTimeout(approvalFinalizeTimerRef.current);
+      approvalFinalizeTimerRef.current = null;
+    }
+    approvalRecognizerRef.current.reset();
+  }
+
+  function scheduleApprovalFinalize() {
+    if (approvalFinalizeTimerRef.current !== null) {
+      window.clearTimeout(approvalFinalizeTimerRef.current);
+    }
+    approvalFinalizeTimerRef.current = window.setTimeout(() => {
+      approvalFinalizeTimerRef.current = null;
+      handleApprovalUpdate(approvalRecognizerRef.current.flush(Date.now()));
+      if (approvalRecognizerRef.current.isCollecting && modeRef.current !== 'off') {
+        scheduleApprovalFinalize();
+      }
+    }, approvalRecognizerRef.current.finalizeCheckIntervalMs());
+  }
+
+  function showCollectingStatus(partialCode: string) {
+    const nextStatus = partialCode
+      ? (modeRef.current === 'sleeping' ? `Unlock: ${partialCode}` : `Approval: ${partialCode}`)
+      : (modeRef.current === 'sleeping' ? 'Unlock code...' : 'Approval code...');
+    setStatus(nextStatus);
+    void reportDesktopStatus(modeRef.current, nextStatus);
+  }
+
+  function handleApprovalUpdate(update: ApprovalCodeUpdate): boolean {
+    if (update.type === 'none') return false;
+    if (update.type === 'collecting') {
+      showCollectingStatus(update.partialCode);
+      return true;
+    }
+    if (update.type === 'cancelled') {
+      setStatus('Approval cancelled.');
+      void reportDesktopStatus(modeRef.current, 'Approval cancelled.');
+      return true;
+    }
+    void processApprovalCode(update.code);
+    return true;
+  }
+
+  function acceptApprovalText(text: string, finalizeNow = false): boolean {
+    const now = Date.now();
+    let update = approvalRecognizerRef.current.accept(text, now);
+    if (approvalRecognizerRef.current.isCollecting) {
+      if (finalizeNow) {
+        update = approvalRecognizerRef.current.flush(now + 900);
+      } else {
+        scheduleApprovalFinalize();
+      }
+    }
+    if (update.type === 'none') {
+      return approvalRecognizerRef.current.isCollecting;
+    }
+    return handleApprovalUpdate(update);
+  }
 
   async function loadVoiceSettings(): Promise<VoiceSettings> {
     const data = await client.request<{ ok: true; settings: { unlockCode: string; lockCode: string; lockedOffCode: string } }>('/api/settings/voice-approval');
@@ -721,6 +1101,10 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
       const message = JSON.parse(event.data);
       if (message.type === 'server_ping') {
         socket.send(JSON.stringify({ type: 'client_ping', sentAt: new Date().toISOString() }));
+        return;
+      }
+      if (message.type === 'server_command') {
+        void handleRemoteControlCommand(message, socket);
       }
     };
     socket.onclose = () => {
@@ -730,6 +1114,40 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
       if (controlSocketRef.current === socket) controlSocketRef.current = null;
     };
     controlSocketRef.current = socket;
+  }
+
+  async function handleRemoteControlCommand(message: any, socket: WebSocket) {
+    const command = String(message?.command ?? '');
+    const commandId = String(message?.commandId ?? '');
+    const ack = (payload: Record<string, unknown>) => {
+      if (socket.readyState !== WebSocket.OPEN) return;
+      socket.send(JSON.stringify({ type: 'command_ack', commandId, command, ...payload }));
+    };
+    try {
+      if (command === 'query_status') {
+        ack({ ok: true, mode: modeRef.current, status });
+        void reportDesktopStatus(modeRef.current, status);
+        return;
+      }
+      if (command === 'sleep') {
+        enterSleep();
+        ack({ ok: true, mode: 'sleeping', status: 'Sleeping.' });
+        return;
+      }
+      if (command === 'off') {
+        turnOff();
+        ack({ ok: true, mode: 'off', status: 'Off.' });
+        return;
+      }
+      if (command === 'awake') {
+        enterAwake();
+        ack({ ok: true, mode: 'awake', status: 'Awake.' });
+        return;
+      }
+      ack({ ok: false, error: 'unknown command' });
+    } catch (err: any) {
+      ack({ ok: false, error: err?.message ?? String(err) });
+    }
   }
 
   async function startVoice(target: VoiceStreamTarget = 'assistant') {
@@ -826,6 +1244,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
   }
 
   function enterAwake() {
+    resetApprovalCollection();
     setMode('awake');
     void reportDesktopStatus('awake', 'Awake. Listening for wake phrases.');
     startWakeListener();
@@ -833,6 +1252,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
 
   function enterSleep() {
     if (streaming) void stopVoice('sleeping');
+    resetApprovalCollection();
     setMode('sleeping');
     const settings = voiceSettings;
     setStatus(settings ? `Sleep: ${settings.unlockCode} awake, ${settings.offCode} off.` : 'Sleeping.');
@@ -843,6 +1263,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
   function turnOff() {
     if (streaming) void stopVoice('off');
     stopWakeListener();
+    resetApprovalCollection();
     setMode('off');
     setStatus('Off.');
     void reportDesktopStatus('off', 'Off.');
@@ -851,16 +1272,12 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
   async function processWakePhrase() {
     const text = phrase;
     setPhrase('');
-    await processPhraseText(text);
+    await processPhraseText(text, true);
   }
 
-  async function processPhraseText(text: string) {
+  async function processPhraseText(text: string, finalizeNow = false) {
     const currentMode = modeRef.current;
-    const approvalCode = approvalCodeFromText(text);
-    if (approvalCode) {
-      await processApprovalCode(approvalCode);
-      return;
-    }
+    if (acceptApprovalText(text, finalizeNow)) return;
     if (currentMode === 'recording') {
       setStatus('Recording. Wake commands are ignored until capture stops.');
       return;
@@ -1090,16 +1507,6 @@ function wakePhraseMatch(text: string): 'start' | 'patch' | 'clipboard' | 'sleep
   if (words.includes('transcribe')) return 'clipboard';
   if (words.includes('status') || compact === 'stateus' || compact === 'checkstatus') return 'status';
   return null;
-}
-
-function approvalCodeFromText(text: string): string | null {
-  const words = text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
-  const start = words.findIndex((word, index) => word === 'approval' && words[index + 1] === 'code');
-  if (start < 0) return null;
-  const digits = words.slice(start + 2).map((word) => ({
-    zero: '0', oh: '0', o: '0', one: '1', won: '1', two: '2', too: '2', to: '2', three: '3', tree: '3', four: '4', for: '4', five: '5', six: '6', seven: '7', eight: '8', ate: '8', nine: '9', niner: '9',
-  } as Record<string, string>)[word] ?? (/^\d$/.test(word) ? word : '')).join('').slice(0, 8);
-  return digits.length >= 4 ? digits : null;
 }
 
 function recordingStatus(target: VoiceStreamTarget): string {

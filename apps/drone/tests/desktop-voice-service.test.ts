@@ -646,4 +646,51 @@ describe('DesktopVoiceService', () => {
     expect(recognizerStarts).toBe(1);
     expect(captureStarts).toBe(1);
   });
+
+  test('emits local wake cue when prompt recording starts', () => {
+    const service = new DesktopVoiceService({
+      transcribeWav: async () => ({ text: '', model: 'test' }),
+      submitAssistantPrompt: async () => {},
+    });
+    const events: any[] = [];
+    const unsubscribe = service.subscribe((event) => events.push(event));
+
+    (service as any).mode = 'awake';
+    void (service as any).startPromptRecording('assistant');
+    unsubscribe();
+
+    expect(events.some((event) => event.type === 'desktop_voice_local_cue' && event.cue === 'wake')).toBe(true);
+  });
+
+  test('seeds prompt recording with buffered pre-roll audio', () => {
+    const service = new DesktopVoiceService({
+      transcribeWav: async () => ({ text: '', model: 'test' }),
+      submitAssistantPrompt: async () => {},
+    });
+    const preRoll = Buffer.alloc(640, 7);
+    (service as any).promptPreRollBuffer.push(preRoll);
+    (service as any).mode = 'awake';
+
+    void (service as any).startPromptRecording('assistant');
+
+    expect((service as any).promptChunks).toEqual([preRoll]);
+    expect((service as any).promptPreRollBuffer.byteLength).toBe(0);
+  });
+
+  test('replays recent desktop voice events to new subscribers', () => {
+    const service = new DesktopVoiceService({
+      transcribeWav: async () => ({ text: '', model: 'test' }),
+      submitAssistantPrompt: async () => {},
+    });
+
+    (service as any).emitLocalCue('status');
+    (service as any).emitDesktopVoiceEvent({ type: 'desktop_voice_transcript_segment', text: 'hello' });
+
+    const events: any[] = [];
+    const unsubscribe = service.subscribe((event) => events.push(event));
+    unsubscribe();
+
+    expect(events.some((event) => event.type === 'desktop_voice_local_cue' && event.cue === 'status')).toBe(true);
+    expect(events.some((event) => event.type === 'desktop_voice_transcript_segment' && event.text === 'hello')).toBe(true);
+  });
 });

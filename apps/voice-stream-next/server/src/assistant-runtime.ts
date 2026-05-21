@@ -55,6 +55,13 @@ export async function generateAssistantReply(messages: { role: 'user' | 'assista
 }
 
 export async function transcribePcm16(pcm: Uint8Array): Promise<RuntimeResult> {
+  const testTranscript = process.env.VOICE_STREAM_NEXT_TEST_TRANSCRIPT;
+  if (testTranscript != null) {
+    return {
+      provider: 'fallback',
+      text: testTranscript.trim(),
+    };
+  }
   if (!apiKey()) {
     return {
       provider: 'fallback',
