@@ -13,6 +13,11 @@ const state = {
   mode: 'off',
   voiceSettings: null,
   recognition: null,
+  wakeStream: null,
+  wakeAudioContext: null,
+  wakeProcessor: null,
+  wakeUnsubscribe: null,
+  wakeStarting: false,
   lastRecognizedText: '',
   lastRecognizedAt: 0,
   analyser: null,
@@ -474,6 +479,63 @@ async function processPhraseText(text) {
 }
 
 function startWakeListener() {
+  if (state.wakeStarting || state.wakeStream || state.recognition) {
+    showStatus('Awake. Listening for wake phrases.');
+    return;
+  }
+  if (desktop.startVosk && desktop.sendVoskFrame && desktop.onVoskText) {
+    startVoskWakeListener().then((started) => {
+      if (!started) startSpeechWakeListener();
+    });
+    return;
+  }
+  startSpeechWakeListener();
+}
+
+async function startVoskWakeListener() {
+  state.wakeStarting = true;
+  try {
+    const status = await desktop.startVosk();
+    if (!status.available) {
+      showStatus(status.error ? `Vosk unavailable: ${status.error}` : 'Vosk unavailable. Type a wake phrase if needed.');
+      return false;
+    }
+
+    const media = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const context = new AudioContext({ sampleRate: 16000 });
+    const source = context.createMediaStreamSource(media);
+    const processor = context.createScriptProcessor(4096, 1, 1);
+    const unsubscribe = desktop.onVoskText((result) => {
+      const text = String(result?.text || '').trim();
+      if (!text) return;
+      const now = Date.now();
+      if (text === state.lastRecognizedText && now - state.lastRecognizedAt < 1500) return;
+      state.lastRecognizedText = text;
+      state.lastRecognizedAt = now;
+      void processPhraseText(text).catch((err) => showStatus(err.message));
+    });
+
+    processor.onaudioprocess = (event) => {
+      desktop.sendVoskFrame(floatToPcm16(event.inputBuffer.getChannelData(0)));
+    };
+    source.connect(processor);
+    processor.connect(context.destination);
+    state.wakeStream = media;
+    state.wakeAudioContext = context;
+    state.wakeProcessor = processor;
+    state.wakeUnsubscribe = unsubscribe;
+    showStatus('Awake. Listening with Vosk.');
+    return true;
+  } catch (err) {
+    stopVoskWakeListener();
+    showStatus(err?.message ? `Vosk listener failed: ${err.message}` : 'Vosk listener failed. Type a wake phrase if needed.');
+    return false;
+  } finally {
+    state.wakeStarting = false;
+  }
+}
+
+function startSpeechWakeListener() {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRecognition) {
     showStatus('Awake. Type a wake phrase for this desktop runtime.');
@@ -515,6 +577,7 @@ function startWakeListener() {
 }
 
 function stopWakeListener() {
+  stopVoskWakeListener();
   const recognition = state.recognition;
   if (!recognition) return;
   recognition.onend = null;
@@ -524,6 +587,19 @@ function stopWakeListener() {
   } catch {
     // Ignore already-ended SpeechRecognition sessions.
   }
+}
+
+function stopVoskWakeListener() {
+  if (state.wakeUnsubscribe) state.wakeUnsubscribe();
+  state.wakeUnsubscribe = null;
+  if (state.wakeProcessor) state.wakeProcessor.disconnect();
+  state.wakeProcessor = null;
+  if (state.wakeStream) state.wakeStream.getTracks().forEach((track) => track.stop());
+  state.wakeStream = null;
+  if (state.wakeAudioContext) void state.wakeAudioContext.close().catch(() => {});
+  state.wakeAudioContext = null;
+  state.wakeStarting = false;
+  if (desktop.stopVosk) void desktop.stopVosk();
 }
 
 function renderMeter() {

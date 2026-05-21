@@ -85,9 +85,30 @@ const desktopDeviceStorageKey = 'voiceStreamNext.desktopDevice';
 
 declare global {
   interface Window {
-    voiceStreamDesktop?: { isDesktop?: boolean; writeClipboard?: (text: string) => void };
+    voiceStreamDesktop?: {
+      isDesktop?: boolean;
+      writeClipboard?: (text: string) => void;
+      voskStatus?: () => Promise<DesktopVoskStatus>;
+      startVosk?: () => Promise<DesktopVoskStatus>;
+      stopVosk?: () => Promise<DesktopVoskStatus>;
+      resetVosk?: () => Promise<DesktopVoskStatus>;
+      sendVoskFrame?: (frame: ArrayBuffer) => void;
+      onVoskStatus?: (callback: (status: DesktopVoskStatus) => void) => () => void;
+      onVoskText?: (callback: (result: DesktopVoskText) => void) => () => void;
+    };
   }
 }
+
+type DesktopVoskStatus = {
+  available: boolean;
+  modelPath?: string;
+  error?: string;
+};
+
+type DesktopVoskText = {
+  text: string;
+  final?: boolean;
+};
 
 function defaultDevUser(): DevUser {
   return { email: 'developer@example.local', name: 'Local Developer', admin: true };
@@ -510,6 +531,11 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
     context?: AudioContext;
     processor?: ScriptProcessorNode;
     recognition?: any;
+    wakeStream?: MediaStream;
+    wakeContext?: AudioContext;
+    wakeProcessor?: ScriptProcessorNode;
+    wakeUnsubscribe?: () => void;
+    wakeStarting?: boolean;
   }>({});
   const modeRef = React.useRef(mode);
   const streamingRef = React.useRef(streaming);
@@ -691,6 +717,64 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
   }
 
   function startWakeListener() {
+    if (refs.current.wakeStarting || refs.current.wakeStream || refs.current.recognition) {
+      setStatus('Awake. Listening for wake phrases.');
+      return;
+    }
+    if (window.voiceStreamDesktop?.startVosk && window.voiceStreamDesktop.sendVoskFrame && window.voiceStreamDesktop.onVoskText) {
+      void startVoskWakeListener().then((started) => {
+        if (!started) startSpeechWakeListener();
+      });
+      return;
+    }
+    startSpeechWakeListener();
+  }
+
+  async function startVoskWakeListener(): Promise<boolean> {
+    const desktop = window.voiceStreamDesktop;
+    if (!desktop?.startVosk || !desktop.sendVoskFrame || !desktop.onVoskText) return false;
+    refs.current.wakeStarting = true;
+    try {
+      const status = await desktop.startVosk();
+      if (!status.available) {
+        setStatus(status.error ? `Vosk unavailable: ${status.error}` : 'Vosk unavailable. Type a wake phrase if needed.');
+        return false;
+      }
+
+      const media = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const context = new AudioContext({ sampleRate: 16_000 });
+      const source = context.createMediaStreamSource(media);
+      const processor = context.createScriptProcessor(4096, 1, 1);
+      const unsubscribe = desktop.onVoskText((result) => {
+        const text = result.text?.trim();
+        if (!text) return;
+        const now = Date.now();
+        if (text === lastRecognizedRef.current.text && now - lastRecognizedRef.current.at < 1500) return;
+        lastRecognizedRef.current = { text, at: now };
+        void processPhraseText(text).catch((err) => setStatus(err?.message ?? String(err)));
+      });
+
+      processor.onaudioprocess = (event) => {
+        desktop.sendVoskFrame?.(floatToPcm16(event.inputBuffer.getChannelData(0)));
+      };
+      source.connect(processor);
+      processor.connect(context.destination);
+      refs.current.wakeStream = media;
+      refs.current.wakeContext = context;
+      refs.current.wakeProcessor = processor;
+      refs.current.wakeUnsubscribe = unsubscribe;
+      setStatus('Awake. Listening with Vosk.');
+      return true;
+    } catch (err: any) {
+      stopVoskWakeListener();
+      setStatus(err?.message ? `Vosk listener failed: ${err.message}` : 'Vosk listener failed. Type a wake phrase if needed.');
+      return false;
+    } finally {
+      refs.current.wakeStarting = false;
+    }
+  }
+
+  function startSpeechWakeListener() {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
       setStatus('Awake. Type a wake phrase for this desktop runtime.');
@@ -731,6 +815,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
   }
 
   function stopWakeListener() {
+    stopVoskWakeListener();
     const recognition = refs.current.recognition;
     if (!recognition) return;
     recognition.onend = null;
@@ -740,6 +825,18 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
     } catch {
       // Ignore SpeechRecognition stop errors from already-ended sessions.
     }
+  }
+
+  function stopVoskWakeListener() {
+    refs.current.wakeUnsubscribe?.();
+    refs.current.wakeUnsubscribe = undefined;
+    refs.current.wakeProcessor?.disconnect();
+    refs.current.wakeProcessor = undefined;
+    refs.current.wakeStream?.getTracks().forEach((track) => track.stop());
+    refs.current.wakeStream = undefined;
+    void refs.current.wakeContext?.close().catch(() => undefined);
+    refs.current.wakeContext = undefined;
+    void window.voiceStreamDesktop?.stopVosk?.();
   }
 
   async function processApprovalCode(code: string) {
