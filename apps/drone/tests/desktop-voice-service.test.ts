@@ -74,7 +74,7 @@ describe('DesktopVoiceService', () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(service.snapshot().mode).toBe('sleeping');
+    expect(service.snapshot().mode).toBe('awake');
     expect(service.snapshot().message).toBe('Awake: sending assistant voice prompt.');
     expect(submittedPrompt).toBe('final check the build');
     expect(transcribedWav?.byteLength).toBeGreaterThan(6400);
@@ -82,7 +82,7 @@ describe('DesktopVoiceService', () => {
     resolveSubmit();
     await finishPromise;
 
-    expect(service.snapshot().mode).toBe('sleeping');
+    expect(service.snapshot().mode).toBe('awake');
     expect(service.snapshot().message).toBe('Awake: sent assistant voice prompt.');
   });
 
@@ -112,7 +112,7 @@ describe('DesktopVoiceService', () => {
 
     expect(transcribeCalls).toBe(0);
     expect(submittedPrompt).toBe('rough chunk text');
-    expect(service.snapshot().mode).toBe('sleeping');
+    expect(service.snapshot().mode).toBe('awake');
     expect(events.some((event) => event.type === 'desktop_voice_status' && event.status.mode === 'transcribing')).toBe(false);
   });
 
@@ -132,7 +132,7 @@ describe('DesktopVoiceService', () => {
 
     const status = service.start();
 
-    expect(status.mode).toBe('sleeping');
+    expect(status.mode).toBe('awake');
     expect(status.message).toBe('Awake: waiting for hey Sebastian.');
     expect(recognizerStarted).toBe(false);
     expect(captureStarted).toBe(false);
@@ -143,30 +143,73 @@ describe('DesktopVoiceService', () => {
     expect(captureStarted).toBe(true);
   });
 
-  test('go to sleep locks desktop voice while awake', () => {
+  test('still starts recognition when sleep is entered before deferred startup runs', async () => {
     const service = new DesktopVoiceService({
       transcribeWav: async () => ({ text: '', model: 'test' }),
       submitAssistantPrompt: async () => {},
     });
+    let recognizerStarts = 0;
+    let captureStarts = 0;
+    (service as any).recognizer.start = () => {
+      recognizerStarts += 1;
+    };
+    (service as any).capture.start = () => {
+      captureStarts += 1;
+    };
 
-    (service as any).mode = 'sleeping';
-    (service as any).handleRecognizedText('go to sleep', true);
+    service.start();
+    const sleepingStatus = service.toggle();
 
-    expect(service.snapshot().mode).toBe('locked');
-    expect(service.snapshot().message).toContain('Locked:');
+    expect(sleepingStatus.mode).toBe('sleeping');
+    expect(recognizerStarts).toBe(1);
+    expect(captureStarts).toBe(1);
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(recognizerStarts).toBe(1);
+    expect(captureStarts).toBe(1);
   });
 
-  test('awake approval lock code no longer locks desktop voice', () => {
+  test('go to sleep puts desktop voice to sleep while awake', () => {
+    const service = new DesktopVoiceService({
+      transcribeWav: async () => ({ text: '', model: 'test' }),
+      submitAssistantPrompt: async () => {},
+    });
+
+    (service as any).mode = 'awake';
+    (service as any).handleRecognizedText('go to sleep', true);
+
+    expect(service.snapshot().mode).toBe('sleeping');
+    expect(service.snapshot().message).toContain('Sleep:');
+  });
+
+  test('awake legacy lock code no longer changes desktop voice mode', () => {
+    const service = new DesktopVoiceService({
+      transcribeWav: async () => ({ text: '', model: 'test' }),
+      submitAssistantPrompt: async () => {},
+    });
+
+    (service as any).mode = 'awake';
+    (service as any).handleApprovalCode(VOICE_APPROVAL_SETTINGS_DEFAULT.lockCode);
+
+    expect(service.snapshot().mode).toBe('awake');
+    expect(service.snapshot().message).toBe(`Approval code detected: ${VOICE_APPROVAL_SETTINGS_DEFAULT.lockCode}`);
+  });
+
+  test('manual wake from sleep clears stale approval code', () => {
     const service = new DesktopVoiceService({
       transcribeWav: async () => ({ text: '', model: 'test' }),
       submitAssistantPrompt: async () => {},
     });
 
     (service as any).mode = 'sleeping';
-    (service as any).handleApprovalCode(VOICE_APPROVAL_SETTINGS_DEFAULT.lockCode);
+    (service as any).lastApprovalCode = '9999';
+    (service as any).recognizer.start = () => {};
+    (service as any).capture.start = () => {};
+    const status = service.toggle();
 
-    expect(service.snapshot().mode).toBe('sleeping');
-    expect(service.snapshot().message).toBe(`Approval code detected: ${VOICE_APPROVAL_SETTINGS_DEFAULT.lockCode}`);
+    expect(status.mode).toBe('awake');
+    expect(status.lastApprovalCode).toBeUndefined();
   });
 
   test('awake off code turns desktop voice off', () => {
@@ -175,14 +218,14 @@ describe('DesktopVoiceService', () => {
       submitAssistantPrompt: async () => {},
     });
 
-    (service as any).mode = 'sleeping';
+    (service as any).mode = 'awake';
     (service as any).handleApprovalCode(VOICE_APPROVAL_SETTINGS_DEFAULT.lockedOffCode);
 
     expect(service.snapshot().mode).toBe('off');
     expect(service.snapshot().message).toBe('Desktop voice is off.');
   });
 
-  test('go to sleep locks desktop voice from full prompt transcription', async () => {
+  test('go to sleep puts desktop voice to sleep from full prompt transcription', async () => {
     let submittedPrompt = '';
     const service = new DesktopVoiceService({
       transcribeWav: async () => ({ text: 'go to sleep', model: 'test' }),
@@ -196,13 +239,13 @@ describe('DesktopVoiceService', () => {
 
     await (service as any).finishAssistantPromptRecording();
 
-    expect(service.snapshot().mode).toBe('locked');
+    expect(service.snapshot().mode).toBe('sleeping');
     expect(submittedPrompt).toBe('');
   });
 
   test('keeps embedded go to sleep text while recording a patch', async () => {
     const service = new DesktopVoiceService({
-      transcribeWav: async () => ({ text: 'if you say go to sleep it should lock listening', model: 'test' }),
+      transcribeWav: async () => ({ text: 'if you say go to sleep it should enter sleep mode', model: 'test' }),
       submitAssistantPrompt: async () => {},
     });
 
@@ -220,7 +263,7 @@ describe('DesktopVoiceService', () => {
 
     expect(service.snapshot().mode).toBe('recording');
     expect(service.snapshot().message).toBe('Awake: patching into current drone chat.');
-    expect(service.snapshot().transcript.text).toBe('if you say go to sleep it should lock listening');
+    expect(service.snapshot().transcript.text).toBe('if you say go to sleep it should enter sleep mode');
   });
 
   test('does not start deferred capture backends after immediate stop', async () => {
@@ -261,7 +304,7 @@ describe('DesktopVoiceService', () => {
 
     await (service as any).abortPromptRecordingFromTranscript();
 
-    expect(service.snapshot().mode).toBe('sleeping');
+    expect(service.snapshot().mode).toBe('awake');
     expect(service.snapshot().message).toBe('Awake: assistant voice prompt cancelled.');
     expect(service.snapshot().transcript.text).toBe('');
     expect(submitCalls).toBe(0);
@@ -293,7 +336,7 @@ describe('DesktopVoiceService', () => {
 
       unsubscribe();
 
-      expect(service.snapshot().mode).toBe('sleeping');
+      expect(service.snapshot().mode).toBe('awake');
       expect(service.snapshot().message).toBe('Awake: assistant voice prompt cancelled.');
       expect(service.snapshot().transcript.text).toBe('');
       expect(submitCalls).toBe(0);
@@ -322,7 +365,7 @@ describe('DesktopVoiceService', () => {
 
     unsubscribe();
 
-    expect(service.snapshot().mode).toBe('sleeping');
+    expect(service.snapshot().mode).toBe('awake');
     expect(service.snapshot().transcript.text).toBe('');
     expect(events.some((event) => event.type === 'desktop_voice_transcript_segment')).toBe(false);
   });
@@ -396,10 +439,10 @@ describe('DesktopVoiceService', () => {
     (service as any).promptTranscriptText = 'copy this';
 
     await (service as any).finishPromptRecordingFromTranscript();
-    expect(service.snapshot().mode).toBe('sleeping');
+    expect(service.snapshot().mode).toBe('awake');
 
     (service as any).handleRecognizedText('can you transcribe', true);
-    expect(service.snapshot().mode).toBe('sleeping');
+    expect(service.snapshot().mode).toBe('awake');
 
     (service as any).promptCommandSuppressedUntil = Date.now() - 1;
     (service as any).handleRecognizedText('can you transcribe', true);
@@ -534,7 +577,7 @@ describe('DesktopVoiceService', () => {
       submitAssistantPrompt: async () => {},
       clipboardRecorder: fake.recorder,
     });
-    (service as any).mode = 'sleeping';
+    (service as any).mode = 'awake';
     (service as any).message = 'Awake: waiting for hey Sebastian.';
     (service as any).recognizer.start = () => {
       recognizerStarts += 1;
@@ -554,7 +597,7 @@ describe('DesktopVoiceService', () => {
     expect(recordingStatus.clipboard.mode).toBe('recording');
     expect(recordingStatus.suspended.active).toBe(true);
     expect(recordingStatus.suspended.reason).toBe('clipboard');
-    expect(recordingStatus.suspended.previousMode).toBe('sleeping');
+    expect(recordingStatus.suspended.previousMode).toBe('awake');
     expect(recognizerStops).toBe(1);
     expect(captureStops).toBe(1);
 
@@ -562,7 +605,7 @@ describe('DesktopVoiceService', () => {
 
     expect(finishedStatus.clipboard.mode).toBe('idle');
     expect(finishedStatus.suspended.active).toBe(false);
-    expect(finishedStatus.mode).toBe('sleeping');
+    expect(finishedStatus.mode).toBe('awake');
     expect(finishedStatus.message).toBe('Awake: waiting for hey Sebastian.');
     expect(recognizerStarts).toBe(1);
     expect(captureStarts).toBe(1);
@@ -582,7 +625,7 @@ describe('DesktopVoiceService', () => {
       submitAssistantPrompt: async () => {},
       clipboardRecorder: fake.recorder,
     });
-    (service as any).mode = 'sleeping';
+    (service as any).mode = 'awake';
     (service as any).message = 'Awake: waiting for hey Sebastian.';
     (service as any).recognizer.start = () => {
       recognizerStarts += 1;
@@ -598,7 +641,7 @@ describe('DesktopVoiceService', () => {
 
     expect(status.clipboard.mode).toBe('idle');
     expect(status.suspended.active).toBe(false);
-    expect(status.mode).toBe('sleeping');
+    expect(status.mode).toBe('awake');
     expect(cancelCalls).toBe(1);
     expect(recognizerStarts).toBe(1);
     expect(captureStarts).toBe(1);

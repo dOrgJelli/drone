@@ -1,7 +1,7 @@
-export type DesktopVoiceMode = 'off' | 'locked' | 'sleeping' | 'dormant' | 'recording' | 'transcribing' | 'error';
+export type DesktopVoiceMode = 'off' | 'awake' | 'sleeping' | 'recording' | 'transcribing' | 'error';
 export type DesktopVoiceClipboardMode = 'idle' | 'recording' | 'transcribing' | 'error';
 
-export type DesktopVoiceCue = 'start_button' | 'stop_button' | 'unlock' | 'lock' | 'locked_off' | 'wake' | 'sleep' | 'status';
+export type DesktopVoiceCue = 'start_button' | 'stop_button' | 'unlock' | 'sleeping_off' | 'wake' | 'sleep' | 'status';
 
 export const DESKTOP_VOICE_CODES = {
   unlock: '1234',
@@ -23,12 +23,7 @@ export const DESKTOP_VOICE_CUE_TONES: Record<DesktopVoiceCue, Array<{ frequencyH
     { frequencyHz: 560, durationMs: 80 },
     { frequencyHz: 820, durationMs: 130 },
   ],
-  lock: [
-    { frequencyHz: 820, durationMs: 70 },
-    { frequencyHz: 520, durationMs: 80 },
-    { frequencyHz: 300, durationMs: 150 },
-  ],
-  locked_off: [
+  sleeping_off: [
     { frequencyHz: 460, durationMs: 120 },
     { frequencyHz: 0, durationMs: 50 },
     { frequencyHz: 330, durationMs: 150 },

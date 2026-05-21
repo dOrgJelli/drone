@@ -1,6 +1,6 @@
 import { playLocalVoiceCue, type LocalVoiceCue } from './local-voice-cues';
 
-export type DesktopAssistantVoiceMode = 'off' | 'locked' | 'sleeping' | 'dormant' | 'recording' | 'transcribing' | 'error';
+export type DesktopAssistantVoiceMode = 'off' | 'awake' | 'sleeping' | 'recording' | 'transcribing' | 'error';
 
 export type DesktopAssistantVoiceStatus = {
   ok?: true;
@@ -61,9 +61,8 @@ export function desktopAssistantVoiceHeardText(status: DesktopAssistantVoiceStat
 export function desktopAssistantVoiceControlLabel(status: DesktopAssistantVoiceStatus): string {
   if (status.mode === 'off') return 'Start voice';
   if (status.mode === 'error') return 'Voice error';
-  if (status.mode === 'locked') return 'Locked';
-  if (status.mode === 'dormant') return 'Sleep';
-  if (status.mode === 'sleeping') return 'Awake';
+  if (status.mode === 'sleeping') return 'Sleep';
+  if (status.mode === 'awake') return 'Awake';
   if (status.mode === 'recording') return 'Recording';
   if (status.mode === 'transcribing') return 'Transcribing';
   return 'Voice';
@@ -72,7 +71,7 @@ export function desktopAssistantVoiceControlLabel(status: DesktopAssistantVoiceS
 export function desktopAssistantVoiceControlTitle(status: DesktopAssistantVoiceStatus): string {
   if (status.mode === 'off' || status.mode === 'error') return 'Start desktop assistant voice';
   if (isDesktopAssistantVoiceBusy(status)) return 'Stop recording';
-  if (status.mode === 'dormant') return 'Wake desktop assistant voice';
+  if (status.mode === 'sleeping') return 'Wake desktop assistant voice';
   return 'Sleep desktop assistant voice';
 }
 
@@ -91,15 +90,14 @@ function cueForTransition(previous: DesktopAssistantVoiceStatus | null, next: De
   if (!previous) return null;
   if (previous.updatedAt === next.updatedAt && previous.mode === next.mode && previous.message === next.message) return null;
   if (next.mode === 'off' && previous.mode !== 'off') {
-    return next.lastApprovalCode === '0000' ? 'locked_off' : 'stop_button';
+    return next.lastApprovalCode === '0000' ? 'sleeping_off' : 'stop_button';
   }
-  if ((previous.mode === 'off' || previous.mode === 'error') && next.mode === 'sleeping') return 'start_button';
-  if (previous.mode === 'sleeping' && next.mode === 'dormant') return 'sleep';
-  if (previous.mode === 'dormant' && next.mode === 'sleeping') return 'wake';
-  if (previous.mode === 'locked' && next.mode === 'sleeping') return 'unlock';
-  if ((previous.mode === 'sleeping' || previous.mode === 'recording') && next.mode === 'locked') return 'lock';
-  if (previous.mode === 'sleeping' && next.mode === 'recording') return 'wake';
-  if ((previous.mode === 'recording' || previous.mode === 'transcribing') && next.mode === 'sleeping') return 'sleep';
+  if ((previous.mode === 'off' || previous.mode === 'error') && next.mode === 'awake') return 'start_button';
+  if (previous.mode === 'awake' && next.mode === 'sleeping') return 'sleep';
+  if (previous.mode === 'sleeping' && next.mode === 'awake') return next.lastApprovalCode ? 'unlock' : 'wake';
+  if ((previous.mode === 'awake' || previous.mode === 'recording') && next.mode === 'sleeping') return 'sleep';
+  if (previous.mode === 'awake' && next.mode === 'recording') return 'wake';
+  if ((previous.mode === 'recording' || previous.mode === 'transcribing') && next.mode === 'awake') return 'sleep';
   return null;
 }
 
@@ -212,14 +210,14 @@ export function dispatchAssistantDesktopVoiceStop(): void {
 
 export function dispatchAssistantDesktopVoiceToggle(): void {
   if (typeof window === 'undefined') return;
-  if (latestStatus?.mode === 'sleeping') stopDesktopVoiceSpeech();
+  if (latestStatus?.mode === 'awake') stopDesktopVoiceSpeech();
   window.dispatchEvent(new CustomEvent(ASSISTANT_DESKTOP_VOICE_TOGGLE_EVENT));
   void requestDesktopVoiceToggle();
 }
 
 export function dispatchAssistantDesktopVoiceStatus(status: DesktopAssistantVoiceStatus): void {
   if (typeof window === 'undefined') return;
-  if (status.mode === 'off' || status.mode === 'dormant') stopDesktopVoiceSpeech();
+  if (status.mode === 'off' || status.mode === 'sleeping') stopDesktopVoiceSpeech();
   playCueForStatus(status);
   window.dispatchEvent(new CustomEvent<DesktopAssistantVoiceStatus>(ASSISTANT_DESKTOP_VOICE_STATUS_EVENT, { detail: status }));
 }

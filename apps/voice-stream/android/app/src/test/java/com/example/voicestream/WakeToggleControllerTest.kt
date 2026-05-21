@@ -5,135 +5,135 @@ import org.junit.Test
 
 class WakeToggleControllerTest {
     @Test
-    fun heySebastianStartsStreamingAndDoesNotStopIt() {
+    fun heySebastianStartsRecordingAndDoesNotStopIt() {
         val controller = WakeToggleController()
 
-        assertEquals(WakeAction.NONE, controller.startListening())
-        assertEquals(WakeState.WAITING_FOR_WAKE, controller.state)
-        assertEquals(WakeAction.START_STREAMING, controller.wakeDetected(WakePhrase.START))
-        assertEquals(WakeState.STREAMING, controller.state)
+        assertEquals(WakeAction.NONE, controller.startAwake())
+        assertEquals(WakeState.AWAKE, controller.state)
+        assertEquals(WakeAction.START_RECORDING, controller.wakeDetected(WakePhrase.START))
+        assertEquals(WakeState.RECORDING, controller.state)
 
         assertEquals(WakeAction.NONE, controller.wakeDetected(WakePhrase.START))
-        assertEquals(WakeState.STREAMING, controller.state)
+        assertEquals(WakeState.RECORDING, controller.state)
     }
 
     @Test
-    fun localStopPhraseDoesNotControlStreaming() {
+    fun localStopPhraseDoesNotControlRecording() {
         val controller = WakeToggleController()
 
-        assertEquals(WakeAction.NONE, controller.startListening())
-        controller.unlockToListening()
+        assertEquals(WakeAction.NONE, controller.startAwake())
+        controller.wakeFromSleep()
         assertEquals(null, WakePhraseMatcher.match("that's it"))
-        assertEquals(WakeState.WAITING_FOR_WAKE, controller.state)
+        assertEquals(WakeState.AWAKE, controller.state)
 
-        assertEquals(WakeAction.START_STREAMING, controller.wakeDetected(WakePhrase.START))
-        assertEquals(WakeState.STREAMING, controller.state)
+        assertEquals(WakeAction.START_RECORDING, controller.wakeDetected(WakePhrase.START))
+        assertEquals(WakeState.RECORDING, controller.state)
 
         assertEquals(WakeAction.NONE, controller.wakeDetected(WakePhrase.START))
-        assertEquals(WakeState.STREAMING, controller.state)
+        assertEquals(WakeState.RECORDING, controller.state)
     }
 
     @Test
     fun statusPhraseOnlyPlaysWhileWaiting() {
         val controller = WakeToggleController()
 
-        assertEquals(WakeAction.NONE, controller.startListening())
-        controller.unlockToListening()
+        assertEquals(WakeAction.NONE, controller.startAwake())
+        controller.wakeFromSleep()
         assertEquals(WakeAction.PLAY_STATUS, controller.wakeDetected(WakePhrase.STATUS))
-        assertEquals(WakeState.WAITING_FOR_WAKE, controller.state)
+        assertEquals(WakeState.AWAKE, controller.state)
 
-        assertEquals(WakeAction.START_STREAMING, controller.wakeDetected(WakePhrase.START))
-        assertEquals(WakeState.STREAMING, controller.state)
+        assertEquals(WakeAction.START_RECORDING, controller.wakeDetected(WakePhrase.START))
+        assertEquals(WakeState.RECORDING, controller.state)
 
         assertEquals(WakeAction.NONE, controller.wakeDetected(WakePhrase.STATUS))
-        assertEquals(WakeState.STREAMING, controller.state)
+        assertEquals(WakeState.RECORDING, controller.state)
     }
 
     @Test
-    fun sleepPhraseLocksWhileWaiting() {
+    fun sleepPhraseEntersSleepingWhileAwake() {
         val controller = WakeToggleController()
 
-        assertEquals(WakeAction.NONE, controller.startListening())
-        assertEquals(WakeAction.LOCK_LISTENING, controller.wakeDetected(WakePhrase.SLEEP))
-        assertEquals(WakeState.LOCKED, controller.state)
+        assertEquals(WakeAction.NONE, controller.startAwake())
+        assertEquals(WakeAction.ENTER_SLEEPING, controller.wakeDetected(WakePhrase.SLEEP))
+        assertEquals(WakeState.SLEEPING, controller.state)
     }
 
     @Test
-    fun sleepPhraseLocksWhileStreaming() {
+    fun sleepPhraseEntersSleepingWhileRecording() {
         val controller = WakeToggleController()
 
-        assertEquals(WakeAction.NONE, controller.startListening())
-        assertEquals(WakeAction.START_STREAMING, controller.wakeDetected(WakePhrase.START))
-        assertEquals(WakeState.STREAMING, controller.state)
-        assertEquals(WakeAction.LOCK_LISTENING, controller.wakeDetected(WakePhrase.SLEEP))
-        assertEquals(WakeState.LOCKED, controller.state)
+        assertEquals(WakeAction.NONE, controller.startAwake())
+        assertEquals(WakeAction.START_RECORDING, controller.wakeDetected(WakePhrase.START))
+        assertEquals(WakeState.RECORDING, controller.state)
+        assertEquals(WakeAction.ENTER_SLEEPING, controller.wakeDetected(WakePhrase.SLEEP))
+        assertEquals(WakeState.SLEEPING, controller.state)
     }
 
     @Test
-    fun patchPhraseStartsPatchStreaming() {
+    fun patchPhraseStartsPatchRecording() {
         val controller = WakeToggleController()
 
-        controller.startListening()
-        controller.unlockToListening()
+        controller.startAwake()
+        controller.wakeFromSleep()
 
-        assertEquals(WakeAction.START_PATCH_STREAMING, controller.wakeDetected(WakePhrase.PATCH))
-        assertEquals(WakeState.STREAMING, controller.state)
+        assertEquals(WakeAction.START_PATCH_RECORDING, controller.wakeDetected(WakePhrase.PATCH))
+        assertEquals(WakeState.RECORDING, controller.state)
     }
 
     @Test
-    fun clipboardPhraseStartsClipboardStreaming() {
+    fun clipboardPhraseStartsClipboardRecording() {
         val controller = WakeToggleController()
 
-        controller.startListening()
-        controller.unlockToListening()
+        controller.startAwake()
+        controller.wakeFromSleep()
 
-        assertEquals(WakeAction.START_CLIPBOARD_STREAMING, controller.wakeDetected(WakePhrase.CLIPBOARD))
-        assertEquals(WakeState.STREAMING, controller.state)
+        assertEquals(WakeAction.START_CLIPBOARD_RECORDING, controller.wakeDetected(WakePhrase.CLIPBOARD))
+        assertEquals(WakeState.RECORDING, controller.state)
     }
 
     @Test
-    fun stopAllStopsStreamingAndTurnsOff() {
+    fun stopAllStopsRecordingAndTurnsOff() {
         val controller = WakeToggleController()
 
-        controller.startListening()
-        controller.unlockToListening()
+        controller.startAwake()
+        controller.wakeFromSleep()
         controller.wakeDetected(WakePhrase.START)
 
-        assertEquals(WakeAction.STOP_STREAMING, controller.stopAll())
+        assertEquals(WakeAction.STOP_RECORDING, controller.stopAll())
         assertEquals(WakeState.OFF, controller.state)
     }
 
     @Test
-    fun toggleAwakeSleepSwitchesBetweenListeningAndDormant() {
+    fun toggleAwakeSleepSwitchesBetweenAwakeAndSleeping() {
         val controller = WakeToggleController()
 
-        controller.startListening()
-        assertEquals(WakeState.WAITING_FOR_WAKE, controller.state)
+        controller.startAwake()
+        assertEquals(WakeState.AWAKE, controller.state)
         assertEquals(WakeAction.NONE, controller.toggleAwakeSleep())
-        assertEquals(WakeState.DORMANT, controller.state)
+        assertEquals(WakeState.SLEEPING, controller.state)
         assertEquals(WakeAction.NONE, controller.toggleAwakeSleep())
-        assertEquals(WakeState.WAITING_FOR_WAKE, controller.state)
+        assertEquals(WakeState.AWAKE, controller.state)
     }
 
     @Test
-    fun toggleAwakeSleepStopsStreaming() {
+    fun toggleAwakeSleepStopsRecording() {
         val controller = WakeToggleController()
 
-        controller.startListening()
+        controller.startAwake()
         controller.wakeDetected(WakePhrase.START)
-        assertEquals(WakeAction.STOP_STREAMING, controller.toggleAwakeSleep())
-        assertEquals(WakeState.WAITING_FOR_WAKE, controller.state)
+        assertEquals(WakeAction.STOP_RECORDING, controller.toggleAwakeSleep())
+        assertEquals(WakeState.AWAKE, controller.state)
     }
 
     @Test
-    fun lockListeningReturnsToLockedState() {
+    fun enterSleepingReturnsToSleepingState() {
         val controller = WakeToggleController()
 
-        controller.startListening()
-        controller.unlockToListening()
-        assertEquals(WakeState.WAITING_FOR_WAKE, controller.state)
-        assertEquals(WakeAction.NONE, controller.lockListening())
-        assertEquals(WakeState.LOCKED, controller.state)
+        controller.startAwake()
+        controller.wakeFromSleep()
+        assertEquals(WakeState.AWAKE, controller.state)
+        assertEquals(WakeAction.NONE, controller.enterSleeping())
+        assertEquals(WakeState.SLEEPING, controller.state)
     }
 
     @Test
