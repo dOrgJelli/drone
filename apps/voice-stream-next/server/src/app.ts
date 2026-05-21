@@ -410,10 +410,15 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
   );
 
   app.get('/api/transcripts', async (req, reply) =>
-    withUser(req, reply, db, clerkEnabled, async (ctx) => ({
-      ok: true,
-      transcripts: db.listTranscripts(ctx.user.id, 200),
-    })),
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const query = (req.query ?? {}) as Record<string, unknown>;
+      const deviceId = cleanText(query.deviceId) || undefined;
+      const voiceSessionId = cleanText(query.voiceSessionId) || undefined;
+      return {
+        ok: true,
+        transcripts: db.listTranscripts(ctx.user.id, 200, { deviceId, voiceSessionId }),
+      };
+    }),
   );
 
   app.post('/api/devices/:deviceId/status', async (req, reply) => {

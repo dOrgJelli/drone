@@ -1,6 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 
-import { buildPairingPayload, clientVersionSupported, minClientVersion, pairingExpiresAt, parseClientVersion } from './pairing.js';
+import {
+  buildPairingPayload,
+  clientVersionSupported,
+  minClientVersion,
+  pairingExpiresAt,
+  parseClientVersion,
+  parsePairingPayload,
+} from './pairing.js';
 
 describe('pairing payload', () => {
   test('builds a versioned voicestream URI with expiry and session metadata', () => {
@@ -34,5 +41,30 @@ describe('pairing payload', () => {
     expect(parseClientVersion('0.1.1', 1)).toBe(0);
     expect(clientVersionSupported(1)).toBe(true);
     expect(clientVersionSupported(0)).toBe(false);
+  });
+
+  test('round-trips generated pairing payload URIs', () => {
+    const built = buildPairingPayload({
+      serverUrl: 'http://127.0.0.1:3299',
+      deviceId: 'dev_roundtrip',
+      token: 'secret-token',
+      deviceType: 'android',
+      displayName: 'Android voice client',
+      protocolVersion: 1,
+      expiresAt: '2026-05-21T20:00:00.000Z',
+      pairingSessionId: 'pair_roundtrip',
+    });
+    const parsed = parsePairingPayload(built.payloadUri);
+    expect(parsed.serverUrl).toBe('http://127.0.0.1:3299');
+    expect(parsed.deviceId).toBe('dev_roundtrip');
+    expect(parsed.token).toBe('secret-token');
+    expect(parsed.displayName).toBe('Android voice client');
+    expect(parsed.pairingSessionId).toBe('pair_roundtrip');
+    expect(parsed.minClientVersion).toBe(minClientVersion());
+  });
+
+  test('rejects malformed pairing payloads', () => {
+    expect(() => parsePairingPayload('')).toThrow('pairing payload is empty');
+    expect(() => parsePairingPayload('https://example.com/pair')).toThrow('voicestream://pair');
   });
 });

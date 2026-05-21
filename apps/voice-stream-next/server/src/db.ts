@@ -90,12 +90,15 @@ export type VoiceSession = {
 export type TranscriptRecord = {
   id: string;
   voiceSessionId: string;
+  assistantThreadId: string;
   userId: string;
   deviceId: string;
   deviceName: string;
   mode: string;
   text: string;
   final: boolean;
+  sessionStartedAt: string;
+  sessionEndedAt: string | null;
   createdAt: string;
 };
 
@@ -260,12 +263,15 @@ function rowTranscript(row: any): TranscriptRecord {
   return {
     id: String(row.id),
     voiceSessionId: String(row.voice_session_id),
+    assistantThreadId: String(row.assistant_thread_id ?? ''),
     userId: String(row.user_id),
     deviceId: String(row.device_id ?? ''),
     deviceName: String(row.device_name ?? ''),
     mode: String(row.mode ?? ''),
     text: String(row.text ?? ''),
     final: asBool(row.final),
+    sessionStartedAt: String(row.session_started_at ?? row.created_at),
+    sessionEndedAt: row.session_ended_at == null ? null : String(row.session_ended_at),
     createdAt: String(row.created_at),
   };
 }
@@ -875,23 +881,39 @@ export class VoiceStreamNextDb {
       .run({ $id: newId('trn'), $voiceSessionId: voiceSessionId, $userId: userId, $text: trimmed, $createdAt: nowIso() });
   }
 
-  listTranscripts(userId: string, limit = 100): TranscriptRecord[] {
+  listTranscripts(userId: string, limit = 100, options: { deviceId?: string; voiceSessionId?: string } = {}): TranscriptRecord[] {
+    const filters = ['transcripts.user_id = $userId'];
+    const params: { $userId: string; $limit: number; $deviceId?: string; $voiceSessionId?: string } = {
+      $userId: userId,
+      $limit: limit,
+    };
+    if (options.deviceId) {
+      filters.push('voice_sessions.device_id = $deviceId');
+      params.$deviceId = options.deviceId;
+    }
+    if (options.voiceSessionId) {
+      filters.push('transcripts.voice_session_id = $voiceSessionId');
+      params.$voiceSessionId = options.voiceSessionId;
+    }
     return this.db
       .query(
         `
         SELECT transcripts.*,
                voice_sessions.device_id,
                voice_sessions.mode,
+               voice_sessions.assistant_thread_id,
+               voice_sessions.started_at AS session_started_at,
+               voice_sessions.ended_at AS session_ended_at,
                devices.display_name AS device_name
         FROM transcripts
         JOIN voice_sessions ON voice_sessions.id = transcripts.voice_session_id
         LEFT JOIN devices ON devices.id = voice_sessions.device_id
-        WHERE transcripts.user_id = $userId
+        WHERE ${filters.join(' AND ')}
         ORDER BY transcripts.created_at DESC
         LIMIT $limit
       `,
       )
-      .all({ $userId: userId, $limit: limit })
+      .all(params)
       .map(rowTranscript);
   }
 
@@ -1021,6 +1043,7 @@ export class VoiceStreamNextDb {
         threadCount: threads.length,
         deviceCount: devices.length,
         logCount: logs.length,
+        transcriptCount: this.listTranscripts(user.id, 200).length,
       },
       dbPath: this.path,
     };

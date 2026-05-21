@@ -62,3 +62,54 @@ export function clientVersionSupported(clientVersion: number | null): boolean {
   if (clientVersion == null) return true;
   return clientVersion >= minClientVersion();
 }
+
+export type ParsedPairingPayload = Omit<PairingPayload, 'token'> & {
+  token: string;
+};
+
+export function parsePairingPayload(raw: string): ParsedPairingPayload {
+  const trimmed = raw.trim();
+  if (!trimmed) throw Object.assign(new Error('pairing payload is empty'), { statusCode: 400 });
+
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    throw Object.assign(new Error('pairing payload is not a valid URI'), { statusCode: 400 });
+  }
+
+  if (url.protocol !== 'voicestream:' || url.hostname !== 'pair') {
+    throw Object.assign(new Error('pairing payload must use voicestream://pair'), { statusCode: 400 });
+  }
+
+  const read = (key: keyof PairingPayload): string => {
+    const value = url.searchParams.get(key)?.trim() ?? '';
+    if (!value) throw Object.assign(new Error(`pairing payload missing ${key}`), { statusCode: 400 });
+    return value;
+  };
+
+  const version = parseClientVersion(url.searchParams.get('version'), null);
+  if (version == null || version < 1) {
+    throw Object.assign(new Error('pairing payload missing version'), { statusCode: 400 });
+  }
+
+  const protocolVersion = parseClientVersion(url.searchParams.get('protocolVersion'), null);
+  if (protocolVersion == null || protocolVersion < 1) {
+    throw Object.assign(new Error('pairing payload missing protocolVersion'), { statusCode: 400 });
+  }
+
+  const parsedMinClientVersion = parseClientVersion(url.searchParams.get('minClientVersion'), minClientVersion()) ?? minClientVersion();
+
+  return {
+    version,
+    serverUrl: read('serverUrl').replace(/\/+$/, ''),
+    deviceId: read('deviceId'),
+    token: read('token'),
+    deviceType: read('deviceType'),
+    displayName: read('displayName'),
+    protocolVersion,
+    expiresAt: read('expiresAt'),
+    pairingSessionId: read('pairingSessionId'),
+    minClientVersion: parsedMinClientVersion,
+  };
+}
