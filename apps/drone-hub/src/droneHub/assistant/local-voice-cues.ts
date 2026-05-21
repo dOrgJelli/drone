@@ -56,8 +56,15 @@ const CUE_TONES: Record<LocalVoiceCue, Array<{ frequencyHz: number; durationMs: 
   ],
 };
 
+let lastPlayedCue = '';
+let lastPlayedAt = 0;
+
 export function playLocalVoiceCue(cue: LocalVoiceCue): void {
   if (typeof window === 'undefined') return;
+  const now = Date.now();
+  if (cue === lastPlayedCue && now - lastPlayedAt < 250) return;
+  lastPlayedCue = cue;
+  lastPlayedAt = now;
   const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
   if (!AudioContextClass) return;
 

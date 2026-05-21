@@ -1,5 +1,17 @@
 import { playLocalVoiceCue, type LocalVoiceCue } from './local-voice-cues';
 
+const SERVER_LOCAL_VOICE_CUES = new Set<LocalVoiceCue>([
+  'wake',
+  'sleep',
+  'status',
+  'unlock',
+  'sleeping_off',
+]);
+
+const DESKTOP_VOICE_SSE_RECONNECT_BASE_MS = 500;
+const DESKTOP_VOICE_SSE_RECONNECT_MAX_MS = 10_000;
+const DESKTOP_VOICE_SSE_MAX_RECONNECT_ATTEMPTS = 6;
+
 export type DesktopAssistantVoiceMode = 'off' | 'awake' | 'sleeping' | 'recording' | 'transcribing' | 'error';
 
 export type DesktopAssistantVoiceStatus = {
@@ -234,9 +246,18 @@ export function subscribeAssistantDesktopVoiceStatus(listener: (status: DesktopA
   };
   window.addEventListener(ASSISTANT_DESKTOP_VOICE_STATUS_EVENT, handler);
   let source: EventSource | null = null;
-  if (typeof window.EventSource !== 'undefined') {
-    source = new window.EventSource('/api/assistant/desktop-voice/events');
-    source.addEventListener('desktop_voice_status', (event) => {
+  let reconnectAttempt = 0;
+  let reconnectTimer: number | null = null;
+  let closed = false;
+
+  const clearReconnectTimer = () => {
+    if (reconnectTimer == null) return;
+    window.clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  };
+
+  const attachDesktopVoiceEventSource = (nextSource: EventSource) => {
+    nextSource.addEventListener('desktop_voice_status', (event) => {
       try {
         const status = JSON.parse((event as MessageEvent).data);
         dispatchAssistantDesktopVoiceStatus(status);
@@ -244,7 +265,7 @@ export function subscribeAssistantDesktopVoiceStatus(listener: (status: DesktopA
         // Ignore malformed event payloads.
       }
     });
-    source.addEventListener('desktop_voice_transcript_segment', (event) => {
+    nextSource.addEventListener('desktop_voice_transcript_segment', (event) => {
       try {
         const data = JSON.parse((event as MessageEvent).data);
         const text = String(data?.text ?? '').trim();
@@ -253,16 +274,16 @@ export function subscribeAssistantDesktopVoiceStatus(listener: (status: DesktopA
         // Ignore malformed event payloads.
       }
     });
-    source.addEventListener('desktop_voice_local_cue', (event) => {
+    nextSource.addEventListener('desktop_voice_local_cue', (event) => {
       try {
         const data = JSON.parse((event as MessageEvent).data);
-        const cue = String(data?.cue ?? '').trim();
-        if (cue === 'status') playLocalVoiceCue(cue);
+        const cue = String(data?.cue ?? '').trim() as LocalVoiceCue;
+        if (SERVER_LOCAL_VOICE_CUES.has(cue)) playLocalVoiceCue(cue);
       } catch {
         // Ignore malformed event payloads.
       }
     });
-    source.addEventListener('desktop_voice_speak', (event) => {
+    nextSource.addEventListener('desktop_voice_speak', (event) => {
       try {
         const data = JSON.parse((event as MessageEvent).data);
         const text = String(data?.text ?? '').trim();
@@ -271,7 +292,7 @@ export function subscribeAssistantDesktopVoiceStatus(listener: (status: DesktopA
         // Ignore malformed event payloads.
       }
     });
-    source.addEventListener('desktop_voice_speak_audio', (event) => {
+    nextSource.addEventListener('desktop_voice_speak_audio', (event) => {
       try {
         const data = JSON.parse((event as MessageEvent).data);
         const audioBase64 = String(data?.audioBase64 ?? '').trim();
@@ -281,9 +302,39 @@ export function subscribeAssistantDesktopVoiceStatus(listener: (status: DesktopA
         // Ignore malformed event payloads.
       }
     });
-    source.onerror = () => {
-      dispatchAssistantDesktopVoiceStatus({ mode: 'error', message: 'Desktop voice event stream disconnected.' });
+    nextSource.onopen = () => {
+      reconnectAttempt = 0;
     };
+    nextSource.onerror = () => {
+      nextSource.close();
+      if (closed) return;
+      if (reconnectAttempt >= DESKTOP_VOICE_SSE_MAX_RECONNECT_ATTEMPTS) {
+        dispatchAssistantDesktopVoiceStatus({ mode: 'error', message: 'Desktop voice event stream disconnected.' });
+        return;
+      }
+      const delayMs = Math.min(
+        DESKTOP_VOICE_SSE_RECONNECT_MAX_MS,
+        DESKTOP_VOICE_SSE_RECONNECT_BASE_MS * (2 ** reconnectAttempt),
+      );
+      reconnectAttempt += 1;
+      clearReconnectTimer();
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        if (closed) return;
+        connectDesktopVoiceEventSource();
+      }, delayMs);
+    };
+  };
+
+  const connectDesktopVoiceEventSource = () => {
+    if (typeof window.EventSource === 'undefined') return;
+    source?.close();
+    source = new window.EventSource('/api/assistant/desktop-voice/events');
+    attachDesktopVoiceEventSource(source);
+  };
+
+  if (typeof window.EventSource !== 'undefined') {
+    connectDesktopVoiceEventSource();
   } else {
     fetch('/api/assistant/desktop-voice/status')
       .then((response) => response.json())
@@ -291,7 +342,10 @@ export function subscribeAssistantDesktopVoiceStatus(listener: (status: DesktopA
       .catch((error) => dispatchAssistantDesktopVoiceStatus({ mode: 'error', message: error?.message ?? String(error) }));
   }
   return () => {
+    closed = true;
+    clearReconnectTimer();
     window.removeEventListener(ASSISTANT_DESKTOP_VOICE_STATUS_EVENT, handler);
     source?.close();
+    source = null;
   };
 }
