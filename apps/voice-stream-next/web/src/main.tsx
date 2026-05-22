@@ -1,145 +1,30 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-import { ClerkProvider, SignedIn, SignedOut, SignIn, UserButton, useAuth, useUser } from '@clerk/clerk-react';
+import { ClerkProvider, SignedIn, SignedOut, SignIn, UserButton, useAuth } from '@clerk/clerk-react';
 import QRCode from 'qrcode';
 import { ApprovalCodeRecognizer, type ApprovalCodeUpdate } from '../../server/src/approval-code.js';
 import {
   approvalRecognizerOptions,
   VOICE_APPROVAL_SETTINGS_DEFAULT,
-  type VoiceApprovalSettings,
 } from '../../server/src/voice-approval-settings.js';
+import { createClerkClient, createDevClient, readDevUser } from './apiClient.js';
+import type {
+  ApiClient,
+  AssistantMessage,
+  AssistantThread,
+  DashboardData,
+  DashboardView,
+  DesktopVoskStatus,
+  DesktopVoskText,
+  DeviceRecord,
+  VoiceApprovalFormState,
+  VoiceSettings,
+} from './dashboardTypes.js';
+import { timeLabel } from './time.js';
+import { TranscriptPanel } from './TranscriptPanel.js';
 import './styles.css';
 
-type UserProfile = {
-  id: string;
-  clerkUserId: string;
-  displayName: string;
-  email: string;
-  admin: boolean;
-};
-
-type VoiceSettings = VoiceApprovalSettings & {
-  updatedAt: string;
-};
-
-type VoiceApprovalFormState = VoiceApprovalSettings;
-
-type DeviceRecord = {
-  id: string;
-  userId: string;
-  deviceType: string;
-  displayName: string;
-  tokenHint: string;
-  lastSeenAt: string;
-  createdAt: string;
-  revokedAt?: string | null;
-};
-
-type PairingSessionRecord = {
-  id: string;
-  userId: string;
-  deviceId: string;
-  expiresAt: string;
-  claimedAt: string | null;
-  createdAt: string;
-};
-
-type LogRecord = {
-  id: string;
-  deviceId: string | null;
-  source: string;
-  level: string;
-  message: string;
-  detailsJson: string | null;
-  createdAt: string;
-};
-
-type AssistantThread = {
-  id: string;
-  title: string;
-  source: string;
-  deviceId: string | null;
-  updatedAt: string;
-  createdAt: string;
-};
-
-type AssistantMessage = {
-  id: string;
-  role: 'user' | 'assistant';
-  content: string;
-  spokenText: string | null;
-  createdAt: string;
-};
-
-type TranscriptRecord = {
-  id: string;
-  voiceSessionId: string;
-  assistantThreadId: string;
-  deviceId: string;
-  deviceName: string;
-  mode: string;
-  text: string;
-  final: boolean;
-  sessionStartedAt: string;
-  sessionEndedAt: string | null;
-  createdAt: string;
-};
-
-type TranscriptSessionGroup = {
-  voiceSessionId: string;
-  assistantThreadId: string;
-  deviceId: string;
-  deviceName: string;
-  mode: string;
-  sessionStartedAt: string;
-  sessionEndedAt: string | null;
-  transcripts: TranscriptRecord[];
-};
-
-type ClientStatusRecord = {
-  deviceId: string;
-  deviceType: string;
-  displayName: string;
-  mode: string;
-  status: string;
-  microphone: string;
-  protocolVersion: number | null;
-  appVersion: string | null;
-  lastError: string | null;
-  reportedAt: string;
-  updatedAt: string;
-};
-
-type DashboardData = {
-  ok: true;
-  authMode: 'clerk' | 'dev';
-  user: UserProfile;
-  settings: VoiceSettings;
-  threads: AssistantThread[];
-  logs: LogRecord[];
-  transcripts: TranscriptRecord[];
-  clientStatuses: ClientStatusRecord[];
-  approvalCodes: { id: string; code: string; source: string; createdAt: string }[];
-  devices: DeviceRecord[];
-  pairingSessions: PairingSessionRecord[];
-  adminDevices: DeviceRecord[];
-  adminClientStatuses: ClientStatusRecord[];
-  stats: { threadCount: number; deviceCount: number; logCount: number; transcriptCount: number };
-  dbPath: string;
-};
-
-type ApiClient = {
-  request<T>(path: string, init?: RequestInit): Promise<T>;
-};
-
-type DevUser = {
-  email: string;
-  name: string;
-  admin: boolean;
-};
-
 const publishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string | undefined;
-const devUserStorageKey = 'voiceStreamNext.devUser';
 const desktopDeviceStorageKey = 'voiceStreamNext.desktopDevice';
 
 declare global {
@@ -158,248 +43,14 @@ declare global {
   }
 }
 
-type DesktopVoskStatus = {
-  available: boolean;
-  modelPath?: string;
-  error?: string;
-};
-
-type DesktopVoskText = {
-  text: string;
-  final?: boolean;
-};
-
-function defaultDevUser(): DevUser {
-  return { email: 'developer@example.local', name: 'Local Developer', admin: true };
-}
-
-function readDevUser(): DevUser {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(devUserStorageKey) || 'null');
-    return {
-      email: String(parsed?.email ?? defaultDevUser().email),
-      name: String(parsed?.name ?? defaultDevUser().name),
-      admin: Boolean(parsed?.admin ?? true),
-    };
-  } catch {
-    return defaultDevUser();
-  }
-}
-
-function createDevClient(user: DevUser): ApiClient {
-  return {
-    async request<T>(path: string, init?: RequestInit) {
-      const headers = new Headers(init?.headers);
-      headers.set('content-type', headers.get('content-type') || 'application/json');
-      headers.set('x-voice-dev-user-email', user.email);
-      headers.set('x-voice-dev-user-name', user.name);
-      headers.set('x-voice-dev-admin', user.admin ? '1' : '0');
-      return requestJson<T>(path, { ...init, headers });
-    },
-  };
-}
-
-function createClerkClient(getToken: () => Promise<string | null>): ApiClient {
-  return {
-    async request<T>(path: string, init?: RequestInit) {
-      const headers = new Headers(init?.headers);
-      headers.set('content-type', headers.get('content-type') || 'application/json');
-      const token = await getToken();
-      if (token) headers.set('authorization', `Bearer ${token}`);
-      return requestJson<T>(path, { ...init, headers });
-    },
-  };
-}
-
-async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, init);
-  const text = await response.text();
-  let data: any = null;
-  if (text) {
-    try {
-      data = JSON.parse(text);
-    } catch {
-      throw new Error(`Expected JSON from ${path}`);
-    }
-  }
-  if (!response.ok) throw new Error(data?.error ?? `${response.status} ${response.statusText}`);
-  return data as T;
-}
-
-function timeLabel(iso: string): string {
-  const date = new Date(iso);
-  if (!Number.isFinite(date.getTime())) return iso;
-  return date.toLocaleString();
-}
-
-function groupTranscriptsBySession(transcripts: TranscriptRecord[]): TranscriptSessionGroup[] {
-  const groups = new Map<string, TranscriptSessionGroup>();
-  for (const transcript of transcripts) {
-    const existing = groups.get(transcript.voiceSessionId);
-    if (existing) {
-      existing.transcripts.push(transcript);
-      continue;
-    }
-    groups.set(transcript.voiceSessionId, {
-      voiceSessionId: transcript.voiceSessionId,
-      assistantThreadId: transcript.assistantThreadId,
-      deviceId: transcript.deviceId,
-      deviceName: transcript.deviceName,
-      mode: transcript.mode,
-      sessionStartedAt: transcript.sessionStartedAt,
-      sessionEndedAt: transcript.sessionEndedAt,
-      transcripts: [transcript],
-    });
-  }
-  return [...groups.values()].sort(
-    (left, right) => Date.parse(right.sessionStartedAt) - Date.parse(left.sessionStartedAt),
-  );
-}
-
-function TranscriptPanel({
-  transcripts,
-  devices,
-  threads,
-  onOpenThread,
-}: {
-  transcripts: TranscriptRecord[];
-  devices: DeviceRecord[];
-  threads: AssistantThread[];
-  onOpenThread: (threadId: string) => void;
-}) {
-  const [deviceFilter, setDeviceFilter] = React.useState('all');
-  const [modeFilter, setModeFilter] = React.useState('all');
-  const [query, setQuery] = React.useState('');
-
-  const filtered = React.useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    return transcripts.filter((transcript) => {
-      if (deviceFilter !== 'all' && transcript.deviceId !== deviceFilter) return false;
-      if (modeFilter !== 'all' && transcript.mode !== modeFilter) return false;
-      if (!needle) return true;
-      return (
-        transcript.text.toLowerCase().includes(needle) ||
-        transcript.deviceName.toLowerCase().includes(needle) ||
-        transcript.mode.toLowerCase().includes(needle)
-      );
-    });
-  }, [deviceFilter, modeFilter, query, transcripts]);
-
-  const groups = React.useMemo(() => groupTranscriptsBySession(filtered), [filtered]);
-  const modes = React.useMemo(
-    () => [...new Set(transcripts.map((transcript) => transcript.mode).filter(Boolean))].sort(),
-    [transcripts],
-  );
-
-  async function copyVisibleTranscripts() {
-    const text = filtered
-      .map((transcript) => `[${transcript.createdAt}] ${transcript.deviceName || transcript.deviceId} ${transcript.mode}: ${transcript.text}`)
-      .join('\n');
-    await navigator.clipboard?.writeText(text);
-  }
-
-  function threadTitle(threadId: string): string {
-    return threads.find((thread) => thread.id === threadId)?.title ?? 'Voice thread';
-  }
-
-  return (
-    <section className="panel transcript-panel">
-      <div className="panel-heading">
-        <div>
-          <h2>Transcripts</h2>
-          <p>
-            {filtered.length} of {transcripts.length} final transcripts grouped by voice session.
-          </p>
-        </div>
-        <button type="button" onClick={() => void copyVisibleTranscripts()} disabled={filtered.length === 0}>
-          Copy Visible
-        </button>
-      </div>
-
-      <div className="transcript-toolbar">
-        <label>
-          Device
-          <select value={deviceFilter} onChange={(event) => setDeviceFilter(event.target.value)}>
-            <option value="all">All devices</option>
-            {devices.map((device) => (
-              <option key={device.id} value={device.id}>
-                {device.displayName}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Mode
-          <select value={modeFilter} onChange={(event) => setModeFilter(event.target.value)}>
-            <option value="all">All modes</option>
-            {modes.map((mode) => (
-              <option key={mode} value={mode}>
-                {mode}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="transcript-search">
-          Search
-          <input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Filter transcript text..."
-          />
-        </label>
-      </div>
-
-      <div className="transcript-list">
-        {groups.map((group) => (
-          <article key={group.voiceSessionId} className="transcript-session">
-            <header className="transcript-session-header">
-              <div>
-                <strong>{group.deviceName || group.deviceId}</strong>
-                <span>
-                  {group.mode} / {group.transcripts.length} transcript{group.transcripts.length === 1 ? '' : 's'}
-                </span>
-                <span>
-                  {timeLabel(group.sessionStartedAt)}
-                  {group.sessionEndedAt ? ` – ${timeLabel(group.sessionEndedAt)}` : ' – active'}
-                </span>
-              </div>
-              <div className="transcript-session-actions">
-                {group.assistantThreadId ? (
-                  <button type="button" className="link-button" onClick={() => onOpenThread(group.assistantThreadId)}>
-                    Open {threadTitle(group.assistantThreadId)}
-                  </button>
-                ) : null}
-              </div>
-            </header>
-            <div className="transcript-session-body">
-              {group.transcripts.map((transcript) => (
-                <article key={transcript.id} className="transcript-row">
-                  <div>
-                    <span>{timeLabel(transcript.createdAt)}</span>
-                    <span className="transcript-mode-pill">{transcript.mode}</span>
-                  </div>
-                  <p>{transcript.text}</p>
-                </article>
-              ))}
-            </div>
-          </article>
-        ))}
-        {groups.length === 0 ? (
-          <div className="empty-note">
-            {transcripts.length === 0 ? 'No transcripts yet.' : 'No transcripts match the current filters.'}
-          </div>
-        ) : null}
-      </div>
-    </section>
-  );
-}
-
 function codeValue(raw: string): string {
   return raw.replace(/\D/g, '').slice(0, 12);
 }
 
-function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identitySlot: React.ReactNode; devMode?: boolean }) {
+function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: React.ReactNode }) {
   const [dashboard, setDashboard] = React.useState<DashboardData | null>(null);
+  const [activeView, setActiveView] = React.useState<DashboardView>('threads');
+  const [threadSidebarOpen, setThreadSidebarOpen] = React.useState(true);
   const [activeThreadId, setActiveThreadId] = React.useState<string | null>(null);
   const [messages, setMessages] = React.useState<AssistantMessage[]>([]);
   const [loading, setLoading] = React.useState(true);
@@ -414,6 +65,7 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
   const [pairingExpiresAt, setPairingExpiresAt] = React.useState<string | null>(null);
   const [pairingDeviceId, setPairingDeviceId] = React.useState<string | null>(null);
   const [approvalSettings, setApprovalSettings] = React.useState<VoiceApprovalFormState>(VOICE_APPROVAL_SETTINGS_DEFAULT);
+  const settingsHydratedRef = React.useRef(false);
 
   const activeThread = dashboard?.threads.find((thread) => thread.id === activeThreadId) ?? dashboard?.threads[0] ?? null;
 
@@ -422,19 +74,22 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
     try {
       const data = await client.request<DashboardData>('/api/dashboard');
       setDashboard(data);
-      setApprovalSettings({
-        triggerPhrase: data.settings.triggerPhrase,
-        unlockCode: data.settings.unlockCode,
-        lockCode: data.settings.lockCode,
-        lockedOffCode: data.settings.lockedOffCode,
-        minDigits: data.settings.minDigits,
-        maxDigits: data.settings.maxDigits,
-        stableMs: data.settings.stableMs,
-        collectTimeoutMs: data.settings.collectTimeoutMs,
-        duplicateCooldownMs: data.settings.duplicateCooldownMs,
-        finalizeCheckIntervalMs: data.settings.finalizeCheckIntervalMs,
-        postPromptCommandSuppressionMs: data.settings.postPromptCommandSuppressionMs,
-      });
+      if (!settingsHydratedRef.current) {
+        setApprovalSettings({
+          triggerPhrase: data.settings.triggerPhrase,
+          unlockCode: data.settings.unlockCode,
+          lockCode: data.settings.lockCode,
+          lockedOffCode: data.settings.lockedOffCode,
+          minDigits: data.settings.minDigits,
+          maxDigits: data.settings.maxDigits,
+          stableMs: data.settings.stableMs,
+          collectTimeoutMs: data.settings.collectTimeoutMs,
+          duplicateCooldownMs: data.settings.duplicateCooldownMs,
+          finalizeCheckIntervalMs: data.settings.finalizeCheckIntervalMs,
+          postPromptCommandSuppressionMs: data.settings.postPromptCommandSuppressionMs,
+        });
+        settingsHydratedRef.current = true;
+      }
       if (!activeThreadId && data.threads[0]) setActiveThreadId(data.threads[0].id);
     } catch (err: any) {
       setError(err?.message ?? String(err));
@@ -467,6 +122,34 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
 
   React.useEffect(() => {
     void loadMessages(activeThread?.id ?? null);
+  }, [activeThread?.id, loadMessages]);
+
+  React.useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState === 'hidden') return;
+      void loadDashboard();
+    };
+    const timer = window.setInterval(refresh, 4000);
+    window.addEventListener('focus', refresh);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refresh);
+    };
+  }, [loadDashboard]);
+
+  React.useEffect(() => {
+    const threadId = activeThread?.id ?? null;
+    if (!threadId) return undefined;
+    const refresh = () => {
+      if (document.visibilityState === 'hidden') return;
+      void loadMessages(threadId);
+    };
+    const timer = window.setInterval(refresh, 2500);
+    window.addEventListener('focus', refresh);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refresh);
+    };
   }, [activeThread?.id, loadMessages]);
 
   async function createThread() {
@@ -666,9 +349,9 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
   }
 
   function openThreadFromTranscript(threadId: string) {
+    setActiveView('threads');
     setActiveThreadId(threadId);
     setNotice('Opened assistant thread from transcript session.');
-    window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   if (loading) {
@@ -694,70 +377,167 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
     );
   }
 
+  const devices = dashboard?.devices ?? [];
+  const threads = dashboard?.threads ?? [];
+  const logs = dashboard?.logs ?? [];
+  const transcripts = dashboard?.transcripts ?? [];
+  const connectedDeviceIds = new Set((dashboard?.clientStatuses ?? []).map((status) => status.deviceId));
+  const navItems: Array<{ id: DashboardView; label: string; count?: number }> = [
+    { id: 'threads', label: 'Chat', count: threads.length },
+    { id: 'devices', label: 'Devices', count: devices.length },
+    { id: 'settings', label: 'Settings' },
+    { id: 'activity', label: 'Activity', count: transcripts.length + logs.length },
+  ];
+
   return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div>
-          <div className="kicker">Voice Stream Next</div>
-          <h1>Voice and assistant control room</h1>
+    <main className="assistant-dock-shell">
+      {threadSidebarOpen ? <aside className="assistant-thread-sidebar">
+        <div className="assistant-thread-sidebar-header">
+          <div className="assistant-sidebar-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false">
+              <path d="M4 5h16v10H8l-4 4V5Z" />
+            </svg>
+          </div>
+          <div className="assistant-sidebar-title">
+            <span>Threads</span>
+            <small>{threads.length} assistant</small>
+          </div>
+          <button
+            type="button"
+            className="assistant-sidebar-collapse-button"
+            onClick={() => setThreadSidebarOpen(false)}
+            title="Hide thread sidebar"
+            aria-label="Hide thread sidebar"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M15 18l-6-6 6-6" />
+              <path d="M20 4v16" />
+            </svg>
+          </button>
         </div>
-        <div className="identity">
-          {devMode ? <span className="dev-pill">Dev auth</span> : null}
-          {identitySlot}
+
+        <div className="assistant-thread-sidebar-create">
+          <button type="button" onClick={() => void createThread()} disabled={busy}>
+            + New Thread
+          </button>
         </div>
-      </header>
 
-      {error ? <div className="banner error">{error}</div> : null}
-      {notice ? <div className="banner notice">{notice}</div> : null}
+        <div className="assistant-thread-list">
+          {threads.map((thread) => {
+            const active = thread.id === activeThread?.id;
+            const messageCount = active ? messages.length : 0;
+            return (
+              <button
+                key={thread.id}
+                type="button"
+                className={active ? 'assistant-thread-item active' : 'assistant-thread-item'}
+                onClick={() => {
+                  setActiveView('threads');
+                  setActiveThreadId(thread.id);
+                }}
+              >
+                <div>
+                  <span className="assistant-thread-dot" />
+                  <strong>{thread.title || 'Untitled thread'}</strong>
+                </div>
+                <small>
+                  {thread.source} · {timeLabel(thread.updatedAt)}
+                  {messageCount ? ` · ${messageCount}` : ''}
+                </small>
+              </button>
+            );
+          })}
+          {threads.length === 0 ? <div className="empty-note">No assistant threads yet.</div> : null}
+        </div>
 
-      <section className="status-grid">
-        <Metric label="Threads" value={dashboard?.stats.threadCount ?? 0} />
-        <Metric label="Devices" value={dashboard?.stats.deviceCount ?? 0} />
-        <Metric label="Logs" value={dashboard?.stats.logCount ?? 0} />
-        <Metric label="Role" value={dashboard?.user.admin ? 'Admin' : 'User'} />
-      </section>
+        <div className="assistant-sidebar-footer">
+          <span>Connected devices</span>
+          <strong>{connectedDeviceIds.size}/{devices.length}</strong>
+        </div>
+      </aside> : null}
 
-      {window.voiceStreamDesktop?.isDesktop ? <DesktopVoicePanel client={client} onRefresh={loadDashboard} /> : null}
-
-      <section className="dashboard-grid">
-        <section className="panel assistant-panel">
-          <div className="panel-heading">
-            <div>
-              <h2>Assistant Threads</h2>
-              <p>{activeThread ? activeThread.title : 'Create a thread to start.'}</p>
-            </div>
-            <button type="button" onClick={() => void createThread()} disabled={busy}>
-              New Thread
-            </button>
+      <section className="assistant-dock-main">
+        <header className="assistant-dock-toolbar">
+          <button
+            type="button"
+            className={threadSidebarOpen ? 'assistant-sidebar-toggle active' : 'assistant-sidebar-toggle'}
+            onClick={() => setThreadSidebarOpen((open) => !open)}
+            title={threadSidebarOpen ? 'Hide thread sidebar' : 'Show thread sidebar'}
+            aria-label={threadSidebarOpen ? 'Hide thread sidebar' : 'Show thread sidebar'}
+            aria-pressed={threadSidebarOpen}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              {threadSidebarOpen ? (
+                <>
+                  <path d="M15 18l-6-6 6-6" />
+                  <path d="M20 4v16" />
+                </>
+              ) : (
+                <>
+                  <path d="M9 18l6-6-6-6" />
+                  <path d="M4 4v16" />
+                </>
+              )}
+            </svg>
+          </button>
+          <div className="assistant-dock-title">
+            <strong>{activeView === 'threads' ? activeThread?.title ?? 'Assistant' : navItems.find((item) => item.id === activeView)?.label}</strong>
+            <span>
+              <span className="assistant-status-dot" />
+              {activeView === 'threads' ? (activeThread ? 'idle' : 'no thread') : 'live'}
+            </span>
           </div>
 
-          <div className="thread-layout">
-            <aside className="thread-list">
-              {(dashboard?.threads ?? []).map((thread) => (
-                <button
-                  key={thread.id}
-                  type="button"
-                  className={thread.id === activeThread?.id ? 'thread-item active' : 'thread-item'}
-                  onClick={() => setActiveThreadId(thread.id)}
-                >
-                  <span>{thread.title}</span>
-                  <small>{thread.source} / {timeLabel(thread.updatedAt)}</small>
-                </button>
-              ))}
-              {dashboard?.threads.length === 0 ? <div className="empty-note">No assistant threads yet.</div> : null}
-            </aside>
+          <div className="assistant-toolbar-actions">
+            {navItems.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className={activeView === item.id ? 'assistant-toolbar-tab active' : 'assistant-toolbar-tab'}
+                onClick={() => setActiveView(item.id)}
+              >
+                {item.label}
+                {typeof item.count === 'number' ? <span>{item.count}</span> : null}
+              </button>
+            ))}
+            {!threadSidebarOpen ? (
+              <button
+                type="button"
+                className="assistant-toolbar-icon-button"
+                onClick={() => void createThread()}
+                disabled={busy}
+                title="New assistant thread"
+                aria-label="New assistant thread"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 5v14" />
+                  <path d="M5 12h14" />
+                </svg>
+              </button>
+            ) : null}
+            <span className="assistant-live-indicator">Live</span>
+            {identitySlot ? <div className="assistant-identity">{identitySlot}</div> : null}
+          </div>
+        </header>
 
-            <div className="conversation">
-              <div className="messages">
+        {error ? <div className="banner error">{error}</div> : null}
+        {notice ? <div className="banner notice">{notice}</div> : null}
+
+        <section className="assistant-dock-content">
+          {activeView === 'threads' ? (
+            <section className="assistant-chat-pane">
+              <div className="assistant-messages">
                 {messages.map((message) => (
-                  <article key={message.id} className={`message ${message.role}`}>
-                    <div className="message-role">{message.role}</div>
+                  <article key={message.id} className={`assistant-message ${message.role}`}>
+                    <div className="assistant-message-role">{message.role === 'assistant' ? 'Assistant' : 'You'}</div>
                     <p>{message.content}</p>
                   </article>
                 ))}
                 {activeThread && messages.length === 0 ? <div className="empty-note">This thread is empty.</div> : null}
+                {!activeThread ? <div className="empty-note">Create a thread to start.</div> : null}
               </div>
-              <form className="composer" onSubmit={(event) => void sendMessage(event)}>
+
+              <form className="assistant-composer" onSubmit={(event) => void sendMessage(event)}>
                 <textarea
                   value={messageDraft}
                   onChange={(event) => setMessageDraft(event.target.value)}
@@ -768,260 +548,261 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
                   Send
                 </button>
               </form>
-            </div>
-          </div>
-        </section>
+            </section>
+          ) : null}
 
-        <aside className="side-stack">
-          <section className="panel">
-            <h2>Profile</h2>
-            <dl className="profile-list">
-              <div>
-                <dt>Name</dt>
-                <dd>{dashboard?.user.displayName}</dd>
-              </div>
-              <div>
-                <dt>Email</dt>
-                <dd>{dashboard?.user.email}</dd>
-              </div>
-              <div>
-                <dt>Database</dt>
-                <dd>{dashboard?.dbPath}</dd>
-              </div>
-            </dl>
-          </section>
-
-          <section className="panel">
-            <h2>Voice Approval</h2>
-            <form className="settings-form" onSubmit={(event) => void saveApprovalSettings(event)}>
-              <label>
-                Trigger phrase
-                <input
-                  value={approvalSettings.triggerPhrase}
-                  onChange={(event) => setApprovalSettings((prev) => ({ ...prev, triggerPhrase: event.target.value }))}
-                />
-              </label>
-              <label>
-                Unlock
-                <input
-                  value={approvalSettings.unlockCode}
-                  onChange={(event) => setApprovalSettings((prev) => ({ ...prev, unlockCode: codeValue(event.target.value) }))}
-                />
-              </label>
-              <label>
-                Lock
-                <input
-                  value={approvalSettings.lockCode}
-                  onChange={(event) => setApprovalSettings((prev) => ({ ...prev, lockCode: codeValue(event.target.value) }))}
-                />
-              </label>
-              <label>
-                Off
-                <input
-                  value={approvalSettings.lockedOffCode}
-                  onChange={(event) => setApprovalSettings((prev) => ({ ...prev, lockedOffCode: codeValue(event.target.value) }))}
-                />
-              </label>
-              <label>
-                Min digits
-                <input
-                  type="number"
-                  min={1}
-                  max={12}
-                  value={approvalSettings.minDigits}
-                  onChange={(event) => setApprovalSettings((prev) => ({ ...prev, minDigits: Number(event.target.value) }))}
-                />
-              </label>
-              <label>
-                Max digits
-                <input
-                  type="number"
-                  min={1}
-                  max={12}
-                  value={approvalSettings.maxDigits}
-                  onChange={(event) => setApprovalSettings((prev) => ({ ...prev, maxDigits: Number(event.target.value) }))}
-                />
-              </label>
-              <label>
-                Stable ms
-                <input
-                  type="number"
-                  min={250}
-                  max={3000}
-                  value={approvalSettings.stableMs}
-                  onChange={(event) => setApprovalSettings((prev) => ({ ...prev, stableMs: Number(event.target.value) }))}
-                />
-              </label>
-              <label>
-                Collection timeout ms
-                <input
-                  type="number"
-                  min={1000}
-                  max={15000}
-                  value={approvalSettings.collectTimeoutMs}
-                  onChange={(event) => setApprovalSettings((prev) => ({ ...prev, collectTimeoutMs: Number(event.target.value) }))}
-                />
-              </label>
-              <label>
-                Duplicate cooldown ms
-                <input
-                  type="number"
-                  min={0}
-                  max={15000}
-                  value={approvalSettings.duplicateCooldownMs}
-                  onChange={(event) => setApprovalSettings((prev) => ({ ...prev, duplicateCooldownMs: Number(event.target.value) }))}
-                />
-              </label>
-              <label>
-                Finalize interval ms
-                <input
-                  type="number"
-                  min={100}
-                  max={1000}
-                  value={approvalSettings.finalizeCheckIntervalMs}
-                  onChange={(event) =>
-                    setApprovalSettings((prev) => ({ ...prev, finalizeCheckIntervalMs: Number(event.target.value) }))
-                  }
-                />
-              </label>
-              <button type="submit" disabled={busy}>
-                Save Approval Settings
-              </button>
-            </form>
-          </section>
-
-          <section className="panel">
-            <h2>Pair Device</h2>
-            <form className="settings-form" onSubmit={(event) => void pairDevice(event)}>
-              <label>
-                Type
-                <select value={deviceType} onChange={(event) => setDeviceType(event.target.value)}>
-                  <option value="desktop">Desktop</option>
-                  <option value="android">Android</option>
-                </select>
-              </label>
-              <label>
-                Name
-                <input value={deviceName} onChange={(event) => setDeviceName(event.target.value)} />
-              </label>
-              <button type="submit" disabled={busy || !deviceName.trim()}>
-                Create QR Payload
-              </button>
-            </form>
-            {pairingText ? (
-              <div className="pairing-payload">
-                <small>QR / pairing payload</small>
-                {pairingExpiresAt ? <div className="pairing-meta">Expires {timeLabel(pairingExpiresAt)}</div> : null}
-                {pairingQr ? <img src={pairingQr} alt="Device pairing QR" /> : null}
-                <textarea readOnly value={pairingText} onFocus={(event) => event.currentTarget.select()} />
-                <div className="pairing-actions">
-                  <button type="button" onClick={() => void copyPairingPayload()}>
-                    Copy Payload
+          {activeView === 'devices' ? (
+            <section className="assistant-utility-grid">
+              <section className="assistant-panel">
+                <div className="assistant-panel-header">
+                  <div>
+                    <span className="hub-kicker">Pairing</span>
+                    <h2>Pair Device</h2>
+                  </div>
+                </div>
+                <form className="settings-form" onSubmit={(event) => void pairDevice(event)}>
+                  <label>
+                    Type
+                    <select value={deviceType} onChange={(event) => setDeviceType(event.target.value)}>
+                      <option value="desktop">Desktop</option>
+                      <option value="android">Android</option>
+                    </select>
+                  </label>
+                  <label>
+                    Name
+                    <input value={deviceName} onChange={(event) => setDeviceName(event.target.value)} />
+                  </label>
+                  <button type="submit" disabled={busy || !deviceName.trim()}>
+                    Create QR Payload
                   </button>
-                  <button type="button" onClick={() => void sharePairingPayload()}>
-                    Share
-                  </button>
+                </form>
+                {pairingText ? (
+                  <div className="pairing-payload">
+                    <small>Pairing payload</small>
+                    {pairingExpiresAt ? <div className="pairing-meta">Expires {timeLabel(pairingExpiresAt)}</div> : null}
+                    {pairingQr ? <img src={pairingQr} alt="Device pairing QR" /> : null}
+                    <textarea readOnly value={pairingText} onFocus={(event) => event.currentTarget.select()} />
+                    <div className="pairing-actions">
+                      <button type="button" onClick={() => void copyPairingPayload()}>
+                        Copy Payload
+                      </button>
+                      <button type="button" onClick={() => void sharePairingPayload()}>
+                        Share
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+              </section>
+
+              <section className="assistant-panel">
+                <div className="assistant-panel-header">
+                  <div>
+                    <span className="hub-kicker">Fleet</span>
+                    <h2>Devices</h2>
+                  </div>
+                </div>
+                <div className="device-list">
+                  {devices.map((device) => {
+                    const status = dashboard?.clientStatuses.find((entry) => entry.deviceId === device.id);
+                    const pairing = dashboard?.pairingSessions.find((entry) => entry.deviceId === device.id);
+                    return (
+                      <article key={device.id} className="device-row managed-device-row">
+                        <div>
+                          <strong>{device.displayName}</strong>
+                          <span>{device.deviceType}</span>
+                          <span>{status ? `${status.mode} / ${status.status}` : 'No live status'}</span>
+                          {pairing && !pairing.claimedAt ? <span>Pairing expires {timeLabel(pairing.expiresAt)}</span> : null}
+                        </div>
+                        <div className="device-actions">
+                          <button type="button" disabled={busy} onClick={() => void sendDeviceCommand(device.id, 'query_status')}>
+                            Query
+                          </button>
+                          <button type="button" disabled={busy} onClick={() => void sendDeviceCommand(device.id, 'sleep')}>
+                            Sleep
+                          </button>
+                          <button type="button" disabled={busy} onClick={() => void sendDeviceCommand(device.id, 'off')}>
+                            Off
+                          </button>
+                          <button type="button" disabled={busy} onClick={() => void rotateDeviceToken(device.id)}>
+                            Rotate
+                          </button>
+                          <button type="button" disabled={busy} onClick={() => void revokeDevice(device.id)}>
+                            Revoke
+                          </button>
+                        </div>
+                      </article>
+                    );
+                  })}
+                  {devices.length === 0 ? <div className="empty-note">No paired devices yet.</div> : null}
+                </div>
+              </section>
+            </section>
+          ) : null}
+
+          {activeView === 'settings' ? (
+            <section className="assistant-panel settings-section">
+              <div className="assistant-panel-header">
+                <div>
+                  <span className="hub-kicker">Settings</span>
+                  <h2>Voice Approval</h2>
                 </div>
               </div>
-            ) : null}
-          </section>
+              <form className="settings-form settings-grid" onSubmit={(event) => void saveApprovalSettings(event)}>
+                <label>
+                  Trigger phrase
+                  <input
+                    value={approvalSettings.triggerPhrase}
+                    onChange={(event) => setApprovalSettings((prev) => ({ ...prev, triggerPhrase: event.target.value }))}
+                  />
+                </label>
+                <label>
+                  Unlock
+                  <input
+                    value={approvalSettings.unlockCode}
+                    onChange={(event) => setApprovalSettings((prev) => ({ ...prev, unlockCode: codeValue(event.target.value) }))}
+                  />
+                </label>
+                <label>
+                  Lock
+                  <input
+                    value={approvalSettings.lockCode}
+                    onChange={(event) => setApprovalSettings((prev) => ({ ...prev, lockCode: codeValue(event.target.value) }))}
+                  />
+                </label>
+                <label>
+                  Off
+                  <input
+                    value={approvalSettings.lockedOffCode}
+                    onChange={(event) => setApprovalSettings((prev) => ({ ...prev, lockedOffCode: codeValue(event.target.value) }))}
+                  />
+                </label>
+                <label>
+                  Min digits
+                  <input
+                    type="number"
+                    min={1}
+                    max={12}
+                    value={approvalSettings.minDigits}
+                    onChange={(event) => setApprovalSettings((prev) => ({ ...prev, minDigits: Number(event.target.value) }))}
+                  />
+                </label>
+                <label>
+                  Max digits
+                  <input
+                    type="number"
+                    min={1}
+                    max={12}
+                    value={approvalSettings.maxDigits}
+                    onChange={(event) => setApprovalSettings((prev) => ({ ...prev, maxDigits: Number(event.target.value) }))}
+                  />
+                </label>
+                <label>
+                  Stable ms
+                  <input
+                    type="number"
+                    min={250}
+                    max={3000}
+                    value={approvalSettings.stableMs}
+                    onChange={(event) => setApprovalSettings((prev) => ({ ...prev, stableMs: Number(event.target.value) }))}
+                  />
+                </label>
+                <label>
+                  Collection timeout ms
+                  <input
+                    type="number"
+                    min={1000}
+                    max={15000}
+                    value={approvalSettings.collectTimeoutMs}
+                    onChange={(event) => setApprovalSettings((prev) => ({ ...prev, collectTimeoutMs: Number(event.target.value) }))}
+                  />
+                </label>
+                <label>
+                  Duplicate cooldown ms
+                  <input
+                    type="number"
+                    min={0}
+                    max={15000}
+                    value={approvalSettings.duplicateCooldownMs}
+                    onChange={(event) => setApprovalSettings((prev) => ({ ...prev, duplicateCooldownMs: Number(event.target.value) }))}
+                  />
+                </label>
+                <label>
+                  Finalize interval ms
+                  <input
+                    type="number"
+                    min={100}
+                    max={1000}
+                    value={approvalSettings.finalizeCheckIntervalMs}
+                    onChange={(event) =>
+                      setApprovalSettings((prev) => ({ ...prev, finalizeCheckIntervalMs: Number(event.target.value) }))
+                    }
+                  />
+                </label>
+                <button type="submit" disabled={busy}>
+                  Save Settings
+                </button>
+              </form>
+            </section>
+          ) : null}
 
-          <section className="panel">
-            <h2>Your Devices</h2>
-            <div className="device-list">
-              {(dashboard?.devices ?? []).map((device) => {
-                const status = dashboard?.clientStatuses.find((entry) => entry.deviceId === device.id);
-                const pairing = dashboard?.pairingSessions.find((entry) => entry.deviceId === device.id);
-                return (
-                  <article key={device.id} className="device-row managed-device-row">
+          {activeView === 'activity' ? (
+            <section className="activity-stack">
+              <TranscriptPanel transcripts={transcripts} devices={devices} threads={threads} onOpenThread={openThreadFromTranscript} />
+
+              <section className="assistant-panel">
+                <div className="assistant-panel-header">
+                  <div>
+                    <span className="hub-kicker">Runtime</span>
+                    <h2>Logs</h2>
+                  </div>
+                  <button type="button" onClick={() => void copyLogs()}>
+                    Copy Logs
+                  </button>
+                </div>
+                <div className="log-list">
+                  {logs.map((log) => (
+                    <article key={log.id} className="log-row">
+                      <span className={`level ${log.level}`}>{log.level}</span>
+                      <span>{log.source}</span>
+                      <strong>{log.message}</strong>
+                      <time>{timeLabel(log.createdAt)}</time>
+                    </article>
+                  ))}
+                  {logs.length === 0 ? <div className="empty-note">No logs yet.</div> : null}
+                </div>
+              </section>
+
+              {dashboard?.user.admin ? (
+                <section className="assistant-panel">
+                  <div className="assistant-panel-header">
                     <div>
-                      <strong>{device.displayName}</strong>
-                      <span>{device.deviceType}</span>
-                      <span>{status ? `${status.mode} / ${status.status}` : 'No live status'}</span>
-                      {pairing && !pairing.claimedAt ? <span>Pairing expires {timeLabel(pairing.expiresAt)}</span> : null}
+                      <span className="hub-kicker">Admin</span>
+                      <h2>Device Monitor</h2>
                     </div>
-                    <div className="device-actions">
-                      <button type="button" disabled={busy} onClick={() => void sendDeviceCommand(device.id, 'query_status')}>
-                        Query
-                      </button>
-                      <button type="button" disabled={busy} onClick={() => void sendDeviceCommand(device.id, 'sleep')}>
-                        Sleep
-                      </button>
-                      <button type="button" disabled={busy} onClick={() => void sendDeviceCommand(device.id, 'off')}>
-                        Off
-                      </button>
-                      <button type="button" disabled={busy} onClick={() => void rotateDeviceToken(device.id)}>
-                        Rotate
-                      </button>
-                      <button type="button" disabled={busy} onClick={() => void revokeDevice(device.id)}>
-                        Revoke
-                      </button>
-                    </div>
-                  </article>
-                );
-              })}
-              {dashboard?.devices.length === 0 ? <div className="empty-note">No paired devices yet.</div> : null}
-            </div>
-          </section>
-        </aside>
-      </section>
-
-      <section className="lower-grid">
-        <TranscriptPanel
-          transcripts={dashboard?.transcripts ?? []}
-          devices={dashboard?.devices ?? []}
-          threads={dashboard?.threads ?? []}
-          onOpenThread={openThreadFromTranscript}
-        />
-
-        <section className="panel">
-          <div className="panel-heading">
-            <div>
-              <h2>Logs</h2>
-              <p>Stored as database rows. Copy visible rows for debugging.</p>
-            </div>
-            <button type="button" onClick={() => void copyLogs()}>
-              Copy Logs
-            </button>
-          </div>
-          <div className="log-list">
-            {(dashboard?.logs ?? []).map((log) => (
-              <article key={log.id} className="log-row">
-                <span className={`level ${log.level}`}>{log.level}</span>
-                <span>{log.source}</span>
-                <strong>{log.message}</strong>
-                <time>{timeLabel(log.createdAt)}</time>
-              </article>
-            ))}
-            {dashboard?.logs.length === 0 ? <div className="empty-note">No logs yet.</div> : null}
-          </div>
-        </section>
-
-        <section className="panel">
-          <h2>{dashboard?.user.admin ? 'Admin Device Monitor' : 'Device Monitor'}</h2>
-          {dashboard?.user.admin ? (
-            <div className="device-list">
-              {dashboard.adminDevices.map((device) => (
-                <article key={device.id} className="device-row">
-                  <strong>{device.displayName}</strong>
-                  <span>{device.deviceType}</span>
-                  <span>token {device.tokenHint}...</span>
-                  <time>{timeLabel(device.lastSeenAt)}</time>
-                </article>
-              ))}
-              {dashboard.adminClientStatuses.map((status) => (
-                <article key={`status-${status.deviceId}`} className="device-row status-row">
-                  <strong>{status.displayName}</strong>
-                  <span>{status.mode}</span>
-                  <span>{status.microphone || status.status}</span>
-                  <time>{timeLabel(status.updatedAt)}</time>
-                </article>
-              ))}
-              {dashboard.adminDevices.length === 0 ? <div className="empty-note">No connected devices yet.</div> : null}
-            </div>
-          ) : (
-            <div className="locked-panel">Admin access required.</div>
-          )}
+                  </div>
+                  <div className="device-list">
+                    {dashboard.adminDevices.map((device) => (
+                      <article key={device.id} className="device-row">
+                        <strong>{device.displayName}</strong>
+                        <span>{device.deviceType}</span>
+                        <span>token {device.tokenHint}...</span>
+                        <time>{timeLabel(device.lastSeenAt)}</time>
+                      </article>
+                    ))}
+                    {dashboard.adminClientStatuses.map((status) => (
+                      <article key={`status-${status.deviceId}`} className="device-row status-row">
+                        <strong>{status.displayName}</strong>
+                        <span>{status.mode}</span>
+                        <span>{status.microphone || status.status}</span>
+                        <time>{timeLabel(status.updatedAt)}</time>
+                      </article>
+                    ))}
+                    {dashboard.adminDevices.length === 0 ? <div className="empty-note">No connected devices yet.</div> : null}
+                  </div>
+                </section>
+              ) : null}
+            </section>
+          ) : null}
         </section>
       </section>
     </main>
@@ -1700,53 +1481,96 @@ function Metric({ label, value }: { label: string; value: React.ReactNode }) {
 
 function ClerkDashboard() {
   const { getToken } = useAuth();
-  const { user } = useUser();
   const client = React.useMemo(() => createClerkClient(getToken), [getToken]);
-  return <AppShell client={client} identitySlot={<><span>{user?.primaryEmailAddress?.emailAddress}</span><UserButton /></>} />;
+  return (
+    <AppShell
+      client={client}
+      identitySlot={
+        <UserButton
+          afterSignOutUrl="/"
+          appearance={{
+            elements: {
+              avatarBox: {
+                width: '28px',
+                height: '28px',
+                border: '1px solid var(--border-subtle)',
+                borderRadius: '4px',
+              },
+              userButtonPopoverCard: {
+                backgroundColor: '#171B21',
+                border: '1px solid #2D3340',
+                boxShadow: '0 24px 80px rgba(0,0,0,.35)',
+              },
+              userButtonPopoverActionButton: {
+                color: '#B8BFD0',
+              },
+              userButtonPopoverActionButtonText: {
+                fontFamily: 'var(--sans)',
+              },
+            },
+          }}
+        />
+      }
+    />
+  );
 }
 
 function DevDashboard() {
-  const [devUser, setDevUser] = React.useState(readDevUser);
-  const [draft, setDraft] = React.useState(devUser);
+  const devUser = React.useMemo(readDevUser, []);
   const client = React.useMemo(() => createDevClient(devUser), [devUser]);
-
-  function saveDevUser(event: React.FormEvent) {
-    event.preventDefault();
-    localStorage.setItem(devUserStorageKey, JSON.stringify(draft));
-    setDevUser(draft);
-  }
-
-  if (window.voiceStreamDesktop?.isDesktop) {
-    return <AppShell client={client} identitySlot={<span>{devUser.email}</span>} devMode />;
-  }
-
   return (
-    <>
-      <form className="dev-auth" onSubmit={saveDevUser}>
-        <span>Local dev auth</span>
-        <input value={draft.name} onChange={(event) => setDraft((prev) => ({ ...prev, name: event.target.value }))} />
-        <input value={draft.email} onChange={(event) => setDraft((prev) => ({ ...prev, email: event.target.value }))} />
-        <label>
-          <input type="checkbox" checked={draft.admin} onChange={(event) => setDraft((prev) => ({ ...prev, admin: event.target.checked }))} />
-          Admin
-        </label>
-        <button type="submit">Apply</button>
-      </form>
-      <AppShell client={client} identitySlot={<span>{devUser.email}</span>} devMode />
-    </>
+    <AppShell
+      client={client}
+      identitySlot={
+        <div className="assistant-dev-profile" title="Dev auth is active. Configure VITE_CLERK_PUBLISHABLE_KEY to enable login and logout.">
+          D
+        </div>
+      }
+    />
   );
 }
 
 function Root() {
   if (!publishableKey) return <DevDashboard />;
   return (
-    <ClerkProvider publishableKey={publishableKey}>
+    <ClerkProvider
+      publishableKey={publishableKey}
+      appearance={{
+        variables: {
+          colorBackground: '#171b21',
+          colorText: '#dfe3ea',
+          colorTextSecondary: '#8891a8',
+          colorPrimary: '#a78bfa',
+          colorInputBackground: 'rgba(255,255,255,.035)',
+          colorInputText: '#dfe3ea',
+          borderRadius: '8px',
+        },
+        elements: {
+          card: {
+            backgroundColor: '#171b21',
+            border: '1px solid #2d3340',
+            boxShadow: 'none',
+          },
+          headerTitle: { color: '#dfe3ea' },
+          headerSubtitle: { color: '#8891a8' },
+          socialButtonsBlockButton: {
+            backgroundColor: 'rgba(255,255,255,.035)',
+            borderColor: '#2d3340',
+            color: '#dfe3ea',
+          },
+          formButtonPrimary: {
+            backgroundColor: '#a78bfa',
+            color: '#101216',
+          },
+        },
+      }}
+    >
       <SignedOut>
         <div className="signin-page">
           <div className="signin-copy">
             <div className="kicker">Voice Stream</div>
-            <h1>Sign in to your voice workspace</h1>
-            <p>Use Clerk to access assistant threads, device pairing, voice codes, and logs.</p>
+            <h1>Sign in to Assistant Hub</h1>
+            <p>Access assistant threads and paired devices from your workspace.</p>
           </div>
           <SignIn routing="hash" />
         </div>

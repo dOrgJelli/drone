@@ -399,18 +399,42 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
   );
 
   app.post('/api/logs', async (req, reply) =>
-    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+    {
       const body = jsonBody(req);
       const detailsJson = body.details == null ? null : JSON.stringify(body.details);
-      const log = db.addLog(ctx.user.id, {
-        deviceId: cleanText(body.deviceId) || null,
-        source: cleanText(body.source, 'web') || 'web',
-        level: cleanText(body.level, 'info') || 'info',
-        message: cleanText(body.message, 'Log event') || 'Log event',
-        detailsJson,
+      const deviceId = cleanText(body.deviceId) || null;
+      const token = cleanText(body.token || req.headers['x-voice-device-token']);
+      if (deviceId && token) {
+        const auth = verifyDeviceAuth(db, deviceId, token, parseClientVersion(body.clientVersion, parseClientVersion(body.protocolVersion, null)));
+        if (!auth.ok) {
+          reply.code(auth.reason === 'client_too_old' ? 426 : 401).send({
+            ok: false,
+            error: deviceAuthFailureMessage(auth),
+            reason: auth.reason,
+            minClientVersion: auth.reason === 'client_too_old' ? auth.minClientVersion : undefined,
+          });
+          return;
+        }
+        const log = db.addLog(auth.device.userId, {
+          deviceId: auth.device.id,
+          source: cleanText(body.source, auth.device.deviceType) || auth.device.deviceType,
+          level: cleanText(body.level, 'info') || 'info',
+          message: cleanText(body.message, 'Log event') || 'Log event',
+          detailsJson,
+        });
+        return { ok: true, log };
+      }
+      return withUser(req, reply, db, clerkEnabled, async (ctx) => {
+        const log = db.addLog(ctx.user.id, {
+          deviceId,
+          source: cleanText(body.source, 'web') || 'web',
+          level: cleanText(body.level, 'info') || 'info',
+          message: cleanText(body.message, 'Log event') || 'Log event',
+          detailsJson,
+        });
+        return { ok: true, log };
       });
-      return { ok: true, log };
-    }),
+    },
   );
 
   app.get('/api/transcripts', async (req, reply) =>
@@ -585,15 +609,33 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     }),
   );
 
-  app.post('/api/voice/sessions', async (req, reply) =>
-    withUser(req, reply, db, clerkEnabled, async (ctx) => {
-      const body = jsonBody(req);
-      const deviceId = cleanText(body.deviceId);
-      const mode = cleanVoiceStreamMode(cleanText(body.mode));
-      if (!deviceId) throw Object.assign(new Error('deviceId is required'), { statusCode: 400 });
+  app.post('/api/voice/sessions', async (req, reply) => {
+    const body = jsonBody(req);
+    const deviceId = cleanText(body.deviceId);
+    const mode = cleanVoiceStreamMode(cleanText(body.mode));
+    if (!deviceId) throw Object.assign(new Error('deviceId is required'), { statusCode: 400 });
+    const token = cleanText(body.token || req.headers['x-voice-device-token']);
+    if (token) {
+      const auth = verifyDeviceAuth(db, deviceId, token, parseClientVersion(body.clientVersion, parseClientVersion(body.protocolVersion, null)));
+      if (!auth.ok) {
+        reply.code(auth.reason === 'client_too_old' ? 426 : 401).send({
+          ok: false,
+          error: deviceAuthFailureMessage(auth),
+          reason: auth.reason,
+          minClientVersion: auth.reason === 'client_too_old' ? auth.minClientVersion : undefined,
+        });
+        return;
+      }
+      const session = db.createVoiceSession(auth.device.userId, auth.device.id, mode);
+      return { ok: true, session };
+    }
+    return withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const device = db.deviceForUser(ctx.user.id, deviceId);
+      if (!device || device.revokedAt) throw Object.assign(new Error('unknown device'), { statusCode: 404 });
       const session = db.createVoiceSession(ctx.user.id, deviceId, mode);
       return { ok: true, session };
-    }),
+    });
+  },
   );
 
   app.get('/api/voice/stream', { websocket: true }, (socket, req) => {
@@ -637,6 +679,17 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
             status: command.type === 'abort' ? 'Voice command cancelled' : 'Voice command detected',
             protocolVersion: VOICE_STREAM_PROTOCOL_VERSION,
           });
+          db.addLog(device.userId, {
+            deviceId: device.id,
+            source: device.deviceType,
+            level: 'info',
+            message: command.type === 'abort' ? 'Voice stop command detected' : 'Voice finish command detected',
+            detailsJson: JSON.stringify({
+              phrase: command.phrase,
+              transcriptChars: command.transcriptText.length,
+              mode: streamMode,
+            }),
+          });
           void finalizeVoiceStream();
         })
       : null;
@@ -654,9 +707,13 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     db.addLog(device.userId, {
       deviceId: device.id,
       source: device.deviceType,
-      level: 'info',
+      level: streamingEnabled ? 'info' : 'warn',
       message: 'Voice stream connected',
-      detailsJson: JSON.stringify({ deviceId: device.id }),
+      detailsJson: JSON.stringify({
+        deviceId: device.id,
+        streamingTranscriptionEnabled: streamingEnabled,
+        commandDetection: streamingEnabled ? 'enabled' : 'disabled: missing speech transcription runtime',
+      }),
     });
     db.upsertClientStatus(device.userId, device.id, {
       mode: 'recording',

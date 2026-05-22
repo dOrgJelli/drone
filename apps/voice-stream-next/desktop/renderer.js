@@ -528,35 +528,103 @@ async function pairDevice() {
   await loadDashboard();
 }
 
+function configuredDeviceIsKnown() {
+  if (!state.config?.deviceId || !state.dashboard?.devices) return true;
+  return state.dashboard.devices.some((device) => device.id === state.config.deviceId);
+}
+
+async function clearSavedDevice(reason) {
+  const config = readFormConfig();
+  const nextConfig = await desktop.writeConfig({ ...config, deviceId: '', deviceToken: '' });
+  applyConfig(nextConfig);
+  if (reason) showPairingMessage(reason, 'error');
+}
+
+function staleDeviceError(err) {
+  const message = String(err?.message || '');
+  return err?.statusCode === 404 ||
+    err?.statusCode === 401 ||
+    /unknown device|not found|foreign key/i.test(message);
+}
+
+async function ensureRecordingDevice() {
+  if (!state.config?.deviceId || !state.config?.deviceToken) {
+    await pairDevice();
+    return;
+  }
+  if (!configuredDeviceIsKnown()) {
+    await clearSavedDevice('Saved desktop pairing was not found on this server. Re-pairing desktop.');
+    await pairDevice();
+  }
+}
+
+async function createVoiceSession(target) {
+  await ensureRecordingDevice();
+  try {
+    return await api('/api/voice/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ deviceId: state.config.deviceId, token: state.config.deviceToken, mode: target, protocolVersion: 1 }),
+    });
+  } catch (err) {
+    if (!staleDeviceError(err)) throw err;
+    await clearSavedDevice('Saved desktop pairing is stale. Re-pairing desktop.');
+    await pairDevice();
+    return api('/api/voice/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ deviceId: state.config.deviceId, token: state.config.deviceToken, mode: target, protocolVersion: 1 }),
+    });
+  }
+}
+
 async function startMic(target = 'assistant', options = {}) {
+  const session = await createVoiceSession(target);
   stopWakeListener();
-  if (!state.config.deviceId) await pairDevice();
-  const session = await api('/api/voice/sessions', {
-    method: 'POST',
-    body: JSON.stringify({ deviceId: state.config.deviceId, mode: target }),
-  });
-  state.voiceSessionId = session.session.id;
-  state.voiceTarget = cleanVoiceTarget(target);
-  resetVoiceStreamState();
-  pendingStreamBuffer.pushAll(preRollBuffer.drain());
-  if (options.cue) playLocalVoiceCue(options.cue);
-  state.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  const context = new AudioContext({ sampleRate: 16000 });
-  state.audioContext = context;
-  const source = context.createMediaStreamSource(state.stream);
-  state.analyser = context.createAnalyser();
-  state.analyser.fftSize = 256;
-  state.processor = context.createScriptProcessor(4096, 1, 1);
-  state.voiceSocket = openVoiceSocket(state.voiceTarget);
-  state.processor.onaudioprocess = (event) => {
-    sendOrBufferStreamFrame(floatToPcm16(event.inputBuffer.getChannelData(0)));
-  };
-  source.connect(state.analyser);
-  source.connect(state.processor);
-  state.processor.connect(context.destination);
-  setMode('recording', recordingStatus(state.voiceTarget));
-  await api('/api/logs', { method: 'POST', body: JSON.stringify({ source: 'desktop', level: 'info', message: 'Desktop microphone capture started' }) });
-  renderMeter();
+  try {
+    state.voiceSessionId = session.session.id;
+    state.voiceTarget = cleanVoiceTarget(target);
+    resetVoiceStreamState();
+    pendingStreamBuffer.pushAll(preRollBuffer.drain());
+    if (options.cue) playLocalVoiceCue(options.cue);
+    state.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const context = new AudioContext({ sampleRate: 16000 });
+    state.audioContext = context;
+    const source = context.createMediaStreamSource(state.stream);
+    state.analyser = context.createAnalyser();
+    state.analyser.fftSize = 256;
+    state.processor = context.createScriptProcessor(4096, 1, 1);
+    state.voiceSocket = openVoiceSocket(state.voiceTarget);
+    state.processor.onaudioprocess = (event) => {
+      sendOrBufferStreamFrame(floatToPcm16(event.inputBuffer.getChannelData(0)));
+    };
+    source.connect(state.analyser);
+    source.connect(state.processor);
+    state.processor.connect(context.destination);
+    setMode('recording', recordingStatus(state.voiceTarget));
+    await api('/api/logs', {
+      method: 'POST',
+      body: JSON.stringify({
+        deviceId: state.config.deviceId,
+        token: state.config.deviceToken,
+        source: 'desktop',
+        level: 'info',
+        message: 'Desktop microphone capture started',
+        protocolVersion: 1,
+      }),
+    });
+    renderMeter();
+  } catch (err) {
+    if (state.processor) state.processor.disconnect();
+    if (state.audioContext) await state.audioContext.close().catch(() => {});
+    if (state.stream) state.stream.getTracks().forEach((track) => track.stop());
+    state.stream = null;
+    state.audioContext = null;
+    state.processor = null;
+    state.voiceSocket = null;
+    state.voiceSessionId = null;
+    resetVoiceStreamState();
+    if (state.mode !== 'off') startWakeListener();
+    throw err;
+  }
 }
 
 async function stopMic(nextMode = 'awake', options = {}) {
@@ -589,8 +657,18 @@ async function stopMic(nextMode = 'awake', options = {}) {
   }
   setMode(nextMode, 'Capture stopped.');
   if (nextMode !== 'off') startWakeListener();
-  await api('/api/logs', { method: 'POST', body: JSON.stringify({ source: 'desktop', level: 'info', message: 'Desktop microphone capture stopped' }) });
-  await loadDashboard();
+  await api('/api/logs', {
+    method: 'POST',
+    body: JSON.stringify({
+      deviceId: state.config.deviceId,
+      token: state.config.deviceToken,
+      source: 'desktop',
+      level: 'info',
+      message: 'Desktop microphone capture stopped',
+      protocolVersion: 1,
+    }),
+  });
+  await loadDashboard().catch(() => {});
 }
 
 function openVoiceSocket(target) {
@@ -788,9 +866,25 @@ function wakePhraseMatch(text) {
   if (words.some((word, index) => word === 'go' && words[index + 1] === 'to' && words[index + 2] === 'sleep')) return 'sleep';
   if (words.some((word, index) => (word === 'hey' || word === 'hay') && words[index + 1] === 'sebastian')) return 'start';
   if (words.some((word, index) => word === 'patch' && words[index + 1] === 'me' && words[index + 2] === 'in')) return 'patch';
-  if (words.includes('transcribe')) return 'clipboard';
+  if (words.some((word, index) => word === 'can' && words[index + 1] === 'you' && words[index + 2] === 'transcribe')) return 'clipboard';
   if (words.includes('status') || compact === 'stateus' || compact === 'checkstatus') return 'status';
   return null;
+}
+
+async function logDesktopEvent(level, message, details) {
+  if (!state.config?.deviceId || !state.config?.deviceToken) return;
+  await api('/api/logs', {
+    method: 'POST',
+    body: JSON.stringify({
+      deviceId: state.config.deviceId,
+      token: state.config.deviceToken,
+      source: 'desktop',
+      level,
+      message,
+      details,
+      protocolVersion: 1,
+    }),
+  }).catch(() => {});
 }
 
 async function enterAwake() {
@@ -847,14 +941,17 @@ async function processPhraseText(text, finalizeNow = false) {
   if (acceptApprovalText(text, finalizeNow)) return;
   if (state.mode === 'recording') {
     showStatus('Recording. Wake commands are ignored until capture stops.');
+    void logDesktopEvent('info', 'Wake phrase ignored while recording', { text });
     return;
   }
   const match = wakePhraseMatch(text);
   if (!match) {
     const heard = String(text || '').trim();
     showStatus(heard ? `Heard "${heard}". No voice command matched.` : 'No voice command matched.');
+    void logDesktopEvent('info', 'Wake phrase did not match command', { text: heard });
     return;
   }
+  void logDesktopEvent('info', 'Wake command matched', { text, command: match });
   if (match === 'sleep') {
     await enterSleep();
     return;

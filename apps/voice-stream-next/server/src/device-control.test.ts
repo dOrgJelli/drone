@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import path from 'node:path';
 
+import { buildApp } from './app.js';
 import { ControlChannelRegistry } from './control-channel.js';
 import { VoiceStreamNextDb } from './db.js';
 import { buildPairingPayload, pairingExpiresAt } from './pairing.js';
@@ -122,5 +123,74 @@ describe('pairing payload integration', () => {
     });
     expect(built.payload.token).toBe('rotated-token');
     expect(built.payload.minClientVersion).toBeGreaterThan(0);
+  });
+});
+
+describe('voice session device validation', () => {
+  test('allows paired devices to create sessions and logs with device tokens', async () => {
+    const dataDir = path.join(process.cwd(), 'server', 'data', 'tests', crypto.randomUUID());
+    process.env.VOICE_STREAM_NEXT_DATA_DIR = dataDir;
+    const built = await buildApp({ logger: false });
+    try {
+      const headers = {
+        'content-type': 'application/json',
+        'x-voice-dev-user-email': 'device-token@example.local',
+        'x-voice-dev-user-name': 'Device Token',
+        'x-voice-dev-admin': '0',
+      };
+      const registered = await built.app.inject({
+        method: 'POST',
+        url: '/api/devices',
+        headers,
+        payload: JSON.stringify({ deviceType: 'desktop', displayName: 'Token Desktop' }),
+      }).then((response) => response.json());
+
+      const sessionResponse = await built.app.inject({
+        method: 'POST',
+        url: '/api/voice/sessions',
+        headers: { 'content-type': 'application/json' },
+        payload: JSON.stringify({ deviceId: registered.device.id, token: registered.token, mode: 'assistant' }),
+      });
+      expect(sessionResponse.statusCode).toBe(200);
+      expect(sessionResponse.json().session.deviceId).toBe(registered.device.id);
+
+      const logResponse = await built.app.inject({
+        method: 'POST',
+        url: '/api/logs',
+        headers: { 'content-type': 'application/json' },
+        payload: JSON.stringify({ deviceId: registered.device.id, token: registered.token, source: 'desktop', level: 'info', message: 'Device token log' }),
+      });
+      expect(logResponse.statusCode).toBe(200);
+      expect(logResponse.json().log.message).toBe('Device token log');
+    } finally {
+      await built.app.close();
+      built.db.db.close();
+      delete process.env.VOICE_STREAM_NEXT_DATA_DIR;
+    }
+  });
+
+  test('returns unknown device for stale desktop pairing', async () => {
+    const dataDir = path.join(process.cwd(), 'server', 'data', 'tests', crypto.randomUUID());
+    process.env.VOICE_STREAM_NEXT_DATA_DIR = dataDir;
+    const built = await buildApp({ logger: false });
+    try {
+      const response = await built.app.inject({
+        method: 'POST',
+        url: '/api/voice/sessions',
+        headers: {
+          'content-type': 'application/json',
+          'x-voice-dev-user-email': 'stale-desktop@example.local',
+          'x-voice-dev-user-name': 'Stale Desktop',
+          'x-voice-dev-admin': '0',
+        },
+        payload: JSON.stringify({ deviceId: 'dev_missing', mode: 'assistant' }),
+      });
+      expect(response.statusCode).toBe(404);
+      expect(response.json().error).toBe('unknown device');
+    } finally {
+      await built.app.close();
+      built.db.db.close();
+      delete process.env.VOICE_STREAM_NEXT_DATA_DIR;
+    }
   });
 });

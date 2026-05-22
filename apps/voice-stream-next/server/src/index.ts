@@ -1,5 +1,7 @@
-import { buildApp } from './app.js';
+import { loadServerEnv } from './env.js';
 
+loadServerEnv();
+const { buildApp } = await import('./app.js');
 const { app, port } = await buildApp();
 
 try {
