@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { EventEmitter } from 'node:events';
 
-import { DesktopVoiceService } from '../src/hub/desktop-voice-service';
+import { DesktopVoiceService, __desktopVoiceTestInternals } from '../src/hub/desktop-voice-service';
 import { VOICE_APPROVAL_SETTINGS_DEFAULT } from '../src/hub/hub-settings';
 
 function createFakeClipboardRecorder(opts: {
@@ -615,8 +616,52 @@ describe('DesktopVoiceService', () => {
 
     expect(status.clipboard.mode).toBe('idle');
     expect(status.clipboard.message).toBe('Transcribed 11 characters.');
+    expect(status.clipboardResultText).toBe('hello world');
     expect(transcribed?.toString('utf8')).toBe('fake-wav');
     expect(tailPadMs).toBe(400);
+  });
+
+  test('treats pw-record interrupted exit as a completed stop', async () => {
+    const recorder = new __desktopVoiceTestInternals.ClipboardWavRecorder();
+    const child = new EventEmitter() as any;
+    child.exitCode = null;
+    child.signalCode = null;
+    child.stdin = null;
+    child.kill = () => {
+      child.exitCode = 1;
+      setTimeout(() => child.emit('close', 1, null), 0);
+      return true;
+    };
+
+    await expect((recorder as any).stopChild(child, {
+      kind: 'pw-record',
+      label: 'clipboard-pw-record',
+      command: 'pw-record',
+      args: [],
+      tmp: '/tmp/test.wav',
+    }, 0)).resolves.toBeUndefined();
+  });
+
+  test('treats arecord quiet interrupt as completed after audio data arrives', async () => {
+    const recorder = new __desktopVoiceTestInternals.ClipboardWavRecorder();
+    const child = new EventEmitter() as any;
+    child.exitCode = null;
+    child.signalCode = null;
+    child.stdin = null;
+    child.kill = () => {
+      child.exitCode = 1;
+      setTimeout(() => child.emit('close', 1, null), 0);
+      return true;
+    };
+    (recorder as any).firstDataElapsedMs = 25;
+
+    await expect((recorder as any).stopChild(child, {
+      kind: 'arecord',
+      label: 'clipboard-arecord',
+      command: 'arecord',
+      args: [],
+      tmp: '/tmp/test.wav',
+    }, 0)).resolves.toBeUndefined();
   });
 
   test('suspends awake desktop voice while shortcut clipboard recording runs', async () => {

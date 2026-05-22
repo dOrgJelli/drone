@@ -98,6 +98,7 @@ type DesktopVoiceStatus = {
     text?: string;
     error: string | null;
   };
+  clipboardResultText?: string;
   lastApprovalCode?: string;
   capture: {
     active: boolean;
@@ -294,9 +295,9 @@ function selectedClipboardRecorder(): ClipboardRecorderKind {
   if (raw === 'pw' || raw === 'pipewire') return 'pw-record';
   if (raw === 'pw-record' || raw === 'arecord' || raw === 'ffmpeg') return raw;
   if (process.platform === 'linux') {
-    if (commandAvailable('ffmpeg')) return 'ffmpeg';
-    if (commandAvailable('pw-record', ['--help'])) return 'pw-record';
     if (commandAvailable('arecord')) return 'arecord';
+    if (commandAvailable('pw-record', ['--help'])) return 'pw-record';
+    if (commandAvailable('ffmpeg')) return 'ffmpeg';
   }
   return 'ffmpeg';
 }
@@ -304,12 +305,12 @@ function selectedClipboardRecorder(): ClipboardRecorderKind {
 function buildClipboardRecorderCommand(tmp: string): ClipboardRecorderCommand {
   const kind = selectedClipboardRecorder();
   if (process.platform === 'linux' && kind === 'arecord') {
-    const device = String(process.env.DRONE_DESKTOP_VOICE_CLIPBOARD_ALSA_DEVICE ?? process.env.SUPASCRIBE_ALSA_DEVICE ?? 'default');
+    const device = String(process.env.DRONE_DESKTOP_VOICE_CLIPBOARD_ALSA_DEVICE ?? process.env.SUPASCRIBE_ALSA_DEVICE ?? '').trim();
     return {
       kind,
       label: 'clipboard-arecord',
       command: 'arecord',
-      args: ['-D', device, '-f', 'S16_LE', '-r', '16000', '-c', '1', '-t', 'wav', tmp],
+      args: [...(device ? ['-D', device] : []), '-q', '-f', 'S16_LE', '-r', '16000', '-c', '1', '-t', 'wav', tmp],
       tmp,
     };
   }
@@ -902,17 +903,45 @@ class ClipboardWavRecorder implements ClipboardAudioRecorder {
   private async stopChild(child: ChildProcess, command: ClipboardRecorderCommand, tailPadMs: number): Promise<void> {
     await new Promise<void>((resolve, reject) => {
       let settled = false;
+      let stopTimer: NodeJS.Timeout | null = null;
+      let interruptTimer: NodeJS.Timeout | null = null;
+      let terminateTimer: NodeJS.Timeout | null = null;
+      let killTimer: NodeJS.Timeout | null = null;
+      let timeoutTimer: NodeJS.Timeout | null = null;
+      const clearTimers = () => {
+        if (stopTimer) clearTimeout(stopTimer);
+        if (interruptTimer) clearTimeout(interruptTimer);
+        if (terminateTimer) clearTimeout(terminateTimer);
+        if (killTimer) clearTimeout(killTimer);
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+        stopTimer = null;
+        interruptTimer = null;
+        terminateTimer = null;
+        killTimer = null;
+        timeoutTimer = null;
+      };
       const finish = (error?: Error) => {
         if (settled) return;
         settled = true;
+        clearTimers();
         if (error) reject(error);
         else resolve();
+      };
+      const childExited = () => child.exitCode !== null || child.signalCode != null;
+      const sendSignal = (signal: NodeJS.Signals) => {
+        if (settled || childExited()) return;
+        try {
+          child.kill(signal);
+        } catch {
+          // ignore
+        }
       };
       child.on('close', (code, signal) => {
         const detail = this.stderr.trim() || `exit ${code ?? signal ?? 'unknown'}`;
         if (code === 0) return finish();
         if (command.kind === 'arecord' && /Interrupted system call|Aborted by signal|SIGINT|terminated/i.test(detail)) return finish();
-        if (command.kind === 'pw-record' && /interrupted|SIGINT|terminated|ctrl\+c/i.test(detail)) return finish();
+        if (command.kind === 'arecord' && code === 1 && this.firstDataElapsedMs != null) return finish();
+        if (command.kind === 'pw-record' && (code === 1 || /interrupted|SIGINT|terminated|ctrl\+c/i.test(detail))) return finish();
         if (command.kind === 'ffmpeg' && (/Output #0/i.test(detail) || /size=/i.test(detail))) return finish();
         return finish(new Error(`${command.label} exited ${code ?? signal ?? 'unknown'}: ${detail}`));
       });
@@ -927,21 +956,22 @@ class ClipboardWavRecorder implements ClipboardAudioRecorder {
             // fall through to signal
           }
         }
-        try {
-          child.kill('SIGINT');
-        } catch {
-          // ignore
-        }
+        sendSignal('SIGINT');
       };
-      setTimeout(sendStop, Math.max(0, tailPadMs)).unref();
-      setTimeout(() => {
-        if (settled || child.exitCode !== null) return;
-        try {
-          child.kill('SIGTERM');
-        } catch {
-          // ignore
-        }
-      }, Math.max(0, tailPadMs) + 2_000).unref();
+      const tailMs = Math.max(0, tailPadMs);
+      stopTimer = setTimeout(sendStop, tailMs);
+      interruptTimer = setTimeout(() => sendSignal('SIGINT'), tailMs + 800);
+      terminateTimer = setTimeout(() => sendSignal('SIGTERM'), tailMs + 2_000);
+      killTimer = setTimeout(() => sendSignal('SIGKILL'), tailMs + 4_000);
+      timeoutTimer = setTimeout(() => {
+        const detail = this.stderr.trim() || 'recorder did not exit after stop signals';
+        finish(new Error(`${command.label} stop timed out: ${detail}`));
+      }, tailMs + 6_000);
+      stopTimer.unref();
+      interruptTimer.unref();
+      terminateTimer.unref();
+      killTimer.unref();
+      timeoutTimer.unref();
     });
   }
 
@@ -973,6 +1003,10 @@ class ClipboardWavRecorder implements ClipboardAudioRecorder {
     this.firstDataProbeTimer = null;
   }
 }
+
+export const __desktopVoiceTestInternals = {
+  ClipboardWavRecorder,
+};
 
 export class DesktopVoiceService {
   private readonly events = new EventEmitter();
@@ -1242,8 +1276,11 @@ export class DesktopVoiceService {
         this.emitChange();
         return this.snapshot();
       }
-      await this.stopClipboardRecording();
-      return this.snapshot();
+      const clipboardResultText = await this.stopClipboardRecording();
+      return {
+        ...this.snapshot(),
+        ...(clipboardResultText ? { clipboardResultText } : {}),
+      };
     }
     if (this.clipboardMode === 'transcribing') return this.snapshot();
     if (Date.now() < this.clipboardStartSuppressedUntil) {
@@ -1762,7 +1799,7 @@ export class DesktopVoiceService {
     this.promptCommandSuppressedUntil = Date.now() + Math.max(0, this.approvalSettings.postPromptCommandSuppressionMs);
   }
 
-  private async stopClipboardRecording(): Promise<void> {
+  private async stopClipboardRecording(): Promise<string | null> {
     const sessionId = this.clipboardSessionId;
     const stopRequestedAtMs = Date.now();
     this.clipboardMode = 'transcribing';
@@ -1772,7 +1809,7 @@ export class DesktopVoiceService {
     this.emitChange();
     try {
       const wav = await this.clipboardRecorder.stop(clipboardTailPadMs());
-      if (this.clipboardSessionId !== sessionId) return;
+      if (this.clipboardSessionId !== sessionId) return null;
       desktopVoiceLog('voice clipboard recording wav ready', {
         requestId: this.clipboardRecordingRequestId,
         stopElapsedMs: Date.now() - stopRequestedAtMs,
@@ -1788,13 +1825,19 @@ export class DesktopVoiceService {
       this.clipboardRecordingStartedAtMs = 0;
       this.clipboardRecordingRequestId = null;
       this.emitDesktopVoiceEvent({ type: 'desktop_voice_clipboard_result', text } satisfies DesktopVoiceEvent);
+      return text;
     } catch (error: any) {
-      if (this.clipboardSessionId !== sessionId) return;
+      if (this.clipboardSessionId !== sessionId) return null;
       this.clipboardMode = 'error';
       this.clipboardError = error?.message ?? String(error);
       this.clipboardMessage = `Voice transcription failed: ${this.clipboardError}`;
+      desktopVoiceWarn('voice clipboard recording failed', {
+        requestId: this.clipboardRecordingRequestId,
+        error: this.clipboardError,
+      });
       this.clipboardRecordingStartedAtMs = 0;
       this.clipboardRecordingRequestId = null;
+      return null;
     } finally {
       this.resumeDesktopVoiceAfterClipboard();
       this.touch();
