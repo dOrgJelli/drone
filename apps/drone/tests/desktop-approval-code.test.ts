@@ -36,6 +36,13 @@ describe('ApprovalCodeRecognizer', () => {
     expect(recognizer.flush(5_000)).toEqual({ type: 'cancelled' });
   });
 
+  test('supports configured three digit approval codes', () => {
+    const recognizer = new ApprovalCodeRecognizer({ minDigits: 3, maxDigits: 4 });
+
+    expect(recognizer.accept('approval code one two three', 0)).toEqual({ type: 'collecting', partialCode: '123' });
+    expect(recognizer.flush(900)).toEqual({ type: 'completed', code: '123' });
+  });
+
   test('suppresses duplicate completed codes during cooldown', () => {
     const recognizer = new ApprovalCodeRecognizer();
 

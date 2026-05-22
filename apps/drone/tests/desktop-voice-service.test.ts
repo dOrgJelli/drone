@@ -402,7 +402,7 @@ describe('DesktopVoiceService', () => {
     expect(events.some((event) => event.type === 'desktop_voice_transcript_segment')).toBe(false);
   });
 
-  test('does not cancel a patch when the first empty segment looks like sleep', async () => {
+  test('does not cancel a patch when a segment is a thank-you artifact', async () => {
     let abortCalls = 0;
     const service = new DesktopVoiceService({
       transcribeWav: async () => ({ text: 'thank you', model: 'test' }),
@@ -426,6 +426,61 @@ describe('DesktopVoiceService', () => {
     expect(service.snapshot().mode).toBe('recording');
     expect(service.snapshot().message).toBe('Awake: patching into current drone chat.');
     expect(abortCalls).toBe(0);
+  });
+
+  test('does not finish or submit an assistant prompt when a segment is a thank-you artifact', async () => {
+    let submitCalls = 0;
+    const service = new DesktopVoiceService({
+      transcribeWav: async () => ({ text: 'thank you', model: 'test' }),
+      submitAssistantPrompt: async () => {
+        submitCalls += 1;
+      },
+    });
+
+    (service as any).mode = 'recording';
+    (service as any).promptCaptureTarget = 'assistant';
+    (service as any).promptChunks = [Buffer.alloc(3200)];
+    await (service as any).transcribePromptSegment({
+      pcm: Buffer.alloc(3200),
+      audioMs: 100,
+      speechMs: 100,
+      trailingSilenceMs: 0,
+      reason: 'flush',
+      sequence: 1,
+    });
+
+    expect(service.snapshot().mode).toBe('recording');
+    expect(service.snapshot().message).toBe('Awake: recording assistant voice prompt.');
+    expect(service.snapshot().transcript.text).toBe('thank you');
+    expect(submitCalls).toBe(0);
+  });
+
+  test('does not treat a thank-you artifact as stop after prior assistant transcript content', async () => {
+    let submittedPrompt = '';
+    const service = new DesktopVoiceService({
+      voiceTranscription: { finalMode: 'segments' },
+      transcribeWav: async () => ({ text: 'thank you', model: 'test' }),
+      submitAssistantPrompt: async (prompt) => {
+        submittedPrompt = prompt;
+      },
+    });
+
+    (service as any).mode = 'recording';
+    (service as any).promptCaptureTarget = 'assistant';
+    (service as any).promptTranscriptText = 'run the tests';
+    await (service as any).transcribePromptSegment({
+      pcm: Buffer.alloc(3200),
+      audioMs: 100,
+      speechMs: 100,
+      trailingSilenceMs: 0,
+      reason: 'flush',
+      sequence: 1,
+    });
+
+    expect(service.snapshot().mode).toBe('recording');
+    expect(service.snapshot().message).toBe('Awake: recording assistant voice prompt.');
+    expect(service.snapshot().transcript.text).toBe('run the tests\nthank you');
+    expect(submittedPrompt).toBe('');
   });
 
   test('briefly suppresses wake commands after desktop voice transcription stops', async () => {

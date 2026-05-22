@@ -65,6 +65,20 @@ function codeOnly(value: string, maxDigits: number): string {
   return value.replace(/\D/g, '').slice(0, maxDigits);
 }
 
+function codeLengths(settings: Pick<VoiceApprovalSettings, 'unlockCode' | 'lockCode' | 'lockedOffCode'>): number[] {
+  return [settings.unlockCode, settings.lockCode, settings.lockedOffCode].map((code) => code.length).filter((length) => length > 0);
+}
+
+function alignDigitBounds(settings: VoiceApprovalSettings): VoiceApprovalSettings {
+  const lengths = codeLengths(settings);
+  if (lengths.length === 0) return settings;
+  return {
+    ...settings,
+    minDigits: Math.min(settings.minDigits, ...lengths),
+    maxDigits: Math.max(settings.maxDigits, ...lengths),
+  };
+}
+
 export function VoiceApprovalSettingsTab({ voiceApproval }: VoiceApprovalSettingsTabProps) {
   const {
     voiceApprovalSettings,
@@ -91,7 +105,7 @@ export function VoiceApprovalSettingsTab({ voiceApproval }: VoiceApprovalSetting
         if (!prev) return prev;
         const next = { ...prev, ...patch };
         if (next.maxDigits < next.minDigits) next.maxDigits = next.minDigits;
-        return next;
+        return alignDigitBounds(next);
       });
     },
     [setVoiceApprovalDraft],

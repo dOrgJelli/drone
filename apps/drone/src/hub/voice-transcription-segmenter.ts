@@ -69,11 +69,6 @@ export function hasTranscriptContent(text: string): boolean {
   return /[\p{L}\p{N}]/u.test(text);
 }
 
-export function isLikelyShortSleepMistranscription(text: string): boolean {
-  const normalized = normalizeWords(text).join(' ');
-  return normalized === 'thank you' || normalized === 'thanks';
-}
-
 export function pcmDurationMs(bytes: number, sampleRateHz = 16_000, channels = 1): number {
   return Math.round((bytes / (sampleRateHz * channels * 2)) * 1000);
 }

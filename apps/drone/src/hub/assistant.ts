@@ -46,6 +46,13 @@ export type AssistantCreateDroneResult = {
   request: any;
 };
 
+export type AssistantCreateChatResult = {
+  droneId: string;
+  droneName: string;
+  chatName: string;
+  chats: string[];
+};
+
 export type AssistantSetDroneGroupResult = {
   group: string | null;
   moved: Array<{ id: string; name: string; previousGroup: string | null; group: string | null }>;
@@ -132,6 +139,8 @@ type StoredAssistantState = {
   chatIdleSubscriptions?: AssistantChatIdleSubscription[];
   systemPrompt?: string;
   systemPromptUpdatedAt?: string;
+  voiceSystemPrompt?: string;
+  voiceSystemPromptUpdatedAt?: string;
   overviewPrompt?: string;
   overviewPromptUpdatedAt?: string;
   updatedAt?: string;
@@ -172,6 +181,7 @@ export type AssistantChangeEvent = {
 type AssistantToolCallbacks = {
   listDrones: () => Promise<AssistantDroneSummary[]>;
   createDrone: (opts: any) => Promise<AssistantCreateDroneResult>;
+  createChat: (opts: { droneId: string; chatName: string }) => Promise<AssistantCreateChatResult>;
   setDroneGroup: (opts: { droneIds: string[]; group: string | null }) => Promise<AssistantSetDroneGroupResult>;
   messageDrone: (opts: {
     droneId: string;
@@ -481,6 +491,14 @@ export type AssistantSystemPromptSettings = {
     maxPromptChars: number;
     runtimeAppendix: string;
   };
+  assistantVoiceSystemPrompt: {
+    prompt: string;
+    promptSource: 'settings' | 'default';
+    updatedAt: string | null;
+    defaultPrompt: string;
+    maxPromptChars: number;
+    runtimeAppendix: string;
+  };
 };
 
 export type AssistantThreadSystemPromptSettings = {
@@ -567,7 +585,7 @@ const ASSISTANT_SYSTEM_PROMPT_DEFAULT = [
   'Chat timelines contain user messages and agent messages. Queued or pending user messages appear in the same timeline with a non-completed status.',
   'When you send a drone chat message and need the result later, call subscribe_to_chats_idle on the target chat. This returns immediately so you can continue other work. If there is nothing else to do, end your turn; the system will resume this thread when the subscribed chats become idle.',
   'Do not load more chat pages than needed. Start with the latest page.',
-  'Creating or cloning drones does not require approval, and assistant-created drones must use the container (Docker) runtime. Changing drone groups, sending a user message to a drone, and running bash in a drone require user approval; explain briefly what you intend to do.',
+  'Creating or cloning drones and creating chats do not require approval, and assistant-created drones must use the container (Docker) runtime. Changing drone groups, sending a user message to a drone, and running bash in a drone require user approval; explain briefly what you intend to do.',
   'File write tools require write access to the target drone and should be used carefully for concrete code or content edits.',
   'If an approval-gated write tool returns successfully, the user already approved that action. Do not ask for the same approval again.',
   'Voice threads can use speak to send short spoken replies back to the voice device that started the request.',
@@ -599,6 +617,7 @@ const ASSISTANT_TOOL_SUMMARIES: AssistantToolSummary[] = [
   { name: 'speak', label: 'Speak', category: 'actions', description: 'Send a short spoken reply to the connected Android or desktop voice device.' },
   { name: 'create_drone', label: 'Create drone', category: 'actions', description: 'Create a new container drone.' },
   { name: 'clone_drone', label: 'Clone drone', category: 'actions', description: 'Clone an existing container drone into a new container drone.' },
+  { name: 'create_chat', label: 'Create chat', category: 'actions', description: 'Create a new chat in an existing drone.' },
   { name: 'set_drone_group', label: 'Set drone group', category: 'actions', description: 'Move drones to a group after user approval.' },
   { name: 'message_drone', label: 'Send user message to drone', category: 'actions', description: 'Send a user message to a drone chat after approval.' },
 ];
@@ -606,6 +625,7 @@ const ASSISTANT_ALL_TOOL_NAMES = ASSISTANT_TOOL_SUMMARIES.map((tool) => tool.nam
 const ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES = ASSISTANT_ALL_TOOL_NAMES.filter(
   (name) => name !== 'get_system_prompt' && name !== 'update_system_prompt' && name !== 'set_thinking_level' && name !== 'speak',
 );
+const ASSISTANT_LEGACY_DEFAULT_ENABLED_TOOL_NAMES = ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES.filter((name) => name !== 'create_chat');
 const ASSISTANT_VOICE_DEFAULT_ENABLED_TOOL_NAMES = [...ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES, 'set_thinking_level', 'speak'];
 const ASSISTANT_OVERVIEW_PROMPT_DEFAULT = [
   'You write a concise Markdown status overview for an assistant thread in Drone Hub.',
@@ -1076,6 +1096,11 @@ function normalizeAssistantEnabledTools(raw: unknown, fallback: string[] = ASSIS
   return tools;
 }
 
+function normalizeAssistantSystemPromptKind(raw: unknown): 'normal' | 'voice' {
+  const value = String(raw ?? '').trim().toLowerCase();
+  return value === 'voice' ? 'voice' : 'normal';
+}
+
 function normalizeAssistantVoiceEnabled(raw: unknown): boolean {
   return raw === true || String(raw ?? '').trim() === 'true';
 }
@@ -1089,6 +1114,16 @@ function enabledToolsForVoiceMode(enabledTools: string[], voiceEnabled: boolean)
   const base = normalizeAssistantEnabledTools(enabledTools);
   if (!voiceEnabled) return base.filter((name) => name !== 'speak');
   return normalizeAssistantEnabledTools([...base, 'speak'], ASSISTANT_VOICE_DEFAULT_ENABLED_TOOL_NAMES);
+}
+
+function normalizeStoredAssistantEnabledTools(raw: unknown, voiceEnabled: boolean): string[] {
+  const base = normalizeAssistantEnabledTools(raw);
+  const hadLegacyDefaultTools =
+    Array.isArray(raw) && ASSISTANT_LEGACY_DEFAULT_ENABLED_TOOL_NAMES.every((name) => base.includes(name));
+  if (hadLegacyDefaultTools && !base.includes('create_chat')) {
+    base.push('create_chat');
+  }
+  return enabledToolsForVoiceMode(base, voiceEnabled);
 }
 
 function normalizeAssistantSystemPromptPatches(raw: unknown): Array<{ oldText: string; newText: string }> {
@@ -1735,7 +1770,7 @@ function normalizeThread(raw: any, fallback: { provider: LlmProviderId; model: s
     thinkingLevel,
     systemPrompt: normalizeAssistantSystemPrompt(raw.systemPrompt) || fallback.systemPrompt || ASSISTANT_SYSTEM_PROMPT_DEFAULT,
     systemPromptUpdatedAt: cleanOptionalString(raw.systemPromptUpdatedAt) || null,
-    enabledTools: enabledToolsForVoiceMode(raw.enabledTools, normalizeAssistantVoiceEnabled(raw.voiceEnabled)),
+    enabledTools: normalizeStoredAssistantEnabledTools(raw.enabledTools, normalizeAssistantVoiceEnabled(raw.voiceEnabled)),
     accessScope: makeAssistantAccessScope(raw.accessScope),
     autoApprove: normalizeAssistantAutoApprove(raw.autoApprove),
     promptDeliveryMode: normalizeAssistantPromptDeliveryMode(raw.promptDeliveryMode),
@@ -1752,10 +1787,13 @@ function serializeState(input: {
   chatIdleSubscriptions: AssistantChatIdleSubscription[];
   systemPrompt: string;
   systemPromptUpdatedAt: string | null;
+  voiceSystemPrompt: string;
+  voiceSystemPromptUpdatedAt: string | null;
   overviewPrompt: string;
   overviewPromptUpdatedAt: string | null;
 }): StoredAssistantState {
   const systemPrompt = normalizeAssistantSystemPrompt(input.systemPrompt) || ASSISTANT_SYSTEM_PROMPT_DEFAULT;
+  const voiceSystemPrompt = normalizeAssistantSystemPrompt(input.voiceSystemPrompt) || ASSISTANT_SYSTEM_PROMPT_DEFAULT;
   const overviewPrompt = normalizeAssistantOverviewPrompt(input.overviewPrompt) || ASSISTANT_OVERVIEW_PROMPT_DEFAULT;
   const chatIdleSubscriptions = input.chatIdleSubscriptions
     .slice(-CHAT_IDLE_MAX_SUBSCRIPTIONS)
@@ -1768,6 +1806,14 @@ function serializeState(input: {
       ? {
           systemPrompt,
           systemPromptUpdatedAt: input.systemPromptUpdatedAt ?? nowIso(),
+        }
+      : {}),
+    ...(voiceSystemPrompt !== ASSISTANT_SYSTEM_PROMPT_DEFAULT || systemPrompt !== ASSISTANT_SYSTEM_PROMPT_DEFAULT
+      ? {
+          voiceSystemPrompt,
+          ...(voiceSystemPrompt !== ASSISTANT_SYSTEM_PROMPT_DEFAULT
+            ? { voiceSystemPromptUpdatedAt: input.voiceSystemPromptUpdatedAt ?? nowIso() }
+            : {}),
         }
       : {}),
     ...(overviewPrompt !== ASSISTANT_OVERVIEW_PROMPT_DEFAULT
@@ -1835,6 +1881,8 @@ export class HubAssistantService {
   private chatIdleSubscriptionCheck: Promise<void> | null = null;
   private defaultSystemPrompt = ASSISTANT_SYSTEM_PROMPT_DEFAULT;
   private defaultSystemPromptUpdatedAt: string | null = null;
+  private defaultVoiceSystemPrompt = ASSISTANT_SYSTEM_PROMPT_DEFAULT;
+  private defaultVoiceSystemPromptUpdatedAt: string | null = null;
   private defaultOverviewPrompt = ASSISTANT_OVERVIEW_PROMPT_DEFAULT;
   private defaultOverviewPromptUpdatedAt: string | null = null;
   private overviewCache = new Map<string, AssistantThreadOverviewCacheEntry>();
@@ -2411,12 +2459,18 @@ export class HubAssistantService {
     return this.systemPromptSettingsSync();
   }
 
-  async updateSystemPrompt(input: { prompt?: unknown }): Promise<AssistantSystemPromptSettings> {
+  async updateSystemPrompt(input: { prompt?: unknown; promptType?: unknown; assistantType?: unknown; type?: unknown }): Promise<AssistantSystemPromptSettings> {
     await this.ensureLoaded();
     const prompt = normalizeAssistantSystemPrompt(input.prompt);
     if (!prompt) throw new Error('missing system prompt');
-    this.defaultSystemPrompt = prompt;
-    this.defaultSystemPromptUpdatedAt = prompt === ASSISTANT_SYSTEM_PROMPT_DEFAULT ? null : nowIso();
+    const promptKind = normalizeAssistantSystemPromptKind(input.promptType ?? input.assistantType ?? input.type);
+    if (promptKind === 'voice') {
+      this.defaultVoiceSystemPrompt = prompt;
+      this.defaultVoiceSystemPromptUpdatedAt = prompt === ASSISTANT_SYSTEM_PROMPT_DEFAULT ? null : nowIso();
+    } else {
+      this.defaultSystemPrompt = prompt;
+      this.defaultSystemPromptUpdatedAt = prompt === ASSISTANT_SYSTEM_PROMPT_DEFAULT ? null : nowIso();
+    }
     await this.persist();
     return this.systemPromptSettingsSync();
   }
@@ -2435,7 +2489,7 @@ export class HubAssistantService {
       : applyAssistantSystemPromptPatches(thread.systemPrompt, input.patches);
     if (!prompt) throw new Error('missing system prompt');
     thread.systemPrompt = prompt;
-    thread.systemPromptUpdatedAt = prompt === this.defaultSystemPrompt ? null : nowIso();
+    thread.systemPromptUpdatedAt = prompt === this.defaultSystemPromptForThread(thread) ? null : nowIso();
     thread.updatedAt = nowIso();
     await this.persist();
     return this.threadSystemPromptSettingsSync(thread.id);
@@ -2447,8 +2501,13 @@ export class HubAssistantService {
     const prompt = normalizeAssistantSystemPrompt(input?.prompt) || normalizeAssistantSystemPrompt(thread.systemPrompt);
     if (!prompt) throw new Error('missing thread system prompt');
     thread.systemPrompt = prompt;
-    this.defaultSystemPrompt = prompt;
-    this.defaultSystemPromptUpdatedAt = prompt === ASSISTANT_SYSTEM_PROMPT_DEFAULT ? null : nowIso();
+    if (thread.voiceEnabled) {
+      this.defaultVoiceSystemPrompt = prompt;
+      this.defaultVoiceSystemPromptUpdatedAt = prompt === ASSISTANT_SYSTEM_PROMPT_DEFAULT ? null : nowIso();
+    } else {
+      this.defaultSystemPrompt = prompt;
+      this.defaultSystemPromptUpdatedAt = prompt === ASSISTANT_SYSTEM_PROMPT_DEFAULT ? null : nowIso();
+    }
     thread.systemPromptUpdatedAt = null;
     thread.updatedAt = nowIso();
     await this.persist();
@@ -3040,12 +3099,22 @@ export class HubAssistantService {
     if (this.loaded) return;
     const stored = await readAssistantStateFile() ?? undefined;
     const storedSystemPrompt = normalizeAssistantSystemPrompt(stored?.systemPrompt);
+    const storedVoiceSystemPrompt = normalizeAssistantSystemPrompt(stored?.voiceSystemPrompt);
     const storedOverviewPrompt = normalizeAssistantOverviewPrompt(stored?.overviewPrompt);
     this.defaultSystemPrompt = storedSystemPrompt || ASSISTANT_SYSTEM_PROMPT_DEFAULT;
     this.defaultSystemPromptUpdatedAt =
       storedSystemPrompt && typeof stored?.systemPromptUpdatedAt === 'string' && stored.systemPromptUpdatedAt.trim()
         ? stored.systemPromptUpdatedAt.trim()
         : null;
+    this.defaultVoiceSystemPrompt = storedVoiceSystemPrompt || storedSystemPrompt || ASSISTANT_SYSTEM_PROMPT_DEFAULT;
+    this.defaultVoiceSystemPromptUpdatedAt =
+      storedVoiceSystemPrompt && typeof stored?.voiceSystemPromptUpdatedAt === 'string' && stored.voiceSystemPromptUpdatedAt.trim()
+        ? stored.voiceSystemPromptUpdatedAt.trim()
+        : storedVoiceSystemPrompt
+          ? nowIso()
+          : storedSystemPrompt && typeof stored?.systemPromptUpdatedAt === 'string' && stored.systemPromptUpdatedAt.trim()
+            ? stored.systemPromptUpdatedAt.trim()
+            : null;
     this.defaultOverviewPrompt = storedOverviewPrompt || ASSISTANT_OVERVIEW_PROMPT_DEFAULT;
     this.defaultOverviewPromptUpdatedAt =
       storedOverviewPrompt && typeof stored?.overviewPromptUpdatedAt === 'string' && stored.overviewPromptUpdatedAt.trim()
@@ -3103,7 +3172,7 @@ export class HubAssistantService {
       provider,
       model: allowedModelForProvider(provider, input?.model),
       thinkingLevel: allowedThinkingLevelForModel(provider, allowedModelForProvider(provider, input?.model), 'off'),
-      systemPrompt: normalizeAssistantSystemPrompt(input?.systemPrompt) || this.defaultSystemPrompt,
+      systemPrompt: normalizeAssistantSystemPrompt(input?.systemPrompt) || this.defaultSystemPromptForVoiceMode(voiceEnabled),
       systemPromptUpdatedAt: null,
       enabledTools: [...(voiceEnabled ? ASSISTANT_VOICE_DEFAULT_ENABLED_TOOL_NAMES : ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES)],
       accessScope: input?.accessScope ?? this.defaultAccessScopeForNewThread({ voiceEnabled }),
@@ -3114,6 +3183,14 @@ export class HubAssistantService {
       status: 'idle',
       error: null,
     };
+  }
+
+  private defaultSystemPromptForVoiceMode(voiceEnabled: boolean): string {
+    return normalizeAssistantSystemPrompt(voiceEnabled ? this.defaultVoiceSystemPrompt : this.defaultSystemPrompt) || ASSISTANT_SYSTEM_PROMPT_DEFAULT;
+  }
+
+  private defaultSystemPromptForThread(thread: AssistantThread): string {
+    return this.defaultSystemPromptForVoiceMode(normalizeAssistantVoiceEnabled(thread.voiceEnabled));
   }
 
   private getThread(threadId: string): AssistantThread {
@@ -3146,6 +3223,8 @@ export class HubAssistantService {
       chatIdleSubscriptions: this.chatIdleSubscriptions,
       systemPrompt: this.defaultSystemPrompt,
       systemPromptUpdatedAt: this.defaultSystemPromptUpdatedAt,
+      voiceSystemPrompt: this.defaultVoiceSystemPrompt,
+      voiceSystemPromptUpdatedAt: this.defaultVoiceSystemPromptUpdatedAt,
       overviewPrompt: this.defaultOverviewPrompt,
       overviewPromptUpdatedAt: this.defaultOverviewPromptUpdatedAt,
     });
@@ -3773,6 +3852,33 @@ export class HubAssistantService {
         },
       },
       {
+        name: 'create_chat',
+        label: 'Create chat',
+        description:
+          'Create a new chat in an existing drone. This does not require user approval, but requires assistant write access to the target drone.',
+        parameters: Type.Object({
+          targetDroneId: Type.String({ description: 'Target drone id or visible name.' }),
+          name: Type.String({ description: 'Name for the new chat.' }),
+        }),
+        executionMode: 'sequential',
+        execute: async (_toolCallId: string, params: any) => {
+          const targetDroneRef = params?.targetDroneId ?? params?.droneId ?? params?.targetDrone;
+          const droneId = await this.requireDroneInScope(targetDroneRef, 'write', threadId);
+          const chatName = cleanOptionalString(params?.name ?? params?.chatName);
+          if (!chatName) throw new Error('missing chat name');
+          const result = await this.tools.createChat({ droneId, chatName });
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Created chat ${result.chatName} in ${result.droneName} (${result.droneId}).`,
+              },
+            ],
+            details: result,
+          };
+        },
+      },
+      {
         name: 'set_drone_group',
         label: 'Set drone group',
         description: 'Move one or more existing drones to a group, or clear their group. This requires user approval.',
@@ -4068,6 +4174,7 @@ export class HubAssistantService {
 
   private systemPromptSettingsSync(): AssistantSystemPromptSettings {
     const prompt = normalizeAssistantSystemPrompt(this.defaultSystemPrompt) || ASSISTANT_SYSTEM_PROMPT_DEFAULT;
+    const voicePrompt = normalizeAssistantSystemPrompt(this.defaultVoiceSystemPrompt) || ASSISTANT_SYSTEM_PROMPT_DEFAULT;
     return {
       ok: true,
       assistantSystemPrompt: {
@@ -4078,12 +4185,20 @@ export class HubAssistantService {
         maxPromptChars: ASSISTANT_SYSTEM_PROMPT_MAX_CHARS,
         runtimeAppendix: ASSISTANT_SYSTEM_PROMPT_RUNTIME_APPENDIX,
       },
+      assistantVoiceSystemPrompt: {
+        prompt: voicePrompt,
+        promptSource: voicePrompt === ASSISTANT_SYSTEM_PROMPT_DEFAULT ? 'default' : 'settings',
+        updatedAt: voicePrompt === ASSISTANT_SYSTEM_PROMPT_DEFAULT ? null : this.defaultVoiceSystemPromptUpdatedAt,
+        defaultPrompt: ASSISTANT_SYSTEM_PROMPT_DEFAULT,
+        maxPromptChars: ASSISTANT_SYSTEM_PROMPT_MAX_CHARS,
+        runtimeAppendix: ASSISTANT_SYSTEM_PROMPT_RUNTIME_APPENDIX,
+      },
     };
   }
 
   private threadSystemPromptSettingsSync(threadId: string): AssistantThreadSystemPromptSettings {
     const thread = this.getThread(threadId);
-    const globalPrompt = normalizeAssistantSystemPrompt(this.defaultSystemPrompt) || ASSISTANT_SYSTEM_PROMPT_DEFAULT;
+    const globalPrompt = this.defaultSystemPromptForThread(thread);
     const prompt = normalizeAssistantSystemPrompt(thread.systemPrompt) || globalPrompt;
     const globalPromptSource = globalPrompt === ASSISTANT_SYSTEM_PROMPT_DEFAULT ? 'default' : 'settings';
     const promptSource =
@@ -4128,7 +4243,7 @@ export class HubAssistantService {
     const readScope = describeAssistantAccessMode(accessScope.readMode, accessScope.droneIds);
     const writeScope = describeAssistantAccessMode(accessScope.writeMode, accessScope.droneIds);
     const scopeText = `Current access scope: read=${readScope}; write=${writeScope}. Do not claim read or write access outside those scopes.`;
-    const basePrompt = normalizeAssistantSystemPrompt(thread?.systemPrompt) || this.defaultSystemPrompt;
+    const basePrompt = normalizeAssistantSystemPrompt(thread?.systemPrompt) || (thread ? this.defaultSystemPromptForThread(thread) : this.defaultSystemPrompt);
     return [basePrompt, scopeText].join('\n\n');
   }
 }

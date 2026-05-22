@@ -337,6 +337,7 @@ import { createDronePendingPromptStore, type PendingPrompt } from './drone-pendi
 import { createDroneProvisioningController } from './drone-provisioning';
 import {
   HubAssistantService,
+  type AssistantCreateChatResult,
   type AssistantCreateDroneResult,
   type AssistantDroneSummary,
   type AssistantSetDroneGroupResult,
@@ -11116,7 +11117,12 @@ export async function startDroneHubApiServer(opts: {
   const isAndroidSpeakUnavailable = (error: unknown): boolean => {
     const anyError = error as any;
     const message = String(anyError?.message ?? error ?? '');
+    const causeMessage = String(anyError?.cause?.message ?? '');
+    const causeCode = String(anyError?.cause?.code ?? '');
     return message.includes('Voice Stream server is not running') ||
+      message.includes('fetch failed') ||
+      /ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|ETIMEDOUT/.test(causeCode) ||
+      /ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|ETIMEDOUT/.test(causeMessage) ||
       (Number(anyError?.status) === 409 && /no android control client/i.test(message));
   };
   const speakToVoiceTarget = async ({ threadId, text, source }: { threadId: string; text: string; source?: AssistantVoiceSource | null }) => {
@@ -11186,6 +11192,15 @@ export async function startDroneHubApiServer(opts: {
         runtime: String(data?.runtime ?? request?.runtime ?? 'container').trim() || 'container',
         phase: String(data?.phase ?? 'starting').trim() || 'starting',
         request,
+      };
+    },
+    createChat: async ({ droneId, chatName }): Promise<AssistantCreateChatResult> => {
+      const data = await callLocalHubApi(`/api/drones/${encodeURIComponent(droneId)}/chats`, { name: chatName });
+      return {
+        droneId: String(data?.id ?? droneId).trim() || droneId,
+        droneName: String(data?.name ?? droneId).trim() || droneId,
+        chatName: String(data?.chat ?? chatName).trim() || chatName,
+        chats: Array.isArray(data?.chats) ? data.chats.map((chat: any) => String(chat ?? '').trim()).filter(Boolean) : [],
       };
     },
     setDroneGroup: async ({ droneIds, group }): Promise<AssistantSetDroneGroupResult> => {

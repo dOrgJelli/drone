@@ -427,14 +427,17 @@ function parseVoiceApprovalSettings(raw: unknown): VoiceApprovalSettings | null 
   if (maxDigits < minDigits) return null;
   const codeSet = new Set([unlockCode, lockCode, lockedOffCode]);
   if (codeSet.size !== 3) return null;
-  if ([unlockCode, lockCode, lockedOffCode].some((code) => code.length > maxDigits)) return null;
+  const codeLengths = [unlockCode, lockCode, lockedOffCode].map((code) => code.length);
+  const effectiveMinDigits = Math.min(minDigits, ...codeLengths);
+  const effectiveMaxDigits = Math.max(maxDigits, ...codeLengths);
+  if (effectiveMaxDigits > VOICE_APPROVAL_SETTINGS_LIMITS.maxDigitsMax) return null;
   return {
     triggerPhrase,
     unlockCode,
     lockCode,
     lockedOffCode,
-    minDigits,
-    maxDigits,
+    minDigits: effectiveMinDigits,
+    maxDigits: effectiveMaxDigits,
     stableMs,
     collectTimeoutMs,
     duplicateCooldownMs,
