@@ -2,36 +2,71 @@ import { pcm16ToWav } from './wav.js';
 
 export type RuntimeResult = {
   text: string;
-  provider: 'openai' | 'fallback';
+  provider: 'openai' | 'groq' | 'fallback';
 };
 
-function apiKey(): string {
+const GROQ_TRANSCRIPTION_ENDPOINT = 'https://api.groq.com/openai/v1/audio/transcriptions';
+const GROQ_TTS_DEFAULT_ENDPOINT = 'https://api.groq.com/openai/v1/audio/speech';
+const GROQ_TRANSCRIPTION_DEFAULT_MODEL = 'whisper-large-v3-turbo';
+const GROQ_TTS_DEFAULT_MODEL = 'canopylabs/orpheus-v1-english';
+const GROQ_TTS_DEFAULT_VOICE = 'austin';
+
+function openAiApiKey(): string {
   return process.env.OPENAI_API_KEY?.trim() || process.env.VOICE_STREAM_NEXT_OPENAI_API_KEY?.trim() || '';
+}
+
+function groqApiKey(env: NodeJS.ProcessEnv = process.env): string {
+  return env.GROQ_API_KEY?.trim() || env.VOICE_STREAM_NEXT_GROQ_API_KEY?.trim() || '';
+}
+
+function groqSttApiKey(env: NodeJS.ProcessEnv = process.env): string {
+  return env.GROQ_STT_API_KEY?.trim() || env.VOICE_STREAM_NEXT_GROQ_STT_API_KEY?.trim() || groqApiKey(env);
+}
+
+function groqTtsApiKey(env: NodeJS.ProcessEnv = process.env): string {
+  return env.GROQ_TTS_API_KEY?.trim() || env.VOICE_STREAM_NEXT_GROQ_TTS_API_KEY?.trim() || groqApiKey(env);
 }
 
 function assistantModel(): string {
   return process.env.VOICE_STREAM_NEXT_ASSISTANT_MODEL?.trim() || 'gpt-5.2';
 }
 
-function sttModel(): string {
-  return process.env.VOICE_STREAM_NEXT_STT_MODEL?.trim() || 'gpt-4o-mini-transcribe';
+function groqSttModel(): string {
+  return process.env.GROQ_STT_MODEL?.trim() ||
+    process.env.GROQ_TRANSCRIPTION_MODEL?.trim() ||
+    process.env.VOICE_STREAM_NEXT_STT_MODEL?.trim() ||
+    GROQ_TRANSCRIPTION_DEFAULT_MODEL;
 }
 
-function ttsModel(): string {
-  return process.env.VOICE_STREAM_NEXT_TTS_MODEL?.trim() || 'gpt-4o-mini-tts';
+function groqTtsEndpoint(): string {
+  return process.env.GROQ_TTS_ENDPOINT?.trim() ||
+    process.env.VOICE_STREAM_NEXT_GROQ_TTS_ENDPOINT?.trim() ||
+    GROQ_TTS_DEFAULT_ENDPOINT;
 }
 
-function ttsVoice(): string {
-  return process.env.VOICE_STREAM_NEXT_TTS_VOICE?.trim() || 'alloy';
+function groqTtsModel(): string {
+  return process.env.GROQ_TTS_MODEL?.trim() ||
+    process.env.VOICE_STREAM_NEXT_TTS_MODEL?.trim() ||
+    GROQ_TTS_DEFAULT_MODEL;
+}
+
+function groqTtsVoice(): string {
+  return process.env.GROQ_TTS_VOICE?.trim() ||
+    process.env.VOICE_STREAM_NEXT_TTS_VOICE?.trim() ||
+    GROQ_TTS_DEFAULT_VOICE;
 }
 
 export function hasOpenAiRuntime(): boolean {
-  return Boolean(apiKey());
+  return Boolean(openAiApiKey());
+}
+
+export function hasGroqSpeechRuntime(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(groqSttApiKey(env));
 }
 
 export async function generateAssistantReply(messages: { role: 'user' | 'assistant'; content: string }[]): Promise<RuntimeResult> {
   const lastUserMessage = [...messages].reverse().find((message) => message.role === 'user')?.content.trim() || '';
-  if (!apiKey()) {
+  if (!openAiApiKey()) {
     return {
       provider: 'fallback',
       text: fallbackReply(lastUserMessage),
@@ -62,7 +97,7 @@ export async function transcribePcm16(pcm: Uint8Array): Promise<RuntimeResult> {
       text: testTranscript.trim(),
     };
   }
-  if (!apiKey()) {
+  if (!groqSttApiKey()) {
     return {
       provider: 'fallback',
       text: '',
@@ -78,40 +113,44 @@ export async function transcribePcm16(pcm: Uint8Array): Promise<RuntimeResult> {
   const wav = pcm16ToWav(pcm);
   const wavBody = wav.buffer.slice(wav.byteOffset, wav.byteOffset + wav.byteLength) as ArrayBuffer;
   const form = new FormData();
-  form.append('model', sttModel());
+  form.append('model', groqSttModel());
   form.append('file', new Blob([wavBody], { type: 'audio/wav' }), 'voice-stream.wav');
   form.append('response_format', 'json');
+  form.append('temperature', '0');
 
-  const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+  const response = await fetch(GROQ_TRANSCRIPTION_ENDPOINT, {
     method: 'POST',
-    headers: { authorization: `Bearer ${apiKey()}` },
+    headers: { authorization: `Bearer ${groqSttApiKey()}` },
     body: form,
   });
-  const body = await parseOpenAiResponse(response);
+  const body = await parseProviderJsonResponse(response, 'GROQ transcription');
   return {
-    provider: 'openai',
+    provider: 'groq',
     text: String(body.text ?? '').trim(),
   };
 }
 
-export async function synthesizeSpeech(text: string): Promise<{ audio: Uint8Array | null; provider: 'openai' | 'fallback' }> {
+export async function synthesizeSpeech(text: string): Promise<{ audio: Uint8Array | null; provider: 'groq' | 'fallback' }> {
   const input = text.trim().slice(0, 4096);
-  if (!apiKey() || !input) {
+  if (!groqTtsApiKey() || !input) {
     return { audio: null, provider: 'fallback' };
   }
-  const response = await fetch('https://api.openai.com/v1/audio/speech', {
+  const response = await fetch(groqTtsEndpoint(), {
     method: 'POST',
-    headers: openAiHeaders(),
+    headers: {
+      authorization: `Bearer ${groqTtsApiKey()}`,
+      'content-type': 'application/json',
+    },
     body: JSON.stringify({
-      model: ttsModel(),
-      voice: ttsVoice(),
+      model: groqTtsModel(),
+      voice: groqTtsVoice(),
       input,
       response_format: 'wav',
     }),
   });
-  if (!response.ok) await parseOpenAiResponse(response);
+  if (!response.ok) await parseProviderJsonResponse(response, 'GROQ TTS');
   return {
-    provider: 'openai',
+    provider: 'groq',
     audio: new Uint8Array(await response.arrayBuffer()),
   };
 }
@@ -123,12 +162,16 @@ function fallbackReply(prompt: string): string {
 
 function openAiHeaders(): Record<string, string> {
   return {
-    authorization: `Bearer ${apiKey()}`,
+    authorization: `Bearer ${openAiApiKey()}`,
     'content-type': 'application/json',
   };
 }
 
 async function parseOpenAiResponse(response: Response): Promise<any> {
+  return parseProviderJsonResponse(response, 'OpenAI');
+}
+
+async function parseProviderJsonResponse(response: Response, providerLabel: string): Promise<any> {
   const text = await response.text();
   let body: any = {};
   try {
@@ -137,7 +180,7 @@ async function parseOpenAiResponse(response: Response): Promise<any> {
     body = { error: { message: text } };
   }
   if (!response.ok) {
-    throw new Error(body?.error?.message ?? `OpenAI request failed: ${response.status}`);
+    throw new Error(body?.error?.message ?? body?.message ?? `${providerLabel} request failed: ${response.status}`);
   }
   return body;
 }

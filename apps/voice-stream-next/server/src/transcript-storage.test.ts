@@ -4,7 +4,7 @@ import path from 'node:path';
 import { VoiceStreamNextDb } from './db.js';
 
 function tempDb(name: string): VoiceStreamNextDb {
-  const dir = path.join(process.cwd(), 'server', '.data', 'tests');
+  const dir = path.join(process.cwd(), 'server', 'data', 'tests');
   return new VoiceStreamNextDb(path.join(dir, `${name}-${crypto.randomUUID()}.sqlite`));
 }
 

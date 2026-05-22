@@ -6,7 +6,7 @@ import { VoiceStreamNextDb } from './db.js';
 import { buildPairingPayload, pairingExpiresAt } from './pairing.js';
 
 function tempDb(name: string): VoiceStreamNextDb {
-  const dir = path.join(process.cwd(), 'server', '.data', 'tests');
+  const dir = path.join(process.cwd(), 'server', 'data', 'tests');
   return new VoiceStreamNextDb(path.join(dir, `${name}-${crypto.randomUUID()}.sqlite`));
 }
 

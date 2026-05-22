@@ -16,6 +16,10 @@ pids
 *.pid
 *.seed
 *.pid.lock
+apps/voice-stream-next/server/data/
+apps/voice-stream-next/server/.data/
+server/data/
+server/.data/
 
 # Coverage directory used by tools like istanbul
 coverage/

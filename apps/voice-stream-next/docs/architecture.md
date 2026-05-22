@@ -307,7 +307,7 @@ VOICE_STREAM_NEXT_DATA_DIR=/data
 Local development can default to:
 
 ```text
-apps/voice-stream-next/server/.data/voice-stream-next.sqlite
+apps/voice-stream-next/server/data/voice-stream-next.sqlite
 ```
 
 Railway deployment should mount a persistent volume at the configured data directory. The service should fail clearly if it is configured for hosted mode but the data directory is not writable.

@@ -181,7 +181,7 @@ The first backend database should be SQLite.
 Default storage:
 
 ```text
-server/.data/voice-stream-next.sqlite
+server/data/voice-stream-next.sqlite
 ```
 
 The server should allow the data directory to be configured with an environment variable, for example:

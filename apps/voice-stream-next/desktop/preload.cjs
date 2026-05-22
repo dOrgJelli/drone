@@ -6,6 +6,15 @@ contextBridge.exposeInMainWorld('voiceStreamDesktop', {
   writeConfig: (config) => ipcRenderer.invoke('config:write', config),
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
   writeClipboard: (text) => clipboard.writeText(String(text || '')),
+  windowState: () => ipcRenderer.invoke('window:state'),
+  compactWindow: () => ipcRenderer.invoke('window:compact'),
+  expandWindow: () => ipcRenderer.invoke('window:expand'),
+  closeWindow: () => ipcRenderer.invoke('window:close'),
+  onWindowState: (callback) => {
+    const listener = (_event, status) => callback(status);
+    ipcRenderer.on('window:state', listener);
+    return () => ipcRenderer.removeListener('window:state', listener);
+  },
   voskStatus: () => ipcRenderer.invoke('vosk:status'),
   startVosk: () => ipcRenderer.invoke('vosk:start'),
   stopVosk: () => ipcRenderer.invoke('vosk:stop'),

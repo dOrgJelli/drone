@@ -40,6 +40,7 @@ const state = {
   approvalFinalizeTimer: null,
   analyser: null,
   meterFrame: 0,
+  compact: true,
 };
 
 const els = {
@@ -48,35 +49,21 @@ const els = {
   deviceLabel: document.querySelector('#deviceLabel'),
   openWebButton: document.querySelector('#openWebButton'),
   signInButton: document.querySelector('#signInButton'),
+  compactButton: document.querySelector('#compactButton'),
+  closeButton: document.querySelector('#closeButton'),
+  expandButton: document.querySelector('#expandButton'),
   saveButton: document.querySelector('#saveButton'),
   serverUrlInput: document.querySelector('#serverUrlInput'),
   deviceNameInput: document.querySelector('#deviceNameInput'),
-  authModeInput: document.querySelector('#authModeInput'),
-  bearerTokenInput: document.querySelector('#bearerTokenInput'),
-  devEmailInput: document.querySelector('#devEmailInput'),
-  devNameInput: document.querySelector('#devNameInput'),
-  devAdminInput: document.querySelector('#devAdminInput'),
   authStatus: document.querySelector('#authStatus'),
-  pairingPayloadInput: document.querySelector('#pairingPayloadInput'),
-  applyPairingButton: document.querySelector('#applyPairingButton'),
-  pastePairingButton: document.querySelector('#pastePairingButton'),
   pairingMessage: document.querySelector('#pairingMessage'),
   pairButton: document.querySelector('#pairButton'),
-  awakeButton: document.querySelector('#awakeButton'),
-  startMicButton: document.querySelector('#startMicButton'),
-  sleepButton: document.querySelector('#sleepButton'),
-  stopMicButton: document.querySelector('#stopMicButton'),
+  primaryVoiceButton: document.querySelector('#primaryVoiceButton'),
+  primaryVoiceMode: document.querySelector('#primaryVoiceMode'),
+  primaryVoiceAction: document.querySelector('#primaryVoiceAction'),
   offButton: document.querySelector('#offButton'),
-  wakePhraseForm: document.querySelector('#wakePhraseForm'),
-  wakePhraseInput: document.querySelector('#wakePhraseInput'),
   micStatus: document.querySelector('#micStatus'),
   meterBar: document.querySelector('#meterBar'),
-  newThreadButton: document.querySelector('#newThreadButton'),
-  messages: document.querySelector('#messages'),
-  messageForm: document.querySelector('#messageForm'),
-  messageInput: document.querySelector('#messageInput'),
-  refreshButton: document.querySelector('#refreshButton'),
-  logs: document.querySelector('#logs'),
 };
 
 function trimSlash(value) {
@@ -118,8 +105,8 @@ function updateAuthStatus(kind, message) {
 function authGuidance(config) {
   const webUrl = deriveWebUrl(config);
   return webUrl
-    ? `Sign in at ${webUrl}, copy your Clerk session token, choose Clerk session token, save, then retry.`
-    : 'Sign in on the web dashboard, copy your Clerk session token, choose Clerk session token, save, then retry.';
+    ? `Sign in at ${webUrl}, then reopen the desktop app.`
+    : 'Sign in on the web dashboard, then reopen the desktop app.';
 }
 
 function showPairingMessage(message, kind = 'muted') {
@@ -132,11 +119,6 @@ function readFormConfig() {
     ...state.config,
     serverUrl: trimSlash(els.serverUrlInput.value),
     deviceName: els.deviceNameInput.value.trim() || 'Desktop voice client',
-    authMode: els.authModeInput.value,
-    bearerToken: els.bearerTokenInput.value.trim(),
-    devEmail: els.devEmailInput.value.trim() || 'desktop@example.local',
-    devName: els.devNameInput.value.trim() || 'Desktop Operator',
-    devAdmin: els.devAdminInput.checked,
   };
 }
 
@@ -144,20 +126,15 @@ function applyConfig(config) {
   state.config = config;
   els.serverUrlInput.value = config.serverUrl;
   els.deviceNameInput.value = config.deviceName;
-  els.authModeInput.value = config.authMode;
-  els.bearerTokenInput.value = config.bearerToken;
-  els.devEmailInput.value = config.devEmail;
-  els.devNameInput.value = config.devName;
-  els.devAdminInput.checked = Boolean(config.devAdmin);
-  updateConnection('idle', config.deviceId ? 'Device paired' : 'Ready', config.deviceId ? `${config.deviceName} · ${config.deviceId.slice(0, 12)}` : 'No device paired');
+  updateConnection('idle', config.deviceId ? 'Desktop connected' : 'Ready', config.deviceId ? `${config.deviceName} · ${config.deviceId.slice(0, 12)}` : 'No device connected');
   if (config.authMode === 'bearer') {
     if (config.bearerToken) {
-      updateAuthStatus('idle', config.authSavedAt ? `Clerk token saved ${new Date(config.authSavedAt).toLocaleString()}.` : 'Clerk token saved locally.');
+      updateAuthStatus('idle', config.authSavedAt ? `Signed in ${new Date(config.authSavedAt).toLocaleString()}.` : 'Signed in.');
     } else {
-      updateAuthStatus('error', 'Clerk mode selected but no session token saved yet.');
+      updateAuthStatus('error', 'Sign in on the web dashboard to use this server.');
     }
   } else {
-    updateAuthStatus('idle', 'Using local dev auth headers.');
+    updateAuthStatus('idle', 'Local development session.');
   }
 }
 
@@ -167,9 +144,9 @@ function headers() {
   if (config.authMode === 'bearer' && config.bearerToken) {
     next.authorization = `Bearer ${config.bearerToken}`;
   } else {
-    next['x-voice-dev-user-email'] = config.devEmail;
-    next['x-voice-dev-user-name'] = config.devName;
-    next['x-voice-dev-admin'] = config.devAdmin ? '1' : '0';
+    next['x-voice-dev-user-email'] = config.devEmail || 'desktop@example.local';
+    next['x-voice-dev-user-name'] = config.devName || 'Desktop Operator';
+    next['x-voice-dev-admin'] = '0';
   }
   return next;
 }
@@ -199,9 +176,9 @@ async function api(path, init = {}) {
     throw err;
   }
   if (config.authMode === 'bearer' && config.bearerToken) {
-    updateAuthStatus('ok', `Clerk session accepted${config.authSavedAt ? ` · saved ${new Date(config.authSavedAt).toLocaleString()}` : ''}.`);
+    updateAuthStatus('ok', `Signed in${config.authSavedAt ? ` · ${new Date(config.authSavedAt).toLocaleString()}` : ''}.`);
   } else if (config.authMode === 'dev') {
-    updateAuthStatus('ok', 'Dev auth accepted by server.');
+    updateAuthStatus('ok', 'Connected to local development server.');
   }
   return body;
 }
@@ -214,6 +191,13 @@ function updateConnection(kind, label, detail) {
 
 function showStatus(message) {
   els.micStatus.textContent = message;
+}
+
+function applyWindowState(windowState) {
+  state.compact = Boolean(windowState?.compact);
+  document.body.classList.toggle('is-compact', state.compact);
+  els.compactButton.hidden = state.compact;
+  els.expandButton.hidden = !state.compact;
 }
 
 function setMode(mode, status) {
@@ -323,10 +307,23 @@ function handleRemoteControlCommand(message, socket) {
 
 function updateVoiceButtons() {
   const streaming = Boolean(state.voiceSocket || state.stream);
-  els.startMicButton.disabled = streaming || state.mode === 'sleeping';
-  els.stopMicButton.disabled = !streaming;
-  els.awakeButton.disabled = streaming && state.mode === 'recording';
-  els.sleepButton.disabled = state.mode === 'off' && !streaming;
+  const labels = {
+    off: ['Off', 'Start voice'],
+    awake: ['Awake', 'Sleep'],
+    sleeping: ['Sleeping', 'Wake'],
+    recording: ['Recording', 'Stop'],
+    transcribing: ['Transcribing', 'Working'],
+    error: ['Voice error', 'Retry'],
+  };
+  const [modeLabel, actionLabel] = labels[state.mode] || ['Voice', 'Toggle'];
+  els.primaryVoiceMode.textContent = modeLabel;
+  els.primaryVoiceAction.textContent = actionLabel;
+  els.primaryVoiceButton.disabled = state.mode === 'transcribing';
+  els.primaryVoiceButton.className = `voice-orb is-${state.mode}`;
+  els.primaryVoiceButton.setAttribute('aria-label', `${actionLabel} desktop voice`);
+  els.primaryVoiceButton.setAttribute('aria-pressed', String(streaming || state.mode === 'awake'));
+  els.offButton.hidden = state.mode === 'off';
+  els.offButton.disabled = state.mode === 'transcribing';
 }
 
 function clearVoiceReconnectTimer() {
@@ -408,35 +405,6 @@ function resetVoiceStreamState() {
   pendingStreamBuffer.clear();
 }
 
-function renderMessages(messages) {
-  els.messages.innerHTML = '';
-  if (!messages.length) {
-    els.messages.innerHTML = '<div class="empty">No messages in this thread yet.</div>';
-    return;
-  }
-  for (const message of messages) {
-    const item = document.createElement('div');
-    item.className = `message ${message.role}`;
-    item.textContent = message.content;
-    els.messages.appendChild(item);
-  }
-  els.messages.scrollTop = els.messages.scrollHeight;
-}
-
-function renderLogs(logs) {
-  els.logs.innerHTML = '';
-  if (!logs.length) {
-    els.logs.innerHTML = '<div class="empty">No client logs yet.</div>';
-    return;
-  }
-  for (const log of logs.slice(0, 40)) {
-    const item = document.createElement('div');
-    item.className = 'log-row';
-    item.innerHTML = `<strong>${escapeHtml(log.level)}</strong><span>${escapeHtml(log.source)}</span><p>${escapeHtml(log.message)}</p>`;
-    els.logs.appendChild(item);
-  }
-}
-
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' })[char]);
 }
@@ -458,10 +426,8 @@ async function loadDashboard() {
         finalizeCheckIntervalMs: state.voiceSettings.finalizeCheckIntervalMs,
       });
     }
-    state.activeThreadId = state.activeThreadId || dashboard.threads[0]?.id || null;
-    renderLogs(dashboard.logs);
     updateConnection('ok', 'Connected', state.config.deviceId ? `${state.config.deviceName} · ${state.config.deviceId.slice(0, 12)}` : `${dashboard.user.displayName}`);
-    if (state.activeThreadId) await loadMessages();
+    showPairingMessage(state.config.deviceId ? 'Desktop connected.' : `Signed in as ${dashboard.user.displayName}. Connect this desktop before recording.`);
   } catch (err) {
     updateConnection('error', 'Connection failed', err?.message || 'Could not reach server');
     if (err?.authFailure) {
@@ -477,8 +443,6 @@ async function applyPairingPayload(rawPayload) {
     showPairingMessage('Paste a pairing payload or ws:// server URL first.', 'error');
     return;
   }
-  els.pairingPayloadInput.value = payload;
-
   if (isUpdatePayload(payload)) {
     handleUpdatePayload(parseUpdatePayload(payload));
     return;
@@ -551,15 +515,6 @@ async function loadVoiceSettings() {
   return state.voiceSettings;
 }
 
-async function loadMessages() {
-  if (!state.activeThreadId) {
-    renderMessages([]);
-    return;
-  }
-  const data = await api(`/api/assistant/threads/${encodeURIComponent(state.activeThreadId)}/messages`);
-  renderMessages(data.messages);
-}
-
 async function pairDevice() {
   const config = readFormConfig();
   const data = await api('/api/devices', {
@@ -568,31 +523,9 @@ async function pairDevice() {
   });
   applyConfig(await desktop.writeConfig({ ...config, deviceId: data.device.id, deviceToken: data.token }));
   ensureControlSocket();
-  showStatus('Desktop device paired.');
+  showPairingMessage('Desktop connected.');
+  showStatus('Desktop connected.');
   await loadDashboard();
-}
-
-async function createThread() {
-  const data = await api('/api/assistant/threads', {
-    method: 'POST',
-    body: JSON.stringify({ title: 'Desktop voice thread' }),
-  });
-  state.activeThreadId = data.thread.id;
-  await loadDashboard();
-}
-
-async function sendMessage(event) {
-  event.preventDefault();
-  const content = els.messageInput.value.trim();
-  if (!content) return;
-  if (!state.activeThreadId) await createThread();
-  els.messageInput.value = '';
-  const data = await api(`/api/assistant/threads/${encodeURIComponent(state.activeThreadId)}/messages`, {
-    method: 'POST',
-    body: JSON.stringify({ content }),
-  });
-  renderMessages([...(document.querySelectorAll('.message').length ? [] : []), ...data.messages]);
-  await loadMessages();
 }
 
 async function startMic(target = 'assistant', options = {}) {
@@ -700,7 +633,7 @@ function openVoiceSocket(target) {
           const copied = await copyText(message.transcriptText || '');
           showStatus(copied ? 'Copied voice transcription.' : 'No voice transcription detected.');
         } else {
-          showStatus('Awake. Waiting for wake phrase.');
+          showStatus('Awake. Waiting for voice command.');
         }
         await finishMicFromServer();
       }
@@ -748,7 +681,7 @@ async function finishMicFromServer() {
   resetVoiceStreamState();
   cancelAnimationFrame(state.meterFrame);
   els.meterBar.style.width = '0%';
-  setMode('awake', els.micStatus.textContent || 'Awake. Waiting for wake phrase.');
+  setMode('awake', els.micStatus.textContent || 'Awake. Waiting for voice command.');
   startWakeListener();
   await loadDashboard().catch(() => {});
 }
@@ -863,7 +796,7 @@ function wakePhraseMatch(text) {
 async function enterAwake() {
   resetApprovalCollection();
   await loadVoiceSettings().catch(() => null);
-  setMode('awake', 'Awake. Say or enter "hey sebastian" to start recording.');
+  setMode('awake', 'Awake. Say "hey Sebastian" to start recording.');
   startWakeListener();
 }
 
@@ -910,13 +843,6 @@ async function processApprovalCode(code) {
   await loadDashboard();
 }
 
-async function processWakePhrase(event) {
-  event.preventDefault();
-  const text = els.wakePhraseInput.value.trim();
-  els.wakePhraseInput.value = '';
-  await processPhraseText(text, true);
-}
-
 async function processPhraseText(text, finalizeNow = false) {
   if (acceptApprovalText(text, finalizeNow)) return;
   if (state.mode === 'recording') {
@@ -925,7 +851,8 @@ async function processPhraseText(text, finalizeNow = false) {
   }
   const match = wakePhraseMatch(text);
   if (!match) {
-    showStatus('No wake command matched.');
+    const heard = String(text || '').trim();
+    showStatus(heard ? `Heard "${heard}". No voice command matched.` : 'No voice command matched.');
     return;
   }
   if (match === 'sleep') {
@@ -938,7 +865,7 @@ async function processPhraseText(text, finalizeNow = false) {
     return;
   }
   if (state.mode === 'sleeping') {
-    showStatus('Sleeping. Use the unlock code or Awake first.');
+    showStatus('Sleeping. Press Wake or say the unlock code.');
     return;
   }
   if (state.mode === 'off') enterAwake();
@@ -963,7 +890,7 @@ async function startWakeAudioCapture() {
 
 function startWakeListener() {
   if (state.wakeStarting || state.wakeStream || state.recognition) {
-    showStatus('Awake. Listening for wake phrases.');
+    showStatus('Awake. Listening for voice commands.');
     return;
   }
   if (desktop.startVosk && desktop.sendVoskFrame && desktop.onVoskText) {
@@ -980,7 +907,7 @@ async function startVoskWakeListener() {
   try {
     const status = await desktop.startVosk();
     if (!status.available) {
-      showStatus(status.error ? `Vosk unavailable: ${status.error}` : 'Vosk unavailable. Type a wake phrase if needed.');
+      showStatus(status.error ? `Vosk unavailable: ${status.error}` : 'Wake listener unavailable.');
       return false;
     }
 
@@ -1001,7 +928,7 @@ async function startVoskWakeListener() {
     return true;
   } catch (err) {
     stopVoskWakeListener();
-    showStatus(err?.message ? `Vosk listener failed: ${err.message}` : 'Vosk listener failed. Type a wake phrase if needed.');
+    showStatus(err?.message ? `Vosk listener failed: ${err.message}` : 'Vosk listener failed.');
     return false;
   } finally {
     state.wakeStarting = false;
@@ -1011,13 +938,11 @@ async function startVoskWakeListener() {
 function startSpeechWakeListener() {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRecognition) {
-    void startWakeAudioCapture()
-      .then(() => showStatus('Awake. Type a wake phrase for this desktop runtime.'))
-      .catch((err) => showStatus(err?.message || 'Wake audio capture failed.'));
+    showStatus('Awake. Wake phrase recognition is unavailable in this runtime.');
     return;
   }
   if (state.recognition) {
-    showStatus('Awake. Listening for wake phrases.');
+    showStatus('Awake. Listening for voice commands.');
     return;
   }
   state.wakeUsesVosk = false;
@@ -1036,7 +961,7 @@ function startSpeechWakeListener() {
     state.lastRecognizedAt = now;
     void processPhraseText(text).catch((err) => showStatus(err.message));
   };
-  recognition.onerror = () => showStatus('Wake listener paused. Type a wake phrase if needed.');
+  recognition.onerror = () => showStatus('Wake listener paused.');
   recognition.onend = () => {
     state.recognition = null;
     if (state.mode !== 'off' && !state.stream) {
@@ -1046,10 +971,10 @@ function startSpeechWakeListener() {
   state.recognition = recognition;
   try {
     recognition.start();
-    showStatus('Awake. Listening for wake phrases.');
+    showStatus('Awake. Listening for voice commands.');
   } catch {
     state.recognition = null;
-    showStatus('Awake. Type a wake phrase for this desktop runtime.');
+    showStatus('Awake. Wake phrase recognition is unavailable in this runtime.');
   }
 }
 
@@ -1089,34 +1014,34 @@ function renderMeter() {
   state.meterFrame = requestAnimationFrame(renderMeter);
 }
 
+async function togglePrimaryVoice() {
+  if (state.mode === 'recording' || state.mode === 'transcribing') {
+    await stopMic('awake');
+    return;
+  }
+  if (state.mode === 'awake') {
+    await enterSleep();
+    return;
+  }
+  await enterAwake();
+}
+
 els.saveButton.addEventListener('click', async () => {
   applyConfig(await desktop.writeConfig(authSessionFields(readFormConfig())));
   await loadDashboard().catch((err) => showStatus(err.message));
 });
-els.applyPairingButton.addEventListener('click', () => applyPairingPayload(els.pairingPayloadInput.value).catch((err) => showPairingMessage(err.message, 'error')));
-els.pastePairingButton.addEventListener('click', async () => {
-  try {
-    const text = await navigator.clipboard.readText();
-    if (!text?.trim()) {
-      showPairingMessage('Clipboard is empty.', 'error');
-      return;
-    }
-    els.pairingPayloadInput.value = text.trim();
-    showPairingMessage('Pasted pairing payload. Review it, then click Apply pairing.');
-  } catch (err) {
-    showPairingMessage(err?.message || 'Could not read clipboard.', 'error');
-  }
-});
 els.pairButton.addEventListener('click', () => pairDevice().catch((err) => showStatus(err.message)));
-els.refreshButton.addEventListener('click', () => loadDashboard().catch((err) => showStatus(err.message)));
-els.newThreadButton.addEventListener('click', () => createThread().catch((err) => showStatus(err.message)));
-els.messageForm.addEventListener('submit', (event) => sendMessage(event).catch((err) => showStatus(err.message)));
-els.startMicButton.addEventListener('click', () => startMic('assistant', { cue: 'start_button' }).catch((err) => showStatus(err.message)));
-els.stopMicButton.addEventListener('click', () => stopMic().catch((err) => showStatus(err.message)));
-els.awakeButton.addEventListener('click', () => enterAwake().catch((err) => showStatus(err.message)));
-els.sleepButton.addEventListener('click', () => enterSleep().catch((err) => showStatus(err.message)));
+els.primaryVoiceButton.addEventListener('click', () => togglePrimaryVoice().catch((err) => showStatus(err.message)));
 els.offButton.addEventListener('click', () => turnOff().catch((err) => showStatus(err.message)));
-els.wakePhraseForm.addEventListener('submit', (event) => processWakePhrase(event).catch((err) => showStatus(err.message)));
+els.compactButton.addEventListener('click', () => {
+  if (desktop.compactWindow) void desktop.compactWindow().then(applyWindowState);
+});
+els.expandButton.addEventListener('click', () => {
+  if (desktop.expandWindow) void desktop.expandWindow().then(applyWindowState);
+});
+els.closeButton.addEventListener('click', () => {
+  if (desktop.closeWindow) void desktop.closeWindow();
+});
 els.openWebButton.addEventListener('click', () => {
   const config = readFormConfig();
   void desktop.openExternal(deriveWebUrl(config) || config.serverUrl);
@@ -1124,13 +1049,21 @@ els.openWebButton.addEventListener('click', () => {
 els.signInButton.addEventListener('click', () => {
   const config = readFormConfig();
   void desktop.openExternal(deriveWebUrl(config) || config.serverUrl);
-  updateAuthStatus('idle', 'Opened web dashboard. Sign in, copy your Clerk session token, paste it here, save, then refresh.');
+  updateAuthStatus('idle', 'Opened the web dashboard for sign in.');
 });
 
 if (desktop.onPairingPayload) {
   desktop.onPairingPayload((payload) => {
     void applyPairingPayload(payload).catch((err) => showPairingMessage(err.message, 'error'));
   });
+}
+
+if (desktop.onWindowState) {
+  desktop.onWindowState(applyWindowState);
+}
+
+if (desktop.windowState) {
+  desktop.windowState().then(applyWindowState).catch(() => applyWindowState({ compact: true }));
 }
 
 desktop.readConfig().then((config) => {

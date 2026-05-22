@@ -675,6 +675,25 @@ function AppShell({ client, identitySlot, devMode }: { client: ApiClient; identi
     return <div className="loading-screen">Loading Voice Stream...</div>;
   }
 
+  if (window.voiceStreamDesktop?.isDesktop) {
+    return (
+      <main className="desktop-shell">
+        <header className="desktop-topbar">
+          <div>
+            <div className="kicker">Voice Stream</div>
+            <h1>Desktop voice</h1>
+          </div>
+          <div className="identity">{identitySlot}</div>
+        </header>
+
+        {error ? <div className="banner error">{error}</div> : null}
+        {notice ? <div className="banner notice">{notice}</div> : null}
+
+        <DesktopVoicePanel client={client} onRefresh={loadDashboard} />
+      </main>
+    );
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -1013,7 +1032,6 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
   const [deviceName, setDeviceName] = React.useState('Electron desktop');
   const [status, setStatus] = React.useState('Ready');
   const [mode, setMode] = React.useState<VoiceMode>('off');
-  const [phrase, setPhrase] = React.useState('');
   const [streaming, setStreaming] = React.useState(false);
   const [voiceSettings, setVoiceSettings] = React.useState<VoiceSettings | null>(null);
   const [device, setDevice] = React.useState<{ id: string; token: string } | null>(() => {
@@ -1284,7 +1302,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
             await finishVoiceFromServer(message.status || 'Transcript patched into chat.');
             void onRefresh();
           } else if (message.type === 'sleep') {
-            let nextStatus = 'Awake. Waiting for wake phrase.';
+            let nextStatus = 'Awake. Waiting for voice command.';
             if (target === 'clipboard') {
               const copied = await copyText(message.transcriptText || '');
               nextStatus = copied ? 'Copied voice transcription.' : 'No voice transcription detected.';
@@ -1344,7 +1362,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
   function enterAwake() {
     resetApprovalCollection();
     setMode('awake');
-    void reportDesktopStatus('awake', 'Awake. Listening for wake phrases.');
+    void reportDesktopStatus('awake', 'Awake. Listening for voice commands.');
     startWakeListener();
   }
 
@@ -1367,17 +1385,11 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
     void reportDesktopStatus('off', 'Off.');
   }
 
-  async function processWakePhrase() {
-    const text = phrase;
-    setPhrase('');
-    await processPhraseText(text, true);
-  }
-
   async function processPhraseText(text: string, finalizeNow = false) {
     const currentMode = modeRef.current;
     if (acceptApprovalText(text, finalizeNow)) return;
     if (currentMode === 'recording') {
-      setStatus('Recording. Wake commands are ignored until capture stops.');
+      setStatus('Recording. Voice commands are ignored until capture stops.');
       return;
     }
     const match = wakePhraseMatch(text);
@@ -1394,7 +1406,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
       return;
     }
     if (currentMode === 'sleeping') {
-      setStatus('Sleeping. Wake the app manually first.');
+      setStatus('Sleeping. Press Wake or say the unlock code.');
       return;
     }
     if (currentMode === 'off') enterAwake();
@@ -1403,7 +1415,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
 
   function startWakeListener() {
     if (refs.current.wakeStarting || refs.current.wakeStream || refs.current.recognition) {
-      setStatus('Awake. Listening for wake phrases.');
+      setStatus('Awake. Listening for voice commands.');
       return;
     }
     if (window.voiceStreamDesktop?.startVosk && window.voiceStreamDesktop.sendVoskFrame && window.voiceStreamDesktop.onVoskText) {
@@ -1422,7 +1434,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
     try {
       const status = await desktop.startVosk();
       if (!status.available) {
-        setStatus(status.error ? `Vosk unavailable: ${status.error}` : 'Vosk unavailable. Type a wake phrase if needed.');
+        setStatus(status.error ? `Vosk unavailable: ${status.error}` : 'Wake listener unavailable.');
         return false;
       }
 
@@ -1452,7 +1464,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
       return true;
     } catch (err: any) {
       stopVoskWakeListener();
-      setStatus(err?.message ? `Vosk listener failed: ${err.message}` : 'Vosk listener failed. Type a wake phrase if needed.');
+      setStatus(err?.message ? `Vosk listener failed: ${err.message}` : 'Vosk listener failed.');
       return false;
     } finally {
       refs.current.wakeStarting = false;
@@ -1462,11 +1474,11 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
   function startSpeechWakeListener() {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      setStatus('Awake. Type a wake phrase for this desktop runtime.');
+      setStatus('Awake. Wake recognition is unavailable in this runtime.');
       return;
     }
     if (refs.current.recognition) {
-      setStatus('Awake. Listening for wake phrases.');
+      setStatus('Awake. Listening for voice commands.');
       return;
     }
     const recognition = new SpeechRecognition();
@@ -1482,7 +1494,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
       lastRecognizedRef.current = { text, at: now };
       void processPhraseText(text);
     };
-    recognition.onerror = () => setStatus('Wake listener paused. Type a wake phrase if needed.');
+    recognition.onerror = () => setStatus('Wake listener paused.');
     recognition.onend = () => {
       refs.current.recognition = undefined;
       if (modeRef.current !== 'off' && !streamingRef.current) {
@@ -1492,10 +1504,10 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
     refs.current.recognition = recognition;
     try {
       recognition.start();
-      setStatus('Awake. Listening for wake phrases.');
+      setStatus('Awake. Listening for voice commands.');
     } catch {
       refs.current.recognition = undefined;
-      setStatus('Awake. Type a wake phrase for this desktop runtime.');
+      setStatus('Awake. Wake recognition is unavailable in this runtime.');
     }
   }
 
@@ -1552,43 +1564,72 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
     await onRefresh();
   }
 
+  async function togglePrimaryVoice() {
+    if (streamingRef.current || modeRef.current === 'recording') {
+      await stopVoice();
+      return;
+    }
+    if (modeRef.current === 'awake') {
+      enterSleep();
+      return;
+    }
+    enterAwake();
+  }
+
+  const primaryLabel = mode === 'off'
+    ? 'Off'
+    : mode === 'awake'
+      ? 'Awake'
+      : mode === 'sleeping'
+        ? 'Sleeping'
+        : 'Recording';
+  const primaryAction = mode === 'off'
+    ? 'Start voice'
+    : mode === 'awake'
+      ? 'Sleep'
+      : mode === 'sleeping'
+        ? 'Wake'
+        : 'Stop';
+
   return (
-    <section className="panel desktop-voice-panel">
-      <div className="panel-heading">
-        <div>
-          <h2>Desktop Voice</h2>
-          <p>Mode: {mode}. Wake phrases: hey sebastian, patch me in, can you transcribe, go to sleep, status.</p>
-        </div>
-        <div className="voice-actions">
-          <button type="button" onClick={() => void pairDesktop()} disabled={streaming}>
-            Pair
-          </button>
-          <button type="button" onClick={enterAwake} disabled={streaming}>
-            Awake
-          </button>
-          <button type="button" onClick={enterSleep}>
-            Sleep
-          </button>
-          <button type="button" onClick={() => void startVoice()} disabled={streaming || mode === 'sleeping'}>
-            Record
-          </button>
-          <button type="button" onClick={() => void stopVoice()} disabled={!streaming}>
-            Stop
-          </button>
-          <button type="button" onClick={turnOff}>
-            Off
-          </button>
-        </div>
+    <section className="desktop-voice-focus">
+      <div className="desktop-voice-copy">
+        <div className="kicker">Assistant microphone</div>
+        <h2>Voice control</h2>
+        <p>{device ? `${deviceName} connected` : 'Connect this desktop, then start voice.'}</p>
       </div>
-      <label>
-        Desktop name
-        <input value={deviceName} onChange={(event) => setDeviceName(event.target.value)} disabled={streaming} />
-      </label>
-      <form className="desktop-phrase-row" onSubmit={(event) => { event.preventDefault(); void processWakePhrase(); }}>
-        <input value={phrase} onChange={(event) => setPhrase(event.target.value)} placeholder="Type a wake phrase for desktop testing" />
-        <button type="submit">Run Phrase</button>
-      </form>
-      <p className="runtime-status">{status}</p>
+
+      <button
+        type="button"
+        className={`desktop-voice-orb is-${mode}`}
+        onClick={() => void togglePrimaryVoice()}
+        aria-pressed={mode === 'awake' || mode === 'recording'}
+        aria-label={`${primaryAction} desktop voice`}
+      >
+        <span className="desktop-orb-ring" />
+        <span className="desktop-mic-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" focusable="false">
+            <rect x="9" y="3" width="6" height="11" rx="3" />
+            <path d="M5 11a7 7 0 0 0 14 0" />
+            <path d="M12 18v3" />
+            <path d="M8 21h8" />
+          </svg>
+        </span>
+        <strong>{primaryLabel}</strong>
+        <span>{primaryAction}</span>
+      </button>
+
+      <p className="desktop-runtime-status">{status}</p>
+
+      <div className="desktop-connection-strip">
+        <label>
+          Desktop name
+          <input value={deviceName} onChange={(event) => setDeviceName(event.target.value)} disabled={streaming} />
+        </label>
+        <button type="button" onClick={() => void pairDesktop()} disabled={streaming}>
+          Connect desktop
+        </button>
+      </div>
     </section>
   );
 }
@@ -1673,6 +1714,10 @@ function DevDashboard() {
     event.preventDefault();
     localStorage.setItem(devUserStorageKey, JSON.stringify(draft));
     setDevUser(draft);
+  }
+
+  if (window.voiceStreamDesktop?.isDesktop) {
+    return <AppShell client={client} identitySlot={<span>{devUser.email}</span>} devMode />;
   }
 
   return (

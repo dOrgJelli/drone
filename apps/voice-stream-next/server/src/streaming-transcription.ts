@@ -1,4 +1,4 @@
-import { transcribePcm16 } from './assistant-runtime.js';
+import { hasGroqSpeechRuntime, transcribePcm16 } from './assistant-runtime.js';
 
 export type TerminalCommandType = 'sleep' | 'abort';
 
@@ -68,9 +68,7 @@ export function buildStreamingTranscriptionConfigFromEnv(env: NodeJS.ProcessEnv 
 }
 
 export function streamingTranscriptionEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.VOICE_STREAM_NEXT_TEST_TRANSCRIPT != null || Boolean(
-    env.OPENAI_API_KEY?.trim() || env.VOICE_STREAM_NEXT_OPENAI_API_KEY?.trim(),
-  );
+  return env.VOICE_STREAM_NEXT_TEST_TRANSCRIPT != null || hasGroqSpeechRuntime(env);
 }
 
 export class StreamingTranscriptionManager {

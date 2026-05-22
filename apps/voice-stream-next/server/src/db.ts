@@ -144,7 +144,7 @@ function newId(prefix: string): string {
 }
 
 function dataDir(): string {
-  return path.resolve(process.env.VOICE_STREAM_NEXT_DATA_DIR?.trim() || path.join(process.cwd(), 'server', '.data'));
+  return path.resolve(process.env.VOICE_STREAM_NEXT_DATA_DIR?.trim() || path.join(process.cwd(), 'server', 'data'));
 }
 
 function dbPath(): string {

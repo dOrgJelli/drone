@@ -16,7 +16,7 @@ const devHeaders = {
 };
 
 function tempDataDir(): string {
-  return path.join(process.cwd(), 'server', '.data', 'tests', crypto.randomUUID());
+  return path.join(process.cwd(), 'server', 'data', 'tests', crypto.randomUUID());
 }
 
 describe('parseVoiceApprovalSettings', () => {
