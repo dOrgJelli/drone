@@ -5,7 +5,8 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { existsSync, promises as fs } from 'node:fs';
 
-import { type DesktopVoiceClipboardMode, type DesktopVoiceMode } from './desktop-voice-behavior';
+import { type DesktopVoiceClipboardMode, type DesktopVoiceCue, type DesktopVoiceMode } from './desktop-voice-behavior';
+import { PcmRingBuffer } from './pcm-ring-buffer';
 import { managedDesktopVoiceModelDirSync } from './desktop-voice-models';
 import {
   VOICE_APPROVAL_SETTINGS_DEFAULT,
@@ -112,7 +113,7 @@ type DesktopVoiceEvent = {
   status: DesktopVoiceStatus;
 } | {
   type: 'desktop_voice_local_cue';
-  cue: 'status';
+  cue: DesktopVoiceCue;
 } | {
   type: 'desktop_voice_clipboard_result';
   text: string;
@@ -256,6 +257,14 @@ function clipboardPrewarmEnabled(): boolean {
 
 function clipboardPreRollMs(): number {
   return positiveIntEnvValue('DRONE_DESKTOP_VOICE_CLIPBOARD_PREROLL_MS', 1_200);
+}
+
+function promptPreRollMs(): number {
+  return positiveIntEnvValue('DRONE_DESKTOP_VOICE_PROMPT_PREROLL_MS', 1_500);
+}
+
+function desktopVoiceEventReplayLimit(): number {
+  return positiveIntEnvValue('DRONE_DESKTOP_VOICE_EVENT_REPLAY_LIMIT', 64);
 }
 
 function pcmBytesForMs(ms: number, sampleRateHz = 16_000, channels = 1): number {
@@ -994,6 +1003,8 @@ export class DesktopVoiceService {
   private clipboardStartedCapture = false;
   private clipboardPreRollChunks: Buffer[] = [];
   private clipboardPreRollBytes = 0;
+  private readonly promptPreRollBuffer = new PcmRingBuffer(pcmBytesForMs(promptPreRollMs()));
+  private readonly eventReplayBuffer: Exclude<DesktopVoiceEvent, { type: 'desktop_voice_status' }>[] = [];
   private clipboardMode: DesktopVoiceClipboardMode = 'idle';
   private clipboardMessage = 'Voice transcription is idle.';
   private clipboardError: string | null = null;
@@ -1108,6 +1119,7 @@ export class DesktopVoiceService {
     this.desktopSubscriberCount += 1;
     this.events.on('event', listener);
     listener({ type: 'desktop_voice_status', status: this.snapshot() });
+    for (const event of this.eventReplayBuffer) listener(event);
     return () => {
       this.events.off('event', listener);
       this.desktopSubscriberCount = Math.max(0, this.desktopSubscriberCount - 1);
@@ -1119,7 +1131,7 @@ export class DesktopVoiceService {
     if (!trimmed || this.desktopSubscriberCount <= 0) return false;
     if (this.opts.synthesizeSpeechWav) {
       const wav = await this.opts.synthesizeSpeechWav(trimmed);
-      this.events.emit('event', {
+      this.emitDesktopVoiceEvent({
         type: 'desktop_voice_speak_audio',
         text: trimmed,
         contentType: 'audio/wav',
@@ -1127,7 +1139,7 @@ export class DesktopVoiceService {
       } satisfies DesktopVoiceEvent);
       return true;
     }
-    this.events.emit('event', { type: 'desktop_voice_speak', text: trimmed } satisfies DesktopVoiceEvent);
+    this.emitDesktopVoiceEvent({ type: 'desktop_voice_speak', text: trimmed } satisfies DesktopVoiceEvent);
     return true;
   }
 
@@ -1195,6 +1207,7 @@ export class DesktopVoiceService {
     this.mode = 'off';
     this.message = message;
     this.promptChunks = [];
+    this.promptPreRollBuffer.clear();
     this.resetApprovalCollection();
     this.resetPromptTranscription();
     this.promptCaptureTarget = null;
@@ -1295,14 +1308,17 @@ export class DesktopVoiceService {
   }
 
   private handleAudio(chunk: Buffer): void {
-    if (
+    const listening =
       this.mode !== 'off' &&
       this.mode !== 'error' &&
       this.mode !== 'recording' &&
       this.mode !== 'transcribing' &&
       this.clipboardMode !== 'recording' &&
-      this.clipboardMode !== 'transcribing'
-    ) this.recognizer.write(chunk);
+      this.clipboardMode !== 'transcribing';
+    if (listening) {
+      this.recognizer.write(chunk);
+      this.promptPreRollBuffer.push(chunk);
+    }
     if (this.mode === 'recording') {
       this.promptChunks.push(chunk);
       this.enqueuePromptSegments(this.promptSegmenter.append(chunk));
@@ -1341,7 +1357,7 @@ export class DesktopVoiceService {
       this.message = 'Awake: status OK.';
       this.touch();
       this.emitChange();
-      this.events.emit('event', { type: 'desktop_voice_local_cue', cue: 'status' } satisfies DesktopVoiceEvent);
+      this.emitLocalCue('status');
       return;
     }
     if (command.wake && this.mode === 'awake' && this.shouldAcceptCommand('wake', 1500)) {
@@ -1404,7 +1420,9 @@ export class DesktopVoiceService {
       if (code === this.approvalSettings.unlockCode) {
         this.mode = 'awake';
         this.message = 'Awake: waiting for hey Sebastian.';
+        this.emitLocalCue('unlock');
       } else if (code === this.approvalSettings.lockedOffCode) {
+        this.emitLocalCue('sleeping_off');
         this.stop('Desktop voice is off.');
         return;
       } else {
@@ -1415,10 +1433,12 @@ export class DesktopVoiceService {
       return;
     }
     if (code === this.approvalSettings.lockedOffCode) {
+      this.emitLocalCue('sleeping_off');
       this.stop('Desktop voice is off.');
       return;
     }
     this.message = `Approval code detected: ${code}`;
+    this.emitLocalCue('status');
     this.touch();
     this.emitChange();
   }
@@ -1428,9 +1448,11 @@ export class DesktopVoiceService {
     this.message = this.sleepingMessage();
     this.promptChunks = [];
     this.promptSegments = [];
+    this.promptPreRollBuffer.clear();
     this.resetApprovalCollection();
     this.resetPromptTranscription();
     this.promptCaptureTarget = null;
+    this.emitLocalCue('sleep');
     this.touch();
     this.emitChange();
   }
@@ -1458,8 +1480,10 @@ export class DesktopVoiceService {
           ? 'Awake: recording clipboard transcription.'
         : 'Awake: recording assistant voice prompt.';
     this.promptChunks = [];
+    this.seedPromptRecordingFromPreRoll();
     this.resetPromptTranscription();
     this.promptCaptureTarget = target;
+    this.emitLocalCue('wake');
     this.touch();
     this.emitChange();
   }
@@ -1534,7 +1558,7 @@ export class DesktopVoiceService {
         this.promptTranscriptText = this.promptTranscriptText ? `${this.promptTranscriptText}\n${text}` : text;
         this.promptTranscriptUpdatedAt = new Date().toISOString();
         if (this.promptCaptureTarget === 'assistant') {
-          this.events.emit('event', { type: 'desktop_voice_transcript_segment', text } satisfies DesktopVoiceEvent);
+          this.emitDesktopVoiceEvent({ type: 'desktop_voice_transcript_segment', text } satisfies DesktopVoiceEvent);
         }
       }
       this.promptTranscriptError = null;
@@ -1644,7 +1668,7 @@ export class DesktopVoiceService {
       if (target === 'patch') {
         await this.opts.submitChatPatch?.(text);
       } else if (target === 'clipboard') {
-        this.events.emit('event', { type: 'desktop_voice_clipboard_result', text } satisfies DesktopVoiceEvent);
+        this.emitDesktopVoiceEvent({ type: 'desktop_voice_clipboard_result', text } satisfies DesktopVoiceEvent);
       } else {
         await this.opts.submitAssistantPrompt(text);
       }
@@ -1763,7 +1787,7 @@ export class DesktopVoiceService {
       this.clipboardMessage = `Transcribed ${text.length.toLocaleString()} characters.`;
       this.clipboardRecordingStartedAtMs = 0;
       this.clipboardRecordingRequestId = null;
-      this.events.emit('event', { type: 'desktop_voice_clipboard_result', text } satisfies DesktopVoiceEvent);
+      this.emitDesktopVoiceEvent({ type: 'desktop_voice_clipboard_result', text } satisfies DesktopVoiceEvent);
     } catch (error: any) {
       if (this.clipboardSessionId !== sessionId) return;
       this.clipboardMode = 'error';
@@ -1826,11 +1850,41 @@ export class DesktopVoiceService {
     return this.message;
   }
 
+  private seedPromptRecordingFromPreRoll(): void {
+    const preRollChunks = this.promptPreRollBuffer.drain();
+    if (preRollChunks.length === 0) return;
+    const preRollPcm = Buffer.concat(preRollChunks);
+    if (preRollPcm.byteLength <= 0) return;
+    this.promptChunks.push(preRollPcm);
+    this.enqueuePromptSegments(this.promptSegmenter.append(preRollPcm));
+    desktopVoiceLog('seeded prompt recording from pre-roll', {
+      bytes: preRollPcm.byteLength,
+      preRollMs: promptPreRollMs(),
+    });
+  }
+
+  private emitLocalCue(cue: DesktopVoiceCue): void {
+    this.emitDesktopVoiceEvent({ type: 'desktop_voice_local_cue', cue } satisfies DesktopVoiceEvent);
+  }
+
+  private bufferEventForReplay(event: Exclude<DesktopVoiceEvent, { type: 'desktop_voice_status' }>): void {
+    this.eventReplayBuffer.push(event);
+    const limit = desktopVoiceEventReplayLimit();
+    while (this.eventReplayBuffer.length > limit) {
+      this.eventReplayBuffer.shift();
+    }
+  }
+
+  private emitDesktopVoiceEvent(event: DesktopVoiceEvent): void {
+    if (event.type !== 'desktop_voice_status') this.bufferEventForReplay(event);
+    this.events.emit('event', event);
+  }
+
   private touch(): void {
     this.updatedAt = new Date().toISOString();
   }
 
   private emitChange(): void {
-    this.events.emit('event', { type: 'desktop_voice_status', status: this.snapshot() } satisfies DesktopVoiceEvent);
+    this.emitDesktopVoiceEvent({ type: 'desktop_voice_status', status: this.snapshot() } satisfies DesktopVoiceEvent);
   }
 }

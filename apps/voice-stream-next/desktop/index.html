@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VoiceStream Desktop</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <aside class="rail">
+        <div>
+          <p class="eyebrow">VoiceStream</p>
+          <h1>Desktop voice</h1>
+        </div>
+        <div class="status-block">
+          <span id="connectionDot" class="dot"></span>
+          <div>
+            <strong id="connectionLabel">Disconnected</strong>
+            <span id="deviceLabel">No device paired</span>
+          </div>
+        </div>
+        <button id="openWebButton" class="ghost" type="button">Open web dashboard</button>
+        <button id="signInButton" class="ghost" type="button">Sign in on web</button>
+      </aside>
+
+      <section class="workspace">
+        <section class="panel settings-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Connection</p>
+              <h2>Server and auth</h2>
+            </div>
+            <button id="saveButton" type="button">Save</button>
+          </div>
+          <div class="form-grid">
+            <label>
+              Server URL
+              <input id="serverUrlInput" autocomplete="off" />
+            </label>
+            <label>
+              Device name
+              <input id="deviceNameInput" autocomplete="off" />
+            </label>
+            <label>
+              Auth mode
+              <select id="authModeInput">
+                <option value="dev">Local dev headers</option>
+                <option value="bearer">Clerk session token</option>
+              </select>
+            </label>
+            <label>
+              Clerk session token
+              <input id="bearerTokenInput" type="password" autocomplete="off" />
+            </label>
+            <label>
+              Dev email
+              <input id="devEmailInput" autocomplete="off" />
+            </label>
+            <label>
+              Dev display name
+              <input id="devNameInput" autocomplete="off" />
+            </label>
+          </div>
+          <label class="check-row">
+            <input id="devAdminInput" type="checkbox" />
+            Dev user is admin
+          </label>
+          <p id="authStatus" class="auth-status muted">Auth not checked yet.</p>
+          <p class="pairing-help muted">
+            For Clerk production servers, sign in on the web dashboard, copy your session token here, choose
+            <strong>Clerk session token</strong>, then save. Deep links use the <code>voicestream://</code> protocol when the packaged app registers it.
+          </p>
+        </section>
+
+        <section class="panel pairing-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Pairing</p>
+              <h2>QR / deep link / server URL</h2>
+            </div>
+            <div class="pairing-actions">
+              <button id="pastePairingButton" type="button">Paste</button>
+              <button id="applyPairingButton" type="button">Apply pairing</button>
+            </div>
+          </div>
+          <label class="pairing-label">
+            Pairing payload
+            <textarea id="pairingPayloadInput" rows="3" placeholder="voicestream://pair?... or ws://host:3299/audio?token=..."></textarea>
+          </label>
+          <p id="pairingMessage" class="muted">Paste a dashboard pairing payload, open a voicestream:// link, or use Pair device for manual registration.</p>
+        </section>
+
+        <section class="main-grid">
+          <section class="panel voice-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Microphone</p>
+                <h2>Capture session</h2>
+              </div>
+              <button id="pairButton" type="button">Pair device</button>
+            </div>
+            <div class="meter-shell">
+              <div id="meterBar" class="meter-bar"></div>
+            </div>
+            <div class="voice-actions">
+              <button id="awakeButton" type="button">Awake</button>
+              <button id="startMicButton" class="primary" type="button">Record</button>
+              <button id="sleepButton" type="button">Sleep</button>
+              <button id="stopMicButton" type="button" disabled>Stop</button>
+              <button id="offButton" type="button">Off</button>
+            </div>
+            <form id="wakePhraseForm" class="composer">
+              <input id="wakePhraseInput" placeholder="Type wake phrase or approval code" autocomplete="off" />
+              <button type="submit">Run</button>
+            </form>
+            <p id="micStatus" class="muted">Pair this desktop, then start a capture session.</p>
+          </section>
+
+          <section class="panel assistant-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">Assistant</p>
+                <h2>Thread</h2>
+              </div>
+              <button id="newThreadButton" type="button">New thread</button>
+            </div>
+            <div id="messages" class="messages"></div>
+            <form id="messageForm" class="composer">
+              <input id="messageInput" placeholder="Type to the assistant" autocomplete="off" />
+              <button type="submit">Send</button>
+            </form>
+          </section>
+        </section>
+
+        <section class="panel logs-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Diagnostics</p>
+              <h2>Client logs</h2>
+            </div>
+            <button id="refreshButton" type="button">Refresh</button>
+          </div>
+          <div id="logs" class="logs"></div>
+        </section>
+      </section>
+    </main>
+    <script src="../shared/approval-code.js"></script>
+    <script src="../shared/pcm-capture-buffer.js"></script>
+    <script src="../shared/local-voice-cues.js"></script>
+    <script src="../shared/pairing-payload-parser.js"></script>
+    <script src="./renderer.js"></script>
+  </body>
+</html>

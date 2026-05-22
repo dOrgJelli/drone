@@ -1,0 +1,399 @@
+package com.huntelkator.voicestreamnext
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.os.Handler
+import android.os.IBinder
+import android.os.Looper
+import android.os.PowerManager
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
+import org.json.JSONObject
+import java.net.URLEncoder
+import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
+
+class VoiceSessionService : Service() {
+    private lateinit var api: VoiceStreamApi
+    private lateinit var streamer: AudioStreamer
+    private lateinit var microphoneRouter: MicrophoneRouter
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val controlClient = OkHttpClient.Builder()
+        .pingInterval(15, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .build()
+    private var wakeLock: PowerManager.WakeLock? = null
+    @Volatile private var controlSocket: WebSocket? = null
+    @Volatile private var lastStatus = "Off"
+    @Volatile private var lastMode = Constants.MODE_OFF
+    @Volatile private var currentMicrophone = "Mic: phone"
+    @Volatile private var lastApprovalStatus = ""
+    @Volatile private var serviceActive = false
+
+    private val logUploadRunnable = object : Runnable {
+        override fun run() {
+            if (serviceActive) {
+                uploadDiagnostics("periodic", force = false)
+                mainHandler.postDelayed(this, LOG_UPLOAD_INTERVAL_MS)
+            }
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        api = VoiceStreamApi(applicationContext)
+        streamer = AudioStreamer(applicationContext, api)
+        microphoneRouter = MicrophoneRouter(applicationContext)
+        currentMicrophone = microphoneRouter.describeBestAvailable()
+        streamer.statusListener = { update ->
+            if (update.microphone.isNotBlank()) {
+                currentMicrophone = update.microphone
+            }
+            if (update.approvalStatus.isNotBlank()) {
+                publishApprovalStatus(update.approvalStatus)
+            }
+        }
+        createNotificationChannel()
+        ClientLog.i("Service", "VoiceSessionService created")
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            Constants.ACTION_QUERY_STATUS -> {
+                publishStatus(lastStatus, lastMode, currentMicrophone, lastApprovalStatus)
+                if (!serviceActive) {
+                    stopSelf(startId)
+                }
+            }
+            Constants.ACTION_STOP_VOICE -> stopVoice()
+            Constants.ACTION_SLEEP -> {
+                if (serviceActive) {
+                    enterSleep()
+                } else {
+                    stopSelf(startId)
+                }
+            }
+            Constants.ACTION_START_AWAKE -> {
+                serviceActive = true
+                startAwake()
+            }
+            else -> {
+                serviceActive = true
+                startVoice(intent?.getStringExtra(Constants.EXTRA_STREAM_TARGET) ?: Constants.STREAM_TARGET_ASSISTANT)
+            }
+        }
+        return START_STICKY
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onDestroy() {
+        serviceActive = false
+        mainHandler.removeCallbacks(logUploadRunnable)
+        streamer.statusListener = null
+        streamer.stop()
+        AssistantAudioPlayer.stopAll()
+        closeControlChannel()
+        releaseWakeLock()
+        publishStatus("Off", Constants.MODE_OFF, currentMicrophone, "")
+        super.onDestroy()
+    }
+
+    private fun startAwake() {
+        uploadDiagnostics("awake-start", force = true)
+        schedulePeriodicDiagnostics()
+        publishStatus("Waking local detector", Constants.MODE_AWAKE, currentMicrophone, lastApprovalStatus)
+        startForeground(NOTIFICATION_ID, notification("Waking local detector"))
+        acquireWakeLock()
+        connectControlChannel()
+        streamer.startAwake { status ->
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.notify(NOTIFICATION_ID, notification(status))
+            publishStatus(status, modeFromStatus(status), currentMicrophone, lastApprovalStatus)
+            if (status == "Off") stopVoice()
+        }
+    }
+
+    private fun startVoice(target: String) {
+        uploadDiagnostics("voice-start", force = true)
+        schedulePeriodicDiagnostics()
+        publishStatus("Voice stream starting", Constants.MODE_RECORDING, currentMicrophone, lastApprovalStatus)
+        startForeground(NOTIFICATION_ID, notification("Voice stream starting"))
+        acquireWakeLock()
+        connectControlChannel()
+        thread(name = "VoiceStreamNextServiceStart") {
+            try {
+                val deviceId = api.pairedDeviceId()
+                if (deviceId.isBlank()) {
+                    publishStatus("Pair this device before streaming.", Constants.MODE_ERROR, currentMicrophone, lastApprovalStatus)
+                    stopVoice()
+                    return@thread
+                }
+                val sessionId = api.createVoiceSession(deviceId, target)
+                api.uploadLog("Android foreground voice service started")
+                ClientLog.i("Service", "Voice session started target=$target sessionId=$sessionId")
+                streamer.start(sessionId, target) { status ->
+                    val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                    manager.notify(NOTIFICATION_ID, notification(status))
+                    publishStatus(status, modeFromStatus(status), currentMicrophone, lastApprovalStatus)
+                    if (status == "Off") stopVoice()
+                }
+            } catch (error: Exception) {
+                ClientLog.w("Service", "Voice stream failed to start", error)
+                publishStatus("Voice stream failed to start.", Constants.MODE_ERROR, currentMicrophone, lastApprovalStatus)
+                stopVoice()
+            }
+        }
+    }
+
+    private fun stopVoice() {
+        uploadDiagnostics("service-stop", force = true)
+        serviceActive = false
+        mainHandler.removeCallbacks(logUploadRunnable)
+        streamer.stop()
+        AssistantAudioPlayer.stopAll()
+        closeControlChannel()
+        releaseWakeLock()
+        publishStatus("Off", Constants.MODE_OFF, currentMicrophone, "")
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    private fun enterSleep() {
+        if (!streamer.enterSleep()) {
+            stopVoice()
+        }
+    }
+
+    private fun schedulePeriodicDiagnostics() {
+        mainHandler.removeCallbacks(logUploadRunnable)
+        mainHandler.postDelayed(logUploadRunnable, LOG_UPLOAD_INTERVAL_MS)
+    }
+
+    private fun uploadDiagnostics(reason: String, force: Boolean) {
+        DiagnosticsUploader.upload(applicationContext, api, reason, force)
+    }
+
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        val powerManager = getSystemService(PowerManager::class.java)
+        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VoiceStreamNext:VoiceSession").apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let { lock ->
+            runCatching {
+                if (lock.isHeld) lock.release()
+            }
+        }
+        wakeLock = null
+    }
+
+    private fun publishApprovalStatus(status: String) {
+        lastApprovalStatus = status
+        broadcastState()
+        sendControlStatus(lastStatus, lastMode, currentMicrophone, lastApprovalStatus)
+        mainHandler.postDelayed({
+            if (lastApprovalStatus == status) {
+                lastApprovalStatus = ""
+                broadcastState()
+            }
+        }, APPROVAL_STATUS_MS)
+    }
+
+    private fun publishStatus(status: String, mode: String, microphone: String, approvalStatus: String) {
+        lastStatus = status
+        lastMode = mode
+        currentMicrophone = microphone.ifBlank { currentMicrophone }
+        if (approvalStatus.isNotBlank()) {
+            lastApprovalStatus = approvalStatus
+        }
+        broadcastState()
+        if (!sendControlStatus(status, mode, currentMicrophone, lastApprovalStatus)) {
+            thread(name = "VoiceStreamNextStatusUpload") {
+                runCatching {
+                    api.uploadClientStatus(
+                        mode = mode,
+                        status = status,
+                        microphone = currentMicrophone,
+                        lastError = if (mode == Constants.MODE_ERROR) status else null,
+                    )
+                }
+            }
+        }
+    }
+
+    private fun broadcastState() {
+        sendBroadcast(Intent(Constants.ACTION_STATUS).apply {
+            setPackage(packageName)
+            putExtra(Constants.EXTRA_STATUS, lastStatus)
+            putExtra(Constants.EXTRA_MODE, lastMode)
+            putExtra(Constants.EXTRA_MICROPHONE, currentMicrophone)
+            putExtra(Constants.EXTRA_APPROVAL_STATUS, lastApprovalStatus)
+        })
+    }
+
+    private fun connectControlChannel() {
+        if (controlSocket != null) return
+        val deviceId = api.pairedDeviceId()
+        val token = api.pairedDeviceToken()
+        if (deviceId.isBlank() || token.isBlank()) return
+        val url = buildControlUrl(api.loadConfig().serverUrl, deviceId, token)
+        controlSocket = controlClient.newWebSocket(
+            Request.Builder().url(url).build(),
+            object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    sendControlStatus(lastStatus, lastMode, currentMicrophone, lastApprovalStatus, webSocket)
+                }
+
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    val message = runCatching { JSONObject(text) }.getOrNull() ?: return
+                    when (message.optString("type")) {
+                        "server_ping" -> webSocket.send(
+                            JSONObject()
+                                .put("type", "client_ping")
+                                .put("sentAt", java.time.Instant.now().toString())
+                                .toString()
+                        )
+                        "server_command" -> handleRemoteControlCommand(webSocket, message)
+                    }
+                }
+
+                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    if (controlSocket === webSocket) controlSocket = null
+                }
+
+                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    if (controlSocket === webSocket) controlSocket = null
+                }
+            }
+        )
+    }
+
+    private fun closeControlChannel() {
+        controlSocket?.close(1000, "service stopped")
+        controlSocket = null
+    }
+
+    private fun sendControlStatus(
+        status: String,
+        mode: String,
+        microphone: String,
+        approvalStatus: String,
+        socket: WebSocket? = controlSocket,
+    ): Boolean {
+        val localSocket = socket ?: return false
+        val payload = JSONObject()
+            .put("type", "client_status")
+            .put("mode", mode)
+            .put("status", if (approvalStatus.isNotBlank()) "$status | $approvalStatus" else status)
+            .put("microphone", microphone)
+            .put("protocolVersion", 1)
+            .put("clientVersion", BuildConfig.VERSION_CODE)
+            .put("appVersion", BuildConfig.VERSION_NAME)
+            .put("lastError", if (mode == Constants.MODE_ERROR) status else JSONObject.NULL)
+            .put("reportedAt", java.time.Instant.now().toString())
+        return localSocket.send(payload.toString())
+    }
+
+    private fun handleRemoteControlCommand(webSocket: WebSocket, message: JSONObject) {
+        val command = message.optString("command")
+        val commandId = message.optString("commandId")
+        fun ack(ok: Boolean, mode: String = lastMode, status: String = lastStatus, error: String? = null) {
+            val payload = JSONObject()
+                .put("type", "command_ack")
+                .put("commandId", commandId)
+                .put("command", command)
+                .put("ok", ok)
+                .put("mode", mode)
+                .put("status", status)
+            if (error != null) payload.put("error", error)
+            webSocket.send(payload.toString())
+        }
+        when (command) {
+            "query_status" -> {
+                ack(true)
+                publishStatus(lastStatus, lastMode, currentMicrophone, lastApprovalStatus)
+            }
+            "sleep" -> {
+                enterSleep()
+                ack(true, Constants.MODE_SLEEPING, lastStatus)
+            }
+            "off" -> {
+                stopVoice()
+                ack(true, Constants.MODE_OFF, "Off.")
+            }
+            "awake" -> {
+                startAwake()
+                ack(true, Constants.MODE_AWAKE, lastStatus)
+            }
+            else -> ack(false, lastMode, lastStatus, "unknown command")
+        }
+    }
+
+    private fun buildControlUrl(serverUrl: String, deviceId: String, token: String): String {
+        val trimmed = serverUrl.trimEnd('/')
+        val base = when {
+            trimmed.startsWith("https://") -> "wss://${trimmed.removePrefix("https://")}"
+            trimmed.startsWith("http://") -> "ws://${trimmed.removePrefix("http://")}"
+            else -> trimmed
+        }
+        return "$base/api/devices/${encode(deviceId)}/control?token=${encode(token)}"
+    }
+
+    private fun encode(value: String): String = URLEncoder.encode(value, Charsets.UTF_8.name())
+
+    private fun modeFromStatus(status: String): String {
+        val lower = status.lowercase()
+        return when {
+            lower.contains("missing") || lower.contains("failed") || lower.contains("error") -> Constants.MODE_ERROR
+            lower.contains("sleeping") || lower.startsWith("sleep") || lower.startsWith("unlock:") -> Constants.MODE_SLEEPING
+            lower.contains("waiting") || lower.contains("waking") || lower.contains("listening") -> Constants.MODE_AWAKE
+            lower.contains("closed") || lower == "off" -> Constants.MODE_OFF
+            lower.contains("approval") -> if (lower.contains("sent")) Constants.MODE_AWAKE else lastMode
+            else -> Constants.MODE_RECORDING
+        }
+    }
+
+    private fun notification(text: String): Notification {
+        val stopIntent = Intent(this, VoiceSessionService::class.java).apply {
+            action = Constants.ACTION_STOP_VOICE
+        }
+        val stopPendingIntent = PendingIntent.getService(
+            this,
+            2,
+            stopIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        return Notification.Builder(this, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setContentTitle("VoiceStream")
+            .setContentText(text)
+            .setOngoing(true)
+            .addAction(android.R.drawable.ic_media_pause, "Stop", stopPendingIntent)
+            .build()
+    }
+
+    private fun createNotificationChannel() {
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "VoiceStream", NotificationManager.IMPORTANCE_LOW))
+    }
+
+    private companion object {
+        const val CHANNEL_ID = "voice_stream_next_capture"
+        const val NOTIFICATION_ID = 821
+        const val LOG_UPLOAD_INTERVAL_MS = 60_000L
+        const val APPROVAL_STATUS_MS = 4_000L
+    }
+}

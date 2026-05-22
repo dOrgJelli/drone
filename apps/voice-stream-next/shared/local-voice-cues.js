@@ -1,15 +1,4 @@
-export type LocalVoiceCue =
-  | 'start_button'
-  | 'stop_button'
-  | 'unlock'
-  | 'sleeping_off'
-  | 'wake'
-  | 'sleep'
-  | 'status'
-  | 'clipboard_recording_start'
-  | 'clipboard_transcription_success';
-
-const CUE_TONES: Record<LocalVoiceCue, Array<{ frequencyHz: number; durationMs: number }>> = {
+const LOCAL_VOICE_CUE_TONES = {
   start_button: [
     { frequencyHz: 420, durationMs: 70 },
     { frequencyHz: 640, durationMs: 120 },
@@ -44,28 +33,19 @@ const CUE_TONES: Record<LocalVoiceCue, Array<{ frequencyHz: number; durationMs: 
     { frequencyHz: 0, durationMs: 45 },
     { frequencyHz: 700, durationMs: 90 },
   ],
-  clipboard_recording_start: [
-    { frequencyHz: 360, durationMs: 55 },
-    { frequencyHz: 540, durationMs: 70 },
-    { frequencyHz: 720, durationMs: 95 },
-  ],
-  clipboard_transcription_success: [
-    { frequencyHz: 640, durationMs: 55 },
-    { frequencyHz: 820, durationMs: 70 },
-    { frequencyHz: 1040, durationMs: 120 },
-  ],
 };
 
 let lastPlayedCue = '';
 let lastPlayedAt = 0;
 
-export function playLocalVoiceCue(cue: LocalVoiceCue): void {
-  if (typeof window === 'undefined') return;
+function playLocalVoiceCue(cue) {
+  if (!LOCAL_VOICE_CUE_TONES[cue]) return;
   const now = Date.now();
   if (cue === lastPlayedCue && now - lastPlayedAt < 250) return;
   lastPlayedCue = cue;
   lastPlayedAt = now;
-  const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
   if (!AudioContextClass) return;
 
   try {
@@ -75,7 +55,7 @@ export function playLocalVoiceCue(cue: LocalVoiceCue): void {
     gain.gain.value = 0.22;
     gain.connect(context.destination);
 
-    for (const tone of CUE_TONES[cue]) {
+    for (const tone of LOCAL_VOICE_CUE_TONES[cue]) {
       const durationSec = tone.durationMs / 1000;
       if (tone.frequencyHz > 0) {
         const oscillator = context.createOscillator();

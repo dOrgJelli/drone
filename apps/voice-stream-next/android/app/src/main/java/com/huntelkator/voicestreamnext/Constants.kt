@@ -1,0 +1,43 @@
+package com.huntelkator.voicestreamnext
+
+object Constants {
+    const val PREFS_NAME = "voice_stream_next_prefs"
+    const val PREF_SERVER_URL = "server_url"
+    const val PREF_AUTH_MODE = "auth_mode"
+    const val PREF_BEARER_TOKEN = "bearer_token"
+    const val PREF_DEV_EMAIL = "dev_email"
+    const val PREF_DEV_NAME = "dev_name"
+    const val PREF_DEV_ADMIN = "dev_admin"
+    const val PREF_DEVICE_ID = "device_id"
+    const val PREF_DEVICE_TOKEN = "device_token"
+    const val PREF_DEVICE_NAME = "device_name"
+
+    const val ACTION_START_VOICE = "com.huntelkator.voicestreamnext.action.START_VOICE"
+    const val ACTION_START_AWAKE = "com.huntelkator.voicestreamnext.action.START_AWAKE"
+    const val ACTION_SLEEP = "com.huntelkator.voicestreamnext.action.SLEEP"
+    const val ACTION_STOP_VOICE = "com.huntelkator.voicestreamnext.action.STOP_VOICE"
+    const val ACTION_QUERY_STATUS = "com.huntelkator.voicestreamnext.action.QUERY_STATUS"
+    const val ACTION_STATUS = "com.huntelkator.voicestreamnext.action.STATUS"
+
+    const val EXTRA_STATUS = "status"
+    const val EXTRA_MODE = "mode"
+    const val EXTRA_MICROPHONE = "microphone"
+    const val EXTRA_APPROVAL_STATUS = "approval_status"
+    const val EXTRA_STREAM_TARGET = "stream_target"
+
+    const val MODE_OFF = "off"
+    const val MODE_AWAKE = "awake"
+    const val MODE_SLEEPING = "sleeping"
+    const val MODE_RECORDING = "recording"
+    const val MODE_ERROR = "error"
+
+    const val AUTH_DEV = "dev"
+    const val AUTH_BEARER = "bearer"
+    const val STREAM_TARGET_ASSISTANT = "assistant"
+    const val STREAM_TARGET_PATCH = "patch"
+    const val STREAM_TARGET_CLIPBOARD = "clipboard"
+    const val DEFAULT_SERVER_URL = "http://10.0.2.2:3299"
+    const val DEFAULT_DEV_EMAIL = "android@example.local"
+    const val DEFAULT_DEV_NAME = "Android Operator"
+    const val DEFAULT_DEVICE_NAME = "Android voice client"
+}
