@@ -10,8 +10,13 @@ import {
 import { createClerkClient, createDevClient, readDevUser } from './apiClient.js';
 import type {
   ApiClient,
+  AssistantApprovalRecord,
+  AssistantArtifactRecord,
   AssistantMessage,
+  AssistantQueuedPromptRecord,
+  AssistantSnapshot,
   AssistantThread,
+  AssistantThreadView,
   DashboardData,
   DashboardView,
   DesktopVoskStatus,
@@ -47,17 +52,187 @@ function codeValue(raw: string): string {
   return raw.replace(/\D/g, '').slice(0, 12);
 }
 
+function safeJsonText(raw: string | null | undefined): unknown {
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function messageRoleLabel(message: AssistantMessage): string {
+  if (message.role === 'assistant') return 'Assistant';
+  if (message.role === 'toolResult') return message.toolName ? `Tool: ${message.toolName}` : 'Tool';
+  if (message.role === 'system') return 'System';
+  return 'You';
+}
+
+function speakAssistantText(text: string): void {
+  const clean = text.trim();
+  if (!clean || typeof window.speechSynthesis === 'undefined' || typeof window.SpeechSynthesisUtterance === 'undefined') return;
+  window.speechSynthesis.cancel();
+  const utterance = new window.SpeechSynthesisUtterance(clean);
+  utterance.rate = 1;
+  utterance.pitch = 1;
+  window.speechSynthesis.speak(utterance);
+}
+
+function toolActivitySummary(message: AssistantMessage): { title: string; detail: string; block?: string; status?: string } | null {
+  if (message.role === 'toolResult') {
+    const result = safeJsonText(message.contentJson);
+    return {
+      title: message.isError ? 'Tool failed' : 'Tool completed',
+      detail: message.toolName ?? 'tool',
+      block: typeof result === 'string' ? result : JSON.stringify(result, null, 2),
+      status: message.isError ? 'error' : 'done',
+    };
+  }
+  const parsed = safeJsonText(message.contentJson);
+  const calls = Array.isArray(parsed) ? parsed.filter((item) => item && typeof item === 'object' && ['modelToolCall', 'toolCall'].includes(String((item as any).type))) : [];
+  if (calls.length === 0) return null;
+  const call = calls[0] as Record<string, unknown>;
+  return {
+    title: 'Tool requested',
+    detail: String(call.name ?? 'tool'),
+    block: JSON.stringify(call.arguments ?? {}, null, 2),
+    status: 'pending',
+  };
+}
+
+function ToolActivityMessage({ message }: { message: AssistantMessage }) {
+  const summary = toolActivitySummary(message);
+  if (!summary) {
+    return (
+      <article className={`assistant-message ${message.role}`}>
+        <div className="assistant-message-role">{messageRoleLabel(message)}</div>
+        <p>{message.content}</p>
+        {message.spokenText ? <small>Spoken reply ready</small> : null}
+      </article>
+    );
+  }
+  return (
+    <article className={`assistant-tool-activity ${summary.status ?? ''}`}>
+      <div>
+        <span className="assistant-tool-activity-dot" />
+        <strong>{summary.title}</strong>
+        <small>{summary.detail} · {timeLabel(message.createdAt)}</small>
+      </div>
+      {message.content ? <p>{message.content}</p> : null}
+      {summary.block ? <pre>{summary.block}</pre> : null}
+    </article>
+  );
+}
+
+function approvalSummary(approval: AssistantApprovalRecord): {
+  title: string;
+  rows: Array<{ label: string; value: string }>;
+  blockLabel?: string;
+  block?: string;
+} {
+  const args = (approval.args && typeof approval.args === 'object' ? approval.args : safeJsonText(approval.argsJson)) as Record<string, unknown>;
+  if (approval.toolName === 'assistant_artifacts') {
+    const action = String(args.action ?? '').trim();
+    const artifactPath = String(args.path ?? '').trim();
+    const content = String(args.content ?? '').trim();
+    return {
+      title: action === 'delete' ? 'Delete artifact' : action === 'read' ? 'Read artifact' : action === 'append' ? 'Append artifact' : 'Write artifact',
+      rows: [
+        ...(action ? [{ label: 'Action', value: action }] : []),
+        ...(artifactPath ? [{ label: 'Path', value: artifactPath }] : []),
+      ],
+      blockLabel: content ? 'Content' : undefined,
+      block: content,
+    };
+  }
+  if (approval.toolName === 'speak') {
+    return {
+      title: 'Speak reply',
+      rows: [],
+      blockLabel: 'Text',
+      block: String(args.text ?? '').trim(),
+    };
+  }
+  if (approval.toolName === 'update_system_prompt') {
+    return {
+      title: 'Update system prompt',
+      rows: [],
+      blockLabel: 'Prompt',
+      block: String(args.prompt ?? '').trim(),
+    };
+  }
+  if (approval.toolName === 'set_thinking_level') {
+    return {
+      title: 'Set thinking level',
+      rows: [{ label: 'Level', value: String(args.thinkingLevel ?? 'off') }],
+    };
+  }
+  return {
+    title: approval.label || 'Approval required',
+    rows: [],
+    blockLabel: 'Arguments',
+    block: JSON.stringify(args, null, 2),
+  };
+}
+
+type AssistantPromptEvent =
+  | { type: 'snapshot'; snapshot: AssistantSnapshot }
+  | { type: 'delta'; delta: string }
+  | { type: 'message'; message: AssistantMessage }
+  | { type: 'approval_pending'; snapshot: AssistantSnapshot }
+  | { type: 'done'; snapshot: AssistantSnapshot }
+  | { type: 'error'; error: string; snapshot?: AssistantSnapshot }
+  | { type: string; [key: string]: unknown };
+
+function upsertMessage(messages: AssistantMessage[], message: AssistantMessage): AssistantMessage[] {
+  const index = messages.findIndex((entry) => entry.id === message.id);
+  if (index < 0) return [...messages, message];
+  return messages.map((entry) => entry.id === message.id ? message : entry);
+}
+
+async function readAssistantEventStream(response: Response, handleEvent: (event: AssistantPromptEvent) => void): Promise<void> {
+  if (!response.body) throw new Error('Assistant stream did not include a response body');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  for (;;) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    buffer += decoder.decode(chunk.value, { stream: true });
+    let newlineIndex = buffer.indexOf('\n');
+    while (newlineIndex >= 0) {
+      const line = buffer.slice(0, newlineIndex).trim();
+      buffer = buffer.slice(newlineIndex + 1);
+      if (line) handleEvent(JSON.parse(line));
+      newlineIndex = buffer.indexOf('\n');
+    }
+  }
+  buffer += decoder.decode();
+  const line = buffer.trim();
+  if (line) handleEvent(JSON.parse(line));
+}
+
 function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: React.ReactNode }) {
   const [dashboard, setDashboard] = React.useState<DashboardData | null>(null);
+  const [assistantSnapshotData, setAssistantSnapshotData] = React.useState<AssistantSnapshot | null>(null);
   const [activeView, setActiveView] = React.useState<DashboardView>('threads');
   const [threadSidebarOpen, setThreadSidebarOpen] = React.useState(true);
+  const [threadFilter, setThreadFilter] = React.useState<'all' | 'normal' | 'voice'>('all');
   const [activeThreadId, setActiveThreadId] = React.useState<string | null>(null);
   const [messages, setMessages] = React.useState<AssistantMessage[]>([]);
+  const [streamingReply, setStreamingReply] = React.useState('');
+  const [artifacts, setArtifacts] = React.useState<AssistantArtifactRecord[]>([]);
+  const [selectedArtifact, setSelectedArtifact] = React.useState<AssistantArtifactRecord | null>(null);
+  const [artifactPathDraft, setArtifactPathDraft] = React.useState('');
+  const [artifactContentDraft, setArtifactContentDraft] = React.useState('');
+  const [artifactDirty, setArtifactDirty] = React.useState(false);
+  const [overviewModalOpen, setOverviewModalOpen] = React.useState(false);
   const [loading, setLoading] = React.useState(true);
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [notice, setNotice] = React.useState<string | null>(null);
   const [messageDraft, setMessageDraft] = React.useState('');
+  const [threadTitleDraft, setThreadTitleDraft] = React.useState('');
   const [deviceName, setDeviceName] = React.useState('Desktop dev client');
   const [deviceType, setDeviceType] = React.useState('desktop');
   const [pairingText, setPairingText] = React.useState('');
@@ -66,14 +241,44 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   const [pairingDeviceId, setPairingDeviceId] = React.useState<string | null>(null);
   const [approvalSettings, setApprovalSettings] = React.useState<VoiceApprovalFormState>(VOICE_APPROVAL_SETTINGS_DEFAULT);
   const settingsHydratedRef = React.useRef(false);
+  const assistantEventRefreshTimerRef = React.useRef<number | null>(null);
 
-  const activeThread = dashboard?.threads.find((thread) => thread.id === activeThreadId) ?? dashboard?.threads[0] ?? null;
+  const assistantThreads = assistantSnapshotData?.threads ?? dashboard?.threads ?? [];
+  const activeThread =
+    assistantThreads.find((thread) => thread.id === activeThreadId) ??
+    assistantThreads[0] ??
+    null;
+  React.useEffect(() => {
+    setThreadTitleDraft(activeThread?.title ?? '');
+  }, [activeThread?.id, activeThread?.title]);
+  const hydrateArtifactDraft = React.useCallback((artifact: AssistantArtifactRecord | null) => {
+    setSelectedArtifact(artifact);
+    setArtifactPathDraft(artifact?.path ?? '');
+    setArtifactContentDraft(artifact?.content ?? '');
+    setArtifactDirty(false);
+  }, []);
+
+  const loadAssistantSnapshot = React.useCallback(
+    async (preferredThreadId?: string | null) => {
+      const query = preferredThreadId ? `?activeThreadId=${encodeURIComponent(preferredThreadId)}` : '';
+      const snapshot = await client.request<AssistantSnapshot>(`/api/assistant/threads${query}`);
+      setAssistantSnapshotData(snapshot);
+      const nextThreadId = snapshot.activeThreadId ?? snapshot.threads[0]?.id ?? null;
+      if (!activeThreadId && nextThreadId) setActiveThreadId(nextThreadId);
+      const visibleThreadId = preferredThreadId ?? activeThreadId ?? nextThreadId;
+      const visibleThread = snapshot.threads.find((thread) => thread.id === visibleThreadId) ?? snapshot.threads[0] ?? null;
+      if (visibleThread) setMessages(visibleThread.messages);
+      return snapshot;
+    },
+    [activeThreadId, client],
+  );
 
   const loadDashboard = React.useCallback(async () => {
     setError(null);
     try {
       const data = await client.request<DashboardData>('/api/dashboard');
       setDashboard(data);
+      await loadAssistantSnapshot(activeThreadId);
       if (!settingsHydratedRef.current) {
         setApprovalSettings({
           triggerPhrase: data.settings.triggerPhrase,
@@ -96,7 +301,16 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
     } finally {
       setLoading(false);
     }
-  }, [activeThreadId, client]);
+  }, [activeThreadId, client, loadAssistantSnapshot]);
+
+  const scheduleAssistantEventRefresh = React.useCallback(() => {
+    if (document.visibilityState === 'hidden') return;
+    if (assistantEventRefreshTimerRef.current !== null) window.clearTimeout(assistantEventRefreshTimerRef.current);
+    assistantEventRefreshTimerRef.current = window.setTimeout(() => {
+      assistantEventRefreshTimerRef.current = null;
+      void loadDashboard();
+    }, 160);
+  }, [loadDashboard]);
 
   const loadMessages = React.useCallback(
     async (threadId: string | null) => {
@@ -125,6 +339,10 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   }, [activeThread?.id, loadMessages]);
 
   React.useEffect(() => {
+    void loadArtifacts(activeThread?.id ?? null);
+  }, [activeThread?.id]);
+
+  React.useEffect(() => {
     const refresh = () => {
       if (document.visibilityState === 'hidden') return;
       void loadDashboard();
@@ -136,6 +354,42 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
       window.removeEventListener('focus', refresh);
     };
   }, [loadDashboard]);
+
+  React.useEffect(() => {
+    if (typeof window.EventSource === 'undefined') return undefined;
+    let closed = false;
+    const source = new window.EventSource('/api/assistant/events');
+    const refresh = () => {
+      if (closed) return;
+      scheduleAssistantEventRefresh();
+    };
+    source.onopen = refresh;
+    source.onmessage = refresh;
+    source.addEventListener('connected', refresh);
+    source.addEventListener('assistant_change', refresh);
+    source.addEventListener('assistant_speak', (event) => {
+      try {
+        const data = JSON.parse((event as MessageEvent).data);
+        const text = String(data?.text ?? '').trim();
+        if (text) speakAssistantText(text);
+        refresh();
+      } catch {
+        // Ignore malformed assistant speech events.
+      }
+    });
+    source.onerror = () => {
+      if (closed) return;
+      source.close();
+    };
+    return () => {
+      closed = true;
+      source.close();
+      if (assistantEventRefreshTimerRef.current !== null) {
+        window.clearTimeout(assistantEventRefreshTimerRef.current);
+        assistantEventRefreshTimerRef.current = null;
+      }
+    };
+  }, [scheduleAssistantEventRefresh]);
 
   React.useEffect(() => {
     const threadId = activeThread?.id ?? null;
@@ -152,17 +406,23 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
     };
   }, [activeThread?.id, loadMessages]);
 
-  async function createThread() {
+  async function createThread(options: { voiceEnabled?: boolean } = {}) {
     setBusy(true);
     setError(null);
     try {
-      const data = await client.request<{ ok: true; thread: AssistantThread }>('/api/assistant/threads', {
+      const data = await client.request<{ ok: true; thread: AssistantThread; snapshot: AssistantSnapshot }>('/api/assistant/threads', {
         method: 'POST',
-        body: JSON.stringify({ title: 'Assistant thread' }),
+        body: JSON.stringify({
+          title: options.voiceEnabled ? 'Voice thread' : 'Assistant thread',
+          source: options.voiceEnabled ? 'voice' : 'web',
+          voiceEnabled: Boolean(options.voiceEnabled),
+        }),
       });
       setActiveThreadId(data.thread.id);
+      setAssistantSnapshotData(data.snapshot);
+      if (options.voiceEnabled) setThreadFilter('voice');
       await loadDashboard();
-      setNotice('Created assistant thread.');
+      setNotice(options.voiceEnabled ? 'Created voice assistant thread.' : 'Created assistant thread.');
     } catch (err: any) {
       setError(err?.message ?? String(err));
     } finally {
@@ -176,18 +436,272 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
     if (!activeThread || !content) return;
     setBusy(true);
     setError(null);
+    setStreamingReply('');
     try {
-      await client.request(`/api/assistant/threads/${encodeURIComponent(activeThread.id)}/messages`, {
-        method: 'POST',
-        body: JSON.stringify({ content }),
-      });
+      const response = await client.stream(
+        `/api/assistant/threads/${encodeURIComponent(activeThread.id)}/stream`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ prompt: content }),
+        },
+      );
+      if (!response.ok) {
+        const text = await response.text();
+        let data: any = {};
+        try {
+          data = text ? JSON.parse(text) : {};
+        } catch {
+          data = { error: text };
+        }
+        throw new Error(data?.error ?? `${response.status} ${response.statusText}`);
+      }
       setMessageDraft('');
-      await Promise.all([loadMessages(activeThread.id), loadDashboard()]);
+      await readAssistantEventStream(response, (promptEvent) => {
+        if (promptEvent.type === 'delta') {
+          setStreamingReply((current) => `${current}${String(promptEvent.delta ?? '')}`);
+          return;
+        }
+        if (promptEvent.type === 'message' && promptEvent.message) {
+          setMessages((current) => upsertMessage(current, promptEvent.message as AssistantMessage));
+          return;
+        }
+        if ((promptEvent.type === 'snapshot' || promptEvent.type === 'approval_pending' || promptEvent.type === 'queued' || promptEvent.type === 'done') && promptEvent.snapshot) {
+          const snapshot = promptEvent.snapshot as AssistantSnapshot;
+          setAssistantSnapshotData(snapshot);
+          const visibleThread = snapshot.threads.find((thread) => thread.id === activeThread.id);
+          if (visibleThread) setMessages(visibleThread.messages);
+          if (promptEvent.type === 'done') setStreamingReply('');
+          return;
+        }
+        if (promptEvent.type === 'error') {
+          throw new Error(String(promptEvent.error ?? 'Assistant stream failed'));
+        }
+      });
+      await Promise.all([loadAssistantSnapshot(activeThread.id), loadDashboard()]);
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setStreamingReply('');
+      setBusy(false);
+    }
+  }
+
+  async function updateThreadSettings(patch: Partial<AssistantThread>) {
+    if (!activeThread) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await client.request<{ ok: true; thread: AssistantThread; snapshot: AssistantSnapshot }>(
+        `/api/assistant/threads/${encodeURIComponent(activeThread.id)}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify(patch),
+        },
+      );
+      setAssistantSnapshotData(data.snapshot);
+      setNotice('Updated assistant thread.');
+      await loadDashboard();
     } catch (err: any) {
       setError(err?.message ?? String(err));
     } finally {
       setBusy(false);
     }
+  }
+
+  async function renameActiveThread() {
+    const nextTitle = threadTitleDraft.trim();
+    if (!activeThread || !nextTitle || nextTitle === activeThread.title) return;
+    await updateThreadSettings({ title: nextTitle });
+  }
+
+  async function deleteThread(threadId: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await client.request<{ ok: true; snapshot: AssistantSnapshot }>(
+        `/api/assistant/threads/${encodeURIComponent(threadId)}`,
+        { method: 'DELETE' },
+      );
+      setAssistantSnapshotData(data.snapshot);
+      const nextThreadId = data.snapshot.activeThreadId ?? data.snapshot.threads[0]?.id ?? null;
+      setActiveThreadId(nextThreadId);
+      const visibleThread = data.snapshot.threads.find((thread) => thread.id === nextThreadId) ?? null;
+      setMessages(visibleThread?.messages ?? []);
+      setNotice('Deleted assistant thread.');
+      await loadDashboard();
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function cancelQueuedPrompt(queuedPrompt: AssistantQueuedPromptRecord) {
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await client.request<{ ok: true; snapshot: AssistantSnapshot }>(
+        `/api/assistant/threads/${encodeURIComponent(queuedPrompt.threadId)}/queued/${encodeURIComponent(queuedPrompt.id)}`,
+        { method: 'DELETE' },
+      );
+      setAssistantSnapshotData(data.snapshot);
+      setNotice('Cancelled queued prompt.');
+      await loadDashboard();
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resolveApproval(approvalId: string, approved: boolean) {
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await client.request<{ ok: true; snapshot: AssistantSnapshot }>(
+        `/api/assistant/approvals/${encodeURIComponent(approvalId)}/${approved ? 'approve' : 'deny'}`,
+        { method: 'POST', body: '{}' },
+      );
+      setAssistantSnapshotData(data.snapshot);
+      const visibleThread = data.snapshot.threads.find((thread) => thread.id === activeThread?.id);
+      if (visibleThread) setMessages(visibleThread.messages);
+      await loadDashboard();
+      setNotice(approved ? 'Approved assistant tool call.' : 'Denied assistant tool call.');
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function generateOverview(force = true) {
+    if (!activeThread) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await client.request<{ ok: true; snapshot: AssistantSnapshot }>(
+        `/api/assistant/threads/${encodeURIComponent(activeThread.id)}/overview`,
+        { method: 'POST', body: JSON.stringify({ force }) },
+      );
+      setAssistantSnapshotData(data.snapshot);
+      setNotice(force ? 'Regenerated thread overview.' : 'Loaded cached thread overview when possible.');
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function stopActiveRun() {
+    if (!activeThread) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await client.request<{ ok: true; snapshot: AssistantSnapshot }>(
+        `/api/assistant/threads/${encodeURIComponent(activeThread.id)}/stop`,
+        { method: 'POST', body: '{}' },
+      );
+      setAssistantSnapshotData(data.snapshot);
+      setNotice('Stopped active assistant run.');
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function loadArtifacts(threadId: string | null) {
+    if (!threadId) {
+      setArtifacts([]);
+      hydrateArtifactDraft(null);
+      return;
+    }
+    try {
+      const data = await client.request<{ ok: true; artifacts: AssistantArtifactRecord[] }>(
+        `/api/assistant/threads/${encodeURIComponent(threadId)}/artifacts`,
+      );
+      setArtifacts(data.artifacts);
+      const nextSelected = data.artifacts.find((artifact) => artifact.path === selectedArtifact?.path) ?? data.artifacts[0] ?? null;
+      if (!artifactDirty) hydrateArtifactDraft(nextSelected);
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    }
+  }
+
+  function newArtifactDraft() {
+    hydrateArtifactDraft(null);
+    setArtifactPathDraft('notes/new-artifact.md');
+    setArtifactContentDraft('');
+    setArtifactDirty(true);
+  }
+
+  async function saveArtifact() {
+    if (!activeThread) return;
+    const artifactPath = artifactPathDraft.trim();
+    if (!artifactPath) {
+      setError('Artifact path is required.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await client.request<{
+        ok: true;
+        artifact: AssistantArtifactRecord;
+        artifacts: AssistantArtifactRecord[];
+        snapshot: AssistantSnapshot;
+      }>(`/api/assistant/threads/${encodeURIComponent(activeThread.id)}/artifacts/file`, {
+        method: 'PUT',
+        body: JSON.stringify({ path: artifactPath, content: artifactContentDraft }),
+      });
+      setArtifacts(data.artifacts);
+      setAssistantSnapshotData(data.snapshot);
+      hydrateArtifactDraft(data.artifact);
+      setNotice('Saved assistant artifact.');
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteArtifact() {
+    if (!activeThread || !artifactPathDraft.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await client.request<{ ok: true; artifacts: AssistantArtifactRecord[]; snapshot: AssistantSnapshot }>(
+        `/api/assistant/threads/${encodeURIComponent(activeThread.id)}/artifacts/file`,
+        {
+          method: 'DELETE',
+          body: JSON.stringify({ path: artifactPathDraft.trim() }),
+        },
+      );
+      setArtifacts(data.artifacts);
+      setAssistantSnapshotData(data.snapshot);
+      hydrateArtifactDraft(data.artifacts[0] ?? null);
+      setNotice('Deleted assistant artifact.');
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copyArtifact() {
+    await navigator.clipboard?.writeText(artifactContentDraft);
+    setNotice('Copied artifact content.');
+  }
+
+  function downloadArtifact() {
+    const artifactPath = artifactPathDraft.trim() || 'assistant-artifact.txt';
+    const blob = new Blob([artifactContentDraft], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = artifactPath.split('/').filter(Boolean).pop() || 'assistant-artifact.txt';
+    link.click();
+    URL.revokeObjectURL(url);
   }
 
   async function saveApprovalSettings(event: React.FormEvent) {
@@ -214,6 +728,26 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
       });
       await loadDashboard();
       setNotice('Saved voice approval settings.');
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function updateAssistantSettings(patch: Partial<NonNullable<AssistantSnapshot['assistantSettings']>>) {
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await client.request<{ ok: true; settings: AssistantSnapshot['assistantSettings']; snapshot: AssistantSnapshot }>(
+        '/api/assistant/settings',
+        {
+          method: 'PATCH',
+          body: JSON.stringify(patch),
+        },
+      );
+      setAssistantSnapshotData(data.snapshot);
+      setNotice('Saved assistant settings.');
     } catch (err: any) {
       setError(err?.message ?? String(err));
     } finally {
@@ -378,9 +912,22 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   }
 
   const devices = dashboard?.devices ?? [];
-  const threads = dashboard?.threads ?? [];
+  const threads = assistantThreads;
+  const normalThreadCount = threads.filter((thread) => !thread.voiceEnabled && thread.source !== 'voice').length;
+  const voiceThreadCount = threads.filter((thread) => thread.voiceEnabled || thread.source === 'voice').length;
+  const visibleThreads = threads.filter((thread) => {
+    if (threadFilter === 'voice') return Boolean(thread.voiceEnabled) || thread.source === 'voice';
+    if (threadFilter === 'normal') return !thread.voiceEnabled && thread.source !== 'voice';
+    return true;
+  });
   const logs = dashboard?.logs ?? [];
   const transcripts = dashboard?.transcripts ?? [];
+  const pendingApprovals = assistantSnapshotData?.pendingApprovals ?? [];
+  const latestOverview = (activeThread as AssistantThreadView | null)?.latestOverview ?? null;
+  const activeRuns = (activeThread as AssistantThreadView | null)?.runs?.filter((run) => run.status === 'running' || run.status === 'waiting_for_approval') ?? [];
+  const queuedPrompts = (activeThread as AssistantThreadView | null)?.queuedPrompts ?? [];
+  const enabledTools = new Set(activeThread?.enabledTools ?? []);
+  const modelValue = `${activeThread?.provider ?? 'openai'}|${activeThread?.model ?? 'gpt-5.2'}|${activeThread?.thinkingLevel ?? 'off'}`;
   const connectedDeviceIds = new Set((dashboard?.clientStatuses ?? []).map((status) => status.deviceId));
   const navItems: Array<{ id: DashboardView; label: string; count?: number }> = [
     { id: 'threads', label: 'Chat', count: threads.length },
@@ -420,12 +967,28 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
           <button type="button" onClick={() => void createThread()} disabled={busy}>
             + New Thread
           </button>
+          <button type="button" onClick={() => void createThread({ voiceEnabled: true })} disabled={busy}>
+            + Voice Thread
+          </button>
+        </div>
+
+        <div className="assistant-thread-filter" role="group" aria-label="Thread filter">
+          <button type="button" className={threadFilter === 'all' ? 'active' : ''} onClick={() => setThreadFilter('all')}>
+            All <span>{threads.length}</span>
+          </button>
+          <button type="button" className={threadFilter === 'normal' ? 'active' : ''} onClick={() => setThreadFilter('normal')}>
+            Normal <span>{normalThreadCount}</span>
+          </button>
+          <button type="button" className={threadFilter === 'voice' ? 'active' : ''} onClick={() => setThreadFilter('voice')}>
+            Voice <span>{voiceThreadCount}</span>
+          </button>
         </div>
 
         <div className="assistant-thread-list">
-          {threads.map((thread) => {
+          {visibleThreads.map((thread) => {
             const active = thread.id === activeThread?.id;
             const messageCount = active ? messages.length : 0;
+            const queuedCount = (thread as AssistantThreadView).queuedPrompts?.length ?? 0;
             return (
               <button
                 key={thread.id}
@@ -441,13 +1004,14 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                   <strong>{thread.title || 'Untitled thread'}</strong>
                 </div>
                 <small>
-                  {thread.source} · {timeLabel(thread.updatedAt)}
+                  {thread.voiceEnabled || thread.source === 'voice' ? 'voice' : 'normal'} · {timeLabel(thread.updatedAt)}
                   {messageCount ? ` · ${messageCount}` : ''}
+                  {queuedCount ? ` · ${queuedCount} queued` : ''}
                 </small>
               </button>
             );
           })}
-          {threads.length === 0 ? <div className="empty-note">No assistant threads yet.</div> : null}
+          {visibleThreads.length === 0 ? <div className="empty-note">No {threadFilter === 'all' ? 'assistant' : threadFilter} threads yet.</div> : null}
         </div>
 
         <div className="assistant-sidebar-footer">
@@ -484,7 +1048,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
             <strong>{activeView === 'threads' ? activeThread?.title ?? 'Assistant' : navItems.find((item) => item.id === activeView)?.label}</strong>
             <span>
               <span className="assistant-status-dot" />
-              {activeView === 'threads' ? (activeThread ? 'idle' : 'no thread') : 'live'}
+              {activeView === 'threads' ? (activeThread ? activeThread.status ?? 'idle' : 'no thread') : 'live'}
             </span>
           </div>
 
@@ -526,13 +1090,197 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
         <section className="assistant-dock-content">
           {activeView === 'threads' ? (
             <section className="assistant-chat-pane">
+              {activeThread ? (
+                <div className="assistant-thread-controls">
+                  <div className="assistant-control-row assistant-title-row">
+                    <label>
+                      Title
+                      <input
+                        value={threadTitleDraft}
+                        disabled={busy}
+                        onChange={(event) => setThreadTitleDraft(event.currentTarget.value)}
+                        onBlur={() => void renameActiveThread()}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            event.currentTarget.blur();
+                          }
+                        }}
+                      />
+                    </label>
+                    <button type="button" onClick={() => void deleteThread(activeThread.id)} disabled={busy}>
+                      Delete Thread
+                    </button>
+                  </div>
+                  <div className="assistant-control-row">
+                    <label>
+                      Model
+                      <select
+                        value={modelValue}
+                        disabled={busy}
+                        onChange={(event) => {
+                          const [provider, model, thinkingLevel] = event.target.value.split('|');
+                          void updateThreadSettings({ provider, model, thinkingLevel });
+                        }}
+                      >
+                        {(assistantSnapshotData?.models ?? []).map((model) => (
+                          <option key={`${model.provider}-${model.id}-${model.thinkingLevel}`} value={`${model.provider}|${model.id}|${model.thinkingLevel}`}>
+                            {model.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Delivery
+                      <select
+                        value={activeThread.promptDeliveryMode ?? 'queue'}
+                        disabled={busy}
+                        onChange={(event) => void updateThreadSettings({ promptDeliveryMode: event.target.value === 'asap' ? 'asap' : 'queue' })}
+                      >
+                        <option value="queue">Queue</option>
+                        <option value="asap">ASAP</option>
+                      </select>
+                    </label>
+                    <label className="toggle-row">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(activeThread.voiceEnabled)}
+                        disabled={busy}
+                        onChange={(event) => void updateThreadSettings({ voiceEnabled: event.target.checked })}
+                      />
+                      Spoken replies
+                    </label>
+                    {activeRuns.length > 0 ? (
+                      <button type="button" onClick={() => void stopActiveRun()} disabled={busy}>
+                        Stop Run
+                      </button>
+                    ) : null}
+                  </div>
+
+                  <details className="assistant-control-details">
+                    <summary>Tools and prompt</summary>
+                    <div className="assistant-tool-grid">
+                      {(assistantSnapshotData?.availableTools ?? []).map((tool) => (
+                        <label key={tool.name} className="assistant-tool-toggle" title={tool.description}>
+                          <input
+                            type="checkbox"
+                            checked={enabledTools.has(tool.name)}
+                            disabled={busy}
+                            onChange={(event) => {
+                              const next = new Set(enabledTools);
+                              if (event.target.checked) next.add(tool.name);
+                              else next.delete(tool.name);
+                              void updateThreadSettings({ enabledTools: [...next] });
+                            }}
+                          />
+                          <span>
+                            <strong>{tool.label}</strong>
+                            <small>{tool.approval === 'never' ? 'no approval' : tool.approval === 'always' ? 'approval required' : 'approval in normal threads'}</small>
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                    <label className="assistant-system-prompt">
+                      Thread system prompt
+                      <textarea
+                        value={activeThread.systemPrompt ?? ''}
+                        disabled={busy}
+                        placeholder={assistantSnapshotData?.assistantSettings.normalSystemPrompt ?? 'System prompt'}
+                        onBlur={(event) => void updateThreadSettings({ systemPrompt: event.currentTarget.value })}
+                        onChange={(event) => {
+                          const next = event.currentTarget.value;
+                          setAssistantSnapshotData((snapshot) => snapshot
+                            ? {
+                                ...snapshot,
+                                threads: snapshot.threads.map((thread) => thread.id === activeThread.id ? { ...thread, systemPrompt: next } : thread),
+                              }
+                            : snapshot);
+                        }}
+                      />
+                    </label>
+                  </details>
+                </div>
+              ) : null}
+
+              {activeThread?.error ? (
+                <div className="assistant-thread-error">
+                  <strong>Assistant error</strong>
+                  <span>{activeThread.error}</span>
+                </div>
+              ) : null}
+
+              {queuedPrompts.length > 0 ? (
+                <div className="assistant-queue-strip">
+                  <div className="assistant-queue-header">
+                    <strong>Queued prompts</strong>
+                    <small>{queuedPrompts.length} waiting</small>
+                  </div>
+                  {queuedPrompts.map((queuedPrompt) => (
+                    <article key={queuedPrompt.id} className="assistant-queue-item">
+                      <div>
+                        <strong>{queuedPrompt.prompt}</strong>
+                        <small>
+                          {queuedPrompt.provider}/{queuedPrompt.model}
+                          {queuedPrompt.thinkingLevel !== 'off' ? ` · ${queuedPrompt.thinkingLevel}` : ''}
+                          {' · '}
+                          {timeLabel(queuedPrompt.createdAt)}
+                        </small>
+                      </div>
+                      <button type="button" disabled={busy} onClick={() => void cancelQueuedPrompt(queuedPrompt)}>
+                        Cancel
+                      </button>
+                    </article>
+                  ))}
+                </div>
+              ) : null}
+
+              {pendingApprovals.length > 0 ? (
+                <div className="assistant-approval-strip">
+                  {pendingApprovals.map((approval) => {
+                    const summary = approvalSummary(approval);
+                    return (
+                      <article key={approval.id} className="assistant-approval-card">
+                        <div>
+                          <strong>{summary.title}</strong>
+                          <small>{approval.toolName} · {timeLabel(approval.createdAt)}</small>
+                        </div>
+                        <div className="assistant-approval-detail">
+                          {summary.rows.map((row) => (
+                            <div key={row.label} className="assistant-approval-row">
+                              <span>{row.label}</span>
+                              <strong>{row.value}</strong>
+                            </div>
+                          ))}
+                          {summary.block ? (
+                            <pre>
+                              {summary.blockLabel ? `${summary.blockLabel}\n` : ''}
+                              {summary.block}
+                            </pre>
+                          ) : null}
+                        </div>
+                        <div>
+                          <button type="button" disabled={busy} onClick={() => void resolveApproval(approval.id, true)}>
+                            Approve
+                          </button>
+                          <button type="button" disabled={busy} onClick={() => void resolveApproval(approval.id, false)}>
+                            Deny
+                          </button>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              ) : null}
+
               <div className="assistant-messages">
                 {messages.map((message) => (
-                  <article key={message.id} className={`assistant-message ${message.role}`}>
-                    <div className="assistant-message-role">{message.role === 'assistant' ? 'Assistant' : 'You'}</div>
-                    <p>{message.content}</p>
-                  </article>
+                  <ToolActivityMessage key={message.id} message={message} />
                 ))}
+                {streamingReply ? (
+                  <article className="assistant-message assistant streaming">
+                    <div className="assistant-message-role">Assistant</div>
+                    <p>{streamingReply}</p>
+                  </article>
+                ) : null}
                 {activeThread && messages.length === 0 ? <div className="empty-note">This thread is empty.</div> : null}
                 {!activeThread ? <div className="empty-note">Create a thread to start.</div> : null}
               </div>
@@ -548,6 +1296,109 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                   Send
                 </button>
               </form>
+
+              {activeThread ? (
+                <div className="assistant-thread-extras">
+                  <section className="assistant-panel">
+                    <div className="assistant-panel-header">
+                      <div>
+                        <span className="hub-kicker">Overview</span>
+                        <h2>Thread Summary</h2>
+                      </div>
+                      <div className="assistant-overview-actions">
+                        <button type="button" onClick={() => void generateOverview(false)} disabled={busy}>
+                          Use Cache
+                        </button>
+                        <button type="button" onClick={() => void generateOverview(true)} disabled={busy}>
+                          Regenerate
+                        </button>
+                        <button type="button" onClick={() => setOverviewModalOpen(true)} disabled={!latestOverview}>
+                          Open
+                        </button>
+                      </div>
+                    </div>
+                    {latestOverview ? (
+                      <div className="assistant-overview-meta">
+                        <span>{latestOverview.cached ? 'cached copy' : 'fresh summary'}</span>
+                        <span>{timeLabel(latestOverview.createdAt)}</span>
+                      </div>
+                    ) : null}
+                    <pre className="assistant-overview">{latestOverview?.markdown ?? 'No overview generated yet.'}</pre>
+                  </section>
+                  <section className="assistant-panel">
+                    <div className="assistant-panel-header">
+                      <div>
+                        <span className="hub-kicker">Artifacts</span>
+                        <h2>Assistant Files</h2>
+                      </div>
+                      <div className="assistant-artifact-actions">
+                        <button type="button" onClick={newArtifactDraft} disabled={busy}>
+                          New
+                        </button>
+                        <button type="button" onClick={() => void loadArtifacts(activeThread.id)} disabled={busy}>
+                          Refresh
+                        </button>
+                      </div>
+                    </div>
+                    <div className="assistant-artifact-layout">
+                      <div className="assistant-artifact-list">
+                        {artifacts.map((artifact) => (
+                          <button
+                            key={artifact.id}
+                            type="button"
+                            className={selectedArtifact?.path === artifact.path ? 'active' : ''}
+                            onClick={() => hydrateArtifactDraft(artifact)}
+                          >
+                            <strong>{artifact.path}</strong>
+                            <small>{artifact.size} bytes</small>
+                          </button>
+                        ))}
+                        {artifacts.length === 0 ? <div className="empty-note">No assistant files yet.</div> : null}
+                      </div>
+                      <div className="assistant-artifact-editor">
+                        <label>
+                          Path
+                          <input
+                            value={artifactPathDraft}
+                            onChange={(event) => {
+                              setArtifactPathDraft(event.target.value);
+                              setArtifactDirty(true);
+                            }}
+                            placeholder="notes/plan.md"
+                            disabled={busy}
+                          />
+                        </label>
+                        <textarea
+                          value={artifactContentDraft}
+                          onChange={(event) => {
+                            setArtifactContentDraft(event.target.value);
+                            setArtifactDirty(true);
+                          }}
+                          placeholder="Artifact content..."
+                          disabled={busy}
+                        />
+                        <div className="assistant-artifact-editor-footer">
+                          <span>{artifactDirty ? 'Unsaved changes' : selectedArtifact ? `${selectedArtifact.size} bytes` : 'Draft'}</span>
+                          <div>
+                            <button type="button" onClick={() => void copyArtifact()} disabled={!artifactContentDraft || busy}>
+                              Copy
+                            </button>
+                            <button type="button" onClick={downloadArtifact} disabled={!artifactPathDraft.trim() || busy}>
+                              Download
+                            </button>
+                            <button type="button" onClick={() => void deleteArtifact()} disabled={!selectedArtifact || busy}>
+                              Delete
+                            </button>
+                            <button type="button" onClick={() => void saveArtifact()} disabled={!artifactPathDraft.trim() || busy}>
+                              Save
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+                </div>
+              ) : null}
             </section>
           ) : null}
 
@@ -640,108 +1491,160 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
           ) : null}
 
           {activeView === 'settings' ? (
-            <section className="assistant-panel settings-section">
-              <div className="assistant-panel-header">
-                <div>
-                  <span className="hub-kicker">Settings</span>
-                  <h2>Voice Approval</h2>
+            <section className="settings-stack">
+              <section className="assistant-panel settings-section">
+                <div className="assistant-panel-header">
+                  <div>
+                    <span className="hub-kicker">Assistant</span>
+                    <h2>System Prompts</h2>
+                  </div>
                 </div>
-              </div>
-              <form className="settings-form settings-grid" onSubmit={(event) => void saveApprovalSettings(event)}>
-                <label>
-                  Trigger phrase
-                  <input
-                    value={approvalSettings.triggerPhrase}
-                    onChange={(event) => setApprovalSettings((prev) => ({ ...prev, triggerPhrase: event.target.value }))}
-                  />
-                </label>
-                <label>
-                  Unlock
-                  <input
-                    value={approvalSettings.unlockCode}
-                    onChange={(event) => setApprovalSettings((prev) => ({ ...prev, unlockCode: codeValue(event.target.value) }))}
-                  />
-                </label>
-                <label>
-                  Lock
-                  <input
-                    value={approvalSettings.lockCode}
-                    onChange={(event) => setApprovalSettings((prev) => ({ ...prev, lockCode: codeValue(event.target.value) }))}
-                  />
-                </label>
-                <label>
-                  Off
-                  <input
-                    value={approvalSettings.lockedOffCode}
-                    onChange={(event) => setApprovalSettings((prev) => ({ ...prev, lockedOffCode: codeValue(event.target.value) }))}
-                  />
-                </label>
-                <label>
-                  Min digits
-                  <input
-                    type="number"
-                    min={1}
-                    max={12}
-                    value={approvalSettings.minDigits}
-                    onChange={(event) => setApprovalSettings((prev) => ({ ...prev, minDigits: Number(event.target.value) }))}
-                  />
-                </label>
-                <label>
-                  Max digits
-                  <input
-                    type="number"
-                    min={1}
-                    max={12}
-                    value={approvalSettings.maxDigits}
-                    onChange={(event) => setApprovalSettings((prev) => ({ ...prev, maxDigits: Number(event.target.value) }))}
-                  />
-                </label>
-                <label>
-                  Stable ms
-                  <input
-                    type="number"
-                    min={250}
-                    max={3000}
-                    value={approvalSettings.stableMs}
-                    onChange={(event) => setApprovalSettings((prev) => ({ ...prev, stableMs: Number(event.target.value) }))}
-                  />
-                </label>
-                <label>
-                  Collection timeout ms
-                  <input
-                    type="number"
-                    min={1000}
-                    max={15000}
-                    value={approvalSettings.collectTimeoutMs}
-                    onChange={(event) => setApprovalSettings((prev) => ({ ...prev, collectTimeoutMs: Number(event.target.value) }))}
-                  />
-                </label>
-                <label>
-                  Duplicate cooldown ms
-                  <input
-                    type="number"
-                    min={0}
-                    max={15000}
-                    value={approvalSettings.duplicateCooldownMs}
-                    onChange={(event) => setApprovalSettings((prev) => ({ ...prev, duplicateCooldownMs: Number(event.target.value) }))}
-                  />
-                </label>
-                <label>
-                  Finalize interval ms
-                  <input
-                    type="number"
-                    min={100}
-                    max={1000}
-                    value={approvalSettings.finalizeCheckIntervalMs}
-                    onChange={(event) =>
-                      setApprovalSettings((prev) => ({ ...prev, finalizeCheckIntervalMs: Number(event.target.value) }))
-                    }
-                  />
-                </label>
-                <button type="submit" disabled={busy}>
-                  Save Settings
-                </button>
-              </form>
+                <div className="settings-form">
+                  <label>
+                    Normal assistant prompt
+                    <textarea
+                      value={assistantSnapshotData?.assistantSettings.normalSystemPrompt ?? ''}
+                      onChange={(event) => {
+                        const value = event.currentTarget.value;
+                        setAssistantSnapshotData((snapshot) => snapshot
+                          ? { ...snapshot, assistantSettings: { ...snapshot.assistantSettings, normalSystemPrompt: value } }
+                          : snapshot);
+                      }}
+                      onBlur={(event) => void updateAssistantSettings({ normalSystemPrompt: event.currentTarget.value })}
+                    />
+                  </label>
+                  <label>
+                    Voice assistant prompt
+                    <textarea
+                      value={assistantSnapshotData?.assistantSettings.voiceSystemPrompt ?? ''}
+                      onChange={(event) => {
+                        const value = event.currentTarget.value;
+                        setAssistantSnapshotData((snapshot) => snapshot
+                          ? { ...snapshot, assistantSettings: { ...snapshot.assistantSettings, voiceSystemPrompt: value } }
+                          : snapshot);
+                      }}
+                      onBlur={(event) => void updateAssistantSettings({ voiceSystemPrompt: event.currentTarget.value })}
+                    />
+                  </label>
+                  <label>
+                    Overview prompt
+                    <textarea
+                      value={assistantSnapshotData?.assistantSettings.overviewPrompt ?? ''}
+                      onChange={(event) => {
+                        const value = event.currentTarget.value;
+                        setAssistantSnapshotData((snapshot) => snapshot
+                          ? { ...snapshot, assistantSettings: { ...snapshot.assistantSettings, overviewPrompt: value } }
+                          : snapshot);
+                      }}
+                      onBlur={(event) => void updateAssistantSettings({ overviewPrompt: event.currentTarget.value })}
+                    />
+                  </label>
+                </div>
+              </section>
+
+              <section className="assistant-panel settings-section">
+                <div className="assistant-panel-header">
+                  <div>
+                    <span className="hub-kicker">Settings</span>
+                    <h2>Voice Approval</h2>
+                  </div>
+                </div>
+                <form className="settings-form settings-grid" onSubmit={(event) => void saveApprovalSettings(event)}>
+                  <label>
+                    Trigger phrase
+                    <input
+                      value={approvalSettings.triggerPhrase}
+                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, triggerPhrase: event.target.value }))}
+                    />
+                  </label>
+                  <label>
+                    Unlock
+                    <input
+                      value={approvalSettings.unlockCode}
+                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, unlockCode: codeValue(event.target.value) }))}
+                    />
+                  </label>
+                  <label>
+                    Lock
+                    <input
+                      value={approvalSettings.lockCode}
+                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, lockCode: codeValue(event.target.value) }))}
+                    />
+                  </label>
+                  <label>
+                    Off
+                    <input
+                      value={approvalSettings.lockedOffCode}
+                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, lockedOffCode: codeValue(event.target.value) }))}
+                    />
+                  </label>
+                  <label>
+                    Min digits
+                    <input
+                      type="number"
+                      min={1}
+                      max={12}
+                      value={approvalSettings.minDigits}
+                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, minDigits: Number(event.target.value) }))}
+                    />
+                  </label>
+                  <label>
+                    Max digits
+                    <input
+                      type="number"
+                      min={1}
+                      max={12}
+                      value={approvalSettings.maxDigits}
+                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, maxDigits: Number(event.target.value) }))}
+                    />
+                  </label>
+                  <label>
+                    Stable ms
+                    <input
+                      type="number"
+                      min={250}
+                      max={3000}
+                      value={approvalSettings.stableMs}
+                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, stableMs: Number(event.target.value) }))}
+                    />
+                  </label>
+                  <label>
+                    Collection timeout ms
+                    <input
+                      type="number"
+                      min={1000}
+                      max={15000}
+                      value={approvalSettings.collectTimeoutMs}
+                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, collectTimeoutMs: Number(event.target.value) }))}
+                    />
+                  </label>
+                  <label>
+                    Duplicate cooldown ms
+                    <input
+                      type="number"
+                      min={0}
+                      max={15000}
+                      value={approvalSettings.duplicateCooldownMs}
+                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, duplicateCooldownMs: Number(event.target.value) }))}
+                    />
+                  </label>
+                  <label>
+                    Finalize interval ms
+                    <input
+                      type="number"
+                      min={100}
+                      max={1000}
+                      value={approvalSettings.finalizeCheckIntervalMs}
+                      onChange={(event) =>
+                        setApprovalSettings((prev) => ({ ...prev, finalizeCheckIntervalMs: Number(event.target.value) }))
+                      }
+                    />
+                  </label>
+                  <button type="submit" disabled={busy}>
+                    Save Settings
+                  </button>
+                </form>
+              </section>
             </section>
           ) : null}
 
@@ -805,6 +1708,33 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
           ) : null}
         </section>
       </section>
+      {overviewModalOpen && latestOverview ? (
+        <div className="assistant-modal-backdrop" role="dialog" aria-modal="true" aria-label="Thread overview">
+          <section className="assistant-overview-modal">
+            <header>
+              <div>
+                <span className="hub-kicker">Overview</span>
+                <h2>{activeThread?.title ?? 'Assistant'} Summary</h2>
+                <small>
+                  {latestOverview.cached ? 'cached copy' : 'fresh summary'} · {timeLabel(latestOverview.createdAt)}
+                </small>
+              </div>
+              <div>
+                <button type="button" onClick={() => void generateOverview(false)} disabled={busy}>
+                  Use Cache
+                </button>
+                <button type="button" onClick={() => void generateOverview(true)} disabled={busy}>
+                  Regenerate
+                </button>
+                <button type="button" onClick={() => setOverviewModalOpen(false)}>
+                  Close
+                </button>
+              </div>
+            </header>
+            <pre>{latestOverview.markdown}</pre>
+          </section>
+        </div>
+      ) : null}
     </main>
   );
 }

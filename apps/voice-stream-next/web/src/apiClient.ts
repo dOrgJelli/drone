@@ -20,26 +20,38 @@ export function readDevUser(): DevUser {
 }
 
 export function createDevClient(user: DevUser): ApiClient {
+  const withHeaders = (init?: RequestInit): RequestInit => {
+    const headers = new Headers(init?.headers);
+    headers.set('content-type', headers.get('content-type') || 'application/json');
+    headers.set('x-voice-dev-user-email', user.email);
+    headers.set('x-voice-dev-user-name', user.name);
+    headers.set('x-voice-dev-admin', '0');
+    return { ...init, headers };
+  };
   return {
     async request<T>(path: string, init?: RequestInit) {
-      const headers = new Headers(init?.headers);
-      headers.set('content-type', headers.get('content-type') || 'application/json');
-      headers.set('x-voice-dev-user-email', user.email);
-      headers.set('x-voice-dev-user-name', user.name);
-      headers.set('x-voice-dev-admin', '0');
-      return requestJson<T>(path, { ...init, headers });
+      return requestJson<T>(path, withHeaders(init));
+    },
+    async stream(path: string, init?: RequestInit) {
+      return fetch(path, withHeaders(init));
     },
   };
 }
 
 export function createClerkClient(getToken: () => Promise<string | null>): ApiClient {
+  const withHeaders = async (init?: RequestInit): Promise<RequestInit> => {
+    const headers = new Headers(init?.headers);
+    headers.set('content-type', headers.get('content-type') || 'application/json');
+    const token = await getToken();
+    if (token) headers.set('authorization', `Bearer ${token}`);
+    return { ...init, headers };
+  };
   return {
     async request<T>(path: string, init?: RequestInit) {
-      const headers = new Headers(init?.headers);
-      headers.set('content-type', headers.get('content-type') || 'application/json');
-      const token = await getToken();
-      if (token) headers.set('authorization', `Bearer ${token}`);
-      return requestJson<T>(path, { ...init, headers });
+      return requestJson<T>(path, await withHeaders(init));
+    },
+    async stream(path: string, init?: RequestInit) {
+      return fetch(path, await withHeaders(init));
     },
   };
 }

@@ -84,6 +84,16 @@ export type AssistantThread = {
   deviceId: string | null;
   title: string;
   source: string;
+  provider: string;
+  model: string;
+  thinkingLevel: string;
+  status: AssistantRunStatus;
+  error: string | null;
+  voiceEnabled: boolean;
+  systemPrompt: string | null;
+  enabledTools: string[];
+  capabilities: AssistantThreadCapabilities;
+  promptDeliveryMode: 'queue' | 'asap';
   createdAt: string;
   updatedAt: string;
 };
@@ -92,10 +102,149 @@ export type AssistantMessage = {
   id: string;
   threadId: string;
   userId: string;
-  role: 'user' | 'assistant';
+  role: AssistantMessageRole;
   content: string;
+  contentJson: string | null;
+  toolName: string | null;
+  toolCallId: string | null;
+  isError: boolean;
   spokenText: string | null;
   createdAt: string;
+};
+
+export type AssistantMessageRole = 'user' | 'assistant' | 'toolResult' | 'system';
+
+export type AssistantRunStatus = 'idle' | 'running' | 'waiting_for_approval' | 'cancelled' | 'error';
+
+export type AssistantThreadCapabilities = {
+  artifacts: boolean;
+  speech: boolean;
+  approvals: boolean;
+  externalCalls: boolean;
+  futureIntegrations: boolean;
+};
+
+export type AssistantRunRecord = {
+  id: string;
+  userId: string;
+  threadId: string;
+  status: AssistantRunStatus;
+  provider: string;
+  model: string;
+  thinkingLevel: string;
+  prompt: string;
+  error: string | null;
+  startedAt: string;
+  completedAt: string | null;
+  cancelledAt: string | null;
+};
+
+export type AssistantQueuedPromptRecord = {
+  id: string;
+  userId: string;
+  threadId: string;
+  prompt: string;
+  provider: string;
+  model: string;
+  thinkingLevel: string;
+  status: 'queued' | 'running' | 'completed' | 'cancelled' | 'failed';
+  error: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  cancelledAt: string | null;
+};
+
+export type AssistantToolCallRecord = {
+  id: string;
+  userId: string;
+  threadId: string;
+  runId: string | null;
+  toolName: string;
+  status: 'pending' | 'running' | 'waiting_for_approval' | 'approved' | 'denied' | 'completed' | 'failed';
+  argsJson: string;
+  resultJson: string | null;
+  approvalRequired: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AssistantApprovalRecord = {
+  id: string;
+  userId: string;
+  threadId: string;
+  runId: string | null;
+  toolCallId: string;
+  toolName: string;
+  label: string;
+  argsJson: string;
+  status: 'pending' | 'approved' | 'denied';
+  requestedBy: string;
+  resolvedBy: string | null;
+  resultJson: string | null;
+  failureReason: string | null;
+  createdAt: string;
+  resolvedAt: string | null;
+};
+
+export type AssistantArtifactRecord = {
+  id: string;
+  userId: string;
+  threadId: string;
+  path: string;
+  content: string;
+  size: number;
+  revision: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AssistantOverviewRecord = {
+  id: string;
+  userId: string;
+  threadId: string;
+  markdown: string;
+  prompt: string;
+  inputHash: string;
+  cached: boolean;
+  createdAt: string;
+};
+
+export type AssistantSettingsRecord = {
+  userId: string;
+  normalSystemPrompt: string;
+  voiceSystemPrompt: string;
+  overviewPrompt: string;
+  defaultProvider: string;
+  defaultModel: string;
+  defaultThinkingLevel: string;
+  updatedAt: string;
+};
+
+export type AssistantCodexConnectionRecord = {
+  userId: string;
+  accessToken: string;
+  refreshToken: string;
+  accountId: string | null;
+  expiresAt: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AssistantCodexConnectionView = {
+  connected: boolean;
+  accountId: string | null;
+  expiresAt: string | null;
+  updatedAt: string | null;
+};
+
+export type AssistantCodexOAuthStateRecord = {
+  state: string;
+  userId: string;
+  codeVerifier: string;
+  redirectUri: string;
+  createdAt: string;
+  expiresAt: string;
 };
 
 export type VoiceSession = {
@@ -180,6 +329,60 @@ function dbPath(): string {
 
 function asBool(value: unknown): boolean {
   return value === 1 || value === true;
+}
+
+const ASSISTANT_DEFAULT_PROVIDER = 'openai';
+const ASSISTANT_DEFAULT_MODEL = 'gpt-5.2';
+const ASSISTANT_DEFAULT_THINKING_LEVEL = 'off';
+const ASSISTANT_DEFAULT_ENABLED_TOOLS = [
+  'assistant_artifacts',
+  'speak',
+  'get_system_prompt',
+  'update_system_prompt',
+  'get_thread_overview',
+  'set_thinking_level',
+] as const;
+const ASSISTANT_DEFAULT_CAPABILITIES: AssistantThreadCapabilities = {
+  artifacts: true,
+  speech: true,
+  approvals: true,
+  externalCalls: true,
+  futureIntegrations: false,
+};
+const ASSISTANT_NORMAL_SYSTEM_PROMPT_DEFAULT = 'You are VoiceStream, a concise standalone assistant. Answer directly and keep useful context in the thread.';
+const ASSISTANT_VOICE_SYSTEM_PROMPT_DEFAULT = 'You are VoiceStream, a concise voice assistant. Keep spoken replies short and practical.';
+const ASSISTANT_OVERVIEW_PROMPT_DEFAULT = 'Write a concise Markdown overview of this assistant thread. Focus on current state, recent actions, blockers, and next steps. Do not invent facts.';
+
+function parseJsonArray(raw: unknown, fallback: string[]): string[] {
+  if (Array.isArray(raw)) return raw.map((item) => String(item)).filter(Boolean);
+  if (typeof raw !== 'string' || !raw.trim()) return [...fallback];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map((item) => String(item)).filter(Boolean) : [...fallback];
+  } catch {
+    return [...fallback];
+  }
+}
+
+function parseJsonObject<T extends Record<string, unknown>>(raw: unknown, fallback: T): T {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) return { ...fallback, ...(raw as T) };
+  if (typeof raw !== 'string' || !raw.trim()) return { ...fallback };
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? { ...fallback, ...(parsed as T) } : { ...fallback };
+  } catch {
+    return { ...fallback };
+  }
+}
+
+function normalizeRunStatus(raw: unknown): AssistantRunStatus {
+  const value = String(raw ?? '').trim();
+  if (value === 'running' || value === 'waiting_for_approval' || value === 'cancelled' || value === 'error') return value;
+  return 'idle';
+}
+
+function normalizePromptDeliveryMode(raw: unknown): 'queue' | 'asap' {
+  return String(raw ?? '').trim() === 'asap' ? 'asap' : 'queue';
 }
 
 function rowUser(row: any): UserProfile {
@@ -270,6 +473,16 @@ function rowThread(row: any): AssistantThread {
     deviceId: row.device_id == null ? null : String(row.device_id),
     title: String(row.title),
     source: String(row.source),
+    provider: String(row.provider ?? ASSISTANT_DEFAULT_PROVIDER),
+    model: String(row.model ?? ASSISTANT_DEFAULT_MODEL),
+    thinkingLevel: String(row.thinking_level ?? ASSISTANT_DEFAULT_THINKING_LEVEL),
+    status: normalizeRunStatus(row.status),
+    error: row.error == null ? null : String(row.error),
+    voiceEnabled: asBool(row.voice_enabled) || String(row.source ?? '') === 'voice',
+    systemPrompt: row.system_prompt == null ? null : String(row.system_prompt),
+    enabledTools: parseJsonArray(row.enabled_tools_json, [...ASSISTANT_DEFAULT_ENABLED_TOOLS]),
+    capabilities: parseJsonObject(row.capabilities_json, ASSISTANT_DEFAULT_CAPABILITIES),
+    promptDeliveryMode: normalizePromptDeliveryMode(row.prompt_delivery_mode),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
@@ -280,10 +493,166 @@ function rowMessage(row: any): AssistantMessage {
     id: String(row.id),
     threadId: String(row.thread_id),
     userId: String(row.user_id),
-    role: String(row.role) === 'assistant' ? 'assistant' : 'user',
+    role:
+      String(row.role) === 'assistant'
+        ? 'assistant'
+        : String(row.role) === 'toolResult'
+          ? 'toolResult'
+          : String(row.role) === 'system'
+            ? 'system'
+            : 'user',
     content: String(row.content ?? ''),
+    contentJson: row.content_json == null ? null : String(row.content_json),
+    toolName: row.tool_name == null ? null : String(row.tool_name),
+    toolCallId: row.tool_call_id == null ? null : String(row.tool_call_id),
+    isError: asBool(row.is_error),
     spokenText: row.spoken_text == null ? null : String(row.spoken_text),
     createdAt: String(row.created_at),
+  };
+}
+
+function rowAssistantRun(row: any): AssistantRunRecord {
+  return {
+    id: String(row.id),
+    userId: String(row.user_id),
+    threadId: String(row.thread_id),
+    status: normalizeRunStatus(row.status),
+    provider: String(row.provider ?? ASSISTANT_DEFAULT_PROVIDER),
+    model: String(row.model ?? ASSISTANT_DEFAULT_MODEL),
+    thinkingLevel: String(row.thinking_level ?? ASSISTANT_DEFAULT_THINKING_LEVEL),
+    prompt: String(row.prompt ?? ''),
+    error: row.error == null ? null : String(row.error),
+    startedAt: String(row.started_at),
+    completedAt: row.completed_at == null ? null : String(row.completed_at),
+    cancelledAt: row.cancelled_at == null ? null : String(row.cancelled_at),
+  };
+}
+
+function rowAssistantQueuedPrompt(row: any): AssistantQueuedPromptRecord {
+  const statusRaw = String(row.status ?? 'queued');
+  const status = ['queued', 'running', 'completed', 'cancelled', 'failed'].includes(statusRaw)
+    ? (statusRaw as AssistantQueuedPromptRecord['status'])
+    : 'queued';
+  return {
+    id: String(row.id),
+    userId: String(row.user_id),
+    threadId: String(row.thread_id),
+    prompt: String(row.prompt ?? ''),
+    provider: String(row.provider ?? ASSISTANT_DEFAULT_PROVIDER),
+    model: String(row.model ?? ASSISTANT_DEFAULT_MODEL),
+    thinkingLevel: String(row.thinking_level ?? ASSISTANT_DEFAULT_THINKING_LEVEL),
+    status,
+    error: row.error == null ? null : String(row.error),
+    createdAt: String(row.created_at),
+    startedAt: row.started_at == null ? null : String(row.started_at),
+    completedAt: row.completed_at == null ? null : String(row.completed_at),
+    cancelledAt: row.cancelled_at == null ? null : String(row.cancelled_at),
+  };
+}
+
+function rowAssistantToolCall(row: any): AssistantToolCallRecord {
+  const statusRaw = String(row.status ?? 'pending');
+  const status = ['pending', 'running', 'waiting_for_approval', 'approved', 'denied', 'completed', 'failed'].includes(statusRaw)
+    ? (statusRaw as AssistantToolCallRecord['status'])
+    : 'pending';
+  return {
+    id: String(row.id),
+    userId: String(row.user_id),
+    threadId: String(row.thread_id),
+    runId: row.run_id == null ? null : String(row.run_id),
+    toolName: String(row.tool_name),
+    status,
+    argsJson: String(row.args_json ?? '{}'),
+    resultJson: row.result_json == null ? null : String(row.result_json),
+    approvalRequired: asBool(row.approval_required),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+function rowAssistantApproval(row: any): AssistantApprovalRecord {
+  const statusRaw = String(row.status ?? 'pending');
+  const status = statusRaw === 'approved' || statusRaw === 'denied' ? statusRaw : 'pending';
+  return {
+    id: String(row.id),
+    userId: String(row.user_id),
+    threadId: String(row.thread_id),
+    runId: row.run_id == null ? null : String(row.run_id),
+    toolCallId: String(row.tool_call_id),
+    toolName: String(row.tool_name),
+    label: String(row.label ?? ''),
+    argsJson: String(row.args_json ?? '{}'),
+    status,
+    requestedBy: String(row.requested_by ?? ''),
+    resolvedBy: row.resolved_by == null ? null : String(row.resolved_by),
+    resultJson: row.result_json == null ? null : String(row.result_json),
+    failureReason: row.failure_reason == null ? null : String(row.failure_reason),
+    createdAt: String(row.created_at),
+    resolvedAt: row.resolved_at == null ? null : String(row.resolved_at),
+  };
+}
+
+function rowAssistantArtifact(row: any): AssistantArtifactRecord {
+  const content = String(row.content ?? '');
+  return {
+    id: String(row.id),
+    userId: String(row.user_id),
+    threadId: String(row.thread_id),
+    path: String(row.path),
+    content,
+    size: Number(row.size ?? Buffer.byteLength(content, 'utf8')),
+    revision: String(row.revision ?? ''),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+function rowAssistantOverview(row: any): AssistantOverviewRecord {
+  return {
+    id: String(row.id),
+    userId: String(row.user_id),
+    threadId: String(row.thread_id),
+    markdown: String(row.markdown ?? ''),
+    prompt: String(row.prompt ?? ''),
+    inputHash: String(row.input_hash ?? ''),
+    cached: asBool(row.cached),
+    createdAt: String(row.created_at),
+  };
+}
+
+function rowAssistantSettings(row: any): AssistantSettingsRecord {
+  return {
+    userId: String(row.user_id),
+    normalSystemPrompt: String(row.normal_system_prompt ?? ASSISTANT_NORMAL_SYSTEM_PROMPT_DEFAULT),
+    voiceSystemPrompt: String(row.voice_system_prompt ?? ASSISTANT_VOICE_SYSTEM_PROMPT_DEFAULT),
+    overviewPrompt: String(row.overview_prompt ?? ASSISTANT_OVERVIEW_PROMPT_DEFAULT),
+    defaultProvider: String(row.default_provider ?? ASSISTANT_DEFAULT_PROVIDER),
+    defaultModel: String(row.default_model ?? ASSISTANT_DEFAULT_MODEL),
+    defaultThinkingLevel: String(row.default_thinking_level ?? ASSISTANT_DEFAULT_THINKING_LEVEL),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+function rowAssistantCodexConnection(row: any): AssistantCodexConnectionRecord {
+  return {
+    userId: String(row.user_id),
+    accessToken: String(row.access_token ?? ''),
+    refreshToken: String(row.refresh_token ?? ''),
+    accountId: row.account_id == null ? null : String(row.account_id),
+    expiresAt: String(row.expires_at),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+function rowAssistantCodexOAuthState(row: any): AssistantCodexOAuthStateRecord {
+  return {
+    state: String(row.state),
+    userId: String(row.user_id),
+    codeVerifier: String(row.code_verifier ?? ''),
+    redirectUri: String(row.redirect_uri ?? ''),
+    createdAt: String(row.created_at),
+    expiresAt: String(row.expires_at),
   };
 }
 
@@ -422,8 +791,138 @@ export class VoiceStreamNextDb {
         user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         role TEXT NOT NULL,
         content TEXT NOT NULL,
+        content_json TEXT,
+        tool_name TEXT,
+        tool_call_id TEXT,
+        is_error INTEGER NOT NULL DEFAULT 0,
         spoken_text TEXT,
         created_at TEXT NOT NULL
+      )
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS assistant_runs (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        thread_id TEXT NOT NULL REFERENCES assistant_threads(id) ON DELETE CASCADE,
+        status TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        thinking_level TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        error TEXT,
+        started_at TEXT NOT NULL,
+        completed_at TEXT,
+        cancelled_at TEXT
+      )
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS assistant_tool_calls (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        thread_id TEXT NOT NULL REFERENCES assistant_threads(id) ON DELETE CASCADE,
+        run_id TEXT REFERENCES assistant_runs(id) ON DELETE SET NULL,
+        tool_name TEXT NOT NULL,
+        status TEXT NOT NULL,
+        args_json TEXT NOT NULL,
+        result_json TEXT,
+        approval_required INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS assistant_queued_prompts (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        thread_id TEXT NOT NULL REFERENCES assistant_threads(id) ON DELETE CASCADE,
+        prompt TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        thinking_level TEXT NOT NULL,
+        status TEXT NOT NULL,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        completed_at TEXT,
+        cancelled_at TEXT
+      )
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS assistant_approvals (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        thread_id TEXT NOT NULL REFERENCES assistant_threads(id) ON DELETE CASCADE,
+        run_id TEXT REFERENCES assistant_runs(id) ON DELETE SET NULL,
+        tool_call_id TEXT NOT NULL REFERENCES assistant_tool_calls(id) ON DELETE CASCADE,
+        tool_name TEXT NOT NULL,
+        label TEXT NOT NULL,
+        args_json TEXT NOT NULL,
+        status TEXT NOT NULL,
+        requested_by TEXT NOT NULL,
+        resolved_by TEXT,
+        result_json TEXT,
+        failure_reason TEXT,
+        created_at TEXT NOT NULL,
+        resolved_at TEXT
+      )
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS assistant_artifacts (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        thread_id TEXT NOT NULL REFERENCES assistant_threads(id) ON DELETE CASCADE,
+        path TEXT NOT NULL,
+        content TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        revision TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(thread_id, path)
+      )
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS assistant_overviews (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        thread_id TEXT NOT NULL REFERENCES assistant_threads(id) ON DELETE CASCADE,
+        markdown TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        input_hash TEXT NOT NULL,
+        cached INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+      )
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS assistant_settings (
+        user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        normal_system_prompt TEXT NOT NULL,
+        voice_system_prompt TEXT NOT NULL,
+        overview_prompt TEXT NOT NULL,
+        default_provider TEXT NOT NULL,
+        default_model TEXT NOT NULL,
+        default_thinking_level TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS assistant_codex_connections (
+        user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        access_token TEXT NOT NULL,
+        refresh_token TEXT NOT NULL,
+        account_id TEXT,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS assistant_codex_oauth_states (
+        state TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        code_verifier TEXT NOT NULL,
+        redirect_uri TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
       )
     `);
     this.db.run(`
@@ -506,6 +1005,28 @@ export class VoiceStreamNextDb {
     this.ensureColumn('voice_settings', 'duplicate_cooldown_ms', 'INTEGER');
     this.ensureColumn('voice_settings', 'finalize_check_interval_ms', 'INTEGER');
     this.ensureColumn('voice_settings', 'post_prompt_command_suppression_ms', 'INTEGER');
+    this.ensureColumn('assistant_threads', 'provider', `TEXT NOT NULL DEFAULT '${ASSISTANT_DEFAULT_PROVIDER}'`);
+    this.ensureColumn('assistant_threads', 'model', `TEXT NOT NULL DEFAULT '${ASSISTANT_DEFAULT_MODEL}'`);
+    this.ensureColumn('assistant_threads', 'thinking_level', `TEXT NOT NULL DEFAULT '${ASSISTANT_DEFAULT_THINKING_LEVEL}'`);
+    this.ensureColumn('assistant_threads', 'status', "TEXT NOT NULL DEFAULT 'idle'");
+    this.ensureColumn('assistant_threads', 'error', 'TEXT');
+    this.ensureColumn('assistant_threads', 'voice_enabled', 'INTEGER NOT NULL DEFAULT 0');
+    this.ensureColumn('assistant_threads', 'system_prompt', 'TEXT');
+    this.ensureColumn(
+      'assistant_threads',
+      'enabled_tools_json',
+      `TEXT NOT NULL DEFAULT '${JSON.stringify([...ASSISTANT_DEFAULT_ENABLED_TOOLS]).replace(/'/g, "''")}'`,
+    );
+    this.ensureColumn(
+      'assistant_threads',
+      'capabilities_json',
+      `TEXT NOT NULL DEFAULT '${JSON.stringify(ASSISTANT_DEFAULT_CAPABILITIES).replace(/'/g, "''")}'`,
+    );
+    this.ensureColumn('assistant_threads', 'prompt_delivery_mode', "TEXT NOT NULL DEFAULT 'queue'");
+    this.ensureColumn('assistant_messages', 'content_json', 'TEXT');
+    this.ensureColumn('assistant_messages', 'tool_name', 'TEXT');
+    this.ensureColumn('assistant_messages', 'tool_call_id', 'TEXT');
+    this.ensureColumn('assistant_messages', 'is_error', 'INTEGER NOT NULL DEFAULT 0');
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -998,14 +1519,255 @@ export class VoiceStreamNextDb {
     return rows.map(rowLog);
   }
 
-  createThread(userId: string, input: { title?: string; source?: string; deviceId?: string | null }): AssistantThread {
-    const id = newId('thr');
+  ensureAssistantSettings(userId: string): AssistantSettingsRecord {
+    const existing = this.db.query('SELECT * FROM assistant_settings WHERE user_id = $userId').get({ $userId: userId });
+    if (existing) return rowAssistantSettings(existing);
     const at = nowIso();
     this.db
       .query(
         `
-        INSERT INTO assistant_threads (id, user_id, device_id, title, source, created_at, updated_at)
-        VALUES ($id, $userId, $deviceId, $title, $source, $createdAt, $updatedAt)
+        INSERT INTO assistant_settings (
+          user_id,
+          normal_system_prompt,
+          voice_system_prompt,
+          overview_prompt,
+          default_provider,
+          default_model,
+          default_thinking_level,
+          updated_at
+        )
+        VALUES (
+          $userId,
+          $normalSystemPrompt,
+          $voiceSystemPrompt,
+          $overviewPrompt,
+          $defaultProvider,
+          $defaultModel,
+          $defaultThinkingLevel,
+          $updatedAt
+        )
+      `,
+      )
+      .run({
+        $userId: userId,
+        $normalSystemPrompt: ASSISTANT_NORMAL_SYSTEM_PROMPT_DEFAULT,
+        $voiceSystemPrompt: ASSISTANT_VOICE_SYSTEM_PROMPT_DEFAULT,
+        $overviewPrompt: ASSISTANT_OVERVIEW_PROMPT_DEFAULT,
+        $defaultProvider: ASSISTANT_DEFAULT_PROVIDER,
+        $defaultModel: ASSISTANT_DEFAULT_MODEL,
+        $defaultThinkingLevel: ASSISTANT_DEFAULT_THINKING_LEVEL,
+        $updatedAt: at,
+      });
+    return this.ensureAssistantSettings(userId);
+  }
+
+  updateAssistantSettings(
+    userId: string,
+    input: Partial<Pick<AssistantSettingsRecord, 'normalSystemPrompt' | 'voiceSystemPrompt' | 'overviewPrompt' | 'defaultProvider' | 'defaultModel' | 'defaultThinkingLevel'>>,
+  ): AssistantSettingsRecord {
+    const current = this.ensureAssistantSettings(userId);
+    const at = nowIso();
+    this.db
+      .query(
+        `
+        UPDATE assistant_settings
+        SET normal_system_prompt = $normalSystemPrompt,
+            voice_system_prompt = $voiceSystemPrompt,
+            overview_prompt = $overviewPrompt,
+            default_provider = $defaultProvider,
+            default_model = $defaultModel,
+            default_thinking_level = $defaultThinkingLevel,
+            updated_at = $updatedAt
+        WHERE user_id = $userId
+      `,
+      )
+      .run({
+        $normalSystemPrompt: input.normalSystemPrompt ?? current.normalSystemPrompt,
+        $voiceSystemPrompt: input.voiceSystemPrompt ?? current.voiceSystemPrompt,
+        $overviewPrompt: input.overviewPrompt ?? current.overviewPrompt,
+        $defaultProvider: input.defaultProvider ?? current.defaultProvider,
+        $defaultModel: input.defaultModel ?? current.defaultModel,
+        $defaultThinkingLevel: input.defaultThinkingLevel ?? current.defaultThinkingLevel,
+        $updatedAt: at,
+        $userId: userId,
+      });
+    return this.ensureAssistantSettings(userId);
+  }
+
+  codexConnection(userId: string): AssistantCodexConnectionRecord | null {
+    const row = this.db.query('SELECT * FROM assistant_codex_connections WHERE user_id = $userId').get({ $userId: userId });
+    return row ? rowAssistantCodexConnection(row) : null;
+  }
+
+  codexConnectionView(userId: string): AssistantCodexConnectionView {
+    const connection = this.codexConnection(userId);
+    return {
+      connected: Boolean(connection),
+      accountId: connection?.accountId ?? null,
+      expiresAt: connection?.expiresAt ?? null,
+      updatedAt: connection?.updatedAt ?? null,
+    };
+  }
+
+  upsertCodexConnection(
+    userId: string,
+    input: { accessToken: string; refreshToken: string; accountId?: string | null; expiresAt: string },
+  ): AssistantCodexConnectionRecord {
+    const existing = this.codexConnection(userId);
+    const at = nowIso();
+    this.db
+      .query(
+        `
+        INSERT INTO assistant_codex_connections (
+          user_id,
+          access_token,
+          refresh_token,
+          account_id,
+          expires_at,
+          created_at,
+          updated_at
+        )
+        VALUES (
+          $userId,
+          $accessToken,
+          $refreshToken,
+          $accountId,
+          $expiresAt,
+          $createdAt,
+          $updatedAt
+        )
+        ON CONFLICT(user_id) DO UPDATE SET
+          access_token = excluded.access_token,
+          refresh_token = excluded.refresh_token,
+          account_id = excluded.account_id,
+          expires_at = excluded.expires_at,
+          updated_at = excluded.updated_at
+      `,
+      )
+      .run({
+        $userId: userId,
+        $accessToken: input.accessToken,
+        $refreshToken: input.refreshToken,
+        $accountId: input.accountId ?? null,
+        $expiresAt: input.expiresAt,
+        $createdAt: existing?.createdAt ?? at,
+        $updatedAt: at,
+      });
+    return this.codexConnection(userId)!;
+  }
+
+  deleteCodexConnection(userId: string): boolean {
+    const result = this.db.query('DELETE FROM assistant_codex_connections WHERE user_id = $userId').run({ $userId: userId });
+    return Number(result.changes ?? 0) > 0;
+  }
+
+  createCodexOAuthState(
+    userId: string,
+    input: { state: string; codeVerifier: string; redirectUri: string; expiresAt: string },
+  ): AssistantCodexOAuthStateRecord {
+    const at = nowIso();
+    this.db
+      .query(
+        `
+        INSERT INTO assistant_codex_oauth_states (
+          state,
+          user_id,
+          code_verifier,
+          redirect_uri,
+          created_at,
+          expires_at
+        )
+        VALUES (
+          $state,
+          $userId,
+          $codeVerifier,
+          $redirectUri,
+          $createdAt,
+          $expiresAt
+        )
+      `,
+      )
+      .run({
+        $state: input.state,
+        $userId: userId,
+        $codeVerifier: input.codeVerifier,
+        $redirectUri: input.redirectUri,
+        $createdAt: at,
+        $expiresAt: input.expiresAt,
+      });
+    return this.codexOAuthState(input.state)!;
+  }
+
+  codexOAuthState(state: string): AssistantCodexOAuthStateRecord | null {
+    const row = this.db.query('SELECT * FROM assistant_codex_oauth_states WHERE state = $state').get({ $state: state });
+    return row ? rowAssistantCodexOAuthState(row) : null;
+  }
+
+  deleteCodexOAuthState(state: string): boolean {
+    const result = this.db.query('DELETE FROM assistant_codex_oauth_states WHERE state = $state').run({ $state: state });
+    return Number(result.changes ?? 0) > 0;
+  }
+
+  createThread(
+    userId: string,
+    input: {
+      title?: string;
+      source?: string;
+      deviceId?: string | null;
+      voiceEnabled?: boolean;
+      provider?: string;
+      model?: string;
+      thinkingLevel?: string;
+      enabledTools?: string[];
+      capabilities?: AssistantThreadCapabilities;
+      promptDeliveryMode?: 'queue' | 'asap';
+    },
+  ): AssistantThread {
+    const id = newId('thr');
+    const at = nowIso();
+    const settings = this.ensureAssistantSettings(userId);
+    const voiceEnabled = input.voiceEnabled ?? input.source === 'voice';
+    this.db
+      .query(
+        `
+        INSERT INTO assistant_threads (
+          id,
+          user_id,
+          device_id,
+          title,
+          source,
+          provider,
+          model,
+          thinking_level,
+          status,
+          error,
+          voice_enabled,
+          system_prompt,
+          enabled_tools_json,
+          capabilities_json,
+          prompt_delivery_mode,
+          created_at,
+          updated_at
+        )
+        VALUES (
+          $id,
+          $userId,
+          $deviceId,
+          $title,
+          $source,
+          $provider,
+          $model,
+          $thinkingLevel,
+          'idle',
+          NULL,
+          $voiceEnabled,
+          NULL,
+          $enabledToolsJson,
+          $capabilitiesJson,
+          $promptDeliveryMode,
+          $createdAt,
+          $updatedAt
+        )
       `,
       )
       .run({
@@ -1014,6 +1776,13 @@ export class VoiceStreamNextDb {
         $deviceId: input.deviceId ?? null,
         $title: input.title?.trim() || 'Assistant thread',
         $source: input.source?.trim() || 'web',
+        $provider: input.provider?.trim() || settings.defaultProvider,
+        $model: input.model?.trim() || settings.defaultModel,
+        $thinkingLevel: input.thinkingLevel?.trim() || settings.defaultThinkingLevel,
+        $voiceEnabled: voiceEnabled ? 1 : 0,
+        $enabledToolsJson: JSON.stringify(input.enabledTools ?? [...ASSISTANT_DEFAULT_ENABLED_TOOLS]),
+        $capabilitiesJson: JSON.stringify(input.capabilities ?? ASSISTANT_DEFAULT_CAPABILITIES),
+        $promptDeliveryMode: input.promptDeliveryMode === 'asap' ? 'asap' : 'queue',
         $createdAt: at,
         $updatedAt: at,
       });
@@ -1035,6 +1804,60 @@ export class VoiceStreamNextDb {
     return row ? rowThread(row) : null;
   }
 
+  deleteThread(userId: string, threadId: string): boolean {
+    const result = this.db.query('DELETE FROM assistant_threads WHERE user_id = $userId AND id = $threadId').run({
+      $userId: userId,
+      $threadId: threadId,
+    });
+    return Number(result.changes ?? 0) > 0;
+  }
+
+  updateThread(
+    userId: string,
+    threadId: string,
+    input: Partial<Pick<AssistantThread, 'title' | 'provider' | 'model' | 'thinkingLevel' | 'status' | 'error' | 'voiceEnabled' | 'systemPrompt' | 'enabledTools' | 'capabilities' | 'promptDeliveryMode'>>,
+  ): AssistantThread | null {
+    const current = this.thread(userId, threadId);
+    if (!current) return null;
+    const at = nowIso();
+    this.db
+      .query(
+        `
+        UPDATE assistant_threads
+        SET title = $title,
+            provider = $provider,
+            model = $model,
+            thinking_level = $thinkingLevel,
+            status = $status,
+            error = $error,
+            voice_enabled = $voiceEnabled,
+            system_prompt = $systemPrompt,
+            enabled_tools_json = $enabledToolsJson,
+            capabilities_json = $capabilitiesJson,
+            prompt_delivery_mode = $promptDeliveryMode,
+            updated_at = $updatedAt
+        WHERE user_id = $userId AND id = $threadId
+      `,
+      )
+      .run({
+        $title: input.title ?? current.title,
+        $provider: input.provider ?? current.provider,
+        $model: input.model ?? current.model,
+        $thinkingLevel: input.thinkingLevel ?? current.thinkingLevel,
+        $status: input.status ?? current.status,
+        $error: input.error === undefined ? current.error : input.error,
+        $voiceEnabled: (input.voiceEnabled ?? current.voiceEnabled) ? 1 : 0,
+        $systemPrompt: input.systemPrompt === undefined ? current.systemPrompt : input.systemPrompt,
+        $enabledToolsJson: JSON.stringify(input.enabledTools ?? current.enabledTools),
+        $capabilitiesJson: JSON.stringify(input.capabilities ?? current.capabilities),
+        $promptDeliveryMode: input.promptDeliveryMode ?? current.promptDeliveryMode,
+        $updatedAt: at,
+        $userId: userId,
+        $threadId: threadId,
+      });
+    return this.thread(userId, threadId);
+  }
+
   latestVoiceThreadForDevice(userId: string, deviceId: string): AssistantThread {
     const row = this.db
       .query(
@@ -1049,14 +1872,50 @@ export class VoiceStreamNextDb {
     return row ? rowThread(row) : this.createThread(userId, { deviceId, source: 'voice', title: 'Voice thread' });
   }
 
-  addMessage(userId: string, threadId: string, input: { role: 'user' | 'assistant'; content: string; spokenText?: string | null }): AssistantMessage {
+  addMessage(
+    userId: string,
+    threadId: string,
+    input: {
+      role: AssistantMessageRole;
+      content: string;
+      contentJson?: string | null;
+      toolName?: string | null;
+      toolCallId?: string | null;
+      isError?: boolean;
+      spokenText?: string | null;
+    },
+  ): AssistantMessage {
     const id = newId('msg');
     const at = nowIso();
     this.db
       .query(
         `
-        INSERT INTO assistant_messages (id, thread_id, user_id, role, content, spoken_text, created_at)
-        VALUES ($id, $threadId, $userId, $role, $content, $spokenText, $createdAt)
+        INSERT INTO assistant_messages (
+          id,
+          thread_id,
+          user_id,
+          role,
+          content,
+          content_json,
+          tool_name,
+          tool_call_id,
+          is_error,
+          spoken_text,
+          created_at
+        )
+        VALUES (
+          $id,
+          $threadId,
+          $userId,
+          $role,
+          $content,
+          $contentJson,
+          $toolName,
+          $toolCallId,
+          $isError,
+          $spokenText,
+          $createdAt
+        )
       `,
       )
       .run({
@@ -1065,6 +1924,10 @@ export class VoiceStreamNextDb {
         $userId: userId,
         $role: input.role,
         $content: input.content,
+        $contentJson: input.contentJson ?? null,
+        $toolName: input.toolName ?? null,
+        $toolCallId: input.toolCallId ?? null,
+        $isError: input.isError ? 1 : 0,
         $spokenText: input.spokenText ?? null,
         $createdAt: at,
       });
@@ -1087,6 +1950,568 @@ export class VoiceStreamNextDb {
       )
       .all({ $userId: userId, $threadId: threadId })
       .map(rowMessage);
+  }
+
+  createRun(
+    userId: string,
+    threadId: string,
+    input: { prompt: string; provider: string; model: string; thinkingLevel: string },
+  ): AssistantRunRecord {
+    const id = newId('run');
+    const at = nowIso();
+    this.db
+      .query(
+        `
+        INSERT INTO assistant_runs (
+          id,
+          user_id,
+          thread_id,
+          status,
+          provider,
+          model,
+          thinking_level,
+          prompt,
+          error,
+          started_at,
+          completed_at,
+          cancelled_at
+        )
+        VALUES ($id, $userId, $threadId, 'running', $provider, $model, $thinkingLevel, $prompt, NULL, $startedAt, NULL, NULL)
+      `,
+      )
+      .run({
+        $id: id,
+        $userId: userId,
+        $threadId: threadId,
+        $provider: input.provider,
+        $model: input.model,
+        $thinkingLevel: input.thinkingLevel,
+        $prompt: input.prompt,
+        $startedAt: at,
+      });
+    this.updateThread(userId, threadId, { status: 'running', error: null });
+    const row = this.db.query('SELECT * FROM assistant_runs WHERE id = $id').get({ $id: id });
+    return rowAssistantRun(row);
+  }
+
+  updateRun(
+    userId: string,
+    runId: string,
+    input: Partial<Pick<AssistantRunRecord, 'status' | 'error' | 'completedAt' | 'cancelledAt'>>,
+  ): AssistantRunRecord | null {
+    const current = this.db.query('SELECT * FROM assistant_runs WHERE user_id = $userId AND id = $runId').get({
+      $userId: userId,
+      $runId: runId,
+    });
+    if (!current) return null;
+    const currentRun = rowAssistantRun(current);
+    this.db
+      .query(
+        `
+        UPDATE assistant_runs
+        SET status = $status,
+            error = $error,
+            completed_at = $completedAt,
+            cancelled_at = $cancelledAt
+        WHERE user_id = $userId AND id = $runId
+      `,
+      )
+      .run({
+        $status: input.status ?? currentRun.status,
+        $error: input.error === undefined ? currentRun.error : input.error,
+        $completedAt: input.completedAt === undefined ? currentRun.completedAt : input.completedAt,
+        $cancelledAt: input.cancelledAt === undefined ? currentRun.cancelledAt : input.cancelledAt,
+        $userId: userId,
+        $runId: runId,
+      });
+    const row = this.db.query('SELECT * FROM assistant_runs WHERE user_id = $userId AND id = $runId').get({
+      $userId: userId,
+      $runId: runId,
+    });
+    return row ? rowAssistantRun(row) : null;
+  }
+
+  activeRun(userId: string, threadId: string): AssistantRunRecord | null {
+    const row = this.db
+      .query(
+        `
+        SELECT * FROM assistant_runs
+        WHERE user_id = $userId
+          AND thread_id = $threadId
+          AND status IN ('running', 'waiting_for_approval')
+        ORDER BY started_at DESC
+        LIMIT 1
+      `,
+      )
+      .get({ $userId: userId, $threadId: threadId });
+    return row ? rowAssistantRun(row) : null;
+  }
+
+  listRuns(userId: string, threadId: string, limit = 20): AssistantRunRecord[] {
+    return this.db
+      .query(
+        `
+        SELECT * FROM assistant_runs
+        WHERE user_id = $userId AND thread_id = $threadId
+        ORDER BY started_at DESC
+        LIMIT $limit
+      `,
+      )
+      .all({ $userId: userId, $threadId: threadId, $limit: limit })
+      .map(rowAssistantRun);
+  }
+
+  enqueuePrompt(
+    userId: string,
+    threadId: string,
+    input: { prompt: string; provider: string; model: string; thinkingLevel: string },
+  ): AssistantQueuedPromptRecord {
+    const id = newId('qpr');
+    const at = nowIso();
+    this.db
+      .query(
+        `
+        INSERT INTO assistant_queued_prompts (
+          id,
+          user_id,
+          thread_id,
+          prompt,
+          provider,
+          model,
+          thinking_level,
+          status,
+          error,
+          created_at,
+          started_at,
+          completed_at,
+          cancelled_at
+        )
+        VALUES ($id, $userId, $threadId, $prompt, $provider, $model, $thinkingLevel, 'queued', NULL, $createdAt, NULL, NULL, NULL)
+      `,
+      )
+      .run({
+        $id: id,
+        $userId: userId,
+        $threadId: threadId,
+        $prompt: input.prompt,
+        $provider: input.provider,
+        $model: input.model,
+        $thinkingLevel: input.thinkingLevel,
+        $createdAt: at,
+      });
+    this.db.query('UPDATE assistant_threads SET updated_at = $updatedAt WHERE user_id = $userId AND id = $threadId').run({
+      $updatedAt: at,
+      $userId: userId,
+      $threadId: threadId,
+    });
+    const row = this.db.query('SELECT * FROM assistant_queued_prompts WHERE id = $id').get({ $id: id });
+    return rowAssistantQueuedPrompt(row);
+  }
+
+  updateQueuedPrompt(
+    userId: string,
+    queuedPromptId: string,
+    input: Partial<Pick<AssistantQueuedPromptRecord, 'status' | 'error' | 'startedAt' | 'completedAt' | 'cancelledAt'>>,
+  ): AssistantQueuedPromptRecord | null {
+    const current = this.db.query('SELECT * FROM assistant_queued_prompts WHERE user_id = $userId AND id = $id').get({
+      $userId: userId,
+      $id: queuedPromptId,
+    });
+    if (!current) return null;
+    const prompt = rowAssistantQueuedPrompt(current);
+    this.db
+      .query(
+        `
+        UPDATE assistant_queued_prompts
+        SET status = $status,
+            error = $error,
+            started_at = $startedAt,
+            completed_at = $completedAt,
+            cancelled_at = $cancelledAt
+        WHERE user_id = $userId AND id = $id
+      `,
+      )
+      .run({
+        $status: input.status ?? prompt.status,
+        $error: input.error === undefined ? prompt.error : input.error,
+        $startedAt: input.startedAt === undefined ? prompt.startedAt : input.startedAt,
+        $completedAt: input.completedAt === undefined ? prompt.completedAt : input.completedAt,
+        $cancelledAt: input.cancelledAt === undefined ? prompt.cancelledAt : input.cancelledAt,
+        $userId: userId,
+        $id: queuedPromptId,
+      });
+    const row = this.db.query('SELECT * FROM assistant_queued_prompts WHERE user_id = $userId AND id = $id').get({
+      $userId: userId,
+      $id: queuedPromptId,
+    });
+    return row ? rowAssistantQueuedPrompt(row) : null;
+  }
+
+  cancelQueuedPrompt(userId: string, threadId: string, queuedPromptId: string): AssistantQueuedPromptRecord | null {
+    const current = this.db
+      .query("SELECT * FROM assistant_queued_prompts WHERE user_id = $userId AND thread_id = $threadId AND id = $id AND status = 'queued'")
+      .get({ $userId: userId, $threadId: threadId, $id: queuedPromptId });
+    if (!current) return null;
+    return this.updateQueuedPrompt(userId, queuedPromptId, {
+      status: 'cancelled',
+      cancelledAt: nowIso(),
+      error: 'Cancelled by user',
+    });
+  }
+
+  nextQueuedPrompt(userId: string, threadId: string): AssistantQueuedPromptRecord | null {
+    const row = this.db
+      .query(
+        `
+        SELECT * FROM assistant_queued_prompts
+        WHERE user_id = $userId AND thread_id = $threadId AND status = 'queued'
+        ORDER BY created_at ASC
+        LIMIT 1
+      `,
+      )
+      .get({ $userId: userId, $threadId: threadId });
+    return row ? rowAssistantQueuedPrompt(row) : null;
+  }
+
+  listQueuedPrompts(userId: string, threadId: string): AssistantQueuedPromptRecord[] {
+    return this.db
+      .query(
+        `
+        SELECT * FROM assistant_queued_prompts
+        WHERE user_id = $userId AND thread_id = $threadId AND status = 'queued'
+        ORDER BY created_at ASC
+      `,
+      )
+      .all({ $userId: userId, $threadId: threadId })
+      .map(rowAssistantQueuedPrompt);
+  }
+
+  createToolCall(
+    userId: string,
+    threadId: string,
+    input: { runId?: string | null; toolName: string; args: unknown; approvalRequired?: boolean; status?: AssistantToolCallRecord['status'] },
+  ): AssistantToolCallRecord {
+    const id = newId('tool');
+    const at = nowIso();
+    this.db
+      .query(
+        `
+        INSERT INTO assistant_tool_calls (
+          id,
+          user_id,
+          thread_id,
+          run_id,
+          tool_name,
+          status,
+          args_json,
+          result_json,
+          approval_required,
+          created_at,
+          updated_at
+        )
+        VALUES ($id, $userId, $threadId, $runId, $toolName, $status, $argsJson, NULL, $approvalRequired, $createdAt, $updatedAt)
+      `,
+      )
+      .run({
+        $id: id,
+        $userId: userId,
+        $threadId: threadId,
+        $runId: input.runId ?? null,
+        $toolName: input.toolName,
+        $status: input.status ?? (input.approvalRequired ? 'waiting_for_approval' : 'running'),
+        $argsJson: JSON.stringify(input.args ?? {}),
+        $approvalRequired: input.approvalRequired ? 1 : 0,
+        $createdAt: at,
+        $updatedAt: at,
+      });
+    const row = this.db.query('SELECT * FROM assistant_tool_calls WHERE id = $id').get({ $id: id });
+    return rowAssistantToolCall(row);
+  }
+
+  updateToolCall(
+    userId: string,
+    toolCallId: string,
+    input: Partial<Pick<AssistantToolCallRecord, 'status' | 'resultJson'>>,
+  ): AssistantToolCallRecord | null {
+    const current = this.db.query('SELECT * FROM assistant_tool_calls WHERE user_id = $userId AND id = $id').get({
+      $userId: userId,
+      $id: toolCallId,
+    });
+    if (!current) return null;
+    const toolCall = rowAssistantToolCall(current);
+    this.db
+      .query(
+        `
+        UPDATE assistant_tool_calls
+        SET status = $status,
+            result_json = $resultJson,
+            updated_at = $updatedAt
+        WHERE user_id = $userId AND id = $id
+      `,
+      )
+      .run({
+        $status: input.status ?? toolCall.status,
+        $resultJson: input.resultJson === undefined ? toolCall.resultJson : input.resultJson,
+        $updatedAt: nowIso(),
+        $userId: userId,
+        $id: toolCallId,
+      });
+    const row = this.db.query('SELECT * FROM assistant_tool_calls WHERE user_id = $userId AND id = $id').get({
+      $userId: userId,
+      $id: toolCallId,
+    });
+    return row ? rowAssistantToolCall(row) : null;
+  }
+
+  listToolCalls(userId: string, threadId: string): AssistantToolCallRecord[] {
+    return this.db
+      .query(
+        `
+        SELECT * FROM assistant_tool_calls
+        WHERE user_id = $userId AND thread_id = $threadId
+        ORDER BY created_at ASC
+      `,
+      )
+      .all({ $userId: userId, $threadId: threadId })
+      .map(rowAssistantToolCall);
+  }
+
+  createApproval(
+    userId: string,
+    threadId: string,
+    input: { runId?: string | null; toolCallId: string; toolName: string; label: string; args: unknown; requestedBy?: string },
+  ): AssistantApprovalRecord {
+    const id = newId('apr');
+    const at = nowIso();
+    this.db
+      .query(
+        `
+        INSERT INTO assistant_approvals (
+          id,
+          user_id,
+          thread_id,
+          run_id,
+          tool_call_id,
+          tool_name,
+          label,
+          args_json,
+          status,
+          requested_by,
+          resolved_by,
+          result_json,
+          failure_reason,
+          created_at,
+          resolved_at
+        )
+        VALUES ($id, $userId, $threadId, $runId, $toolCallId, $toolName, $label, $argsJson, 'pending', $requestedBy, NULL, NULL, NULL, $createdAt, NULL)
+      `,
+      )
+      .run({
+        $id: id,
+        $userId: userId,
+        $threadId: threadId,
+        $runId: input.runId ?? null,
+        $toolCallId: input.toolCallId,
+        $toolName: input.toolName,
+        $label: input.label,
+        $argsJson: JSON.stringify(input.args ?? {}),
+        $requestedBy: input.requestedBy ?? 'assistant',
+        $createdAt: at,
+      });
+    this.updateThread(userId, threadId, { status: 'waiting_for_approval' });
+    if (input.runId) this.updateRun(userId, input.runId, { status: 'waiting_for_approval' });
+    const row = this.db.query('SELECT * FROM assistant_approvals WHERE id = $id').get({ $id: id });
+    return rowAssistantApproval(row);
+  }
+
+  resolveApproval(
+    userId: string,
+    approvalId: string,
+    input: { approved: boolean; resolvedBy: string; result?: unknown; failureReason?: string | null },
+  ): AssistantApprovalRecord | null {
+    const current = this.db.query('SELECT * FROM assistant_approvals WHERE user_id = $userId AND id = $id').get({
+      $userId: userId,
+      $id: approvalId,
+    });
+    if (!current) return null;
+    const approval = rowAssistantApproval(current);
+    if (approval.status !== 'pending') return approval;
+    const status = input.approved ? 'approved' : 'denied';
+    this.db
+      .query(
+        `
+        UPDATE assistant_approvals
+        SET status = $status,
+            resolved_by = $resolvedBy,
+            result_json = $resultJson,
+            failure_reason = $failureReason,
+            resolved_at = $resolvedAt
+        WHERE user_id = $userId AND id = $id
+      `,
+      )
+      .run({
+        $status: status,
+        $resolvedBy: input.resolvedBy,
+        $resultJson: input.result === undefined ? null : JSON.stringify(input.result),
+        $failureReason: input.failureReason ?? null,
+        $resolvedAt: nowIso(),
+        $userId: userId,
+        $id: approvalId,
+      });
+    this.updateToolCall(userId, approval.toolCallId, { status: input.approved ? 'approved' : 'denied' });
+    const row = this.db.query('SELECT * FROM assistant_approvals WHERE user_id = $userId AND id = $id').get({
+      $userId: userId,
+      $id: approvalId,
+    });
+    return row ? rowAssistantApproval(row) : null;
+  }
+
+  listApprovals(userId: string, threadId?: string): AssistantApprovalRecord[] {
+    const rows = threadId
+      ? this.db
+          .query(
+            `
+            SELECT * FROM assistant_approvals
+            WHERE user_id = $userId AND thread_id = $threadId
+            ORDER BY created_at DESC
+          `,
+          )
+          .all({ $userId: userId, $threadId: threadId })
+      : this.db
+          .query(
+            `
+            SELECT * FROM assistant_approvals
+            WHERE user_id = $userId
+            ORDER BY created_at DESC
+          `,
+          )
+          .all({ $userId: userId });
+    return rows.map(rowAssistantApproval);
+  }
+
+  pendingApproval(userId: string, approvalId: string): AssistantApprovalRecord | null {
+    const row = this.db
+      .query("SELECT * FROM assistant_approvals WHERE user_id = $userId AND id = $id AND status = 'pending'")
+      .get({ $userId: userId, $id: approvalId });
+    return row ? rowAssistantApproval(row) : null;
+  }
+
+  upsertArtifact(userId: string, threadId: string, input: { path: string; content: string }): AssistantArtifactRecord {
+    const at = nowIso();
+    const existing = this.db
+      .query('SELECT * FROM assistant_artifacts WHERE user_id = $userId AND thread_id = $threadId AND path = $path')
+      .get({ $userId: userId, $threadId: threadId, $path: input.path });
+    const revision = newId('rev');
+    const size = Buffer.byteLength(input.content, 'utf8');
+    if (existing) {
+      this.db
+        .query(
+          `
+          UPDATE assistant_artifacts
+          SET content = $content,
+              size = $size,
+              revision = $revision,
+              updated_at = $updatedAt
+          WHERE user_id = $userId AND thread_id = $threadId AND path = $path
+        `,
+        )
+        .run({
+          $content: input.content,
+          $size: size,
+          $revision: revision,
+          $updatedAt: at,
+          $userId: userId,
+          $threadId: threadId,
+          $path: input.path,
+        });
+    } else {
+      this.db
+        .query(
+          `
+          INSERT INTO assistant_artifacts (id, user_id, thread_id, path, content, size, revision, created_at, updated_at)
+          VALUES ($id, $userId, $threadId, $path, $content, $size, $revision, $createdAt, $updatedAt)
+        `,
+        )
+        .run({
+          $id: newId('art'),
+          $userId: userId,
+          $threadId: threadId,
+          $path: input.path,
+          $content: input.content,
+          $size: size,
+          $revision: revision,
+          $createdAt: at,
+          $updatedAt: at,
+        });
+    }
+    const row = this.db
+      .query('SELECT * FROM assistant_artifacts WHERE user_id = $userId AND thread_id = $threadId AND path = $path')
+      .get({ $userId: userId, $threadId: threadId, $path: input.path });
+    return rowAssistantArtifact(row);
+  }
+
+  readArtifact(userId: string, threadId: string, artifactPath: string): AssistantArtifactRecord | null {
+    const row = this.db
+      .query('SELECT * FROM assistant_artifacts WHERE user_id = $userId AND thread_id = $threadId AND path = $path')
+      .get({ $userId: userId, $threadId: threadId, $path: artifactPath });
+    return row ? rowAssistantArtifact(row) : null;
+  }
+
+  listArtifacts(userId: string, threadId: string): AssistantArtifactRecord[] {
+    return this.db
+      .query(
+        `
+        SELECT * FROM assistant_artifacts
+        WHERE user_id = $userId AND thread_id = $threadId
+        ORDER BY updated_at DESC, path ASC
+      `,
+      )
+      .all({ $userId: userId, $threadId: threadId })
+      .map(rowAssistantArtifact);
+  }
+
+  deleteArtifact(userId: string, threadId: string, artifactPath: string): boolean {
+    const result = this.db
+      .query('DELETE FROM assistant_artifacts WHERE user_id = $userId AND thread_id = $threadId AND path = $path')
+      .run({ $userId: userId, $threadId: threadId, $path: artifactPath });
+    return result.changes > 0;
+  }
+
+  createOverview(userId: string, threadId: string, input: { markdown: string; prompt: string; inputHash: string; cached?: boolean }): AssistantOverviewRecord {
+    const id = newId('ovw');
+    this.db
+      .query(
+        `
+        INSERT INTO assistant_overviews (id, user_id, thread_id, markdown, prompt, input_hash, cached, created_at)
+        VALUES ($id, $userId, $threadId, $markdown, $prompt, $inputHash, $cached, $createdAt)
+      `,
+      )
+      .run({
+        $id: id,
+        $userId: userId,
+        $threadId: threadId,
+        $markdown: input.markdown,
+        $prompt: input.prompt,
+        $inputHash: input.inputHash,
+        $cached: input.cached ? 1 : 0,
+        $createdAt: nowIso(),
+      });
+    const row = this.db.query('SELECT * FROM assistant_overviews WHERE id = $id').get({ $id: id });
+    return rowAssistantOverview(row);
+  }
+
+  latestOverview(userId: string, threadId: string): AssistantOverviewRecord | null {
+    const row = this.db
+      .query(
+        `
+        SELECT * FROM assistant_overviews
+        WHERE user_id = $userId AND thread_id = $threadId
+        ORDER BY created_at DESC
+        LIMIT 1
+      `,
+      )
+      .get({ $userId: userId, $threadId: threadId });
+    return row ? rowAssistantOverview(row) : null;
   }
 
   createVoiceSession(userId: string, deviceId: string, mode = 'recording'): VoiceSession {
@@ -1287,6 +2712,7 @@ export class VoiceStreamNextDb {
 
   dashboard(user: UserProfile): any {
     const settings = this.ensureVoiceSettings(user.id);
+    const assistantSettings = this.ensureAssistantSettings(user.id);
     const threads = this.listThreads(user.id);
     const logs = this.listLogs(user.id, 60);
     const devices = this.listDevices(user.id);
@@ -1296,9 +2722,11 @@ export class VoiceStreamNextDb {
     return {
       user,
       settings,
+      assistantSettings,
       threads,
       logs,
       approvalCodes: this.listApprovalCodes(user.id, 40),
+      assistantApprovals: this.listApprovals(user.id).slice(0, 80),
       devices,
       pairingSessions,
       transcripts: this.listTranscripts(user.id, 40),

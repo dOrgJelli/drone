@@ -5,7 +5,7 @@ import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
 import { clerkPlugin } from '@clerk/fastify';
-import { VoiceStreamNextDb } from './db.js';
+import { VoiceStreamNextDb, type AssistantMessage } from './db.js';
 import { requireAdmin, resolveRequestUser, type AuthContext } from './auth.js';
 import { generateAssistantReply, synthesizeSpeech, transcribePcm16 } from './assistant-runtime.js';
 import {
@@ -16,6 +16,19 @@ import {
 } from './streaming-transcription.js';
 import { approvalCodeFromText } from './approval-code.js';
 import { parseVoiceApprovalSettings, voiceApprovalSettingsResponse } from './voice-approval-settings.js';
+import {
+  assistantSnapshot,
+  assistantToolSummaries,
+  generateThreadOverview,
+  promptAssistantThread,
+  resolveAssistantApproval,
+  sanitizeArtifactPath,
+} from './assistant-parity.js';
+import {
+  createCodexAuthorizationFlow,
+  exchangeCodexAuthorizationCode,
+  parseCodexAuthorizationInput,
+} from './codex-auth.js';
 import {
   HEARTBEAT_INTERVAL_MS,
   MAX_STREAM_BYTES,
@@ -173,8 +186,61 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
   const app = Fastify({ logger: options.logger ?? true });
   const db = new VoiceStreamNextDb();
   const controlChannels = new ControlChannelRegistry();
+  const assistantEventClients = new Set<{ res: any; userId: string }>();
+  let assistantChangeSequence = 0;
   const clerkEnabled = Boolean(process.env.CLERK_SECRET_KEY?.trim());
   const port = parsePort(process.env.VOICE_STREAM_NEXT_API_PORT ?? process.env.PORT, 3299);
+
+  const writeAssistantSseEvent = (res: any, event: string, data: unknown) => {
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+  const emitAssistantChange = (reason: string, threadId?: string) => {
+    const event = {
+      type: 'assistant_changed',
+      sequence: ++assistantChangeSequence,
+      reason,
+      ...(threadId ? { threadId } : {}),
+      at: new Date().toISOString(),
+    };
+    for (const client of [...assistantEventClients]) {
+      if (client.res.destroyed || client.res.writableEnded) {
+        assistantEventClients.delete(client);
+        continue;
+      }
+      writeAssistantSseEvent(client.res, 'assistant_change', event);
+    }
+  };
+  const emitAssistantSpeak = (userId: string, threadId: string, message: AssistantMessage) => {
+    const text = String(message.spokenText ?? '').trim();
+    if (!text) return;
+    const event = {
+      type: 'assistant_speak',
+      threadId,
+      messageId: message.id,
+      text,
+      at: new Date().toISOString(),
+    };
+    for (const client of [...assistantEventClients]) {
+      if (client.res.destroyed || client.res.writableEnded) {
+        assistantEventClients.delete(client);
+        continue;
+      }
+      if (client.userId !== userId) continue;
+      writeAssistantSseEvent(client.res, 'assistant_speak', event);
+    }
+  };
+  const handleAssistantPromptEvent = (userId: string, threadId: string, event: any) => {
+    if (event?.type === 'message' && event.message?.spokenText) {
+      emitAssistantSpeak(userId, threadId, event.message as AssistantMessage);
+    }
+  };
+  const emitNewSpokenMessages = (userId: string, threadId: string, beforeIds: Set<string>) => {
+    for (const message of db.listMessages(userId, threadId)) {
+      if (!message.spokenText || beforeIds.has(message.id)) continue;
+      emitAssistantSpeak(userId, threadId, message);
+    }
+  };
 
   await app.register(cors, {
     origin: true,
@@ -192,6 +258,35 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     clerk: clerkEnabled ? 'enabled' : 'dev-fallback',
     dbPath: db.path,
   }));
+
+  app.get('/api/assistant/events', async (req, reply) => {
+    try {
+      const ctx = await resolveRequestUser(req, db, clerkEnabled);
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-cache, no-transform',
+        connection: 'keep-alive',
+      });
+      (req.raw.socket as any).setTimeout?.(0);
+      const client = { res: reply.raw, userId: ctx.user.id };
+      assistantEventClients.add(client);
+      writeAssistantSseEvent(reply.raw, 'connected', { ok: true, at: new Date().toISOString() });
+      const keepAlive = setInterval(() => {
+        if (reply.raw.destroyed || reply.raw.writableEnded) return;
+        reply.raw.write(': keepalive\n\n');
+      }, 25_000);
+      (keepAlive as any).unref?.();
+      const cleanup = () => {
+        clearInterval(keepAlive);
+        assistantEventClients.delete(client);
+      };
+      req.raw.on('close', cleanup);
+      reply.raw.on('close', cleanup);
+    } catch (error: any) {
+      reply.code(Number(error?.statusCode ?? 401) || 401).send({ ok: false, error: error?.message ?? String(error) });
+    }
+  });
 
   app.get('/api/me', async (req, reply) =>
     withUser(req, reply, db, clerkEnabled, async (ctx) => ({
@@ -658,20 +753,59 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
   );
 
   app.get('/api/assistant/threads', async (req, reply) =>
-    withUser(req, reply, db, clerkEnabled, async (ctx) => ({
-      ok: true,
-      threads: db.listThreads(ctx.user.id),
-    })),
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const query = (req.query ?? {}) as Record<string, unknown>;
+      return assistantSnapshot(db, ctx.user.id, cleanText(query.activeThreadId) || null);
+    }),
   );
 
   app.post('/api/assistant/threads', async (req, reply) =>
     withUser(req, reply, db, clerkEnabled, async (ctx) => {
       const body = jsonBody(req);
+      const source = cleanText(body.source) === 'voice' || Boolean(body.voiceEnabled) ? 'voice' : 'web';
+      const codexConnected = db.codexConnectionView(ctx.user.id).connected;
+      const requestedProvider = cleanText(body.provider);
       const thread = db.createThread(ctx.user.id, {
         title: cleanText(body.title, 'Assistant thread') || 'Assistant thread',
-        source: 'web',
+        source,
+        voiceEnabled: Boolean(body.voiceEnabled) || source === 'voice',
+        provider: requestedProvider || (codexConnected ? 'codex' : undefined),
+        model: cleanText(body.model) || (!requestedProvider && codexConnected ? 'gpt-5.3-codex' : undefined),
+        thinkingLevel: cleanText(body.thinkingLevel) || undefined,
+        promptDeliveryMode: body.promptDeliveryMode === 'asap' ? 'asap' : 'queue',
       });
-      return { ok: true, thread };
+      emitAssistantChange('thread_created', thread.id);
+      return { ok: true, thread, snapshot: assistantSnapshot(db, ctx.user.id, thread.id) };
+    }),
+  );
+
+  app.patch('/api/assistant/threads/:threadId', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const threadId = String((req.params as any).threadId ?? '');
+      if (!db.thread(ctx.user.id, threadId)) throw Object.assign(new Error('unknown thread'), { statusCode: 404 });
+      const body = jsonBody(req);
+      const patch: Parameters<VoiceStreamNextDb['updateThread']>[2] = {};
+      if (body.title !== undefined) patch.title = cleanText(body.title, 'Assistant thread') || 'Assistant thread';
+      if (body.provider !== undefined) patch.provider = cleanText(body.provider, 'openai') || 'openai';
+      if (body.model !== undefined) patch.model = cleanText(body.model, 'gpt-5.2') || 'gpt-5.2';
+      if (body.thinkingLevel !== undefined) patch.thinkingLevel = cleanText(body.thinkingLevel, 'off') || 'off';
+      if (body.voiceEnabled !== undefined) patch.voiceEnabled = Boolean(body.voiceEnabled);
+      if (body.systemPrompt !== undefined) patch.systemPrompt = cleanText(body.systemPrompt) || null;
+      if (Array.isArray(body.enabledTools)) patch.enabledTools = body.enabledTools.map((tool: unknown) => cleanText(tool)).filter(Boolean);
+      if (body.promptDeliveryMode !== undefined) patch.promptDeliveryMode = body.promptDeliveryMode === 'asap' ? 'asap' : 'queue';
+      const thread = db.updateThread(ctx.user.id, threadId, patch);
+      emitAssistantChange('thread_updated', threadId);
+      return { ok: true, thread, snapshot: assistantSnapshot(db, ctx.user.id, threadId) };
+    }),
+  );
+
+  app.delete('/api/assistant/threads/:threadId', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const threadId = String((req.params as any).threadId ?? '');
+      const deleted = db.deleteThread(ctx.user.id, threadId);
+      if (!deleted) throw Object.assign(new Error('unknown thread'), { statusCode: 404 });
+      emitAssistantChange('thread_deleted', threadId);
+      return { ok: true, deleted, snapshot: assistantSnapshot(db, ctx.user.id) };
     }),
   );
 
@@ -688,18 +822,301 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       const threadId = String((req.params as any).threadId ?? '');
       if (!db.thread(ctx.user.id, threadId)) throw Object.assign(new Error('unknown thread'), { statusCode: 404 });
       const body = jsonBody(req);
-      const content = cleanText(body.content);
+      const content = cleanText(body.content ?? body.prompt);
       if (!content) throw Object.assign(new Error('message content is required'), { statusCode: 400 });
-      const userMessage = db.addMessage(ctx.user.id, threadId, { role: 'user', content });
-      const history = db.listMessages(ctx.user.id, threadId).map((message) => ({ role: message.role, content: message.content }));
-      const reply = await generateAssistantReply(history);
-      const replyText = reply.text;
-      const assistantMessage = db.addMessage(ctx.user.id, threadId, {
-        role: 'assistant',
-        content: replyText,
-        spokenText: replyText,
+      const events: unknown[] = [];
+      const snapshot = await promptAssistantThread(db, ctx.user.id, threadId, {
+        prompt: content,
+        provider: cleanText(body.provider) || undefined,
+        model: cleanText(body.model) || undefined,
+        thinkingLevel: cleanText(body.thinkingLevel) || undefined,
+      }, (event) => {
+        events.push(event);
+        handleAssistantPromptEvent(ctx.user.id, threadId, event);
       });
-      return { ok: true, runtime: reply.provider, messages: [userMessage, assistantMessage] };
+      emitAssistantChange('thread_prompted', threadId);
+      return { ok: true, events, snapshot, messages: db.listMessages(ctx.user.id, threadId) };
+    }),
+  );
+
+  app.post('/api/assistant/threads/:threadId/prompt', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const threadId = String((req.params as any).threadId ?? '');
+      if (!db.thread(ctx.user.id, threadId)) throw Object.assign(new Error('unknown thread'), { statusCode: 404 });
+      const body = jsonBody(req);
+      const prompt = cleanText(body.prompt ?? body.content);
+      if (!prompt) throw Object.assign(new Error('prompt is required'), { statusCode: 400 });
+      const events: unknown[] = [];
+      const snapshot = await promptAssistantThread(db, ctx.user.id, threadId, {
+        prompt,
+        provider: cleanText(body.provider) || undefined,
+        model: cleanText(body.model) || undefined,
+        thinkingLevel: cleanText(body.thinkingLevel) || undefined,
+      }, (event) => {
+        events.push(event);
+        handleAssistantPromptEvent(ctx.user.id, threadId, event);
+      });
+      emitAssistantChange('thread_prompted', threadId);
+      return { ok: true, events, snapshot };
+    }),
+  );
+
+  app.post('/api/assistant/threads/:threadId/stream', async (req, reply) => {
+    const writeEvent = (event: unknown) => {
+      reply.raw.write(`${JSON.stringify(event)}\n`);
+    };
+    try {
+      const ctx = await resolveRequestUser(req, db, clerkEnabled);
+      const threadId = String((req.params as any).threadId ?? '');
+      if (!db.thread(ctx.user.id, threadId)) throw Object.assign(new Error('unknown thread'), { statusCode: 404 });
+      const body = jsonBody(req);
+      const prompt = cleanText(body.prompt ?? body.content);
+      if (!prompt) throw Object.assign(new Error('prompt is required'), { statusCode: 400 });
+
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        'content-type': 'application/x-ndjson; charset=utf-8',
+        'cache-control': 'no-cache, no-transform',
+        connection: 'keep-alive',
+      });
+      await promptAssistantThread(db, ctx.user.id, threadId, {
+        prompt,
+        provider: cleanText(body.provider) || undefined,
+        model: cleanText(body.model) || undefined,
+        thinkingLevel: cleanText(body.thinkingLevel) || undefined,
+      }, (event) => {
+        writeEvent(event);
+        handleAssistantPromptEvent(ctx.user.id, threadId, event);
+      });
+      emitAssistantChange('thread_prompted', threadId);
+      reply.raw.end();
+    } catch (error: any) {
+      const status = Number(error?.statusCode ?? 0) || 500;
+      if (!reply.raw.headersSent) {
+        reply.code(status).send({ ok: false, error: error?.message ?? String(error) });
+        return;
+      }
+      writeEvent({ type: 'error', error: error?.message ?? String(error) });
+      reply.raw.end();
+    }
+  });
+
+  app.post('/api/assistant/threads/:threadId/stop', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const threadId = String((req.params as any).threadId ?? '');
+      const run = db.activeRun(ctx.user.id, threadId);
+      const pendingApprovals = db.listApprovals(ctx.user.id, threadId).filter((approval) => approval.status === 'pending');
+      for (const approval of pendingApprovals) {
+        await resolveAssistantApproval(db, ctx.user.id, approval.id, false, ctx.user.email || ctx.user.displayName || 'user');
+      }
+      if (!run) {
+        if (pendingApprovals.length > 0) emitAssistantChange('thread_stopped', threadId);
+        return { ok: true, stopped: pendingApprovals.length > 0, snapshot: assistantSnapshot(db, ctx.user.id, threadId) };
+      }
+      const at = new Date().toISOString();
+      db.updateRun(ctx.user.id, run.id, { status: 'cancelled', cancelledAt: at, error: 'Cancelled by user' });
+      db.updateThread(ctx.user.id, threadId, { status: 'idle', error: null });
+      emitAssistantChange('thread_stopped', threadId);
+      return { ok: true, stopped: true, snapshot: assistantSnapshot(db, ctx.user.id, threadId) };
+    }),
+  );
+
+  app.delete('/api/assistant/threads/:threadId/queued/:queuedPromptId', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const threadId = String((req.params as any).threadId ?? '');
+      const queuedPromptId = String((req.params as any).queuedPromptId ?? '');
+      if (!db.thread(ctx.user.id, threadId)) throw Object.assign(new Error('unknown thread'), { statusCode: 404 });
+      const queuedPrompt = db.cancelQueuedPrompt(ctx.user.id, threadId, queuedPromptId);
+      if (!queuedPrompt) throw Object.assign(new Error('unknown queued prompt'), { statusCode: 404 });
+      emitAssistantChange('queued_prompt_cancelled', threadId);
+      return { ok: true, queuedPrompt, snapshot: assistantSnapshot(db, ctx.user.id, threadId) };
+    }),
+  );
+
+  app.get('/api/assistant/tools', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async () => ({
+      ok: true,
+      tools: assistantToolSummaries(),
+    })),
+  );
+
+  app.get('/api/assistant/settings', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => ({
+      ok: true,
+      settings: db.ensureAssistantSettings(ctx.user.id),
+    })),
+  );
+
+  app.get('/api/assistant/codex/status', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => ({
+      ok: true,
+      codexConnection: db.codexConnectionView(ctx.user.id),
+    })),
+  );
+
+  app.post('/api/assistant/codex/connect', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const flow = await createCodexAuthorizationFlow();
+      db.createCodexOAuthState(ctx.user.id, {
+        state: flow.state,
+        codeVerifier: flow.verifier,
+        redirectUri: flow.redirectUri,
+        expiresAt: flow.expiresAt,
+      });
+      return {
+        ok: true,
+        state: flow.state,
+        authorizationUrl: flow.authorizationUrl,
+        redirectUri: flow.redirectUri,
+        expiresAt: flow.expiresAt,
+      };
+    }),
+  );
+
+  app.post('/api/assistant/codex/complete', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const body = jsonBody(req);
+      const parsed = parseCodexAuthorizationInput(cleanText(body.codeOrUrl ?? body.code));
+      const state = cleanText(body.state) || parsed.state || '';
+      const code = parsed.code || '';
+      if (!state || !code) throw Object.assign(new Error('Codex authorization code and state are required'), { statusCode: 400 });
+      const oauthState = db.codexOAuthState(state);
+      if (!oauthState || oauthState.userId !== ctx.user.id) throw Object.assign(new Error('Unknown Codex authorization state'), { statusCode: 404 });
+      if (Date.parse(oauthState.expiresAt) <= Date.now()) {
+        db.deleteCodexOAuthState(state);
+        throw Object.assign(new Error('Codex authorization state expired'), { statusCode: 400 });
+      }
+      const tokenSet = await exchangeCodexAuthorizationCode({
+        code,
+        verifier: oauthState.codeVerifier,
+        redirectUri: oauthState.redirectUri,
+      });
+      db.upsertCodexConnection(ctx.user.id, tokenSet);
+      db.deleteCodexOAuthState(state);
+      db.updateAssistantSettings(ctx.user.id, {
+        defaultProvider: 'codex',
+        defaultModel: 'gpt-5.3-codex',
+        defaultThinkingLevel: 'medium',
+      });
+      emitAssistantChange('codex_connected');
+      return {
+        ok: true,
+        codexConnection: db.codexConnectionView(ctx.user.id),
+        snapshot: assistantSnapshot(db, ctx.user.id),
+      };
+    }),
+  );
+
+  app.delete('/api/assistant/codex/connection', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const deleted = db.deleteCodexConnection(ctx.user.id);
+      emitAssistantChange('codex_disconnected');
+      return {
+        ok: true,
+        deleted,
+        codexConnection: db.codexConnectionView(ctx.user.id),
+        snapshot: assistantSnapshot(db, ctx.user.id),
+      };
+    }),
+  );
+
+  app.patch('/api/assistant/settings', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const body = jsonBody(req);
+      const settings = db.updateAssistantSettings(ctx.user.id, {
+        normalSystemPrompt: body.normalSystemPrompt === undefined ? undefined : cleanText(body.normalSystemPrompt),
+        voiceSystemPrompt: body.voiceSystemPrompt === undefined ? undefined : cleanText(body.voiceSystemPrompt),
+        overviewPrompt: body.overviewPrompt === undefined ? undefined : cleanText(body.overviewPrompt),
+        defaultProvider: body.defaultProvider === undefined ? undefined : cleanText(body.defaultProvider, 'openai'),
+        defaultModel: body.defaultModel === undefined ? undefined : cleanText(body.defaultModel, 'gpt-5.2'),
+        defaultThinkingLevel: body.defaultThinkingLevel === undefined ? undefined : cleanText(body.defaultThinkingLevel, 'off'),
+      });
+      emitAssistantChange('assistant_settings_updated');
+      return { ok: true, settings, snapshot: assistantSnapshot(db, ctx.user.id) };
+    }),
+  );
+
+  app.post('/api/assistant/approvals/:approvalId/approve', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const approvalId = String((req.params as any).approvalId ?? '');
+      const pending = db.pendingApproval(ctx.user.id, approvalId);
+      const beforeSpokenIds = new Set(
+        pending ? db.listMessages(ctx.user.id, pending.threadId).filter((message) => message.spokenText).map((message) => message.id) : [],
+      );
+      const snapshot = await resolveAssistantApproval(db, ctx.user.id, approvalId, true, ctx.user.email || ctx.user.displayName || 'user');
+      if (pending) emitNewSpokenMessages(ctx.user.id, pending.threadId, beforeSpokenIds);
+      emitAssistantChange('approval_resolved', snapshot.activeThreadId ?? undefined);
+      return { ok: true, snapshot };
+    }),
+  );
+
+  app.post('/api/assistant/approvals/:approvalId/deny', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const approvalId = String((req.params as any).approvalId ?? '');
+      const pending = db.pendingApproval(ctx.user.id, approvalId);
+      const beforeSpokenIds = new Set(
+        pending ? db.listMessages(ctx.user.id, pending.threadId).filter((message) => message.spokenText).map((message) => message.id) : [],
+      );
+      const snapshot = await resolveAssistantApproval(db, ctx.user.id, approvalId, false, ctx.user.email || ctx.user.displayName || 'user');
+      if (pending) emitNewSpokenMessages(ctx.user.id, pending.threadId, beforeSpokenIds);
+      emitAssistantChange('approval_resolved', snapshot.activeThreadId ?? undefined);
+      return { ok: true, snapshot };
+    }),
+  );
+
+  app.get('/api/assistant/threads/:threadId/artifacts', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const threadId = String((req.params as any).threadId ?? '');
+      if (!db.thread(ctx.user.id, threadId)) throw Object.assign(new Error('unknown thread'), { statusCode: 404 });
+      return { ok: true, artifacts: db.listArtifacts(ctx.user.id, threadId) };
+    }),
+  );
+
+  app.get('/api/assistant/threads/:threadId/artifacts/file', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const threadId = String((req.params as any).threadId ?? '');
+      if (!db.thread(ctx.user.id, threadId)) throw Object.assign(new Error('unknown thread'), { statusCode: 404 });
+      const artifactPath = sanitizeArtifactPath(queryValue((req.query as any)?.path));
+      const artifact = db.readArtifact(ctx.user.id, threadId, artifactPath);
+      if (!artifact) throw Object.assign(new Error('unknown artifact'), { statusCode: 404 });
+      return { ok: true, artifact };
+    }),
+  );
+
+  app.put('/api/assistant/threads/:threadId/artifacts/file', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const threadId = String((req.params as any).threadId ?? '');
+      if (!db.thread(ctx.user.id, threadId)) throw Object.assign(new Error('unknown thread'), { statusCode: 404 });
+      const body = jsonBody(req);
+      const artifactPath = sanitizeArtifactPath(body.path);
+      const content = String(body.content ?? '');
+      if (Buffer.byteLength(content, 'utf8') > 256 * 1024) {
+        throw Object.assign(new Error('artifact content is too large'), { statusCode: 413 });
+      }
+      const artifact = db.upsertArtifact(ctx.user.id, threadId, { path: artifactPath, content });
+      emitAssistantChange('artifact_saved', threadId);
+      return { ok: true, artifact, artifacts: db.listArtifacts(ctx.user.id, threadId), snapshot: assistantSnapshot(db, ctx.user.id, threadId) };
+    }),
+  );
+
+  app.delete('/api/assistant/threads/:threadId/artifacts/file', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const threadId = String((req.params as any).threadId ?? '');
+      if (!db.thread(ctx.user.id, threadId)) throw Object.assign(new Error('unknown thread'), { statusCode: 404 });
+      const body = jsonBody(req);
+      const artifactPath = sanitizeArtifactPath(body.path ?? queryValue((req.query as any)?.path));
+      const deleted = db.deleteArtifact(ctx.user.id, threadId, artifactPath);
+      emitAssistantChange('artifact_deleted', threadId);
+      return { ok: true, deleted, artifacts: db.listArtifacts(ctx.user.id, threadId), snapshot: assistantSnapshot(db, ctx.user.id, threadId) };
+    }),
+  );
+
+  app.post('/api/assistant/threads/:threadId/overview', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const threadId = String((req.params as any).threadId ?? '');
+      const overview = generateThreadOverview(db, ctx.user.id, threadId, { force: Boolean(jsonBody(req).force) });
+      emitAssistantChange('overview_generated', threadId);
+      return { ok: true, overview, snapshot: assistantSnapshot(db, ctx.user.id, threadId) };
     }),
   );
 
@@ -904,10 +1321,12 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
                 socket.send(JSON.stringify({ type: 'transcript_result', mode: streamMode, transcript, status: 'Transcript patched into chat.' }));
               }
             } else {
-              const history = db.listMessages(device.userId, session.assistantThreadId).map((message) => ({
-                role: message.role,
-                content: message.content,
-              }));
+              const history = db.listMessages(device.userId, session.assistantThreadId)
+                .filter((message) => message.role === 'user' || message.role === 'assistant')
+                .map((message) => ({
+                  role: message.role as 'user' | 'assistant',
+                  content: message.content,
+                }));
               const assistant = await generateAssistantReply(history);
               runtime = assistant.provider;
               assistantText = assistant.text;

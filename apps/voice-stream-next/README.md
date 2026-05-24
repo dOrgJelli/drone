@@ -42,6 +42,7 @@ Voice Stream Next should not import implementation code from `apps/voice-stream`
 - [Product Spec](docs/product-spec.md)
 - [Architecture](docs/architecture.md)
 - [Parity And Migration Plan](docs/parity-and-migration.md)
+- [Assistant Parity Roadmap](docs/assistant-parity-roadmap.md)
 - [Open Questions](docs/open-questions.md)
 
 ## Development
