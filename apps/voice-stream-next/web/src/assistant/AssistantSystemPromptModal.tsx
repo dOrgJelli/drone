@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { cn } from '../ui/cn.js';
 
 export type AssistantSystemPromptMode = 'thread' | 'global';
 export type AssistantSystemPromptKind = 'normal' | 'voice';
@@ -77,44 +78,62 @@ export function AssistantSystemPromptModal({
   const activeGlobalSetter = globalKind === 'voice' ? onVoiceDraftChange : onNormalDraftChange;
   const activeThreadKind: AssistantSystemPromptKind = threadVoiceEnabled ? 'voice' : 'normal';
   const busy = saving || promoteSaving;
+  const tabClass = (active: boolean) =>
+    cn(
+      'h-7 border-0 border-r border-[var(--border-subtle)] bg-transparent px-3 font-display text-[10px] font-bold uppercase text-[var(--muted)] last:border-r-0',
+      active && '!bg-[rgba(74,222,128,.10)] !text-[var(--green)]',
+    );
+  const secondaryButtonClass = 'h-[30px] rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-3 text-[10px] font-semibold text-[var(--muted)] hover:bg-[rgba(255,255,255,.05)] hover:text-[var(--fg-secondary)] disabled:cursor-not-allowed disabled:opacity-50';
+  const primaryButtonClass = 'h-[30px] rounded border border-[rgba(74,222,128,.34)] bg-[rgba(74,222,128,.10)] px-3 text-[10px] font-semibold text-[var(--green)] hover:bg-[rgba(74,222,128,.14)] disabled:cursor-not-allowed disabled:opacity-50';
 
   return (
-    <div className="assistant-modal-backdrop" role="presentation" onMouseDown={onClose}>
-      <section className="assistant-modal assistant-system-prompt-modal" role="dialog" aria-modal="true" aria-label="Assistant system prompts" onMouseDown={(event) => event.stopPropagation()}>
-        <header className="assistant-modal-header">
+    <div className="fixed inset-0 z-[80] grid place-items-center bg-[rgba(3,7,12,.66)] p-6" role="presentation" onMouseDown={onClose}>
+      <section
+        className="grid max-h-[min(760px,calc(100vh-48px))] w-[min(920px,calc(100vw-48px))] overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--panel)] shadow-[0_24px_80px_rgba(0,0,0,.42)]"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Assistant system prompts"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="flex items-start justify-between gap-4 border-b border-[var(--border)] p-3.5">
           <div>
-            <span className="hub-kicker">Assistant</span>
-            <h2>System Prompt</h2>
-            <small>{threadTitle || 'Current thread'} · {activeThreadKind}</small>
+            <span className="font-display text-[10px] font-bold uppercase text-[var(--muted-dim)]">Assistant</span>
+            <h2 className="m-0 mt-0.5 text-base font-bold leading-tight text-[var(--fg)]">System Prompt</h2>
+            <small className="mt-1 block text-[11px] text-[var(--muted)]">{threadTitle || 'Current thread'} · {activeThreadKind}</small>
           </div>
-          <button type="button" className="assistant-modal-close" onClick={onClose} aria-label="Close system prompt editor">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
+          <button
+            type="button"
+            className="grid h-7 w-7 place-items-center rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] p-0 text-[var(--muted)] hover:bg-[rgba(255,255,255,.05)] hover:text-[var(--fg-secondary)]"
+            onClick={onClose}
+            aria-label="Close system prompt editor"
+          >
+            <svg className="h-3.5 w-3.5 fill-none stroke-current stroke-2" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M18 6 6 18" />
               <path d="m6 6 12 12" />
             </svg>
           </button>
         </header>
 
-        <div className="assistant-modal-tabs" role="tablist" aria-label="System prompt scope">
-          <button type="button" className={mode === 'thread' ? 'active' : ''} onClick={() => onModeChange('thread')}>
+        <div className="mx-3.5 mt-2.5 inline-flex w-max overflow-hidden rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.025)]" role="tablist" aria-label="System prompt scope">
+          <button type="button" className={tabClass(mode === 'thread')} onClick={() => onModeChange('thread')}>
             Thread
           </button>
-          <button type="button" className={mode === 'global' ? 'active' : ''} onClick={() => onModeChange('global')}>
+          <button type="button" className={tabClass(mode === 'global')} onClick={() => onModeChange('global')}>
             Defaults
           </button>
         </div>
 
-        {error ? <div className="assistant-modal-banner error">{error}</div> : null}
-        {notice ? <div className="assistant-modal-banner notice">{notice}</div> : null}
+        {error ? <div className="mx-3.5 mt-2.5 rounded border border-[rgba(248,113,113,.28)] bg-[rgba(248,113,113,.08)] p-2 text-xs text-[#fecaca]">{error}</div> : null}
+        {notice ? <div className="mx-3.5 mt-2.5 rounded border border-[rgba(74,222,128,.24)] bg-[rgba(74,222,128,.08)] p-2 text-xs text-[#bbf7d0]">{notice}</div> : null}
 
         {mode === 'thread' ? (
-          <div className="assistant-prompt-editor">
-            <div className="assistant-prompt-editor-header">
+          <div className="grid min-h-0 gap-2.5 overflow-auto p-3.5">
+            <div className="flex items-end justify-between gap-3.5">
               <div>
-                <strong>Thread prompt</strong>
-                <small>Overrides the {activeThreadKind} default for this thread only.</small>
+                <strong className="text-[13px] text-[var(--fg)]">Thread prompt</strong>
+                <small className="block text-[11px] text-[var(--muted)]">Overrides the {activeThreadKind} default for this thread only.</small>
               </div>
-              <span>{charsLabel(threadDraft, maxChars)}</span>
+              <span className="text-[11px] text-[var(--muted)]">{charsLabel(threadDraft, maxChars)}</span>
             </div>
             <textarea
               autoFocus
@@ -122,57 +141,59 @@ export function AssistantSystemPromptModal({
               maxLength={maxChars}
               onChange={(event) => onThreadDraftChange(event.currentTarget.value)}
               placeholder={inheritedPrompt}
+              className="min-h-[260px] max-h-[44vh] resize-y rounded-md border border-[var(--border)] bg-[rgba(255,255,255,.035)] p-2 font-mono text-xs leading-relaxed text-[var(--fg)] outline-none"
             />
-            <div className="assistant-prompt-compare">
+            <div className="grid grid-cols-2 gap-2 max-[880px]:grid-cols-1">
               <div>
-                <span>Inherited default</span>
-                <pre>{inheritedPrompt}</pre>
+                <span className="font-display text-[9px] font-bold uppercase text-[var(--muted-dim)]">Inherited default</span>
+                <pre className="mt-1 max-h-40 min-h-20 overflow-auto whitespace-pre-wrap rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.14)] p-2 text-[11px] leading-normal text-[var(--fg-secondary)]">{inheritedPrompt}</pre>
               </div>
               <div>
-                <span>Thread override</span>
-                <pre>{threadDraft.trim() || inheritedPrompt}</pre>
+                <span className="font-display text-[9px] font-bold uppercase text-[var(--muted-dim)]">Thread override</span>
+                <pre className="mt-1 max-h-40 min-h-20 overflow-auto whitespace-pre-wrap rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.14)] p-2 text-[11px] leading-normal text-[var(--fg-secondary)]">{threadDraft.trim() || inheritedPrompt}</pre>
               </div>
             </div>
-            <footer className="assistant-modal-footer">
-              <button type="button" onClick={onUseInherited} disabled={busy}>
+            <footer className="flex justify-end gap-1.5">
+              <button type="button" className={secondaryButtonClass} onClick={onUseInherited} disabled={busy}>
                 Use Default
               </button>
-              <button type="button" onClick={onPromoteThread} disabled={busy || !threadDraft.trim()}>
+              <button type="button" className={secondaryButtonClass} onClick={onPromoteThread} disabled={busy || !threadDraft.trim()}>
                 {promoteSaving ? 'Saving...' : `Make ${activeThreadKind} Default`}
               </button>
-              <button type="button" className="primary" onClick={onSaveThread} disabled={busy}>
+              <button type="button" className={primaryButtonClass} onClick={onSaveThread} disabled={busy}>
                 {saving ? 'Saving...' : 'Save Thread Prompt'}
               </button>
             </footer>
           </div>
         ) : (
-          <div className="assistant-prompt-editor">
-            <div className="assistant-prompt-kind-switch" role="group" aria-label="Default prompt type">
-              <button type="button" className={globalKind === 'normal' ? 'active' : ''} onClick={() => onGlobalKindChange('normal')}>
+          <div className="grid min-h-0 gap-2.5 overflow-auto p-3.5">
+            <div className="inline-flex w-max overflow-hidden rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.025)]" role="group" aria-label="Default prompt type">
+              <button type="button" className={tabClass(globalKind === 'normal')} onClick={() => onGlobalKindChange('normal')}>
                 Normal
               </button>
-              <button type="button" className={globalKind === 'voice' ? 'active' : ''} onClick={() => onGlobalKindChange('voice')}>
+              <button type="button" className={tabClass(globalKind === 'voice')} onClick={() => onGlobalKindChange('voice')}>
                 Voice
               </button>
             </div>
-            <div className="assistant-prompt-editor-header">
+            <div className="flex items-end justify-between gap-3.5">
               <div>
-                <strong>{globalKind === 'voice' ? 'Voice default' : 'Normal default'}</strong>
-                <small>Used by threads that do not have a thread override.</small>
+                <strong className="text-[13px] text-[var(--fg)]">{globalKind === 'voice' ? 'Voice default' : 'Normal default'}</strong>
+                <small className="block text-[11px] text-[var(--muted)]">Used by threads that do not have a thread override.</small>
               </div>
-              <span>{charsLabel(activeGlobalDraft, maxChars)}</span>
+              <span className="text-[11px] text-[var(--muted)]">{charsLabel(activeGlobalDraft, maxChars)}</span>
             </div>
             <textarea
               autoFocus
               value={activeGlobalDraft}
               maxLength={maxChars}
               onChange={(event) => activeGlobalSetter(event.currentTarget.value)}
+              className="min-h-[260px] max-h-[44vh] resize-y rounded-md border border-[var(--border)] bg-[rgba(255,255,255,.035)] p-2 font-mono text-xs leading-relaxed text-[var(--fg)] outline-none"
             />
-            <footer className="assistant-modal-footer">
-              <button type="button" onClick={onResetGlobal} disabled={busy}>
+            <footer className="flex justify-end gap-1.5">
+              <button type="button" className={secondaryButtonClass} onClick={onResetGlobal} disabled={busy}>
                 Reset Draft
               </button>
-              <button type="button" className="primary" onClick={onSaveGlobal} disabled={busy || !activeGlobalDraft.trim()}>
+              <button type="button" className={primaryButtonClass} onClick={onSaveGlobal} disabled={busy || !activeGlobalDraft.trim()}>
                 {saving ? 'Saving...' : 'Save Default'}
               </button>
             </footer>
