@@ -64,7 +64,6 @@ describe('voice approval settings API', () => {
   let dataDir = '';
   let app: Awaited<ReturnType<typeof buildApp>>['app'];
   let db: VoiceStreamNextDb;
-  let baseUrl = '';
 
   beforeEach(async () => {
     dataDir = tempDataDir();
@@ -72,10 +71,6 @@ describe('voice approval settings API', () => {
     const built = await buildApp({ logger: false });
     app = built.app;
     db = built.db;
-    await app.listen({ host: '127.0.0.1', port: 0 });
-    const address = app.server.address();
-    const port = typeof address === 'object' && address ? address.port : 0;
-    baseUrl = `http://127.0.0.1:${port}`;
   });
 
   afterEach(async () => {
@@ -86,9 +81,13 @@ describe('voice approval settings API', () => {
   });
 
   test('returns persisted defaults for new users', async () => {
-    const response = await fetch(`${baseUrl}/api/settings/voice-approval`, { headers: devHeaders });
-    expect(response.status).toBe(200);
-    const data = await response.json();
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/settings/voice-approval',
+      headers: devHeaders,
+    });
+    expect(response.statusCode).toBe(200);
+    const data = JSON.parse(response.payload);
     expect(data.settings).toMatchObject(VOICE_APPROVAL_SETTINGS_DEFAULT);
     expect(data.defaults).toEqual(VOICE_APPROVAL_SETTINGS_DEFAULT);
     expect(data.limits.minDigitsMax).toBe(8);
@@ -109,25 +108,62 @@ describe('voice approval settings API', () => {
       postPromptCommandSuppressionMs: 1200,
     };
 
-    const saved = await fetch(`${baseUrl}/api/settings/voice-approval`, {
+    const savedResponse = await app.inject({
       method: 'POST',
+      url: '/api/settings/voice-approval',
       headers: devHeaders,
       body: JSON.stringify({ settings: custom }),
-    }).then((response) => response.json());
+    });
+    const saved = JSON.parse(savedResponse.payload);
     expect(saved.settings).toMatchObject(custom);
 
-    const loaded = await fetch(`${baseUrl}/api/settings/voice-approval`, { headers: devHeaders }).then((response) =>
-      response.json(),
-    );
+    const loadedResponse = await app.inject({
+      method: 'GET',
+      url: '/api/settings/voice-approval',
+      headers: devHeaders,
+    });
+    const loaded = JSON.parse(loadedResponse.payload);
     expect(loaded.settings).toMatchObject(custom);
   });
 
   test('rejects invalid POST payloads', async () => {
-    const response = await fetch(`${baseUrl}/api/settings/voice-approval`, {
+    const response = await app.inject({
       method: 'POST',
+      url: '/api/settings/voice-approval',
       headers: devHeaders,
       body: JSON.stringify({ settings: { triggerPhrase: '', unlockCode: '1' } }),
     });
-    expect(response.status).toBe(400);
+    expect(response.statusCode).toBe(400);
+  });
+
+  test('accepts approval codes authenticated with a device token', async () => {
+    const pairingResponse = await app.inject({
+      method: 'POST',
+      url: '/api/devices',
+      headers: devHeaders,
+      body: JSON.stringify({ deviceType: 'android', displayName: 'Android voice client' }),
+    });
+    const pairing = JSON.parse(pairingResponse.payload);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/voice/approval-codes',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        deviceId: pairing.device.id,
+        token: pairing.token,
+        code: '1234',
+        source: 'android',
+        protocolVersion: 1,
+      }),
+    });
+
+    expect(response.statusCode).toBe(200);
+    const user = db.userByClerkId('dev_approval_settings_example_local');
+    expect(user).not.toBeNull();
+    expect(db.listApprovalCodes(user!.id, 1)[0]).toMatchObject({
+      code: '1234',
+      source: 'android',
+    });
   });
 });

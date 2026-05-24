@@ -10,6 +10,7 @@ export type PairingPayloadInput = {
   protocolVersion: number;
   expiresAt: string;
   pairingSessionId: string;
+  apkUrl?: string | null;
 };
 
 export type PairingPayload = PairingPayloadInput & {
@@ -39,12 +40,23 @@ export function buildPairingPayload(input: PairingPayloadInput): { payload: Pair
   };
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(payload)) {
+    if (key === 'apkUrl') {
+      if (value) params.set('apk', String(value));
+      continue;
+    }
     params.set(key, String(value));
   }
   return {
     payload,
     payloadUri: `voicestream://pair?${params.toString()}`,
   };
+}
+
+export function buildUpdatePayload(input: { versionCode: number; apkUrl: string }): string {
+  const params = new URLSearchParams();
+  params.set('versionCode', String(input.versionCode));
+  params.set('apk', input.apkUrl);
+  return `voicestream://update?${params.toString()}`;
 }
 
 export function parseClientVersion(raw: unknown, fallback: number | null = null): number | null {
@@ -111,5 +123,6 @@ export function parsePairingPayload(raw: string): ParsedPairingPayload {
     expiresAt: read('expiresAt'),
     pairingSessionId: read('pairingSessionId'),
     minClientVersion: parsedMinClientVersion,
+    apkUrl: url.searchParams.get('apk')?.trim() || null,
   };
 }

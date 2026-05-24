@@ -42,6 +42,23 @@ export type PairingSessionRecord = {
   createdAt: string;
 };
 
+export type AndroidSetupSessionRecord = {
+  id: string;
+  userId: string;
+  expiresAt: string;
+  claimedAt: string | null;
+  deviceId: string | null;
+  createdAt: string;
+};
+
+export type AndroidSetupSessionResult =
+  | { ok: true; session: AndroidSetupSessionRecord }
+  | { ok: false; reason: 'not_found' | 'invalid_secret' | 'expired' | 'claimed' };
+
+export type AndroidSetupClaimResult =
+  | { ok: true; session: AndroidSetupSessionRecord; device: DeviceRecord; token: string; pairingSession: PairingSessionRecord }
+  | { ok: false; reason: 'not_found' | 'invalid_secret' | 'expired' | 'claimed' };
+
 export type DesktopAuthRequestRecord = {
   id: string;
   displayName: string;
@@ -428,6 +445,17 @@ function rowPairingSession(row: any): PairingSessionRecord {
   };
 }
 
+function rowAndroidSetupSession(row: any): AndroidSetupSessionRecord {
+  return {
+    id: String(row.id),
+    userId: String(row.user_id),
+    expiresAt: String(row.expires_at),
+    claimedAt: row.claimed_at == null ? null : String(row.claimed_at),
+    deviceId: row.device_id == null ? null : String(row.device_id),
+    createdAt: String(row.created_at),
+  };
+}
+
 function rowDesktopAuthRequest(row: any): DesktopAuthRequestRecord {
   return {
     id: String(row.id),
@@ -744,6 +772,17 @@ export class VoiceStreamNextDb {
         level TEXT NOT NULL,
         message TEXT NOT NULL,
         details_json TEXT,
+        created_at TEXT NOT NULL
+      )
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS android_setup_sessions (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        secret_hash TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        claimed_at TEXT,
+        device_id TEXT REFERENCES devices(id) ON DELETE SET NULL,
         created_at TEXT NOT NULL
       )
     `);
@@ -1214,6 +1253,76 @@ export class VoiceStreamNextDb {
       `,
       )
       .run({ $deviceId: deviceId, $claimedAt: at });
+  }
+
+  createAndroidSetupSession(userId: string, expiresAt: string): { session: AndroidSetupSessionRecord; secret: string } {
+    const at = nowIso();
+    const id = newId('asetup');
+    const secret = newSecret();
+    this.db
+      .query(
+        `
+        INSERT INTO android_setup_sessions (id, user_id, secret_hash, expires_at, claimed_at, device_id, created_at)
+        VALUES ($id, $userId, $secretHash, $expiresAt, NULL, NULL, $createdAt)
+      `,
+      )
+      .run({
+        $id: id,
+        $userId: userId,
+        $secretHash: sha256(secret),
+        $expiresAt: expiresAt,
+        $createdAt: at,
+      });
+    const row = this.db.query('SELECT * FROM android_setup_sessions WHERE id = $id').get({ $id: id });
+    return { session: rowAndroidSetupSession(row), secret };
+  }
+
+  androidSetupSession(setupId: string, secret: string): AndroidSetupSessionResult {
+    const row = this.db.query('SELECT * FROM android_setup_sessions WHERE id = $id').get({ $id: setupId });
+    if (!row) return { ok: false, reason: 'not_found' };
+    if (String((row as any).secret_hash) !== sha256(secret)) return { ok: false, reason: 'invalid_secret' };
+    const session = rowAndroidSetupSession(row);
+    if (session.claimedAt) return { ok: false, reason: 'claimed' };
+    if (Date.parse(session.expiresAt) < Date.now()) return { ok: false, reason: 'expired' };
+    return { ok: true, session };
+  }
+
+  claimAndroidSetupSession(
+    setupId: string,
+    secret: string,
+    input: { displayName: string; expiresAt: string },
+  ): AndroidSetupClaimResult {
+    const checked = this.androidSetupSession(setupId, secret);
+    if (!checked.ok) return checked;
+
+    const registered = this.registerDevice(checked.session.userId, {
+      deviceType: 'android',
+      displayName: input.displayName,
+    });
+    const pairingSession = this.createPairingSession(checked.session.userId, registered.device.id, input.expiresAt);
+    const claimedAt = nowIso();
+    this.db
+      .query(
+        `
+        UPDATE android_setup_sessions
+        SET claimed_at = $claimedAt,
+            device_id = $deviceId
+        WHERE id = $id AND claimed_at IS NULL
+      `,
+      )
+      .run({
+        $claimedAt: claimedAt,
+        $deviceId: registered.device.id,
+        $id: checked.session.id,
+      });
+    const row = this.db.query('SELECT * FROM android_setup_sessions WHERE id = $id').get({ $id: checked.session.id });
+    return {
+      ok: true,
+      session: rowAndroidSetupSession(row),
+      device: registered.device,
+      token: registered.token,
+      pairingSession,
+    };
   }
 
   createDesktopAuthRequest(input: { displayName: string; expiresAt: string }): { request: DesktopAuthRequestRecord; secret: string; deviceToken: string } {

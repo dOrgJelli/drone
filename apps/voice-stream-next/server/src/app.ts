@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { existsSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
@@ -38,12 +38,26 @@ import {
   parseVoiceClientMessage,
   type ControlCommand,
 } from './protocol.js';
-import { buildPairingPayload, minClientVersion, pairingExpiresAt, parseClientVersion } from './pairing.js';
+import { buildPairingPayload, buildUpdatePayload, minClientVersion, pairingExpiresAt, parseClientVersion } from './pairing.js';
 import { ControlChannelRegistry } from './control-channel.js';
 import type { DeviceAuthResult } from './db.js';
 
 type AppOptions = {
   logger?: boolean;
+};
+
+type AndroidApkInfo = {
+  available: boolean;
+  platform: 'android';
+  app: string;
+  variant: string | null;
+  versionCode: number | null;
+  versionName: string | null;
+  fileName: string | null;
+  size: number | null;
+  builtAt: string | null;
+  downloadUrl: string | null;
+  updatePayload: string | null;
 };
 
 function parsePort(raw: unknown, fallback: number): number {
@@ -82,6 +96,68 @@ function desktopAuthExpiresAt(from = Date.now()): string {
 
 function queryValue(value: unknown): string {
   return Array.isArray(value) ? String(value[0] ?? '') : String(value ?? '');
+}
+
+function voiceStreamDataDir(): string {
+  return path.resolve(process.env.VOICE_STREAM_NEXT_DATA_DIR?.trim() || path.join(process.cwd(), 'server', 'data'));
+}
+
+function androidApkDir(): string {
+  return path.join(voiceStreamDataDir(), 'mobile', 'Android');
+}
+
+function androidApkDownloadPath(): string {
+  return '/api/mobile/android/apk';
+}
+
+function publicUrlForPath(req: FastifyRequest, urlPath: string): string {
+  return `${serverPublicUrl(req)}${urlPath.startsWith('/') ? urlPath : `/${urlPath}`}`;
+}
+
+function readAndroidApkInfo(req: FastifyRequest): AndroidApkInfo {
+  const metadataFile = path.join(androidApkDir(), 'latest.json');
+  const fallback = {
+    available: false,
+    platform: 'android' as const,
+    app: 'voice-stream-next',
+    variant: null,
+    versionCode: null,
+    versionName: null,
+    fileName: null,
+    size: null,
+    builtAt: null,
+    downloadUrl: null,
+    updatePayload: null,
+  };
+  if (!existsSync(metadataFile)) return fallback;
+
+  let metadata: any = null;
+  try {
+    metadata = JSON.parse(readFileSync(metadataFile, 'utf8'));
+  } catch {
+    return fallback;
+  }
+
+  const fileName = path.basename(cleanText(metadata.fileName, 'voice-stream-next-android-latest.apk'));
+  const apkFile = path.join(androidApkDir(), fileName);
+  if (!existsSync(apkFile)) return fallback;
+
+  const stat = statSync(apkFile);
+  const versionCode = parseClientVersion(metadata.versionCode, null);
+  const downloadUrl = publicUrlForPath(req, androidApkDownloadPath());
+  return {
+    available: true,
+    platform: 'android',
+    app: cleanText(metadata.app, 'voice-stream-next') || 'voice-stream-next',
+    variant: cleanText(metadata.variant) || null,
+    versionCode,
+    versionName: cleanText(metadata.versionName) || null,
+    fileName,
+    size: stat.size,
+    builtAt: cleanText(metadata.builtAt) || null,
+    downloadUrl,
+    updatePayload: versionCode ? buildUpdatePayload({ versionCode, apkUrl: downloadUrl }) : null,
+  };
 }
 
 function binarySize(data: unknown): number {
@@ -133,6 +209,25 @@ function deviceAuthCloseCode(result: Extract<DeviceAuthResult, { ok: false }>): 
       return VoiceCloseCode.ClientTooOld;
     default:
       return VoiceCloseCode.Unauthorized;
+  }
+}
+
+function setupFailureStatus(reason: 'not_found' | 'invalid_secret' | 'expired' | 'claimed'): number {
+  if (reason === 'expired' || reason === 'claimed') return 409;
+  if (reason === 'invalid_secret') return 401;
+  return 404;
+}
+
+function setupFailureMessage(reason: 'not_found' | 'invalid_secret' | 'expired' | 'claimed'): string {
+  switch (reason) {
+    case 'expired':
+      return 'Android setup QR expired';
+    case 'claimed':
+      return 'Android setup QR was already used';
+    case 'invalid_secret':
+      return 'invalid Android setup QR';
+    default:
+      return 'unknown Android setup QR';
   }
 }
 
@@ -260,6 +355,122 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     clerk: clerkEnabled ? 'enabled' : 'dev-fallback',
     dbPath: db.path,
   }));
+
+  app.get('/api/mobile/android', async (req) => ({
+    ok: true,
+    android: readAndroidApkInfo(req),
+  }));
+
+  app.post('/api/mobile/android/setup', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const expiresAt = pairingExpiresAt();
+      const created = db.createAndroidSetupSession(ctx.user.id, expiresAt);
+      const setupPath = `/api/mobile/android/setup/${encodeURIComponent(created.session.id)}?secret=${encodeURIComponent(created.secret)}`;
+      return {
+        ok: true,
+        android: readAndroidApkInfo(req),
+        setup: {
+          id: created.session.id,
+          expiresAt: created.session.expiresAt,
+          setupUrl: publicUrlForPath(req, setupPath),
+        },
+      };
+    }),
+  );
+
+  app.get('/api/mobile/android/setup/:setupId', async (req, reply) => {
+    const setupId = cleanText((req.params as any).setupId);
+    const secret = queryValue((req.query as any).secret).trim();
+    const checked = db.androidSetupSession(setupId, secret);
+    if (!checked.ok) {
+      reply.code(setupFailureStatus(checked.reason)).type('text/plain').send(setupFailureMessage(checked.reason));
+      return;
+    }
+    const android = readAndroidApkInfo(req);
+    if (!android.available || !android.downloadUrl) {
+      reply.code(404).type('text/plain').send('Android APK has not been built yet');
+      return;
+    }
+    reply.redirect(android.downloadUrl);
+  });
+
+  app.post('/api/mobile/android/setup/:setupId/redeem', async (req, reply) => {
+    const setupId = cleanText((req.params as any).setupId);
+    const body = jsonBody(req);
+    const secret = cleanText(body.secret || (req.query as any).secret);
+    const checked = db.androidSetupSession(setupId, secret);
+    if (!checked.ok) {
+      reply.code(setupFailureStatus(checked.reason)).send({ ok: false, error: setupFailureMessage(checked.reason), reason: checked.reason });
+      return;
+    }
+
+    const android = readAndroidApkInfo(req);
+    const clientVersion = parseClientVersion(body.clientVersion, null);
+    if (android.available && android.versionCode != null && clientVersion != null && clientVersion < android.versionCode) {
+      return {
+        ok: true,
+        paired: false,
+        updateAvailable: true,
+        currentVersionCode: clientVersion,
+        android,
+      };
+    }
+
+    const expiresAt = pairingExpiresAt();
+    const claimed = db.claimAndroidSetupSession(setupId, secret, {
+      displayName: cleanText(body.displayName, 'Android voice client') || 'Android voice client',
+      expiresAt,
+    });
+    if (!claimed.ok) {
+      reply.code(setupFailureStatus(claimed.reason)).send({ ok: false, error: setupFailureMessage(claimed.reason), reason: claimed.reason });
+      return;
+    }
+
+    const payload = buildPairingPayload({
+      serverUrl: serverPublicUrl(req),
+      deviceId: claimed.device.id,
+      token: claimed.token,
+      deviceType: 'android',
+      displayName: claimed.device.displayName,
+      protocolVersion: VOICE_STREAM_PROTOCOL_VERSION,
+      expiresAt,
+      pairingSessionId: claimed.pairingSession.id,
+      apkUrl: android.downloadUrl,
+    });
+    db.addLog(claimed.device.userId, {
+      deviceId: claimed.device.id,
+      source: 'android',
+      level: 'info',
+      message: `Android setup QR paired: ${claimed.device.displayName}`,
+      detailsJson: JSON.stringify({ androidSetupSessionId: claimed.session.id, expiresAt }),
+    });
+    return {
+      ok: true,
+      paired: true,
+      updateAvailable: false,
+      currentVersionCode: clientVersion,
+      device: claimed.device,
+      pairingSession: claimed.pairingSession,
+      expiresAt,
+      android,
+      minClientVersion: minClientVersion(),
+      ...payload,
+    };
+  });
+
+  app.get('/api/mobile/android/apk', async (req, reply) => {
+    const info = readAndroidApkInfo(req);
+    if (!info.available || !info.fileName) {
+      reply.code(404).send({ ok: false, error: 'Android APK has not been built yet' });
+      return;
+    }
+    const apkFile = path.join(androidApkDir(), info.fileName);
+    reply
+      .type('application/vnd.android.package-archive')
+      .header('content-disposition', `attachment; filename="${info.fileName}"`)
+      .header('content-length', String(info.size ?? statSync(apkFile).size));
+    return reply.send(createReadStream(apkFile));
+  });
 
   app.get('/api/assistant/events', async (req, reply) => {
     try {
@@ -439,6 +650,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       const result = db.registerDevice(ctx.user.id, { deviceType, displayName });
       const expiresAt = pairingExpiresAt();
       const pairingSession = db.createPairingSession(ctx.user.id, result.device.id, expiresAt);
+      const androidApk = readAndroidApkInfo(req);
       const payload = buildPairingPayload({
         serverUrl: serverPublicUrl(req),
         deviceId: result.device.id,
@@ -448,6 +660,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
         protocolVersion: VOICE_STREAM_PROTOCOL_VERSION,
         expiresAt,
         pairingSessionId: pairingSession.id,
+        apkUrl: deviceType === 'android' ? androidApk.downloadUrl : null,
       });
       db.addLog(ctx.user.id, {
         deviceId: result.device.id,
@@ -463,6 +676,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
         pairingSession,
         expiresAt,
         minClientVersion: minClientVersion(),
+        androidApk,
         ...payload,
       };
     }),
@@ -515,6 +729,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       if (includePayload) {
         expiresAt = pairingExpiresAt();
         pairingSession = db.createPairingSession(ctx.user.id, rotated.device.id, expiresAt);
+        const androidApk = readAndroidApkInfo(req);
         payload = buildPairingPayload({
           serverUrl: serverPublicUrl(req),
           deviceId: rotated.device.id,
@@ -524,6 +739,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
           protocolVersion: VOICE_STREAM_PROTOCOL_VERSION,
           expiresAt,
           pairingSessionId: pairingSession.id,
+          apkUrl: deviceType === 'android' ? androidApk.downloadUrl : null,
         });
       }
       db.addLog(ctx.user.id, {
@@ -742,16 +958,39 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
   });
 
   app.post('/api/voice/approval-codes', async (req, reply) =>
-    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+    {
       const body = jsonBody(req);
-      const code = cleanCode(body.code, 'approval code');
-      const approvalCode = db.addApprovalCode(ctx.user.id, {
-        voiceSessionId: cleanText(body.voiceSessionId) || null,
-        code,
-        source: cleanText(body.source, 'client') || 'client',
+      const deviceId = cleanText(body.deviceId);
+      const token = cleanText(body.token || req.headers['x-voice-device-token']);
+      if (deviceId && token) {
+        const auth = verifyDeviceAuth(db, deviceId, token, parseClientVersion(body.clientVersion, parseClientVersion(body.protocolVersion, null)));
+        if (!auth.ok) {
+          reply.code(auth.reason === 'client_too_old' ? 426 : 401).send({
+            ok: false,
+            error: deviceAuthFailureMessage(auth),
+            reason: auth.reason,
+            minClientVersion: auth.reason === 'client_too_old' ? auth.minClientVersion : undefined,
+          });
+          return;
+        }
+        const code = cleanCode(body.code, 'approval code');
+        const approvalCode = db.addApprovalCode(auth.device.userId, {
+          voiceSessionId: cleanText(body.voiceSessionId) || null,
+          code,
+          source: cleanText(body.source, auth.device.deviceType) || auth.device.deviceType,
+        });
+        return { ok: true, approvalCode };
+      }
+      return withUser(req, reply, db, clerkEnabled, async (ctx) => {
+        const code = cleanCode(body.code, 'approval code');
+        const approvalCode = db.addApprovalCode(ctx.user.id, {
+          voiceSessionId: cleanText(body.voiceSessionId) || null,
+          code,
+          source: cleanText(body.source, 'client') || 'client',
+        });
+        return { ok: true, approvalCode };
       });
-      return { ok: true, approvalCode };
-    }),
+    },
   );
 
   app.get('/api/assistant/threads', async (req, reply) =>

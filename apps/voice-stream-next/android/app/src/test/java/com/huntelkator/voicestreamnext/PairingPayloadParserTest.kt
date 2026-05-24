@@ -10,7 +10,7 @@ class PairingPayloadParserTest {
     @Test
     fun parsesVoiceStreamPairingPayload() {
         val payload =
-            "voicestream://pair?serverUrl=https%3A%2F%2Fexample.test&deviceId=device-1&token=abc123&displayName=Android&deviceType=android&minClientVersion=2&expiresAt=2099-01-01T00%3A00%3A00.000Z&pairingSessionId=session-1"
+            "voicestream://pair?serverUrl=https%3A%2F%2Fexample.test&deviceId=device-1&token=abc123&displayName=Android&deviceType=android&minClientVersion=2&expiresAt=2099-01-01T00%3A00%3A00.000Z&pairingSessionId=session-1&apk=https%3A%2F%2Fexample.test%2Fapi%2Fmobile%2Fandroid%2Fapk"
 
         val config = PairingPayloadParser.parse(payload).getOrThrow()
 
@@ -19,6 +19,7 @@ class PairingPayloadParserTest {
         assertEquals("abc123", config.token)
         assertEquals("Android", config.deviceName)
         assertEquals(2L, config.minClientVersion)
+        assertEquals("https://example.test/api/mobile/android/apk", config.apkUrl)
     }
 
     @Test

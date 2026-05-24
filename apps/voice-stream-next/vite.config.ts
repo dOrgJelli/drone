@@ -26,6 +26,7 @@ export default defineConfig(({ mode }) => {
       sourcemap: true,
     },
     server: {
+      allowedHosts: ['007fc160da8d.ngrok.app'],
       proxy: {
         '/api': {
           target: `http://127.0.0.1:${apiPort}`,

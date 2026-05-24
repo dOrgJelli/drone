@@ -34,6 +34,26 @@ export type PairingSessionRecord = {
   createdAt: string;
 };
 
+export type AndroidApkInfo = {
+  available: boolean;
+  platform: 'android';
+  app: string;
+  variant: string | null;
+  versionCode: number | null;
+  versionName: string | null;
+  fileName: string | null;
+  size: number | null;
+  builtAt: string | null;
+  downloadUrl: string | null;
+  updatePayload: string | null;
+};
+
+export type AndroidSetupInfo = {
+  id: string;
+  expiresAt: string;
+  setupUrl: string;
+};
+
 export type LogRecord = {
   id: string;
   deviceId: string | null;

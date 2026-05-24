@@ -10,6 +10,8 @@ import {
 import { createClerkClient, createDevClient, readDevUser } from './apiClient.js';
 import type {
   ApiClient,
+  AndroidApkInfo,
+  AndroidSetupInfo,
   AssistantApprovalRecord,
   AssistantArtifactRecord,
   AssistantMessage,
@@ -593,8 +595,11 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   const [threadTitleDraft, setThreadTitleDraft] = React.useState('');
   const [codexConnectFlow, setCodexConnectFlow] = React.useState<{ state: string; authorizationUrl: string; redirectUri: string; expiresAt: string } | null>(null);
   const [codexCodeDraft, setCodexCodeDraft] = React.useState('');
-  const [deviceName, setDeviceName] = React.useState('Desktop dev client');
-  const [deviceType, setDeviceType] = React.useState('desktop');
+  const [deviceName, setDeviceName] = React.useState('Android voice client');
+  const [deviceType, setDeviceType] = React.useState('android');
+  const [androidApkInfo, setAndroidApkInfo] = React.useState<AndroidApkInfo | null>(null);
+  const [androidSetupInfo, setAndroidSetupInfo] = React.useState<AndroidSetupInfo | null>(null);
+  const [androidSetupQr, setAndroidSetupQr] = React.useState('');
   const [pairingText, setPairingText] = React.useState('');
   const [pairingQr, setPairingQr] = React.useState('');
   const [pairingExpiresAt, setPairingExpiresAt] = React.useState<string | null>(null);
@@ -688,6 +693,30 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
     }
   }, [activeThreadId, client, loadAssistantSnapshot]);
 
+  const loadAndroidApkInfo = React.useCallback(async () => {
+    try {
+      const data = await client.request<{ ok: true; android: AndroidApkInfo }>('/api/mobile/android');
+      setAndroidApkInfo(data.android);
+    } catch {
+      setAndroidApkInfo(null);
+    }
+  }, [client]);
+
+  const refreshAndroidSetup = React.useCallback(async () => {
+    try {
+      const data = await client.request<{ ok: true; android: AndroidApkInfo; setup: AndroidSetupInfo }>('/api/mobile/android/setup', {
+        method: 'POST',
+        body: '{}',
+      });
+      setAndroidApkInfo(data.android);
+      setAndroidSetupInfo(data.setup);
+      setAndroidSetupQr(await QRCode.toDataURL(data.setup.setupUrl, { margin: 1, width: 180 }));
+    } catch {
+      setAndroidSetupInfo(null);
+      setAndroidSetupQr('');
+    }
+  }, [client]);
+
   const scheduleAssistantEventRefresh = React.useCallback(() => {
     if (document.visibilityState === 'hidden') return;
     if (assistantEventRefreshTimerRef.current !== null) window.clearTimeout(assistantEventRefreshTimerRef.current);
@@ -718,6 +747,14 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   React.useEffect(() => {
     void loadDashboard();
   }, [loadDashboard]);
+
+  React.useEffect(() => {
+    void loadAndroidApkInfo();
+  }, [loadAndroidApkInfo]);
+
+  React.useEffect(() => {
+    void refreshAndroidSetup();
+  }, [refreshAndroidSetup]);
 
   React.useEffect(() => {
     void loadMessages(activeThread?.id ?? null);
@@ -1607,6 +1644,21 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
         </div>
 
         <div className="grid gap-2 border-t border-[var(--border)] bg-white/[.018] p-2 max-[880px]:hidden">
+          <div className="grid gap-2 rounded border border-[var(--border-subtle)] bg-white/[.025] p-2">
+            <div className="flex min-w-0 items-center justify-between gap-2">
+              <span className="min-w-0 truncate font-display text-[10px] font-bold uppercase text-[var(--muted)]">Android Setup</span>
+              {androidApkInfo?.available ? (
+                <span className="shrink-0 text-[10px] text-[var(--muted)]">v{androidApkInfo.versionName ?? androidApkInfo.versionCode ?? '?'}</span>
+              ) : null}
+            </div>
+            {androidSetupQr && androidSetupInfo?.setupUrl ? (
+              <a href={androidSetupInfo.setupUrl} className="block w-fit rounded-[7px] border border-[var(--border)] bg-white p-1 transition hover:border-[rgba(136,145,168,.5)]" title="Android setup QR">
+                <img src={androidSetupQr} alt="Android setup QR" className="h-[112px] w-[112px]" />
+              </a>
+            ) : (
+              <div className="rounded border border-[var(--border-subtle)] bg-black/[.12] p-2 text-[10px] leading-tight text-[var(--muted)]">No setup QR</div>
+            )}
+          </div>
           <button type="button" className="grid min-h-[104px] w-full justify-items-center gap-[7px] rounded border border-[var(--border-subtle)] bg-white/[.025] p-3 font-display text-[10px] font-bold uppercase text-[var(--muted)] transition hover:bg-white/[.05] hover:text-[var(--fg-secondary)] disabled:pointer-events-none disabled:opacity-50" onClick={() => void createThread({ voiceEnabled: true })} disabled={busy}>
             <svg viewBox="0 0 24 24" aria-hidden="true" className="h-11 w-11 rounded-full bg-white/[.045] p-2.5 fill-none stroke-current stroke-[1.8]">
               <rect x="9" y="3" width="6" height="11" rx="3" />
@@ -1626,8 +1678,16 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
           >
             Voice Mode
           </button>
-          <button type="button" className={cn(assistantPrimaryButtonClass, 'h-[34px] text-[var(--muted)]')} onClick={() => setActiveView('devices')}>
-            Pair Android
+          <button
+            type="button"
+            className={cn(assistantPrimaryButtonClass, 'h-[34px] text-[var(--muted)]')}
+            onClick={() => {
+              setDeviceType('android');
+              if (!deviceName.trim() || deviceName === 'Desktop dev client') setDeviceName('Android voice client');
+              setActiveView('devices');
+            }}
+          >
+            Android Setup
           </button>
           <div className="flex items-center justify-between gap-2">
             <span className="text-[10px] leading-tight text-[var(--muted)]">Connected devices</span>
@@ -2159,41 +2219,32 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                 <div className={assistantPanelHeaderClass}>
                   <div>
                     <span className={assistantKickerClass}>Pairing</span>
-                    <h2 className={assistantPanelTitleClass}>Pair Device</h2>
+                    <h2 className={assistantPanelTitleClass}>Android Setup</h2>
                   </div>
-                </div>
-                <form className="grid gap-2.5" onSubmit={(event) => void pairDevice(event)}>
-                  <label className={assistantFieldLabelClass}>
-                    Type
-                    <select value={deviceType} onChange={(event) => setDeviceType(event.target.value)}>
-                      <option value="desktop">Desktop</option>
-                      <option value="android">Android</option>
-                    </select>
-                  </label>
-                  <label className={assistantFieldLabelClass}>
-                    Name
-                    <input value={deviceName} onChange={(event) => setDeviceName(event.target.value)} />
-                  </label>
-                  <button type="submit" className={cn(assistantActionButtonClass, 'w-fit')} disabled={busy || !deviceName.trim()}>
-                    Create QR Payload
+                  <button type="button" className={assistantActionButtonClass} onClick={() => void refreshAndroidSetup()}>
+                    Refresh QR
                   </button>
-                </form>
-                {pairingText ? (
-                  <div className="mt-3 grid gap-2 rounded border border-[var(--border-subtle)] bg-white/[.02] p-3">
-                    <small className={assistantKickerClass}>Pairing payload</small>
-                    {pairingExpiresAt ? <div className="text-xs text-[var(--muted)]">Expires {timeLabel(pairingExpiresAt)}</div> : null}
-                    {pairingQr ? <img src={pairingQr} alt="Device pairing QR" className="h-[220px] w-[220px] rounded-[7px] border border-[var(--border)] bg-white" /> : null}
-                    <textarea readOnly value={pairingText} onFocus={(event) => event.currentTarget.select()} className="min-h-[92px] font-mono text-xs" />
-                    <div className="flex flex-wrap gap-[7px]">
-                      <button type="button" className={assistantActionButtonClass} onClick={() => void copyPairingPayload()}>
-                        Copy Payload
-                      </button>
-                      <button type="button" className={assistantActionButtonClass} onClick={() => void sharePairingPayload()}>
-                        Share
-                      </button>
-                    </div>
+                </div>
+                <div className="mb-3 grid gap-2 rounded border border-[var(--border-subtle)] bg-white/[.02] p-3">
+                  <div className="flex min-w-0 items-center justify-between gap-2">
+                    <small className={assistantKickerClass}>Android Setup</small>
+                    {androidApkInfo?.available ? (
+                      <span className="text-xs text-[var(--muted)]">
+                        v{androidApkInfo.versionName ?? androidApkInfo.versionCode ?? '?'}
+                        {androidApkInfo.variant ? ` / ${androidApkInfo.variant}` : ''}
+                      </span>
+                    ) : null}
                   </div>
-                ) : null}
+                  {androidSetupQr && androidSetupInfo?.setupUrl ? (
+                    <div className="flex flex-wrap items-start gap-3">
+                      <a href={androidSetupInfo.setupUrl} className="block rounded-[7px] border border-[var(--border)] bg-white p-1 transition hover:border-[rgba(136,145,168,.5)]" title="Android setup QR">
+                        <img src={androidSetupQr} alt="Android setup QR" className="h-[132px] w-[132px]" />
+                      </a>
+                    </div>
+                  ) : (
+                    <div className={assistantEmptyClass}>No Android setup QR is available.</div>
+                  )}
+                </div>
               </section>
 
               <section className={assistantPanelClass}>
@@ -3241,15 +3292,15 @@ function DesktopAutoConnect({ client, children }: { client: ApiClient; children:
     <div className="signin-page">
       <div className="signin-copy">
         <div className="kicker">Drone</div>
-        <h1>Connecting desktop</h1>
+        <h1>Connecting device</h1>
         <p>
           {error
-            ? `Desktop connection failed: ${error}`
+            ? `Device connection failed: ${error}`
             : connected
               ? closeAttempted
-                ? 'Desktop connected. You can close this tab.'
-                : 'Desktop connected. Closing this tab.'
-              : 'Finishing desktop sign in.'}
+                ? 'Device connected. You can close this tab.'
+                : 'Device connected. Closing this tab.'
+              : 'Finishing sign in.'}
         </p>
         {error ? <button type="button" onClick={() => window.location.assign('/')}>Open dashboard</button> : null}
       </div>

@@ -47,7 +47,9 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
     private var approvalCodeSettings = ApprovalCodeSettings()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val approvalFinalizeRunnable = Runnable {
-        handleApprovalUpdate(approvalCodeRecognizer.flush(SystemClock.elapsedRealtime()))
+        currentOnStatus?.let { onStatus ->
+            handleApprovalUpdate(approvalCodeRecognizer.flush(SystemClock.elapsedRealtime()), onStatus)
+        }
         if (approvalCodeRecognizer.isCollecting && active.get()) {
             scheduleApprovalFinalize()
         }

@@ -1,7 +1,12 @@
+import java.time.Instant
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
+val androidVersionCode = 1
+val androidVersionName = "0.1.1"
 
 android {
     namespace = "com.huntelkator.voicestreamnext"
@@ -15,8 +20,8 @@ android {
         applicationId = "com.huntelkator.voicestreamnext"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.1"
+        versionCode = androidVersionCode
+        versionName = androidVersionName
         buildConfigField("String", "CLERK_PUBLISHABLE_KEY", "\"${System.getenv("VOICE_STREAM_NEXT_ANDROID_CLERK_PUBLISHABLE_KEY").orEmpty()}\"")
     }
 
@@ -71,4 +76,79 @@ dependencies {
     implementation("com.alphacephei:vosk-android:0.3.47")
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     testImplementation("junit:junit:4.13.2")
+}
+
+fun jsonString(value: String): String =
+    buildString {
+        append('"')
+        value.forEach { char ->
+            when (char) {
+                '\\' -> append("\\\\")
+                '"' -> append("\\\"")
+                '\n' -> append("\\n")
+                '\r' -> append("\\r")
+                '\t' -> append("\\t")
+                else -> append(char)
+            }
+        }
+        append('"')
+    }
+
+fun voiceStreamDataDir(): File {
+    val configured = System.getenv("VOICE_STREAM_NEXT_DATA_DIR")?.trim().orEmpty()
+    return if (configured.isNotBlank()) file(configured) else file("../../server/data")
+}
+
+fun publishAndroidApk(variantName: String, apkFile: File) {
+    if (!apkFile.exists()) {
+        throw GradleException("Android APK was not found at ${apkFile.absolutePath}")
+    }
+    val outputDir = voiceStreamDataDir().resolve("mobile/Android")
+    val variantFileName = "voice-stream-next-android-$variantName.apk"
+    val latestFileName = "voice-stream-next-android-latest.apk"
+    outputDir.mkdirs()
+    copy {
+        from(apkFile)
+        into(outputDir)
+        rename { variantFileName }
+    }
+    copy {
+        from(apkFile)
+        into(outputDir)
+        rename { latestFileName }
+    }
+    val latestFile = outputDir.resolve(latestFileName)
+    val metadata = """
+        {
+          "app": "voice-stream-next",
+          "platform": "android",
+          "variant": ${jsonString(variantName)},
+          "versionCode": $androidVersionCode,
+          "versionName": ${jsonString(androidVersionName)},
+          "fileName": ${jsonString(latestFileName)},
+          "variantFileName": ${jsonString(variantFileName)},
+          "size": ${latestFile.length()},
+          "builtAt": ${jsonString(Instant.now().toString())}
+        }
+    """.trimIndent()
+    outputDir.resolve("latest.json").writeText(metadata)
+    logger.lifecycle("Published VoiceStream Android APK to ${latestFile.absolutePath}")
+}
+
+tasks.configureEach {
+    if (name == "assembleDebug") {
+        doLast {
+            publishAndroidApk("debug", layout.buildDirectory.file("outputs/apk/debug/app-debug.apk").get().asFile)
+        }
+    }
+    if (name == "assembleRelease") {
+        doLast {
+            val releaseDir = layout.buildDirectory.dir("outputs/apk/release").get().asFile
+            val apkFile = listOf("app-release.apk", "app-release-unsigned.apk")
+                .map { releaseDir.resolve(it) }
+                .firstOrNull { it.exists() }
+                ?: throw GradleException("Android release APK was not found in ${releaseDir.absolutePath}")
+            publishAndroidApk("release", apkFile)
+        }
+    }
 }

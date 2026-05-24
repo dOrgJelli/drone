@@ -20,7 +20,7 @@ const {
 describe('pairing-payload-parser', () => {
   test('parses voicestream pairing payloads', () => {
     const payload =
-      'voicestream://pair?serverUrl=https%3A%2F%2Fexample.test&deviceId=device-1&token=abc123&displayName=Desktop&deviceType=desktop&minClientVersion=2&expiresAt=2099-01-01T00%3A00%3A00.000Z&pairingSessionId=session-1';
+      'voicestream://pair?serverUrl=https%3A%2F%2Fexample.test&deviceId=device-1&token=abc123&displayName=Desktop&deviceType=desktop&minClientVersion=2&expiresAt=2099-01-01T00%3A00%3A00.000Z&pairingSessionId=session-1&apk=https%3A%2F%2Fexample.test%2Fapi%2Fmobile%2Fandroid%2Fapk';
 
     const config = parsePairingPayload(payload);
 
@@ -30,6 +30,7 @@ describe('pairing-payload-parser', () => {
     expect(config.deviceName).toBe('Desktop');
     expect(config.minClientVersion).toBe(2);
     expect(config.pairingSessionId).toBe('session-1');
+    expect(config.apkUrl).toBe('https://example.test/api/mobile/android/apk');
   });
 
   test('parses direct websocket URLs with token', () => {

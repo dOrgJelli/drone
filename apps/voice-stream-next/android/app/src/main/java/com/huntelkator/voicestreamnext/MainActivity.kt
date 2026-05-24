@@ -14,12 +14,10 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
-import android.text.InputType
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
-import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageButton
@@ -30,41 +28,29 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
-import com.clerk.api.Clerk
-import com.clerk.api.network.serialization.ClerkResult
-import com.clerk.api.session.GetTokenOptions
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
+import java.net.URI
 import kotlin.concurrent.thread
 
 class MainActivity : ComponentActivity() {
     private lateinit var api: VoiceStreamApi
+    private lateinit var browserAuth: BrowserAuthCoordinator
     private lateinit var serverInput: EditText
-    private lateinit var authModeInput: EditText
-    private lateinit var tokenInput: EditText
-    private lateinit var devEmailInput: EditText
-    private lateinit var devNameInput: EditText
     private lateinit var deviceNameInput: EditText
-    private lateinit var clerkEmailInput: EditText
-    private lateinit var clerkPasswordInput: EditText
-    private lateinit var pairingPayloadInput: EditText
-    private lateinit var devAdminInput: CheckBox
     private lateinit var statusText: TextView
     private lateinit var approvalText: TextView
     private lateinit var microphoneText: TextView
     private lateinit var pairingMessageText: TextView
-    private lateinit var summaryText: TextView
-    private lateinit var assistantInput: EditText
-    private lateinit var assistantOutput: TextView
     private lateinit var primaryActionButton: Button
     private lateinit var offButton: Button
+    private lateinit var signedOutPanel: View
+    private lateinit var voicePanel: View
     private lateinit var settingsPanel: View
     private lateinit var settingsButton: Button
+    private lateinit var signInButton: Button
+    private lateinit var signOutButton: Button
     private lateinit var qrButton: ImageButton
-    private lateinit var wakePhraseInput: EditText
 
     private val wakeController = WakeToggleController()
     private val approvalCodeRecognizer = ApprovalCodeRecognizer()
@@ -110,7 +96,6 @@ class MainActivity : ComponentActivity() {
         if (text.isNullOrBlank()) {
             showPairingMessage("QR scan cancelled.")
         } else {
-            pairingPayloadInput.setText(text)
             applyPairingPayload(text)
         }
     }
@@ -128,13 +113,17 @@ class MainActivity : ComponentActivity() {
         ClientLog.install(applicationContext)
         ClientLog.i("Activity", "MainActivity created")
         api = VoiceStreamApi(applicationContext)
+        browserAuth = BrowserAuthCoordinator(api, browserAuthCallbacks())
         DiagnosticsUploader.upload(applicationContext, api, "activity-start", force = true)
         window.statusBarColor = COLOR_BACKGROUND
         window.navigationBarColor = COLOR_BACKGROUND
         buildUi()
         loadConfigIntoForm()
-        refreshDashboard()
         updateSessionUi(SessionMode.OFF, "Ready")
+        renderAuthState()
+        if (api.pairedDeviceId().isNotBlank()) {
+            refreshDashboard()
+        }
     }
 
     override fun onStart() {
@@ -156,6 +145,11 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         runCatching { unregisterReceiver(statusReceiver) }
         super.onStop()
+    }
+
+    override fun onDestroy() {
+        if (::browserAuth.isInitialized) browserAuth.stop()
+        super.onDestroy()
     }
 
     private fun buildUi() {
@@ -180,11 +174,40 @@ class MainActivity : ComponentActivity() {
             setPadding(0, 2.dp(), 0, 18.dp())
         })
 
+        signedOutPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            background = rounded(COLOR_SURFACE, 18.dp(), COLOR_STROKE)
+            setPadding(18.dp(), 18.dp(), 18.dp(), 18.dp())
+            addView(label("Sign in to connect this phone", 20f, COLOR_TEXT, true).apply {
+                gravity = Gravity.CENTER
+            })
+            addView(label("Use the web dashboard sign-in flow, including social login, then return here.", 13f, COLOR_MUTED, false).apply {
+                gravity = Gravity.CENTER
+                setPadding(0, 8.dp(), 0, 16.dp())
+            })
+            signInButton = button("Sign in") { signInWithBrowser() }
+            addView(signInButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 52.dp()))
+            addView(row(
+                button("Scan QR") { startQrScan() },
+                button("Open web") { openWebDashboard() },
+            ))
+            pairingMessageText = label("", 13f, COLOR_MUTED, false).apply {
+                gravity = Gravity.CENTER
+                setPadding(0, 14.dp(), 0, 0)
+            }
+            addView(pairingMessageText)
+        }
+        root.addView(signedOutPanel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = 24.dp()
+        })
+
         val hero = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
         }
+        voicePanel = hero
         primaryActionButton = Button(this).apply {
             setOnClickListener { togglePrimaryAction() }
             stylePrimaryButton(SessionMode.OFF)
@@ -198,6 +221,20 @@ class MainActivity : ComponentActivity() {
         }
         hero.addView(offButton, LinearLayout.LayoutParams(148.dp(), 48.dp()).apply { topMargin = 18.dp() })
         root.addView(hero)
+
+        signOutButton = Button(this).apply {
+            text = "Sign out"
+            styleFloatingButton()
+            setOnClickListener { signOut() }
+        }
+        screen.addView(signOutButton, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            54.dp(),
+            Gravity.TOP or Gravity.END,
+        ).apply {
+            rightMargin = 18.dp()
+            topMargin = 44.dp()
+        })
 
         statusText = label("Ready", 15f, COLOR_MUTED, true).apply {
             gravity = Gravity.CENTER
@@ -292,27 +329,7 @@ class MainActivity : ComponentActivity() {
 
     private fun buildSettingsContent(): LinearLayout {
         serverInput = field("Server URL")
-        authModeInput = field("Auth mode: dev or bearer")
-        tokenInput = field("Clerk session token")
-        devEmailInput = field("Dev email")
-        devNameInput = field("Dev display name")
         deviceNameInput = field("Device name")
-        clerkEmailInput = field("Clerk email")
-        clerkPasswordInput = field("Clerk password").apply {
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-        }
-        pairingPayloadInput = field("voicestream://pair?... or ws://... or voicestream://update?...")
-        devAdminInput = CheckBox(this).apply {
-            text = "Dev user is admin"
-            setTextColor(COLOR_MUTED)
-        }
-        pairingMessageText = label("", 13f, COLOR_MUTED, false).apply { setPadding(0, 10.dp(), 0, 0) }
-        summaryText = label("", 14f, COLOR_TEXT, false)
-        assistantInput = field("Assistant message")
-        assistantOutput = label("No assistant response yet.", 14f, COLOR_MUTED, false).apply {
-            setPadding(0, 10.dp(), 0, 0)
-        }
-        wakePhraseInput = field("Wake phrase or approval phrase")
 
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -321,45 +338,22 @@ class MainActivity : ComponentActivity() {
 
             addView(card("Connection").apply {
                 addView(serverInput)
-                addView(authModeInput)
-                addView(tokenInput)
-                addView(devEmailInput)
-                addView(devNameInput)
                 addView(deviceNameInput)
-                addView(devAdminInput)
                 addView(row(
                     button("Save") { saveConfigFromForm() },
-                    button("Clerk sign in") { signInWithClerk() },
-                    button("Open web login") { openWebDashboard() }
+                    button("Sign in") { signInWithBrowser() },
+                    button("Open web") { openWebDashboard() }
                 ))
-                addView(clerkEmailInput)
-                addView(clerkPasswordInput)
             })
 
             addView(card("Pairing").apply {
                 addView(row(
-                    button("Pair") { pairDevice() },
-                    button("Apply QR") { applyPairingPayload(pairingPayloadInput.text.toString()) },
+                    button("Scan QR") { startQrScan() },
                     button("Refresh") { refreshDashboard() }
                 ))
-                addView(pairingPayloadInput)
-                addView(pairingMessageText)
-                addView(summaryText)
-            })
-
-            addView(card("Voice Controls").apply {
-                addView(wakePhraseInput)
-                addView(row(
-                    button("Start voice") { ensureMicThenStart() },
-                    button("Stop voice") { stopVoiceSession() },
-                    button("Run phrase") { processWakePhrase() }
-                ))
-            })
-
-            addView(card("Assistant").apply {
-                addView(assistantInput)
-                addView(button("Send") { sendAssistantMessage() })
-                addView(assistantOutput)
+                addView(label("Scan a pairing or update QR from the web dashboard.", 12f, COLOR_MUTED, false).apply {
+                    setPadding(0, 10.dp(), 0, 0)
+                })
             })
 
             addView(label("Version: ${currentVersionLabel()}", 11f, COLOR_MUTED, false).apply {
@@ -368,13 +362,6 @@ class MainActivity : ComponentActivity() {
             addView(label("Diagnostics: ${ClientLog.path(this@MainActivity)}", 11f, COLOR_MUTED, false).apply {
                 setPadding(0, 8.dp(), 0, 0)
             })
-
-            val clerkNote = if (BuildConfig.CLERK_PUBLISHABLE_KEY.isBlank()) {
-                "Set VOICE_STREAM_NEXT_ANDROID_CLERK_PUBLISHABLE_KEY for native Clerk sign-in, or paste a session token."
-            } else {
-                "Clerk SDK initialized for this build."
-            }
-            addView(label(clerkNote, 12f, COLOR_MUTED, false).apply { setPadding(2.dp(), 8.dp(), 2.dp(), 0) })
         }
     }
 
@@ -415,33 +402,35 @@ class MainActivity : ComponentActivity() {
     private fun loadConfigIntoForm() {
         val config = api.loadConfig()
         serverInput.setText(config.serverUrl)
-        authModeInput.setText(config.authMode)
-        tokenInput.setText(config.bearerToken)
-        devEmailInput.setText(config.devEmail)
-        devNameInput.setText(config.devName)
-        devAdminInput.isChecked = config.devAdmin
         val prefs = getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE)
         deviceNameInput.setText(prefs.getString(Constants.PREF_DEVICE_NAME, Constants.DEFAULT_DEVICE_NAME))
         updatePairingMessage()
     }
 
     private fun saveConfigFromForm() {
+        val current = api.loadConfig()
         api.saveConfig(ApiConfig(
             serverUrl = serverInput.text.toString(),
-            authMode = authModeInput.text.toString().ifBlank { Constants.AUTH_DEV },
-            bearerToken = tokenInput.text.toString(),
-            devEmail = devEmailInput.text.toString().ifBlank { Constants.DEFAULT_DEV_EMAIL },
-            devName = devNameInput.text.toString().ifBlank { Constants.DEFAULT_DEV_NAME },
-            devAdmin = devAdminInput.isChecked
+            authMode = current.authMode.ifBlank { Constants.AUTH_DEV },
+            bearerToken = current.bearerToken,
+            devEmail = current.devEmail.ifBlank { Constants.DEFAULT_DEV_EMAIL },
+            devName = current.devName.ifBlank { Constants.DEFAULT_DEV_NAME },
+            devAdmin = current.devAdmin
         ))
+        getSharedPreferences(Constants.PREFS_NAME, MODE_PRIVATE).edit()
+            .putString(Constants.PREF_DEVICE_NAME, deviceNameInput.text.toString().ifBlank { Constants.DEFAULT_DEVICE_NAME })
+            .apply()
         showStatus("Settings saved.")
     }
 
     private fun refreshDashboard() = runApi("Loading dashboard") {
+        if (api.pairedDeviceId().isNotBlank() && api.pairedDeviceToken().isNotBlank()) {
+            val displayName = api.pairedDeviceDisplayName().ifBlank { "this phone" }
+            showStatus("Connected as $displayName.")
+            return@runApi
+        }
         val dashboard = api.dashboard()
-        val logText = dashboard.logs.take(4).joinToString("\n")
-        showSummary("${dashboard.displayName}\nThreads: ${dashboard.threadCount}  Devices: ${dashboard.deviceCount}  Logs: ${dashboard.logCount}\n$logText")
-        showStatus("Connected.")
+        showStatus("Connected as ${dashboard.displayName}.")
     }
 
     private fun pairDevice() {
@@ -452,9 +441,7 @@ class MainActivity : ComponentActivity() {
             api.savePairing(pairing, deviceName)
             showStatus("Paired ${pairing.deviceId.take(14)}.")
             updatePairingMessage()
-            val dashboard = api.dashboard()
-            val logText = dashboard.logs.take(4).joinToString("\n")
-            showSummary("${dashboard.displayName}\nThreads: ${dashboard.threadCount}  Devices: ${dashboard.deviceCount}  Logs: ${dashboard.logCount}\n$logText")
+            runOnUiThread { renderAuthState() }
         }
     }
 
@@ -481,6 +468,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun applyPairingPayload(payload: String) {
+        if (isAndroidSetupUrl(payload)) {
+            redeemAndroidSetup(payload)
+            return
+        }
+
         if (PairingPayloadParser.isUpdatePayload(payload)) {
             val config = PairingPayloadParser.parseUpdate(payload).getOrElse { error ->
                 showPairingMessage("Update check failed: ${error.message}")
@@ -521,7 +513,40 @@ class MainActivity : ComponentActivity() {
         loadConfigIntoForm()
         showPairingMessage("Paired ${config.deviceId.take(14)} from QR payload.")
         showStatus("Paired ${config.deviceId.take(14)} from QR payload.")
-        refreshDashboard()
+        renderAuthState()
+    }
+
+    private fun isAndroidSetupUrl(payload: String): Boolean = runCatching {
+        val uri = URI(payload.trim())
+        val scheme = uri.scheme?.lowercase()
+        (scheme == "http" || scheme == "https") && uri.path.orEmpty().contains("/api/mobile/android/setup/")
+    }.getOrDefault(false)
+
+    private fun redeemAndroidSetup(payload: String) = runApi("Checking Android setup QR") {
+        val result = api.redeemAndroidSetup(payload)
+        if (result.updateAvailable) {
+            val latestVersion = result.latestVersionCode ?: currentVersionCode() + 1
+            runOnUiThread { showUpdateAvailable(UpdateConfig(latestVersion, result.apkUrl)) }
+            return@runApi
+        }
+
+        val pairingPayload = result.pairingPayload
+        if (pairingPayload.isNullOrBlank()) {
+            showPairingMessage("Android setup QR did not return pairing data.")
+            return@runApi
+        }
+
+        val config = PairingPayloadParser.parse(pairingPayload).getOrElse { error ->
+            showPairingMessage("Pairing failed: ${error.message}")
+            return@runApi
+        }
+        api.savePairing(config)
+        runOnUiThread {
+            loadConfigIntoForm()
+            showPairingMessage("Paired ${config.deviceId.take(14)} from setup QR.")
+            showStatus("Paired ${config.deviceId.take(14)} from setup QR.")
+            renderAuthState()
+        }
     }
 
     private fun handleUpdatePayload(config: UpdateConfig) {
@@ -663,34 +688,6 @@ class MainActivity : ComponentActivity() {
         updateSessionUi(SessionMode.OFF, "Off.")
     }
 
-    private fun processWakePhrase() {
-        val text = wakePhraseInput.text.toString()
-        wakePhraseInput.setText("")
-        if (tryHandleApprovalText(text, finalizeNow = true)) return
-        val phrase = WakePhraseMatcher.match(text)
-        if (phrase == null) {
-            showStatus("No wake phrase matched.")
-            return
-        }
-        val action = wakeController.wakeDetected(phrase)
-        when (action) {
-            WakeAction.START_RECORDING -> ensureMicThenStart(Constants.STREAM_TARGET_ASSISTANT)
-            WakeAction.START_PATCH_RECORDING -> ensureMicThenStart(Constants.STREAM_TARGET_PATCH)
-            WakeAction.START_CLIPBOARD_RECORDING -> ensureMicThenStart(Constants.STREAM_TARGET_CLIPBOARD)
-            WakeAction.STOP_RECORDING,
-            WakeAction.ENTER_SLEEPING -> {
-                startService(Intent(this, VoiceSessionService::class.java).apply { setAction(Constants.ACTION_SLEEP) })
-                showStatus("Sleeping.")
-                updateSessionUi(SessionMode.SLEEPING, "Sleeping.")
-            }
-            WakeAction.PLAY_STATUS -> {
-                cuePlayer.play(LocalCue.STATUS)
-                showStatus("Mode: ${wakeController.state}")
-            }
-            WakeAction.NONE -> showStatus("Mode: ${wakeController.state}")
-        }
-    }
-
     private fun tryHandleApprovalText(text: String, finalizeNow: Boolean = false): Boolean {
         val now = SystemClock.elapsedRealtime()
         var update = approvalCodeRecognizer.accept(text, now)
@@ -751,71 +748,86 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun sendAssistantMessage() = runApi("Sending assistant message") {
-        val content = assistantInput.text.toString().trim()
-        if (content.isBlank()) {
-            showStatus("Type a message first.")
-            return@runApi
-        }
-        val exchange = api.sendAssistantMessage(content)
-        runOnUiThread {
-            assistantOutput.text = "You: ${exchange.userMessage}\n\nAssistant: ${exchange.assistantMessage}"
-            assistantInput.setText("")
-        }
-        showStatus("Assistant replied.")
-    }
-
     private fun openWebDashboard() {
         saveConfigFromForm()
-        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(serverInput.text.toString().ifBlank { Constants.DEFAULT_SERVER_URL })))
+        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(VoiceStreamWebUrls.dashboardUrl(serverInput.text.toString().ifBlank { Constants.DEFAULT_SERVER_URL }))))
     }
 
-    private fun signInWithClerk() {
-        val email = clerkEmailInput.text.toString().trim()
-        val password = clerkPasswordInput.text.toString()
-        if (BuildConfig.CLERK_PUBLISHABLE_KEY.isBlank()) {
-            showStatus("Set VOICE_STREAM_NEXT_ANDROID_CLERK_PUBLISHABLE_KEY before building.")
-            return
-        }
-        if (email.isBlank() || password.isBlank()) {
-            showStatus("Enter Clerk email and password.")
-            return
-        }
-        showStatus("Signing in with Clerk.")
-        CoroutineScope(Dispatchers.Main).launch {
-            try {
-                val signIn = Clerk.auth.signInWithPassword {
-                    identifier = email
-                    this.password = password
-                }
-                if (signIn is ClerkResult.Failure<*>) {
-                    showStatus(signIn.throwable?.message ?: "Clerk sign in failed.")
-                    return@launch
-                }
-                val sessionId = (signIn as ClerkResult.Success).value.createdSessionId
-                if (!sessionId.isNullOrBlank()) {
-                    Clerk.auth.setActive(sessionId)
-                }
-                val token = Clerk.auth.getToken(GetTokenOptions())
-                if (token is ClerkResult.Success) {
-                    val current = api.loadConfig()
-                    api.saveConfig(current.copy(authMode = Constants.AUTH_BEARER, bearerToken = token.value))
-                    loadConfigIntoForm()
-                    showStatus("Signed in with Clerk.")
-                    refreshDashboard()
-                } else {
-                    showStatus("Signed in, but no Clerk token was returned.")
-                }
-            } catch (error: Exception) {
-                showStatus(error.message ?: "Clerk sign in failed.")
+    private fun signInWithBrowser() {
+        saveConfigFromForm()
+        browserAuth.start(
+            serverUrl = serverInput.text.toString().ifBlank { Constants.DEFAULT_SERVER_URL },
+            deviceName = deviceNameInput.text.toString().ifBlank { Constants.DEFAULT_DEVICE_NAME },
+        )
+    }
+
+    private fun signOut() {
+        browserAuth.stop()
+        turnOff()
+        api.clearPairing()
+        updatePairingMessage()
+        renderAuthState()
+        showStatus("Signed out.")
+    }
+
+    private fun browserAuthCallbacks(): BrowserAuthCoordinator.Callbacks {
+        return object : BrowserAuthCoordinator.Callbacks {
+            override fun onAuthStarting() {
+                signInButton.isEnabled = false
+                showStatus("Opening sign in.")
+            }
+
+            override fun openBrowser(uri: Uri) {
+                startActivity(Intent(Intent.ACTION_VIEW, uri))
+            }
+
+            override fun onBrowserOpened() {
+                showStatus("Finish sign in in your browser.")
+                updatePairingMessage()
+            }
+
+            override fun onAuthWaiting() {
+                showStatus("Waiting for browser sign in.")
+            }
+
+            override fun onAuthConnected() {
+                signInButton.isEnabled = true
+                loadConfigIntoForm()
+                renderAuthState()
+                showStatus("Signed in.")
+            }
+
+            override fun onAuthExpired() {
+                signInButton.isEnabled = true
+                showPairingMessage("Sign in expired. Try again.")
+            }
+
+            override fun onAuthError(message: String) {
+                signInButton.isEnabled = true
+                showPairingMessage(message)
             }
         }
+    }
+
+    private fun renderAuthState() {
+        val connected = api.pairedDeviceId().isNotBlank() && api.pairedDeviceToken().isNotBlank()
+        signedOutPanel.visibility = if (connected) View.GONE else View.VISIBLE
+        voicePanel.visibility = if (connected) View.VISIBLE else View.GONE
+        signOutButton.visibility = if (connected) View.VISIBLE else View.GONE
+        qrButton.visibility = if (connected) View.GONE else View.VISIBLE
+        settingsButton.visibility = View.VISIBLE
+        if (!connected) {
+            updateSessionUi(SessionMode.OFF, "Sign in to connect this phone.")
+        } else if (sessionMode == SessionMode.OFF) {
+            updateSessionUi(SessionMode.OFF, "Ready.")
+        }
+        updatePairingMessage()
     }
 
     private fun updatePairingMessage() {
         val deviceId = api.pairedDeviceId()
         pairingMessageText.text = if (deviceId.isBlank()) {
-            "Not paired yet."
+            if (browserAuth.isPending) "Waiting for browser sign in." else "Not signed in."
         } else {
             "Paired device ${deviceId.take(14)}"
         }
@@ -857,10 +869,6 @@ class MainActivity : ComponentActivity() {
             pairingMessageText.text = message
             Toast.makeText(this, message, Toast.LENGTH_LONG).show()
         }
-    }
-
-    private fun showSummary(text: String) {
-        runOnUiThread { summaryText.text = text }
     }
 
     private fun card(title: String): LinearLayout = LinearLayout(this).apply {

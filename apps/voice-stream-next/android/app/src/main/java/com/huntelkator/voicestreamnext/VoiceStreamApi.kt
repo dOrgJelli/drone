@@ -8,6 +8,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
+import java.net.URI
 import java.util.concurrent.TimeUnit
 
 data class ApiConfig(
@@ -20,6 +21,23 @@ data class ApiConfig(
 )
 
 data class DevicePairing(val deviceId: String, val token: String)
+data class BrowserAuthRequest(
+    val requestId: String,
+    val secret: String,
+    val deviceToken: String,
+    val expiresAt: String,
+)
+data class BrowserAuthResult(
+    val status: String,
+    val deviceId: String?,
+    val deviceName: String?,
+)
+data class AndroidSetupRedeemResult(
+    val updateAvailable: Boolean,
+    val latestVersionCode: Long?,
+    val apkUrl: String?,
+    val pairingPayload: String?,
+)
 data class DashboardSummary(val displayName: String, val threadCount: Int, val deviceCount: Int, val logCount: Int, val logs: List<String>)
 data class AssistantExchange(val userMessage: String, val assistantMessage: String)
 data class VoiceApprovalSettings(
@@ -101,6 +119,66 @@ class VoiceStreamApi(private val context: Context) {
         savePairing(DevicePairing(config.deviceId, config.token), config.deviceName ?: Constants.DEFAULT_DEVICE_NAME)
     }
 
+    fun clearPairing() {
+        context.getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .remove(Constants.PREF_DEVICE_ID)
+            .remove(Constants.PREF_DEVICE_TOKEN)
+            .apply()
+    }
+
+    fun createBrowserAuthRequest(deviceName: String): BrowserAuthRequest {
+        val json = request(
+            "POST",
+            "/api/desktop-auth/requests",
+            JSONObject()
+                .put("displayName", deviceName)
+                .put("protocolVersion", 1)
+        )
+        return BrowserAuthRequest(
+            requestId = json.getString("requestId"),
+            secret = json.getString("secret"),
+            deviceToken = json.getString("deviceToken"),
+            expiresAt = json.getString("expiresAt"),
+        )
+    }
+
+    fun browserAuthResult(requestId: String, secret: String): BrowserAuthResult {
+        val json = request(
+            "POST",
+            "/api/desktop-auth/result",
+            JSONObject()
+                .put("requestId", requestId)
+                .put("secret", secret)
+        )
+        val device = json.optJSONObject("device")
+        return BrowserAuthResult(
+            status = json.optString("status", "pending"),
+            deviceId = device?.optString("id")?.takeIf { it.isNotBlank() },
+            deviceName = device?.optString("displayName")?.takeIf { it.isNotBlank() },
+        )
+    }
+
+    fun pairedDeviceDisplayName(): String {
+        val deviceId = pairedDeviceId()
+        val token = pairedDeviceToken()
+        if (deviceId.isBlank() || token.isBlank()) return ""
+        val config = loadConfig()
+        val url = "${config.serverUrl.trimEnd('/')}/api/devices/$deviceId/bootstrap"
+        val builder = Request.Builder()
+            .url(url)
+            .header("x-voice-device-token", token)
+            .header("x-voice-client-version", BuildConfig.VERSION_CODE.toString())
+        client.newCall(builder.build()).execute().use { response ->
+            val text = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                throw IOException(JSONObject(text.ifBlank { "{}" }).optString("error", "HTTP ${response.code}"))
+            }
+            return JSONObject(text.ifBlank { "{}" })
+                .getJSONObject("device")
+                .optString("displayName")
+        }
+    }
+
     fun dashboard(): DashboardSummary {
         val json = request("GET", "/api/dashboard")
         val user = json.getJSONObject("user")
@@ -132,8 +210,52 @@ class VoiceStreamApi(private val context: Context) {
         )
     }
 
+    fun redeemAndroidSetup(setupUrl: String): AndroidSetupRedeemResult {
+        val uri = URI(setupUrl.trim())
+        val serverUrl = "${uri.scheme}://${uri.host}${if (uri.port > 0) ":${uri.port}" else ""}".trimEnd('/')
+        val path = uri.rawPath + "/redeem" + (uri.rawQuery?.let { "?$it" } ?: "")
+        val url = "$serverUrl$path"
+        val prefs = context.getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
+        val displayName = prefs.getString(Constants.PREF_DEVICE_NAME, Constants.DEFAULT_DEVICE_NAME)
+            .orEmpty()
+            .ifBlank { Constants.DEFAULT_DEVICE_NAME }
+        val body = JSONObject()
+            .put("clientVersion", BuildConfig.VERSION_CODE)
+            .put("appVersion", BuildConfig.VERSION_NAME)
+            .put("displayName", displayName)
+
+        val builder = Request.Builder()
+            .url(url)
+            .header("content-type", "application/json")
+            .post(body.toString().toRequestBody(JSON))
+        client.newCall(builder.build()).execute().use { response ->
+            val text = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                throw IOException(JSONObject(text.ifBlank { "{}" }).optString("error", "HTTP ${response.code}"))
+            }
+            val json = JSONObject(text.ifBlank { "{}" })
+            val android = json.optJSONObject("android")
+            val apkUrl = android?.optString("downloadUrl")?.takeIf { it.isNotBlank() }
+            return AndroidSetupRedeemResult(
+                updateAvailable = json.optBoolean("updateAvailable", false),
+                latestVersionCode = android?.takeIf { it.has("versionCode") && !it.isNull("versionCode") }?.optLong("versionCode"),
+                apkUrl = apkUrl,
+                pairingPayload = json.optString("payloadUri").takeIf { it.isNotBlank() },
+            )
+        }
+    }
+
     fun createVoiceSession(deviceId: String, mode: String = Constants.STREAM_TARGET_ASSISTANT): String {
-        return request("POST", "/api/voice/sessions", JSONObject().put("deviceId", deviceId).put("mode", mode))
+        return request(
+            "POST",
+            "/api/voice/sessions",
+            JSONObject()
+                .put("deviceId", deviceId)
+                .put("token", pairedDeviceToken())
+                .put("mode", mode)
+                .put("protocolVersion", 1)
+                .put("clientVersion", BuildConfig.VERSION_CODE)
+        )
             .getJSONObject("session")
             .getString("id")
     }
@@ -170,24 +292,34 @@ class VoiceStreamApi(private val context: Context) {
     }
 
     fun uploadLog(message: String) {
+        val deviceId = pairedDeviceId()
+        val token = pairedDeviceToken()
         request(
             "POST",
             "/api/logs",
             JSONObject()
+                .put("deviceId", if (deviceId.isBlank()) JSONObject.NULL else deviceId)
+                .put("token", if (token.isBlank()) JSONObject.NULL else token)
                 .put("source", "android")
                 .put("level", "info")
                 .put("message", message)
+                .put("protocolVersion", 1)
+                .put("clientVersion", BuildConfig.VERSION_CODE)
         )
     }
 
     fun uploadDiagnostics(reason: String, logText: String) {
         val deviceId = pairedDeviceId().takeIf { it.isNotBlank() }
+        val token = pairedDeviceToken().takeIf { it.isNotBlank() }
         val body = JSONObject()
             .put("source", "android")
             .put("level", "info")
             .put("message", "Android diagnostics ($reason)")
             .put("details", JSONObject().put("reason", reason).put("log", logText))
+            .put("protocolVersion", 1)
+            .put("clientVersion", BuildConfig.VERSION_CODE)
         if (deviceId != null) body.put("deviceId", deviceId)
+        if (token != null) body.put("token", token)
         request("POST", "/api/logs", body)
     }
 
@@ -215,6 +347,8 @@ class VoiceStreamApi(private val context: Context) {
         val body = JSONObject()
             .put("source", "android")
             .put("code", code)
+            .put("deviceId", pairedDeviceId().takeIf { it.isNotBlank() } ?: JSONObject.NULL)
+            .put("token", pairedDeviceToken().takeIf { it.isNotBlank() } ?: JSONObject.NULL)
         if (!voiceSessionId.isNullOrBlank()) body.put("voiceSessionId", voiceSessionId)
         request("POST", "/api/voice/approval-codes", body)
     }

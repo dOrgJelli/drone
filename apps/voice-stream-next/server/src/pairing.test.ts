@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
   buildPairingPayload,
+  buildUpdatePayload,
   clientVersionSupported,
   minClientVersion,
   pairingExpiresAt,
@@ -18,10 +19,11 @@ describe('pairing payload', () => {
       token: 'abc123',
       deviceType: 'android',
       displayName: 'Android voice client',
-      protocolVersion: 1,
-      expiresAt,
-      pairingSessionId: 'pair_test',
-    });
+        protocolVersion: 1,
+        expiresAt,
+        pairingSessionId: 'pair_test',
+        apkUrl: 'https://example.test/api/mobile/android/apk',
+      });
 
     expect(built.payload.version).toBe(1);
     expect(built.payload.minClientVersion).toBe(minClientVersion());
@@ -29,6 +31,7 @@ describe('pairing payload', () => {
     expect(built.payloadUri).toContain('voicestream://pair?');
     expect(built.payloadUri).toContain('deviceId=dev_test');
     expect(built.payloadUri).toContain('pairingSessionId=pair_test');
+    expect(built.payloadUri).toContain('apk=https%3A%2F%2Fexample.test%2Fapi%2Fmobile%2Fandroid%2Fapk');
   });
 
   test('derives future expiry timestamps from ttl configuration', () => {
@@ -53,6 +56,7 @@ describe('pairing payload', () => {
       protocolVersion: 1,
       expiresAt: '2026-05-21T20:00:00.000Z',
       pairingSessionId: 'pair_roundtrip',
+      apkUrl: 'https://example.test/api/mobile/android/apk',
     });
     const parsed = parsePairingPayload(built.payloadUri);
     expect(parsed.serverUrl).toBe('http://127.0.0.1:3299');
@@ -61,6 +65,13 @@ describe('pairing payload', () => {
     expect(parsed.displayName).toBe('Android voice client');
     expect(parsed.pairingSessionId).toBe('pair_roundtrip');
     expect(parsed.minClientVersion).toBe(minClientVersion());
+    expect(parsed.apkUrl).toBe('https://example.test/api/mobile/android/apk');
+  });
+
+  test('builds android update payloads', () => {
+    expect(buildUpdatePayload({ versionCode: 28, apkUrl: 'https://example.test/app.apk' })).toBe(
+      'voicestream://update?versionCode=28&apk=https%3A%2F%2Fexample.test%2Fapp.apk',
+    );
   });
 
   test('rejects malformed pairing payloads', () => {
