@@ -1,14 +1,17 @@
-const { app, BrowserWindow, ipcMain, screen, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, shell, Menu, Tray, nativeImage } = require('electron');
 const { fork } = require('node:child_process');
 const fs = require('node:fs');
 const { createRequire } = require('node:module');
 const path = require('node:path');
+const zlib = require('node:zlib');
 
 const PROTOCOL = 'voicestream';
 const pendingPairingPayloads = [];
 let mainWindow = null;
 let compactMode = true;
 let normalWindowBounds = null;
+let tray = null;
+let isQuitting = false;
 
 const fullWindow = {
   width: 1180,
@@ -17,8 +20,8 @@ const fullWindow = {
   minHeight: 680,
 };
 const compactWindow = {
-  width: 172,
-  height: 224,
+  width: 268,
+  height: 72,
   margin: 18,
 };
 
@@ -69,6 +72,8 @@ const defaultConfig = {
   deviceId: '',
   deviceToken: '',
   deviceName: 'Desktop voice client',
+  inputDeviceId: '',
+  outputDeviceId: '',
   authSavedAt: '',
 };
 
@@ -102,6 +107,27 @@ function writeConfig(nextConfig) {
   fs.mkdirSync(path.dirname(configPath()), { recursive: true });
   fs.writeFileSync(configPath(), JSON.stringify(config, null, 2));
   return config;
+}
+
+function windowDebugLog(message, details = {}) {
+  try {
+    const file = path.join(app.getPath('userData'), 'voice-stream-next-window-debug.log');
+    fs.appendFileSync(file, `${JSON.stringify({ at: new Date().toISOString(), pid: process.pid, message, ...details })}\n`);
+  } catch {
+    // Debug logging must never affect window behavior.
+  }
+}
+
+function windowSnapshot(win) {
+  if (!win || win.isDestroyed()) return null;
+  return {
+    bounds: win.getBounds(),
+    minimumSize: win.getMinimumSize(),
+    resizable: win.isResizable(),
+    alwaysOnTop: win.isAlwaysOnTop(),
+    compactMode,
+    normalWindowBounds,
+  };
 }
 
 function resolveVoskModelPath() {
@@ -388,6 +414,7 @@ function sendWindowState(win) {
 
 function applyCompactMode(win) {
   if (!win || win.isDestroyed()) return windowStatePayload();
+  windowDebugLog('applyCompactMode:start', { snapshot: windowSnapshot(win) });
   if (!compactMode) normalWindowBounds = win.getBounds();
   compactMode = true;
   win.setMinimumSize(compactWindow.width, compactWindow.height);
@@ -398,6 +425,7 @@ function applyCompactMode(win) {
   if (win.isMinimized()) win.restore();
   win.show();
   sendWindowState(win);
+  windowDebugLog('applyCompactMode:end', { snapshot: windowSnapshot(win) });
   return windowStatePayload();
 }
 
@@ -414,40 +442,193 @@ function centeredFullBounds(win) {
 
 function applyExpandedMode(win) {
   if (!win || win.isDestroyed()) return windowStatePayload();
+  windowDebugLog('applyExpandedMode:start', { snapshot: windowSnapshot(win) });
   compactMode = false;
   win.setResizable(true);
   win.setMinimumSize(fullWindow.minWidth, fullWindow.minHeight);
   win.setAlwaysOnTop(false);
   win.setSkipTaskbar(false);
-  win.setBounds(normalWindowBounds || centeredFullBounds(win));
+  const bounds = normalWindowBounds || centeredFullBounds(win);
+  const tooSmallForFullMode = bounds.width < fullWindow.minWidth || bounds.height < fullWindow.minHeight;
+  win.setBounds(tooSmallForFullMode ? centeredFullBounds(win) : bounds);
   if (win.isMinimized()) win.restore();
   win.show();
   win.focus();
   sendWindowState(win);
+  windowDebugLog('applyExpandedMode:end', { snapshot: windowSnapshot(win) });
   return windowStatePayload();
+}
+
+function applySignedOutMode(win) {
+  windowDebugLog('applySignedOutMode:start', { snapshot: windowSnapshot(win) });
+  normalWindowBounds = null;
+  const result = applyExpandedMode(win);
+  windowDebugLog('applySignedOutMode:end', { snapshot: windowSnapshot(win) });
+  return result;
+}
+
+function shouldStartCompact() {
+  const config = readConfig();
+  return Boolean(config.deviceId && config.deviceToken);
 }
 
 function windowFromEvent(event) {
   return BrowserWindow.fromWebContents(event.sender) || mainWindow;
 }
 
+function crc32(buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type, data) {
+  const typeBuffer = Buffer.from(type, 'ascii');
+  const length = Buffer.alloc(4);
+  const crc = Buffer.alloc(4);
+  length.writeUInt32BE(data.length, 0);
+  crc.writeUInt32BE(crc32(Buffer.concat([typeBuffer, data])), 0);
+  return Buffer.concat([length, typeBuffer, data, crc]);
+}
+
+function trayIconPngBuffer() {
+  const size = 32;
+  const raw = Buffer.alloc(size * (1 + size * 4));
+
+  function setPixel(x, y, r, g, b, a) {
+    const offset = y * (1 + size * 4) + 1 + x * 4;
+    raw[offset] = r;
+    raw[offset + 1] = g;
+    raw[offset + 2] = b;
+    raw[offset + 3] = a;
+  }
+
+  for (let y = 0; y < size; y += 1) {
+    raw[y * (1 + size * 4)] = 0;
+    for (let x = 0; x < size; x += 1) {
+      const dx = x + 0.5 - 16;
+      const dy = y + 0.5 - 16;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      if (distance <= 15) {
+        const alpha = distance < 14 ? 255 : Math.round((15 - distance) * 255);
+        setPixel(x, y, 157, 124, 255, alpha);
+      }
+    }
+  }
+
+  for (let y = 8; y <= 18; y += 1) {
+    for (let x = 13; x <= 18; x += 1) {
+      const roundedTop = y < 11 && (x < 14 || x > 17);
+      const roundedBottom = y > 15 && (x < 14 || x > 17);
+      if (!roundedTop && !roundedBottom) setPixel(x, y, 255, 255, 255, 255);
+    }
+  }
+  for (let y = 19; y <= 23; y += 1) {
+    for (let x = 15; x <= 16; x += 1) setPixel(x, y, 255, 255, 255, 255);
+  }
+  for (let y = 24; y <= 25; y += 1) {
+    for (let x = 11; x <= 20; x += 1) setPixel(x, y, 255, 255, 255, 255);
+  }
+
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(size, 0);
+  header.writeUInt32BE(size, 4);
+  header[8] = 8;
+  header[9] = 6;
+  header[10] = 0;
+  header[11] = 0;
+  header[12] = 0;
+
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk('IHDR', header),
+    pngChunk('IDAT', zlib.deflateSync(raw)),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
+function trayIconImage() {
+  const image = nativeImage.createFromBuffer(trayIconPngBuffer());
+  if (process.platform === 'darwin') image.setTemplateImage(false);
+  return image;
+}
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+  sendWindowState(mainWindow);
+  mainWindow.webContents.invalidate?.();
+  windowDebugLog('showMainWindow', { snapshot: windowSnapshot(mainWindow) });
+}
+
+function ensureTray() {
+  if (tray) return tray;
+  tray = new Tray(trayIconImage());
+  tray.setToolTip('VoiceStream');
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'Show VoiceStream', click: showMainWindow },
+    { type: 'separator' },
+    {
+      label: 'Quit',
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      },
+    },
+  ]));
+  tray.on('click', showMainWindow);
+  tray.on('double-click', showMainWindow);
+  return tray;
+}
+
+function hideToTray(win) {
+  if (!win || win.isDestroyed()) return;
+  ensureTray();
+  win.hide();
+  windowDebugLog('hideToTray', { snapshot: windowSnapshot(win) });
+}
+
 function createWindow() {
+  const initialBounds = centeredFullBounds(null);
+  windowDebugLog('createWindow:start', {
+    initialBounds,
+    shouldStartCompact: shouldStartCompact(),
+    config: (() => {
+      const config = readConfig();
+      return {
+        serverUrl: config.serverUrl,
+        webUrl: config.webUrl,
+        deviceId: config.deviceId ? `${config.deviceId.slice(0, 12)}...` : '',
+        hasDeviceToken: Boolean(config.deviceToken),
+      };
+    })(),
+  });
   const win = new BrowserWindow({
-    width: compactWindow.width,
-    height: compactWindow.height,
-    minWidth: compactWindow.width,
-    minHeight: compactWindow.height,
+    ...initialBounds,
+    minWidth: fullWindow.minWidth,
+    minHeight: fullWindow.minHeight,
     title: 'VoiceStream',
     backgroundColor: '#101216',
     frame: false,
-    resizable: false,
-    alwaysOnTop: true,
-    skipTaskbar: true,
+    resizable: true,
+    alwaysOnTop: false,
+    skipTaskbar: false,
     show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
+      backgroundThrottling: false,
     },
   });
 
@@ -455,10 +636,21 @@ function createWindow() {
   win.loadFile(path.join(__dirname, 'index.html'));
   mainWindow = win;
   win.once('ready-to-show', () => {
-    applyCompactMode(win);
+    windowDebugLog('ready-to-show', { snapshot: windowSnapshot(win), shouldStartCompact: shouldStartCompact() });
+    if (shouldStartCompact()) {
+      applyCompactMode(win);
+    } else {
+      applySignedOutMode(win);
+    }
   });
   win.webContents.once('did-finish-load', () => {
+    windowDebugLog('did-finish-load', { snapshot: windowSnapshot(win) });
     sendWindowState(win);
+  });
+  win.on('close', (event) => {
+    if (isQuitting) return;
+    event.preventDefault();
+    hideToTray(win);
   });
   win.on('move', () => {
     if (compactMode) return;
@@ -480,10 +672,7 @@ if (!gotSingleInstanceLock) {
   app.on('second-instance', (_event, argv) => {
     const payload = extractPairingPayloadFromArgv(argv);
     if (payload) queuePairingPayload(payload);
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
+    showMainWindow();
   });
 
   app.on('open-url', (event, url) => {
@@ -497,12 +686,17 @@ if (!gotSingleInstanceLock) {
   ipcMain.handle('pairing:takePending', () => pendingPairingPayloads.splice(0));
   ipcMain.handle('config:write', (_event, config) => writeConfig(config));
   ipcMain.handle('app:openExternal', (_event, url) => shell.openExternal(url));
+  ipcMain.handle('debug:window', (_event, message, details) => {
+    windowDebugLog(String(message || 'renderer'), { renderer: details || {}, snapshot: windowSnapshot(mainWindow) });
+    return { ok: true };
+  });
   ipcMain.handle('window:state', () => windowStatePayload());
   ipcMain.handle('window:compact', (event) => applyCompactMode(windowFromEvent(event)));
   ipcMain.handle('window:expand', (event) => applyExpandedMode(windowFromEvent(event)));
+  ipcMain.handle('window:signedOut', (event) => applySignedOutMode(windowFromEvent(event)));
   ipcMain.handle('window:close', (event) => {
     const win = windowFromEvent(event);
-    if (win && !win.isDestroyed()) win.close();
+    hideToTray(win);
   });
   ipcMain.handle('vosk:status', () => statusForVosk());
   ipcMain.handle('vosk:start', () => ensureVoskRecognizer());
@@ -519,18 +713,20 @@ if (!gotSingleInstanceLock) {
   app.whenReady().then(() => {
     const launchPayload = extractPairingPayloadFromArgv(process.argv);
     if (launchPayload) queuePairingPayload(launchPayload);
+    ensureTray();
     createWindow();
   });
 
   app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') app.quit();
+    if (isQuitting && process.platform !== 'darwin') app.quit();
   });
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    showMainWindow();
   });
 
   app.on('before-quit', () => {
+    isQuitting = true;
     releaseVosk();
   });
 }

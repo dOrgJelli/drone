@@ -193,4 +193,70 @@ describe('voice session device validation', () => {
       delete process.env.VOICE_STREAM_NEXT_DATA_DIR;
     }
   });
+
+  test('auto-connects desktop through browser-auth claim flow', async () => {
+    const dataDir = path.join(process.cwd(), 'server', 'data', 'tests', crypto.randomUUID());
+    process.env.VOICE_STREAM_NEXT_DATA_DIR = dataDir;
+    const built = await buildApp({ logger: false });
+    try {
+      const requestResponse = await built.app.inject({
+        method: 'POST',
+        url: '/api/desktop-auth/requests',
+        headers: { 'content-type': 'application/json' },
+        payload: JSON.stringify({ displayName: 'Browser Desktop' }),
+      });
+      expect(requestResponse.statusCode).toBe(200);
+      const request = requestResponse.json();
+      expect(String(request.requestId).startsWith('dauth_')).toBe(true);
+      expect(request.secret).toBeTruthy();
+      expect(request.deviceToken).toBeTruthy();
+
+      const claimResponse = await built.app.inject({
+        method: 'POST',
+        url: '/api/desktop-auth/claim',
+        headers: {
+          'content-type': 'application/json',
+          'x-voice-dev-user-email': 'browser-desktop@example.local',
+          'x-voice-dev-user-name': 'Browser Desktop User',
+          'x-voice-dev-admin': '0',
+        },
+        payload: JSON.stringify({ requestId: request.requestId, secret: request.secret }),
+      });
+      expect(claimResponse.statusCode).toBe(200);
+      const claimed = claimResponse.json();
+      expect(claimed.device.deviceType).toBe('desktop');
+      expect(claimed.device.displayName).toBe('Browser Desktop');
+
+      const resultResponse = await built.app.inject({
+        method: 'POST',
+        url: '/api/desktop-auth/result',
+        headers: { 'content-type': 'application/json' },
+        payload: JSON.stringify({ requestId: request.requestId, secret: request.secret }),
+      });
+      expect(resultResponse.statusCode).toBe(200);
+      expect(resultResponse.json().status).toBe('claimed');
+
+      const sessionResponse = await built.app.inject({
+        method: 'POST',
+        url: '/api/voice/sessions',
+        headers: { 'content-type': 'application/json' },
+        payload: JSON.stringify({ deviceId: claimed.device.id, token: request.deviceToken, mode: 'assistant' }),
+      });
+      expect(sessionResponse.statusCode).toBe(200);
+      expect(sessionResponse.json().session.deviceId).toBe(claimed.device.id);
+
+      const bootstrapResponse = await built.app.inject({
+        method: 'GET',
+        url: `/api/devices/${encodeURIComponent(claimed.device.id)}/bootstrap`,
+        headers: { 'x-voice-device-token': request.deviceToken },
+      });
+      expect(bootstrapResponse.statusCode).toBe(200);
+      expect(bootstrapResponse.json().device.id).toBe(claimed.device.id);
+      expect(bootstrapResponse.json().settings.unlockCode).toBeTruthy();
+    } finally {
+      await built.app.close();
+      built.db.db.close();
+      delete process.env.VOICE_STREAM_NEXT_DATA_DIR;
+    }
+  });
 });

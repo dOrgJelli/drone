@@ -6,39 +6,79 @@
     <title>VoiceStream Desktop</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
-  <body class="is-compact">
+  <body class="is-signed-out">
+    <section class="auth-screen" aria-labelledby="auth-title">
+      <button id="authCloseButton" class="secondary window-button auth-close" type="button" aria-label="Close VoiceStream">x</button>
+      <div class="auth-panel">
+        <div class="brand-lockup auth-brand">
+          <span class="brand-mark"></span>
+          <div>
+            <p class="eyebrow">Voice Stream</p>
+            <h1 id="auth-title">Sign in to Voice Stream</h1>
+          </div>
+        </div>
+        <p id="authStatus" class="auth-status muted">Sign in with your browser to connect this desktop.</p>
+        <div class="auth-actions">
+          <button id="signInButton" type="button">Sign in</button>
+          <button id="openWebButton" class="secondary" type="button">Open web</button>
+        </div>
+      </div>
+    </section>
     <main class="shell">
       <header class="topbar">
         <div class="brand-lockup">
           <span class="brand-mark"></span>
           <div>
-            <p class="eyebrow">Voice Stream</p>
-            <h1>Desktop voice</h1>
+            <h1>Voice Stream</h1>
           </div>
         </div>
 
         <div class="topbar-actions">
-          <div class="status-block">
+          <div class="status-account-block">
             <span id="connectionDot" class="dot"></span>
             <div>
               <strong id="connectionLabel">Disconnected</strong>
               <span id="deviceLabel">No device connected</span>
+              <span class="sr-only" id="accountLabel">Connected</span>
+              <span class="sr-only" id="accountDetail">Desktop voice</span>
+            </div>
+            <button id="signOutButton" class="secondary" type="button">Log out</button>
+          </div>
+          <div class="settings-popover">
+            <button id="settingsButton" class="secondary window-button icon-button" type="button" aria-label="Audio settings" aria-expanded="false">Audio</button>
+            <div id="settingsPanel" class="settings-panel" hidden>
+              <div class="voice-device-panel" aria-label="Audio devices">
+                <div class="device-picker">
+                  <span class="device-picker-title">Input</span>
+                  <button id="inputDeviceButton" class="device-picker-button" type="button" aria-haspopup="listbox" aria-expanded="false">
+                    <span id="inputDeviceLabel">System default</span>
+                    <span class="device-picker-chevron" aria-hidden="true"></span>
+                  </button>
+                  <div id="inputDeviceMenu" class="device-picker-menu" role="listbox" hidden></div>
+                  <select id="inputDeviceSelect" class="device-select-hidden" tabindex="-1" aria-hidden="true"></select>
+                </div>
+                <div class="device-picker">
+                  <span class="device-picker-title">Output</span>
+                  <button id="outputDeviceButton" class="device-picker-button" type="button" aria-haspopup="listbox" aria-expanded="false">
+                    <span id="outputDeviceLabel">System default</span>
+                    <span class="device-picker-chevron" aria-hidden="true"></span>
+                  </button>
+                  <div id="outputDeviceMenu" class="device-picker-menu" role="listbox" hidden></div>
+                  <select id="outputDeviceSelect" class="device-select-hidden" tabindex="-1" aria-hidden="true"></select>
+                </div>
+              </div>
             </div>
           </div>
-          <button id="signInButton" class="secondary" type="button">Sign in</button>
-          <button id="openWebButton" class="secondary" type="button">Open hub</button>
           <button id="compactButton" class="secondary window-button" type="button" aria-label="Minimize to voice controls">Minimize</button>
           <button id="closeButton" class="secondary window-button" type="button" aria-label="Close VoiceStream">x</button>
         </div>
       </header>
 
-      <section class="voice-stage" aria-labelledby="voice-title">
-        <button id="expandButton" class="expand-button" type="button" aria-label="Expand VoiceStream">Full</button>
+      <section class="voice-stage" aria-label="Voice controls">
+        <button id="expandButton" class="expand-button" type="button" aria-label="Expand VoiceStream">Open</button>
 
         <div class="voice-copy">
-          <p class="eyebrow">Assistant microphone</p>
-          <h2 id="voice-title">Voice control</h2>
-          <p id="authStatus" class="auth-status muted">Checking session.</p>
+          <p id="voiceAuthStatus" class="auth-status muted">Checking session.</p>
         </div>
 
         <button id="primaryVoiceButton" class="voice-orb is-off" type="button" aria-label="Start desktop voice">
@@ -64,19 +104,6 @@
         <p id="micStatus" class="voice-status">Connect this desktop, then start voice.</p>
       </section>
 
-      <footer class="connection-strip">
-        <label>
-          Server
-          <input id="serverUrlInput" autocomplete="off" />
-        </label>
-        <label>
-          Desktop name
-          <input id="deviceNameInput" autocomplete="off" />
-        </label>
-        <button id="saveButton" type="button">Save</button>
-        <button id="pairButton" class="secondary" type="button">Connect desktop</button>
-        <p id="pairingMessage" class="strip-message muted">Use Sign in for Clerk, or connect to a local development server.</p>
-      </footer>
     </main>
     <script src="../shared/approval-code.js"></script>
     <script src="../shared/pcm-capture-buffer.js"></script>

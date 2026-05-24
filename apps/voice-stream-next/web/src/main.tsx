@@ -1479,39 +1479,109 @@ function Metric({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
+function readDesktopAuthRequest(): { requestId: string; secret: string } | null {
+  const params = new URLSearchParams(window.location.search);
+  const requestId = String(params.get('desktopAuthRequest') ?? '').trim();
+  const secret = String(params.get('desktopAuthSecret') ?? '').trim();
+  return requestId && secret ? { requestId, secret } : null;
+}
+
+function closeDesktopAuthTab() {
+  window.setTimeout(() => {
+    window.close();
+    window.open('', '_self');
+    window.close();
+  }, 350);
+}
+
+function DesktopAutoConnect({ client, children }: { client: ApiClient; children: React.ReactNode }) {
+  const request = React.useMemo(readDesktopAuthRequest, []);
+  const [error, setError] = React.useState<string | null>(null);
+  const [connected, setConnected] = React.useState(false);
+  const [closeAttempted, setCloseAttempted] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!request) return undefined;
+    let cancelled = false;
+    void client
+      .request<{ ok: true }>('/api/desktop-auth/claim', {
+        method: 'POST',
+        body: JSON.stringify({ requestId: request.requestId, secret: request.secret }),
+      })
+      .then(() => {
+        if (cancelled) return;
+        setConnected(true);
+        window.history.replaceState({}, document.title, window.location.pathname || '/');
+        closeDesktopAuthTab();
+        window.setTimeout(() => {
+          if (!cancelled) setCloseAttempted(true);
+        }, 1200);
+      })
+      .catch((err: any) => {
+        if (!cancelled) setError(err?.message ?? String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, request]);
+
+  if (!request) return <>{children}</>;
+
+  return (
+    <div className="signin-page">
+      <div className="signin-copy">
+        <div className="kicker">Drone</div>
+        <h1>Connecting desktop</h1>
+        <p>
+          {error
+            ? `Desktop connection failed: ${error}`
+            : connected
+              ? closeAttempted
+                ? 'Desktop connected. You can close this tab.'
+                : 'Desktop connected. Closing this tab.'
+              : 'Finishing desktop sign in.'}
+        </p>
+        {error ? <button type="button" onClick={() => window.location.assign('/')}>Open dashboard</button> : null}
+      </div>
+    </div>
+  );
+}
+
 function ClerkDashboard() {
   const { getToken } = useAuth();
   const client = React.useMemo(() => createClerkClient(getToken), [getToken]);
   return (
-    <AppShell
-      client={client}
-      identitySlot={
-        <UserButton
-          afterSignOutUrl="/"
-          appearance={{
-            elements: {
-              avatarBox: {
-                width: '28px',
-                height: '28px',
-                border: '1px solid var(--border-subtle)',
-                borderRadius: '4px',
+    <DesktopAutoConnect client={client}>
+      <AppShell
+        client={client}
+        identitySlot={
+          <UserButton
+            afterSignOutUrl="/"
+            appearance={{
+              elements: {
+                avatarBox: {
+                  width: '28px',
+                  height: '28px',
+                  border: '1px solid var(--border-subtle)',
+                  borderRadius: '4px',
+                },
+                userButtonPopoverCard: {
+                  backgroundColor: '#171B21',
+                  border: '1px solid #2D3340',
+                  boxShadow: '0 24px 80px rgba(0,0,0,.35)',
+                },
+                userButtonPopoverActionButton: {
+                  color: '#B8BFD0',
+                },
+                userButtonPopoverActionButtonText: {
+                  fontFamily: 'var(--sans)',
+                },
               },
-              userButtonPopoverCard: {
-                backgroundColor: '#171B21',
-                border: '1px solid #2D3340',
-                boxShadow: '0 24px 80px rgba(0,0,0,.35)',
-              },
-              userButtonPopoverActionButton: {
-                color: '#B8BFD0',
-              },
-              userButtonPopoverActionButtonText: {
-                fontFamily: 'var(--sans)',
-              },
-            },
-          }}
-        />
-      }
-    />
+            }}
+          />
+        }
+      />
+    </DesktopAutoConnect>
   );
 }
 
@@ -1519,14 +1589,16 @@ function DevDashboard() {
   const devUser = React.useMemo(readDevUser, []);
   const client = React.useMemo(() => createDevClient(devUser), [devUser]);
   return (
-    <AppShell
-      client={client}
-      identitySlot={
-        <div className="assistant-dev-profile" title="Dev auth is active. Configure VITE_CLERK_PUBLISHABLE_KEY to enable login and logout.">
-          D
-        </div>
-      }
-    />
+    <DesktopAutoConnect client={client}>
+      <AppShell
+        client={client}
+        identitySlot={
+          <div className="assistant-dev-profile" title="Dev auth is active. Configure VITE_CLERK_PUBLISHABLE_KEY to enable login and logout.">
+            D
+          </div>
+        }
+      />
+    </DesktopAutoConnect>
   );
 }
 
@@ -1568,8 +1640,8 @@ function Root() {
       <SignedOut>
         <div className="signin-page">
           <div className="signin-copy">
-            <div className="kicker">Voice Stream</div>
-            <h1>Sign in to Assistant Hub</h1>
+            <div className="kicker">Drone</div>
+            <h1>Sign in to Drone</h1>
             <p>Access assistant threads and paired devices from your workspace.</p>
           </div>
           <SignIn routing="hash" />

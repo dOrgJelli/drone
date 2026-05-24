@@ -21,6 +21,7 @@ const state = {
   voiceReconnectAttempt: 0,
   voiceReconnecting: false,
   voiceReconnectTimer: null,
+  desktopAuthPollTimer: null,
   voiceStreamEnding: false,
   wakeUsesVosk: false,
   controlSocket: null,
@@ -41,14 +42,19 @@ const state = {
   analyser: null,
   meterFrame: 0,
   compact: true,
+  signedOutExpandInFlight: false,
 };
 
 const els = {
   connectionDot: document.querySelector('#connectionDot'),
   connectionLabel: document.querySelector('#connectionLabel'),
   deviceLabel: document.querySelector('#deviceLabel'),
+  accountLabel: document.querySelector('#accountLabel'),
+  accountDetail: document.querySelector('#accountDetail'),
   openWebButton: document.querySelector('#openWebButton'),
   signInButton: document.querySelector('#signInButton'),
+  signOutButton: document.querySelector('#signOutButton'),
+  authCloseButton: document.querySelector('#authCloseButton'),
   compactButton: document.querySelector('#compactButton'),
   closeButton: document.querySelector('#closeButton'),
   expandButton: document.querySelector('#expandButton'),
@@ -57,6 +63,8 @@ const els = {
   deviceNameInput: document.querySelector('#deviceNameInput'),
   authStatus: document.querySelector('#authStatus'),
   pairingMessage: document.querySelector('#pairingMessage'),
+  voiceAuthStatus: document.querySelector('#voiceAuthStatus'),
+  voicePairingMessage: document.querySelector('#voicePairingMessage'),
   pairButton: document.querySelector('#pairButton'),
   primaryVoiceButton: document.querySelector('#primaryVoiceButton'),
   primaryVoiceMode: document.querySelector('#primaryVoiceMode'),
@@ -64,10 +72,32 @@ const els = {
   offButton: document.querySelector('#offButton'),
   micStatus: document.querySelector('#micStatus'),
   meterBar: document.querySelector('#meterBar'),
+  inputDeviceSelect: document.querySelector('#inputDeviceSelect'),
+  outputDeviceSelect: document.querySelector('#outputDeviceSelect'),
+  inputDeviceButton: document.querySelector('#inputDeviceButton'),
+  inputDeviceLabel: document.querySelector('#inputDeviceLabel'),
+  inputDeviceMenu: document.querySelector('#inputDeviceMenu'),
+  outputDeviceButton: document.querySelector('#outputDeviceButton'),
+  outputDeviceLabel: document.querySelector('#outputDeviceLabel'),
+  outputDeviceMenu: document.querySelector('#outputDeviceMenu'),
+  settingsButton: document.querySelector('#settingsButton'),
+  settingsPanel: document.querySelector('#settingsPanel'),
 };
 
 function trimSlash(value) {
   return String(value || '').replace(/\/+$/, '');
+}
+
+function debugWindow(message, details = {}) {
+  if (!desktop.debugWindow) return;
+  void desktop.debugWindow(message, {
+    ...details,
+    bodyClass: document.body.className,
+    compact: state.compact,
+    signedOutExpandInFlight: state.signedOutExpandInFlight,
+    hasDeviceId: Boolean(state.config?.deviceId),
+    hasDeviceToken: Boolean(state.config?.deviceToken),
+  }).catch(() => undefined);
 }
 
 function deriveWebUrl(config) {
@@ -98,43 +128,77 @@ function authSessionFields(config) {
 }
 
 function updateAuthStatus(kind, message) {
-  els.authStatus.className = `auth-status ${kind === 'ok' ? 'ok' : kind === 'error' ? 'error' : 'muted'}`;
-  els.authStatus.textContent = message;
+  if (els.authStatus) {
+    els.authStatus.className = `auth-status ${kind === 'ok' ? 'ok' : kind === 'error' ? 'error' : 'muted'}`;
+    els.authStatus.textContent = message;
+  }
+  if (els.voiceAuthStatus) {
+    els.voiceAuthStatus.className = `auth-status ${kind === 'ok' ? 'ok' : kind === 'error' ? 'error' : 'muted'}`;
+    els.voiceAuthStatus.textContent = message;
+  }
 }
 
 function authGuidance(config) {
   const webUrl = deriveWebUrl(config);
   return webUrl
-    ? `Sign in at ${webUrl}, then reopen the desktop app.`
-    : 'Sign in on the web dashboard, then reopen the desktop app.';
+    ? `Sign in at ${webUrl}, then connect this desktop.`
+    : 'Sign in on the web dashboard, then connect this desktop.';
 }
 
 function showPairingMessage(message, kind = 'muted') {
-  els.pairingMessage.textContent = message;
-  els.pairingMessage.className = kind === 'error' ? 'error' : 'muted';
+  if (els.pairingMessage) {
+    els.pairingMessage.textContent = message;
+    els.pairingMessage.className = kind === 'error' ? 'error' : 'muted';
+  }
+  if (els.voicePairingMessage) {
+    els.voicePairingMessage.textContent = message;
+    els.voicePairingMessage.className = kind === 'error' ? 'error' : 'muted';
+  }
+}
+
+function setPreferredOutputDevice(deviceId) {
+  window.voiceStreamPreferredOutputDeviceId = String(deviceId || '');
 }
 
 function readFormConfig() {
   return {
     ...state.config,
-    serverUrl: trimSlash(els.serverUrlInput.value),
-    deviceName: els.deviceNameInput.value.trim() || 'Desktop voice client',
+    serverUrl: trimSlash(els.serverUrlInput?.value || state.config?.serverUrl),
+    deviceName: els.deviceNameInput?.value.trim() || state.config?.deviceName || 'Desktop voice client',
+    inputDeviceId: els.inputDeviceSelect?.value ?? state.config?.inputDeviceId ?? '',
+    outputDeviceId: els.outputDeviceSelect?.value ?? state.config?.outputDeviceId ?? '',
   };
 }
 
 function applyConfig(config) {
   state.config = config;
-  els.serverUrlInput.value = config.serverUrl;
-  els.deviceNameInput.value = config.deviceName;
+  if (els.serverUrlInput) els.serverUrlInput.value = config.serverUrl;
+  if (els.deviceNameInput) els.deviceNameInput.value = config.deviceName;
+  if (els.inputDeviceSelect) els.inputDeviceSelect.value = config.inputDeviceId || '';
+  if (els.outputDeviceSelect) els.outputDeviceSelect.value = config.outputDeviceId || '';
+  renderDevicePicker(els.inputDeviceSelect);
+  renderDevicePicker(els.outputDeviceSelect);
+  setPreferredOutputDevice(config.outputDeviceId);
+  const connected = Boolean(config.deviceId && config.deviceToken);
+  document.body.classList.toggle('is-signed-in', connected);
+  document.body.classList.toggle('is-signed-out', !connected);
+  document.body.classList.toggle('is-compact', connected && state.compact);
+  els.compactButton.hidden = state.compact || !connected;
+  els.expandButton.hidden = !state.compact || !connected;
+  debugWindow('renderer:applyConfig', {
+    connected,
+    deviceId: config.deviceId ? `${config.deviceId.slice(0, 12)}...` : '',
+    hasDeviceToken: Boolean(config.deviceToken),
+    serverUrl: config.serverUrl,
+  });
+  if (!connected) ensureSignedOutWindowExpanded();
   updateConnection('idle', config.deviceId ? 'Desktop connected' : 'Ready', config.deviceId ? `${config.deviceName} · ${config.deviceId.slice(0, 12)}` : 'No device connected');
-  if (config.authMode === 'bearer') {
-    if (config.bearerToken) {
-      updateAuthStatus('idle', config.authSavedAt ? `Signed in ${new Date(config.authSavedAt).toLocaleString()}.` : 'Signed in.');
-    } else {
-      updateAuthStatus('error', 'Sign in on the web dashboard to use this server.');
-    }
+  if (els.accountLabel) els.accountLabel.textContent = connected ? 'Connected' : 'Signed out';
+  if (els.accountDetail) els.accountDetail.textContent = connected ? config.deviceName : 'Sign in required';
+  if (connected) {
+    updateAuthStatus('ok', 'Desktop connected.');
   } else {
-    updateAuthStatus('idle', 'Local development session.');
+    updateAuthStatus('idle', 'Sign in with your browser to connect this desktop.');
   }
 }
 
@@ -193,11 +257,31 @@ function showStatus(message) {
   els.micStatus.textContent = message;
 }
 
+function ensureSignedOutWindowExpanded() {
+  if (state.config?.deviceId && state.config?.deviceToken) return;
+  const resizeWindow = desktop.signedOutWindow || desktop.expandWindow;
+  debugWindow('renderer:ensureSignedOutWindowExpanded', {
+    hasSignedOutWindow: Boolean(desktop.signedOutWindow),
+    hasExpandWindow: Boolean(desktop.expandWindow),
+    skipped: !resizeWindow || state.signedOutExpandInFlight,
+  });
+  if (!resizeWindow || state.signedOutExpandInFlight) return;
+  state.signedOutExpandInFlight = true;
+  void resizeWindow()
+    .then(applyWindowState)
+    .finally(() => {
+      state.signedOutExpandInFlight = false;
+    });
+}
+
 function applyWindowState(windowState) {
   state.compact = Boolean(windowState?.compact);
-  document.body.classList.toggle('is-compact', state.compact);
-  els.compactButton.hidden = state.compact;
-  els.expandButton.hidden = !state.compact;
+  const canCompact = Boolean(state.config?.deviceId && state.config?.deviceToken);
+  document.body.classList.toggle('is-compact', state.compact && canCompact);
+  els.compactButton.hidden = state.compact || !canCompact;
+  els.expandButton.hidden = !state.compact || !canCompact;
+  debugWindow('renderer:applyWindowState', { windowState, canCompact });
+  if (!canCompact) ensureSignedOutWindowExpanded();
 }
 
 function setMode(mode, status) {
@@ -312,7 +396,7 @@ function updateVoiceButtons() {
     awake: ['Awake', 'Sleep'],
     sleeping: ['Sleeping', 'Wake'],
     recording: ['Recording', 'Stop'],
-    transcribing: ['Transcribing', 'Working'],
+    transcribing: ['Working', 'Please wait'],
     error: ['Voice error', 'Retry'],
   };
   const [modeLabel, actionLabel] = labels[state.mode] || ['Voice', 'Toggle'];
@@ -412,6 +496,32 @@ function escapeHtml(value) {
 async function loadDashboard() {
   updateConnection('pending', 'Connecting', 'Loading dashboard');
   try {
+    if (state.config?.deviceId && state.config?.deviceToken) {
+      const data = await api(`/api/devices/${encodeURIComponent(state.config.deviceId)}/bootstrap`, {
+        headers: {
+          'x-voice-device-token': state.config.deviceToken,
+          'x-voice-client-version': '1',
+        },
+      });
+      state.dashboard = { devices: [data.device] };
+      state.voiceSettings = data.settings;
+      if (state.voiceSettings) {
+        state.approvalRecognizer.configure({
+          triggerPhrase: state.voiceSettings.triggerPhrase,
+          minDigits: state.voiceSettings.minDigits,
+          maxDigits: state.voiceSettings.maxDigits,
+          stableMs: state.voiceSettings.stableMs,
+          collectTimeoutMs: state.voiceSettings.collectTimeoutMs,
+          duplicateCooldownMs: state.voiceSettings.duplicateCooldownMs,
+          finalizeCheckIntervalMs: state.voiceSettings.finalizeCheckIntervalMs,
+        });
+      }
+      updateConnection('ok', 'Connected', `${state.config.deviceName} · ${state.config.deviceId.slice(0, 12)}`);
+      if (els.accountLabel) els.accountLabel.textContent = data.device.displayName || state.config.deviceName || 'Connected';
+      if (els.accountDetail) els.accountDetail.textContent = `Device ${state.config.deviceId.slice(0, 12)}`;
+      showPairingMessage('Desktop connected.');
+      return data;
+    }
     const dashboard = await api('/api/dashboard');
     state.dashboard = dashboard;
     state.voiceSettings = dashboard.settings;
@@ -528,15 +638,100 @@ async function pairDevice() {
   await loadDashboard();
 }
 
+async function signInWithBrowser() {
+  clearDesktopAuthPoll();
+  const saved = await desktop.writeConfig(authSessionFields(readFormConfig()));
+  applyConfig(saved);
+  const authBaseUrl = deriveWebUrl(saved) || saved.serverUrl;
+  if (!authBaseUrl) {
+    updateAuthStatus('error', 'Configure a server URL before signing in.');
+    return;
+  }
+  const data = await api('/api/desktop-auth/requests', {
+    method: 'POST',
+    body: JSON.stringify({ displayName: saved.deviceName, protocolVersion: 1 }),
+  });
+  const authUrl = new URL(authBaseUrl);
+  authUrl.searchParams.set('desktopAuthRequest', data.requestId);
+  authUrl.searchParams.set('desktopAuthSecret', data.secret);
+  authUrl.searchParams.set('desktopName', saved.deviceName);
+  void desktop.openExternal(authUrl.toString());
+  startDesktopAuthPoll({
+    requestId: data.requestId,
+    secret: data.secret,
+    deviceToken: data.deviceToken,
+    expiresAt: data.expiresAt,
+  });
+  updateAuthStatus('idle', 'Opened browser sign in. This desktop will connect automatically after login.');
+}
+
+function clearDesktopAuthPoll() {
+  if (state.desktopAuthPollTimer) {
+    window.clearTimeout(state.desktopAuthPollTimer);
+    state.desktopAuthPollTimer = null;
+  }
+}
+
+function startDesktopAuthPoll(auth) {
+  let inFlight = false;
+  const expiresAt = Date.parse(auth.expiresAt || '') || (Date.now() + 10 * 60 * 1000);
+  const poll = async () => {
+    if (inFlight) return;
+    if (Date.now() > expiresAt + 5000) {
+      clearDesktopAuthPoll();
+      updateAuthStatus('error', 'Desktop sign in expired. Try Sign in again.');
+      return;
+    }
+    inFlight = true;
+    try {
+      const data = await api('/api/desktop-auth/result', {
+        method: 'POST',
+        body: JSON.stringify({ requestId: auth.requestId, secret: auth.secret }),
+      });
+      if (data.status === 'claimed' && data.device?.id) {
+        clearDesktopAuthPoll();
+        const current = readFormConfig();
+        const paired = await desktop.writeConfig({
+          ...current,
+          deviceId: data.device.id,
+          deviceToken: auth.deviceToken,
+          deviceName: data.device.displayName || current.deviceName,
+        });
+        applyConfig(paired);
+        void desktop.expandWindow?.().then(applyWindowState);
+        ensureControlSocket();
+        updateAuthStatus('ok', 'Desktop connected through browser sign in.');
+        showPairingMessage('Desktop connected through browser sign in.');
+        showStatus('Desktop connected.');
+        await loadDashboard().catch((err) => showStatus(err.message));
+        return;
+      }
+      updateAuthStatus('idle', 'Waiting for browser sign in to finish.');
+    } catch (err) {
+      clearDesktopAuthPoll();
+      updateAuthStatus('error', err?.message || 'Desktop sign in failed.');
+      return;
+    } finally {
+      inFlight = false;
+    }
+    state.desktopAuthPollTimer = window.setTimeout(poll, 1000);
+  };
+  state.desktopAuthPollTimer = window.setTimeout(poll, 1000);
+}
+
 function configuredDeviceIsKnown() {
   if (!state.config?.deviceId || !state.dashboard?.devices) return true;
   return state.dashboard.devices.some((device) => device.id === state.config.deviceId);
 }
 
 async function clearSavedDevice(reason) {
+  clearDesktopAuthPoll();
   const config = readFormConfig();
   const nextConfig = await desktop.writeConfig({ ...config, deviceId: '', deviceToken: '' });
   applyConfig(nextConfig);
+  void desktop.expandWindow?.().then(applyWindowState);
+  stopWakeListener();
+  setMode('off', 'Sign in to start voice.');
   if (reason) showPairingMessage(reason, 'error');
 }
 
@@ -547,14 +742,223 @@ function staleDeviceError(err) {
     /unknown device|not found|foreign key/i.test(message);
 }
 
+function isMediaDeviceNotFound(err) {
+  const message = String(err?.message || '');
+  return err?.name === 'NotFoundError' ||
+    err?.name === 'DevicesNotFoundError' ||
+    /requested device not found|device not found|no audio input/i.test(message);
+}
+
+function audioDeviceLabel(device, fallback) {
+  return String(device.label || fallback).trim();
+}
+
+function pickerElementsForSelect(select) {
+  if (select === els.inputDeviceSelect) {
+    return { button: els.inputDeviceButton, label: els.inputDeviceLabel, menu: els.inputDeviceMenu };
+  }
+  if (select === els.outputDeviceSelect) {
+    return { button: els.outputDeviceButton, label: els.outputDeviceLabel, menu: els.outputDeviceMenu };
+  }
+  return { button: null, label: null, menu: null };
+}
+
+function closeDeviceMenus(exceptMenu = null) {
+  [els.inputDeviceMenu, els.outputDeviceMenu].forEach((menu) => {
+    if (!menu || menu === exceptMenu) return;
+    menu.hidden = true;
+  });
+  [els.inputDeviceButton, els.outputDeviceButton].forEach((button) => {
+    if (!button) return;
+    const picker = pickerElementsForSelect(button === els.inputDeviceButton ? els.inputDeviceSelect : els.outputDeviceSelect);
+    button.setAttribute('aria-expanded', String(Boolean(picker.menu && !picker.menu.hidden)));
+  });
+}
+
+function closeSettingsPanel() {
+  if (!els.settingsPanel || !els.settingsButton) return;
+  els.settingsPanel.hidden = true;
+  els.settingsButton.setAttribute('aria-expanded', 'false');
+  closeDeviceMenus();
+}
+
+function toggleSettingsPanel() {
+  if (!els.settingsPanel || !els.settingsButton) return;
+  const willOpen = els.settingsPanel.hidden;
+  els.settingsPanel.hidden = !willOpen;
+  els.settingsButton.setAttribute('aria-expanded', String(willOpen));
+  if (willOpen) {
+    void refreshAudioDevicePickers();
+  } else {
+    closeDeviceMenus();
+  }
+}
+
+function renderDevicePicker(select) {
+  if (!select) return;
+  const { button, label, menu } = pickerElementsForSelect(select);
+  if (!button || !label || !menu) return;
+  const selectedOption = select.selectedOptions[0] || select.options[0];
+  label.textContent = selectedOption?.textContent || 'System default';
+  menu.textContent = '';
+
+  [...select.options].forEach((option) => {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'device-picker-option';
+    item.role = 'option';
+    item.textContent = option.textContent || 'Audio device';
+    item.dataset.value = option.value;
+    item.setAttribute('aria-selected', String(option.value === select.value));
+    item.addEventListener('click', () => {
+      select.value = option.value;
+      menu.hidden = true;
+      button.setAttribute('aria-expanded', 'false');
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    menu.append(item);
+  });
+}
+
+function toggleDevicePicker(select) {
+  const { button, menu } = pickerElementsForSelect(select);
+  if (!button || !menu) return;
+  const willOpen = menu.hidden;
+  closeDeviceMenus(menu);
+  menu.hidden = !willOpen;
+  button.setAttribute('aria-expanded', String(willOpen));
+  if (willOpen) {
+    const selected = menu.querySelector('[aria-selected="true"]') || menu.querySelector('.device-picker-option');
+    selected?.focus();
+  }
+}
+
+function setSelectOptions(select, devices, selectedDeviceId, defaultLabel, fallbackPrefix) {
+  if (!select) return;
+  const current = selectedDeviceId || '';
+  select.textContent = '';
+  const defaultOption = document.createElement('option');
+  defaultOption.value = '';
+  defaultOption.textContent = defaultLabel;
+  select.append(defaultOption);
+
+  devices.forEach((device, index) => {
+    if (!device.deviceId || device.deviceId === 'default' || device.deviceId === 'communications') return;
+    const option = document.createElement('option');
+    option.value = device.deviceId;
+    option.textContent = audioDeviceLabel(device, `${fallbackPrefix} ${index + 1}`);
+    select.append(option);
+  });
+
+  const hasSelected = current && [...select.options].some((option) => option.value === current);
+  if (hasSelected) {
+    select.value = current;
+  } else if (current) {
+    const missingOption = document.createElement('option');
+    missingOption.value = current;
+    missingOption.textContent = 'Selected device unavailable';
+    select.append(missingOption);
+    select.value = current;
+  } else {
+    select.value = '';
+  }
+  renderDevicePicker(select);
+}
+
+async function refreshAudioDevicePickers() {
+  if (!navigator.mediaDevices?.enumerateDevices) return;
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    setSelectOptions(
+      els.inputDeviceSelect,
+      devices.filter((device) => device.kind === 'audioinput'),
+      state.config?.inputDeviceId,
+      'System default',
+      'Microphone',
+    );
+    setSelectOptions(
+      els.outputDeviceSelect,
+      devices.filter((device) => device.kind === 'audiooutput'),
+      state.config?.outputDeviceId,
+      'System default',
+      'Speaker',
+    );
+  } catch (err) {
+    showStatus(err?.message ? `Audio devices unavailable: ${err.message}` : 'Audio devices unavailable.');
+  }
+}
+
+async function saveAudioDeviceSelection() {
+  const next = await desktop.writeConfig(authSessionFields(readFormConfig()));
+  applyConfig(next);
+  await refreshAudioDevicePickers();
+}
+
+async function restartWakeListenerForDeviceChange() {
+  if (state.stream) return;
+  const shouldRestart = state.mode !== 'off' && (state.wakeStream || state.recognition || state.wakeStarting);
+  if (!shouldRestart) return;
+  stopWakeListener();
+  startWakeListener();
+}
+
+async function getMicrophoneStream() {
+  const selectedDeviceId = state.config?.inputDeviceId || '';
+  if (selectedDeviceId) {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { deviceId: { exact: selectedDeviceId } },
+      });
+      void refreshAudioDevicePickers();
+      return stream;
+    } catch (err) {
+      if (!isMediaDeviceNotFound(err)) throw err;
+    }
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    void refreshAudioDevicePickers();
+    return stream;
+  } catch (initialError) {
+    if (!isMediaDeviceNotFound(initialError) || !navigator.mediaDevices?.enumerateDevices) {
+      throw initialError;
+    }
+
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const audioInputs = devices.filter((device) => device.kind === 'audioinput' && device.deviceId && device.deviceId !== 'default');
+    if (!audioInputs.length) {
+      const err = new Error('No microphone input was found. Check your system sound input settings.');
+      err.cause = initialError;
+      throw err;
+    }
+
+    let lastError = initialError;
+    for (const device of audioInputs) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: { deviceId: { exact: device.deviceId } },
+        });
+        void refreshAudioDevicePickers();
+        return stream;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    const err = new Error('No available microphone input could be opened.');
+    err.cause = lastError;
+    throw err;
+  }
+}
+
 async function ensureRecordingDevice() {
   if (!state.config?.deviceId || !state.config?.deviceToken) {
-    await pairDevice();
-    return;
+    throw new Error('Sign in before starting voice.');
   }
   if (!configuredDeviceIsKnown()) {
-    await clearSavedDevice('Saved desktop pairing was not found on this server. Re-pairing desktop.');
-    await pairDevice();
+    await clearSavedDevice('Saved desktop connection was not found on this server. Sign in again.');
+    throw new Error('Sign in before starting voice.');
   }
 }
 
@@ -585,7 +989,7 @@ async function startMic(target = 'assistant', options = {}) {
     resetVoiceStreamState();
     pendingStreamBuffer.pushAll(preRollBuffer.drain());
     if (options.cue) playLocalVoiceCue(options.cue);
-    state.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    state.stream = await getMicrophoneStream();
     const context = new AudioContext({ sampleRate: 16000 });
     state.audioContext = context;
     const source = context.createMediaStreamSource(state.stream);
@@ -680,6 +1084,7 @@ function openVoiceSocket(target) {
   if (state.voiceSessionId) url.searchParams.set('sessionId', state.voiceSessionId);
   url.searchParams.set('mode', target);
   const socket = new WebSocket(url.toString());
+  let terminalMessageReceived = false;
   socket.binaryType = 'arraybuffer';
   socket.onopen = () => {
     state.voiceReconnectAttempt = 0;
@@ -699,16 +1104,23 @@ function openVoiceSocket(target) {
         socket.send(JSON.stringify({ type: 'client_ping', sentAt: new Date().toISOString() }));
       }
       if (message.type === 'assistant_result') {
+        terminalMessageReceived = true;
         showStatus(`Transcript: ${message.transcript || 'empty'} / Reply: ${message.assistantText || 'empty'}`);
         await finishMicFromServer();
       }
       if (message.type === 'transcript_result') {
+        terminalMessageReceived = true;
         showStatus(message.status || 'Transcript patched into chat.');
         await finishMicFromServer();
       }
       if (message.type === 'sleep') {
+        terminalMessageReceived = true;
         if (target === 'clipboard') {
-          const copied = await copyText(message.transcriptText || '');
+          const transcriptText = message.transcriptText || '';
+          const copied = await copyText(transcriptText);
+          void logDesktopEvent(copied ? 'info' : 'warn', copied ? 'Clipboard transcription copied' : 'Clipboard transcription copy failed', {
+            chars: String(transcriptText || '').trim().length,
+          });
           showStatus(copied ? 'Copied voice transcription.' : 'No voice transcription detected.');
         } else {
           showStatus('Awake. Waiting for voice command.');
@@ -716,6 +1128,7 @@ function openVoiceSocket(target) {
         await finishMicFromServer();
       }
       if (message.type === 'assistant_error') {
+        terminalMessageReceived = true;
         showStatus(message.error || 'Voice runtime failed.');
         await finishMicFromServer();
       }
@@ -723,8 +1136,15 @@ function openVoiceSocket(target) {
       // Ignore non-protocol text frames in the fallback desktop shell.
     }
   };
-  socket.onclose = () => {
+  socket.onclose = (event) => {
     state.voiceOutgoingReady = false;
+    if (state.mode === 'recording' && !state.voiceStreamEnding && event.code === 1000) {
+      if (target === 'clipboard' && !terminalMessageReceived) {
+        void logDesktopEvent('warn', 'Voice stream closed before clipboard result', { code: event.code, reason: event.reason || '' });
+      }
+      void finishMicFromServer();
+      return;
+    }
     if (state.mode === 'recording' && !state.voiceStreamEnding) {
       showStatus('Voice stream disconnected.');
       scheduleVoiceReconnect();
@@ -787,8 +1207,12 @@ async function copyText(text) {
   const trimmed = String(text || '').trim();
   if (!trimmed) return false;
   if (desktop.writeClipboard) {
-    desktop.writeClipboard(trimmed);
-    return true;
+    try {
+      desktop.writeClipboard(trimmed);
+      return true;
+    } catch {
+      return false;
+    }
   }
   if (!navigator.clipboard) return false;
   try {
@@ -799,9 +1223,23 @@ async function copyText(text) {
   }
 }
 
-function playWav(data) {
-  const audio = new Audio(URL.createObjectURL(new Blob([data], { type: 'audio/wav' })));
-  void audio.play().catch(() => undefined);
+async function playWav(data) {
+  const url = URL.createObjectURL(new Blob([data], { type: 'audio/wav' }));
+  const audio = new Audio(url);
+  const outputDeviceId = state.config?.outputDeviceId || '';
+  try {
+    if (outputDeviceId && typeof audio.setSinkId === 'function') {
+      await audio.setSinkId(outputDeviceId);
+    }
+    await audio.play();
+  } catch (err) {
+    showStatus(err?.message ? `Audio playback failed: ${err.message}` : 'Audio playback failed.');
+  } finally {
+    const cleanup = () => URL.revokeObjectURL(url);
+    audio.addEventListener('ended', cleanup, { once: true });
+    audio.addEventListener('error', cleanup, { once: true });
+    window.setTimeout(cleanup, 60_000);
+  }
 }
 
 function resetApprovalCollection() {
@@ -970,7 +1408,7 @@ async function processPhraseText(text, finalizeNow = false) {
 }
 
 async function startWakeAudioCapture() {
-  const media = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const media = await getMicrophoneStream();
   const context = new AudioContext({ sampleRate: 16000 });
   const source = context.createMediaStreamSource(media);
   const processor = context.createScriptProcessor(4096, 1, 1);
@@ -1123,11 +1561,19 @@ async function togglePrimaryVoice() {
   await enterAwake();
 }
 
-els.saveButton.addEventListener('click', async () => {
-  applyConfig(await desktop.writeConfig(authSessionFields(readFormConfig())));
-  await loadDashboard().catch((err) => showStatus(err.message));
-});
-els.pairButton.addEventListener('click', () => pairDevice().catch((err) => showStatus(err.message)));
+if (els.saveButton) {
+  els.saveButton.addEventListener('click', async () => {
+    applyConfig(await desktop.writeConfig(authSessionFields(readFormConfig())));
+    if (state.config?.deviceId && state.config?.deviceToken) {
+      await loadDashboard().catch((err) => showStatus(err.message));
+    } else {
+      updateAuthStatus('idle', 'Settings saved. Sign in to connect this desktop.');
+    }
+  });
+}
+if (els.pairButton) {
+  els.pairButton.addEventListener('click', () => pairDevice().catch((err) => showStatus(err.message)));
+}
 els.primaryVoiceButton.addEventListener('click', () => togglePrimaryVoice().catch((err) => showStatus(err.message)));
 els.offButton.addEventListener('click', () => turnOff().catch((err) => showStatus(err.message)));
 els.compactButton.addEventListener('click', () => {
@@ -1139,15 +1585,59 @@ els.expandButton.addEventListener('click', () => {
 els.closeButton.addEventListener('click', () => {
   if (desktop.closeWindow) void desktop.closeWindow();
 });
+els.authCloseButton.addEventListener('click', () => {
+  if (desktop.closeWindow) void desktop.closeWindow();
+});
+if (els.signOutButton) {
+  els.signOutButton.addEventListener('click', () => {
+    void clearSavedDevice('Desktop disconnected. Sign in to reconnect.').catch((err) => showStatus(err.message));
+  });
+}
 els.openWebButton.addEventListener('click', () => {
   const config = readFormConfig();
   void desktop.openExternal(deriveWebUrl(config) || config.serverUrl);
 });
 els.signInButton.addEventListener('click', () => {
-  const config = readFormConfig();
-  void desktop.openExternal(deriveWebUrl(config) || config.serverUrl);
-  updateAuthStatus('idle', 'Opened the web dashboard for sign in.');
+  void signInWithBrowser().catch((err) => updateAuthStatus('error', err?.message || 'Could not start sign in.'));
 });
+if (els.inputDeviceButton) {
+  els.inputDeviceButton.addEventListener('click', () => toggleDevicePicker(els.inputDeviceSelect));
+}
+if (els.outputDeviceButton) {
+  els.outputDeviceButton.addEventListener('click', () => toggleDevicePicker(els.outputDeviceSelect));
+}
+if (els.settingsButton) {
+  els.settingsButton.addEventListener('click', () => toggleSettingsPanel());
+}
+if (els.inputDeviceSelect) {
+  els.inputDeviceSelect.addEventListener('change', () => {
+    renderDevicePicker(els.inputDeviceSelect);
+    void saveAudioDeviceSelection()
+      .then(restartWakeListenerForDeviceChange)
+      .catch((err) => showStatus(err?.message || 'Could not save input device.'));
+  });
+}
+if (els.outputDeviceSelect) {
+  els.outputDeviceSelect.addEventListener('change', () => {
+    renderDevicePicker(els.outputDeviceSelect);
+    void saveAudioDeviceSelection().catch((err) => showStatus(err?.message || 'Could not save output device.'));
+  });
+}
+document.addEventListener('click', (event) => {
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  if (!target.closest('.settings-popover')) closeSettingsPanel();
+  if (target.closest('.device-picker')) return;
+  closeDeviceMenus();
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') closeSettingsPanel();
+});
+if (navigator.mediaDevices?.addEventListener) {
+  navigator.mediaDevices.addEventListener('devicechange', () => {
+    void refreshAudioDevicePickers();
+  });
+}
 
 if (desktop.onPairingPayload) {
   desktop.onPairingPayload((payload) => {
@@ -1165,6 +1655,14 @@ if (desktop.windowState) {
 
 desktop.readConfig().then((config) => {
   applyConfig(config);
+  void refreshAudioDevicePickers();
+  applyWindowState({ compact: state.compact });
+  if (!config.deviceId || !config.deviceToken) {
+    updateVoiceButtons();
+    showStatus('Sign in to start voice.');
+    showPairingMessage('Browser sign-in will connect this desktop automatically.');
+    return null;
+  }
   ensureControlSocket();
   updateVoiceButtons();
   return loadDashboard();

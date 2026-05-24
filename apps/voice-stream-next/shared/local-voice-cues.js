@@ -50,6 +50,10 @@ function playLocalVoiceCue(cue) {
 
   try {
     const context = new AudioContextClass();
+    const sinkId = String(window.voiceStreamPreferredOutputDeviceId || '');
+    if (sinkId && typeof context.setSinkId === 'function') {
+      void context.setSinkId(sinkId).catch(() => {});
+    }
     let cursor = context.currentTime + 0.01;
     const gain = context.createGain();
     gain.gain.value = 0.22;

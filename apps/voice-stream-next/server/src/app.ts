@@ -62,6 +62,12 @@ function cleanDeviceMode(raw: unknown): string {
   return ['off', 'awake', 'sleeping', 'recording', 'transcribing', 'error'].includes(mode) ? mode : 'error';
 }
 
+function desktopAuthExpiresAt(from = Date.now()): string {
+  const raw = Number(process.env.VOICE_STREAM_NEXT_DESKTOP_AUTH_TTL_MS ?? 10 * 60 * 1000);
+  const ttlMs = Number.isInteger(raw) && raw > 0 ? raw : 10 * 60 * 1000;
+  return new Date(from + ttlMs).toISOString();
+}
+
 function queryValue(value: unknown): string {
   return Array.isArray(value) ? String(value[0] ?? '') : String(value ?? '');
 }
@@ -233,6 +239,83 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       return voiceApprovalSettingsResponse(settings);
     }),
   );
+
+  app.post('/api/desktop-auth/requests', async (req, reply) => {
+    try {
+      const body = jsonBody(req);
+      const displayName = cleanText(body.displayName, 'Desktop voice client') || 'Desktop voice client';
+      const expiresAt = desktopAuthExpiresAt();
+      const { request, secret, deviceToken } = db.createDesktopAuthRequest({ displayName, expiresAt });
+      return {
+        ok: true,
+        requestId: request.id,
+        secret,
+        deviceToken,
+        expiresAt: request.expiresAt,
+        minClientVersion: minClientVersion(),
+      };
+    } catch (error: any) {
+      reply.code(500).send({ ok: false, error: error?.message ?? String(error) });
+      return undefined;
+    }
+  });
+
+  app.post('/api/desktop-auth/claim', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const body = jsonBody(req);
+      const requestId = cleanText(body.requestId);
+      const secret = cleanText(body.secret);
+      if (!requestId || !secret) throw Object.assign(new Error('desktop auth request is missing'), { statusCode: 400 });
+      const claimed = db.claimDesktopAuthRequest(ctx.user.id, requestId, secret);
+      if (!claimed.ok && claimed.reason === 'claimed') {
+        return { ok: true, alreadyClaimed: true, minClientVersion: minClientVersion() };
+      }
+      if (!claimed.ok) {
+        const status = claimed.reason === 'expired' ? 409 : 404;
+        throw Object.assign(new Error(`desktop auth request ${claimed.reason.replace('_', ' ')}`), { statusCode: status });
+      }
+      db.addLog(ctx.user.id, {
+        deviceId: claimed.device.id,
+        source: 'web',
+        level: 'info',
+        message: `Desktop auto-connected: ${claimed.device.displayName}`,
+        detailsJson: JSON.stringify({ desktopAuthRequestId: claimed.request.id }),
+      });
+      return {
+        ok: true,
+        device: claimed.device,
+        minClientVersion: minClientVersion(),
+      };
+    }),
+  );
+
+  app.post('/api/desktop-auth/result', async (req, reply) => {
+    try {
+      const body = jsonBody(req);
+      const requestId = cleanText(body.requestId);
+      const secret = cleanText(body.secret);
+      if (!requestId || !secret) {
+        reply.code(400).send({ ok: false, error: 'desktop auth request is missing' });
+        return undefined;
+      }
+      const result = db.desktopAuthRequestResult(requestId, secret);
+      if (!result.ok) {
+        const status = result.reason === 'expired' ? 409 : 404;
+        reply.code(status).send({ ok: false, error: `desktop auth request ${result.reason.replace('_', ' ')}` });
+        return undefined;
+      }
+      return {
+        ok: true,
+        status: result.status,
+        request: result.request,
+        device: result.status === 'claimed' ? result.device : undefined,
+        minClientVersion: minClientVersion(),
+      };
+    } catch (error: any) {
+      reply.code(500).send({ ok: false, error: error?.message ?? String(error) });
+      return undefined;
+    }
+  });
 
   app.post('/api/devices', async (req, reply) =>
     withUser(req, reply, db, clerkEnabled, async (ctx) => {
@@ -475,6 +558,29 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       reportedAt: cleanText(body.reportedAt) || null,
     });
     return { ok: true, status };
+  });
+
+  app.get('/api/devices/:deviceId/bootstrap', async (req, reply) => {
+    const deviceId = String((req.params as any).deviceId ?? '');
+    const query = (req.query ?? {}) as Record<string, unknown>;
+    const token = cleanText(req.headers['x-voice-device-token'] || query.token);
+    const clientVersion = parseClientVersion(req.headers['x-voice-client-version'], parseClientVersion(query.clientVersion, parseClientVersion(query.protocolVersion, null)));
+    const auth = verifyDeviceAuth(db, deviceId, token, clientVersion);
+    if (!auth.ok) {
+      reply.code(auth.reason === 'client_too_old' ? 426 : 401).send({
+        ok: false,
+        error: deviceAuthFailureMessage(auth),
+        reason: auth.reason,
+        minClientVersion: auth.reason === 'client_too_old' ? auth.minClientVersion : undefined,
+      });
+      return;
+    }
+    return {
+      ok: true,
+      device: auth.device,
+      settings: voiceApprovalSettingsResponse(db.ensureVoiceSettings(auth.device.userId)).settings,
+      minClientVersion: minClientVersion(),
+    };
   });
 
   app.get('/api/devices/:deviceId/control', { websocket: true }, (socket, req) => {
@@ -851,7 +957,11 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
         detailsJson: JSON.stringify({ frames, bytes, durationMs: Date.now() - startedAt, transcriptChars: transcript.length, assistantChars: assistantText.length, runtime, mode: streamMode }),
       });
       if ((socket as any).readyState === 1) {
-        socket.close(1000, 'finalized');
+        setTimeout(() => {
+          if ((socket as any).readyState === 1) {
+            socket.close(1000, 'finalized');
+          }
+        }, 150);
       }
     }
   });

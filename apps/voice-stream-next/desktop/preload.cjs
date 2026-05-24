@@ -5,10 +5,12 @@ contextBridge.exposeInMainWorld('voiceStreamDesktop', {
   readConfig: () => ipcRenderer.invoke('config:read'),
   writeConfig: (config) => ipcRenderer.invoke('config:write', config),
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
+  debugWindow: (message, details) => ipcRenderer.invoke('debug:window', message, details),
   writeClipboard: (text) => clipboard.writeText(String(text || '')),
   windowState: () => ipcRenderer.invoke('window:state'),
   compactWindow: () => ipcRenderer.invoke('window:compact'),
   expandWindow: () => ipcRenderer.invoke('window:expand'),
+  signedOutWindow: () => ipcRenderer.invoke('window:signedOut'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
   onWindowState: (callback) => {
     const listener = (_event, status) => callback(status);

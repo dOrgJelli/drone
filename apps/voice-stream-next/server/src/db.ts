@@ -42,6 +42,25 @@ export type PairingSessionRecord = {
   createdAt: string;
 };
 
+export type DesktopAuthRequestRecord = {
+  id: string;
+  displayName: string;
+  expiresAt: string;
+  claimedAt: string | null;
+  userId: string | null;
+  deviceId: string | null;
+  createdAt: string;
+};
+
+export type DesktopAuthClaimResult =
+  | { ok: true; request: DesktopAuthRequestRecord; device: DeviceRecord }
+  | { ok: false; reason: 'not_found' | 'invalid_secret' | 'expired' | 'claimed' };
+
+export type DesktopAuthPollResult =
+  | { ok: true; status: 'pending'; request: DesktopAuthRequestRecord }
+  | { ok: true; status: 'claimed'; request: DesktopAuthRequestRecord; device: DeviceRecord }
+  | { ok: false; reason: 'not_found' | 'invalid_secret' | 'expired' };
+
 export type DeviceAuthFailureReason = 'not_found' | 'invalid_token' | 'revoked' | 'pairing_expired' | 'client_too_old';
 
 export type DeviceAuthResult =
@@ -143,6 +162,14 @@ function newId(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, '')}`;
 }
 
+function newSecret(): string {
+  return crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '');
+}
+
+function sha256(value: string): string {
+  return new Bun.CryptoHasher('sha256').update(value).digest('hex');
+}
+
 function dataDir(): string {
   return path.resolve(process.env.VOICE_STREAM_NEXT_DATA_DIR?.trim() || path.join(process.cwd(), 'server', 'data'));
 }
@@ -207,6 +234,18 @@ function rowPairingSession(row: any): PairingSessionRecord {
     deviceId: String(row.device_id),
     expiresAt: String(row.expires_at),
     claimedAt: row.claimed_at == null ? null : String(row.claimed_at),
+    createdAt: String(row.created_at),
+  };
+}
+
+function rowDesktopAuthRequest(row: any): DesktopAuthRequestRecord {
+  return {
+    id: String(row.id),
+    displayName: String(row.display_name),
+    expiresAt: String(row.expires_at),
+    claimedAt: row.claimed_at == null ? null : String(row.claimed_at),
+    userId: row.user_id == null ? null : String(row.user_id),
+    deviceId: row.device_id == null ? null : String(row.device_id),
     createdAt: String(row.created_at),
   };
 }
@@ -442,6 +481,22 @@ export class VoiceStreamNextDb {
         created_at TEXT NOT NULL
       )
     `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS desktop_auth_requests (
+        id TEXT PRIMARY KEY,
+        secret_hash TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        claimed_at TEXT,
+        user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+        device_id TEXT REFERENCES devices(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL,
+        device_token_hash TEXT,
+        device_token_hint TEXT
+      )
+    `);
+    this.ensureColumn('desktop_auth_requests', 'device_token_hash', 'TEXT');
+    this.ensureColumn('desktop_auth_requests', 'device_token_hint', 'TEXT');
     this.ensureColumn('devices', 'revoked_at', 'TEXT');
     this.ensureColumn('voice_settings', 'trigger_phrase', 'TEXT');
     this.ensureColumn('voice_settings', 'min_digits', 'INTEGER');
@@ -673,11 +728,97 @@ export class VoiceStreamNextDb {
       .run({ $deviceId: deviceId, $claimedAt: at });
   }
 
+  createDesktopAuthRequest(input: { displayName: string; expiresAt: string }): { request: DesktopAuthRequestRecord; secret: string; deviceToken: string } {
+    const at = nowIso();
+    const id = newId('dauth');
+    const secret = newSecret();
+    const deviceToken = newSecret();
+    this.db
+      .query(
+        `
+        INSERT INTO desktop_auth_requests (
+          id,
+          secret_hash,
+          display_name,
+          expires_at,
+          claimed_at,
+          user_id,
+          device_id,
+          created_at,
+          device_token_hash,
+          device_token_hint
+        )
+        VALUES ($id, $secretHash, $displayName, $expiresAt, NULL, NULL, NULL, $createdAt, $deviceTokenHash, $deviceTokenHint)
+      `,
+      )
+      .run({
+        $id: id,
+        $secretHash: sha256(secret),
+        $displayName: input.displayName,
+        $expiresAt: input.expiresAt,
+        $createdAt: at,
+        $deviceTokenHash: sha256(deviceToken),
+        $deviceTokenHint: deviceToken.slice(0, 6),
+      });
+    const row = this.db.query('SELECT * FROM desktop_auth_requests WHERE id = $id').get({ $id: id });
+    return { request: rowDesktopAuthRequest(row), secret, deviceToken };
+  }
+
+  claimDesktopAuthRequest(userId: string, requestId: string, secret: string): DesktopAuthClaimResult {
+    const row = this.db.query('SELECT * FROM desktop_auth_requests WHERE id = $id').get({ $id: requestId });
+    if (!row) return { ok: false, reason: 'not_found' };
+    if (String((row as any).secret_hash) !== sha256(secret)) return { ok: false, reason: 'invalid_secret' };
+    const request = rowDesktopAuthRequest(row);
+    if (request.claimedAt) return { ok: false, reason: 'claimed' };
+    if (Date.parse(request.expiresAt) < Date.now()) return { ok: false, reason: 'expired' };
+    const tokenHash = String((row as any).device_token_hash ?? '');
+    const tokenHint = String((row as any).device_token_hint ?? '');
+    if (!tokenHash || !tokenHint) return { ok: false, reason: 'invalid_secret' };
+
+    const registered = this.registerDeviceWithTokenHash(userId, {
+      deviceType: 'desktop',
+      displayName: request.displayName,
+      tokenHash,
+      tokenHint,
+    });
+    const claimedAt = nowIso();
+    this.db
+      .query(
+        `
+        UPDATE desktop_auth_requests
+        SET claimed_at = $claimedAt,
+            user_id = $userId,
+            device_id = $deviceId
+        WHERE id = $id AND claimed_at IS NULL
+      `,
+      )
+      .run({
+        $claimedAt: claimedAt,
+        $userId: userId,
+        $deviceId: registered.id,
+        $id: request.id,
+      });
+    const claimed = this.db.query('SELECT * FROM desktop_auth_requests WHERE id = $id').get({ $id: request.id });
+    return { ok: true, request: rowDesktopAuthRequest(claimed), device: registered };
+  }
+
+  desktopAuthRequestResult(requestId: string, secret: string): DesktopAuthPollResult {
+    const row = this.db.query('SELECT * FROM desktop_auth_requests WHERE id = $id').get({ $id: requestId });
+    if (!row) return { ok: false, reason: 'not_found' };
+    if (String((row as any).secret_hash) !== sha256(secret)) return { ok: false, reason: 'invalid_secret' };
+    const request = rowDesktopAuthRequest(row);
+    if (Date.parse(request.expiresAt) < Date.now() && !request.claimedAt) return { ok: false, reason: 'expired' };
+    if (!request.deviceId) return { ok: true, status: 'pending', request };
+    const deviceRow = this.db.query('SELECT * FROM devices WHERE id = $id').get({ $id: request.deviceId });
+    if (!deviceRow) return { ok: true, status: 'pending', request };
+    return { ok: true, status: 'claimed', request, device: rowDevice(deviceRow) };
+  }
+
   registerDevice(userId: string, input: { deviceType: string; displayName: string }): { device: DeviceRecord; token: string } {
     const at = nowIso();
     const id = newId('dev');
-    const token = crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '');
-    const tokenHash = new Bun.CryptoHasher('sha256').update(token).digest('hex');
+    const token = newSecret();
+    const tokenHash = sha256(token);
     const tokenHint = token.slice(0, 6);
     this.db
       .query(
@@ -702,6 +843,36 @@ export class VoiceStreamNextDb {
     }
     const device = rowDevice(row);
     return { device, token };
+  }
+
+  registerDeviceWithTokenHash(
+    userId: string,
+    input: { deviceType: string; displayName: string; tokenHash: string; tokenHint: string },
+  ): DeviceRecord {
+    const at = nowIso();
+    const id = newId('dev');
+    this.db
+      .query(
+        `
+        INSERT INTO devices (id, user_id, device_type, display_name, token_hash, token_hint, last_seen_at, created_at)
+        VALUES ($id, $userId, $deviceType, $displayName, $tokenHash, $tokenHint, $lastSeenAt, $createdAt)
+      `,
+      )
+      .run({
+        $id: id,
+        $userId: userId,
+        $deviceType: input.deviceType,
+        $displayName: input.displayName,
+        $tokenHash: input.tokenHash,
+        $tokenHint: input.tokenHint,
+        $lastSeenAt: at,
+        $createdAt: at,
+      });
+    const row = this.db.query('SELECT * FROM devices WHERE id = $id').get({ $id: id });
+    if (!row) {
+      throw new Error('Registered device was not found');
+    }
+    return rowDevice(row);
   }
 
   listDevices(userId?: string, includeRevoked = false): DeviceRecord[] {
@@ -736,7 +907,7 @@ export class VoiceStreamNextDb {
     const row = this.db.query('SELECT * FROM devices WHERE id = $id').get({ $id: deviceId });
     if (!row) return { ok: false, reason: 'not_found' };
     if ((row as any).revoked_at != null) return { ok: false, reason: 'revoked' };
-    const tokenHash = new Bun.CryptoHasher('sha256').update(token).digest('hex');
+    const tokenHash = sha256(token);
     if (String((row as any).token_hash) !== tokenHash) return { ok: false, reason: 'invalid_token' };
 
     const pairing = this.pairingSessionForDevice(deviceId);
@@ -771,8 +942,8 @@ export class VoiceStreamNextDb {
   rotateDeviceToken(userId: string, deviceId: string): { device: DeviceRecord; token: string } | null {
     const device = this.deviceForUser(userId, deviceId);
     if (!device || device.revokedAt) return null;
-    const token = crypto.randomUUID().replace(/-/g, '') + crypto.randomUUID().replace(/-/g, '');
-    const tokenHash = new Bun.CryptoHasher('sha256').update(token).digest('hex');
+    const token = newSecret();
+    const tokenHash = sha256(token);
     const tokenHint = token.slice(0, 6);
     const at = nowIso();
     this.db
