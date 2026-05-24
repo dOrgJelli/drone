@@ -56,6 +56,7 @@ export type AssistantThread = {
   status?: 'idle' | 'running' | 'waiting_for_approval' | 'cancelled' | 'error';
   error?: string | null;
   voiceEnabled?: boolean;
+  autoApprove?: boolean;
   systemPrompt?: string | null;
   enabledTools?: string[];
   capabilities?: {
@@ -153,21 +154,10 @@ export type AssistantArtifactRecord = {
   updatedAt: string;
 };
 
-export type AssistantOverviewRecord = {
-  id: string;
-  threadId: string;
-  markdown: string;
-  prompt: string;
-  inputHash: string;
-  cached: boolean;
-  createdAt: string;
-};
-
 export type AssistantSettingsRecord = {
   userId: string;
   normalSystemPrompt: string;
   voiceSystemPrompt: string;
-  overviewPrompt: string;
   defaultProvider: string;
   defaultModel: string;
   defaultThinkingLevel: string;
@@ -189,13 +179,19 @@ export type AssistantModelOption = {
   thinkingLevel: string;
 };
 
+export type AssistantCodexConnection = {
+  connected: boolean;
+  accountId: string | null;
+  expiresAt: string | null;
+  updatedAt: string | null;
+};
+
 export type AssistantThreadView = AssistantThread & {
   messages: AssistantMessage[];
   runs: AssistantRunRecord[];
   queuedPrompts: AssistantQueuedPromptRecord[];
   toolCalls: AssistantToolCallRecord[];
   artifactsCount: number;
-  latestOverview: AssistantOverviewRecord | null;
 };
 
 export type AssistantSnapshot = {
@@ -207,6 +203,7 @@ export type AssistantSnapshot = {
   models: AssistantModelOption[];
   availableTools: AssistantToolSummary[];
   assistantSettings: AssistantSettingsRecord;
+  codexConnection: AssistantCodexConnection;
   runningModels: Record<string, { provider: string; model: string; thinkingLevel: string; runId: string }>;
 };
 

@@ -13,8 +13,10 @@ import type {
   AssistantApprovalRecord,
   AssistantArtifactRecord,
   AssistantMessage,
+  AssistantModelOption,
   AssistantQueuedPromptRecord,
   AssistantSnapshot,
+  AssistantToolSummary,
   AssistantThread,
   AssistantThreadView,
   DashboardData,
@@ -27,10 +29,35 @@ import type {
 } from './dashboardTypes.js';
 import { timeLabel } from './time.js';
 import { TranscriptPanel } from './TranscriptPanel.js';
+import { AssistantSystemPromptModal, type AssistantSystemPromptKind, type AssistantSystemPromptMode } from './assistant/AssistantSystemPromptModal.js';
+import { MarkdownMessage } from './ui/MarkdownMessage.js';
+import { UiMenuSelect, type UiMenuSelectEntry } from './ui/MenuSelect.js';
 import './styles.css';
 
 const publishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string | undefined;
 const desktopDeviceStorageKey = 'voiceStreamNext.desktopDevice';
+const ASSISTANT_NORMAL_SYSTEM_PROMPT_DEFAULT = 'You are VoiceStream, a concise standalone assistant. Answer directly and keep useful context in the thread.';
+const ASSISTANT_VOICE_SYSTEM_PROMPT_DEFAULT = 'You are VoiceStream, a concise voice assistant. Keep spoken replies short and practical.';
+const ASSISTANT_SYSTEM_PROMPT_MAX_CHARS = 20_000;
+
+const ASSISTANT_PROVIDERS: Array<{ id: 'codex' | 'openai'; label: string; title: string }> = [
+  { id: 'codex', label: 'Codex', title: 'Use connected Codex ChatGPT authentication for Codex models.' },
+  { id: 'openai', label: 'OpenAI', title: 'Use the configured OpenAI API key for OpenAI models.' },
+];
+
+function modelSelectionKey(selection: { provider: string; model: string; thinkingLevel: string }): string {
+  return `${selection.provider}:${selection.model}:${selection.thinkingLevel}`;
+}
+
+function modelSelectionLabel(selection: { provider: string; model: string; thinkingLevel: string }, options: AssistantModelOption[]): string {
+  const match = options.find((option) => modelSelectionKey({ provider: option.provider, model: option.id, thinkingLevel: option.thinkingLevel }) === modelSelectionKey(selection));
+  if (match) return match.name;
+  return `${selection.provider}/${selection.model}${selection.thinkingLevel !== 'off' ? ` ${selection.thinkingLevel}` : ''}`;
+}
+
+function compactModelSelectionLabel(label: string): string {
+  return label.replace(/^Codex\s+/, '').replace(/^GPT-/, '').replace(/\bMedium\b/, 'Med');
+}
 
 declare global {
   interface Window {
@@ -68,6 +95,111 @@ function messageRoleLabel(message: AssistantMessage): string {
   return 'You';
 }
 
+type AssistantToolCall = {
+  id: string;
+  name: string;
+  args: unknown;
+};
+
+type AssistantContentPart = {
+  type: string;
+  text?: string;
+  thinking?: string;
+  name?: string;
+  arguments?: unknown;
+  args?: unknown;
+  id?: string;
+  callId?: string;
+  call_id?: string;
+};
+
+type AssistantRenderItem =
+  | { type: 'message'; key: string; message: AssistantMessage }
+  | { type: 'tool'; key: string; call?: AssistantToolCall; result?: AssistantMessage };
+
+const TOOL_LABELS: Record<string, string> = {
+  assistant_artifacts: 'Assistant artifacts',
+  speak: 'Speak',
+  get_system_prompt: 'Read system prompt',
+  update_system_prompt: 'Update system prompt',
+  set_thinking_level: 'Set thinking level',
+};
+
+function toolLabel(name: string | undefined): string {
+  const key = String(name ?? '').trim();
+  if (!key) return 'Tool';
+  return TOOL_LABELS[key] ?? key.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function messageParts(message: AssistantMessage | undefined): AssistantContentPart[] {
+  if (!message) return [];
+  const parsed = safeJsonText(message.contentJson);
+  if (Array.isArray(parsed)) return parsed.filter((part): part is AssistantContentPart => Boolean(part && typeof part === 'object'));
+  return [];
+}
+
+function messageText(message: AssistantMessage | undefined): string {
+  if (!message) return '';
+  const textFromParts = messageParts(message)
+    .filter((part) => part.type === 'text' || part.type === 'thinking')
+    .map((part) => String(part.text ?? part.thinking ?? ''))
+    .join('');
+  return (textFromParts || String(message.content ?? '')).trim();
+}
+
+function toolCallsForMessage(message: AssistantMessage): AssistantToolCall[] {
+  const calls = messageParts(message).filter((item) => ['modelToolCall', 'toolCall'].includes(String(item.type)));
+  return calls
+    .map((item) => ({
+      id: String(item.id ?? item.callId ?? item.call_id ?? ''),
+      name: String(item.name ?? ''),
+      args: item.arguments ?? item.args ?? {},
+    }))
+    .filter((call) => call.id && call.name);
+}
+
+function renderItemsFromMessages(sourceMessages: AssistantMessage[]): AssistantRenderItem[] {
+  const consumedToolResultIndexes = new Set<number>();
+  const items: AssistantRenderItem[] = [];
+  for (let index = 0; index < sourceMessages.length; index += 1) {
+    const message = sourceMessages[index]!;
+    if (message.role === 'toolResult') {
+      if (consumedToolResultIndexes.has(index)) continue;
+      const key = message.toolCallId ? `tool-result:${message.toolCallId}` : `tool-result:${message.id}`;
+      items.push({ type: 'tool', key, result: message });
+      continue;
+    }
+
+    const calls = message.role === 'assistant' ? toolCallsForMessage(message) : [];
+    if (calls.length === 0) {
+      items.push({ type: 'message', key: `message:${message.id}`, message });
+      continue;
+    }
+
+    const visibleText = messageText(message);
+    if (visibleText && !/^requested\s+/i.test(visibleText)) {
+      items.push({ type: 'message', key: `message:${message.id}`, message });
+    }
+
+    for (const call of calls) {
+      let resultIndex = -1;
+      for (let candidateIndex = index + 1; candidateIndex < sourceMessages.length; candidateIndex += 1) {
+        if (consumedToolResultIndexes.has(candidateIndex)) continue;
+        const candidate = sourceMessages[candidateIndex]!;
+        if (candidate.role !== 'toolResult') continue;
+        const candidateCallId = String(candidate.toolCallId ?? '').trim();
+        if (candidateCallId && candidateCallId !== call.id) continue;
+        resultIndex = candidateIndex;
+        break;
+      }
+      const result = resultIndex >= 0 ? sourceMessages[resultIndex] : undefined;
+      if (resultIndex >= 0) consumedToolResultIndexes.add(resultIndex);
+      items.push({ type: 'tool', key: `tool-call:${call.id}`, call, result });
+    }
+  }
+  return items;
+}
+
 function speakAssistantText(text: string): void {
   const clean = text.trim();
   if (!clean || typeof window.speechSynthesis === 'undefined' || typeof window.SpeechSynthesisUtterance === 'undefined') return;
@@ -78,49 +210,181 @@ function speakAssistantText(text: string): void {
   window.speechSynthesis.speak(utterance);
 }
 
-function toolActivitySummary(message: AssistantMessage): { title: string; detail: string; block?: string; status?: string } | null {
-  if (message.role === 'toolResult') {
-    const result = safeJsonText(message.contentJson);
-    return {
-      title: message.isError ? 'Tool failed' : 'Tool completed',
-      detail: message.toolName ?? 'tool',
-      block: typeof result === 'string' ? result : JSON.stringify(result, null, 2),
-      status: message.isError ? 'error' : 'done',
-    };
-  }
-  const parsed = safeJsonText(message.contentJson);
-  const calls = Array.isArray(parsed) ? parsed.filter((item) => item && typeof item === 'object' && ['modelToolCall', 'toolCall'].includes(String((item as any).type))) : [];
-  if (calls.length === 0) return null;
-  const call = calls[0] as Record<string, unknown>;
-  return {
-    title: 'Tool requested',
-    detail: String(call.name ?? 'tool'),
-    block: JSON.stringify(call.arguments ?? {}, null, 2),
-    status: 'pending',
-  };
+function ReasoningBlock({ text, streaming = false }: { text: string; streaming?: boolean }) {
+  const [open, setOpen] = React.useState(false);
+  const trimmed = text.trim();
+  if (!trimmed && !streaming) return null;
+  return (
+    <div className="assistant-reasoning-block">
+      <button type="button" onClick={() => setOpen((value) => !value)} aria-expanded={open}>
+        <span>Reasoning</span>
+        {streaming ? <ThinkingPulseDots /> : null}
+        <small>{open ? 'Hide' : 'Show'}</small>
+      </button>
+      {trimmed && open ? <div className="assistant-reasoning-body">{trimmed}</div> : null}
+    </div>
+  );
 }
 
-function ToolActivityMessage({ message }: { message: AssistantMessage }) {
-  const summary = toolActivitySummary(message);
-  if (!summary) {
-    return (
-      <article className={`assistant-message ${message.role}`}>
-        <div className="assistant-message-role">{messageRoleLabel(message)}</div>
-        <p>{message.content}</p>
-        {message.spokenText ? <small>Spoken reply ready</small> : null}
-      </article>
-    );
-  }
+function AssistantMessageRow({ message, streaming = false }: { message: AssistantMessage; streaming?: boolean }) {
+  const parts = messageParts(message);
+  const hasStructuredContent = parts.some((part) => part.type === 'text' || part.type === 'thinking');
   return (
-    <article className={`assistant-tool-activity ${summary.status ?? ''}`}>
-      <div>
-        <span className="assistant-tool-activity-dot" />
-        <strong>{summary.title}</strong>
-        <small>{summary.detail} · {timeLabel(message.createdAt)}</small>
-      </div>
-      {message.content ? <p>{message.content}</p> : null}
-      {summary.block ? <pre>{summary.block}</pre> : null}
+    <article className={`assistant-message ${message.role}${streaming ? ' streaming' : ''}`}>
+      <div className="assistant-message-role">{messageRoleLabel(message)}</div>
+      {hasStructuredContent ? (
+        parts.map((part, index) => {
+          if (part.type === 'thinking') return <ReasoningBlock key={index} text={String(part.thinking ?? '')} streaming={streaming && index === parts.length - 1} />;
+          if (part.type === 'text') return <MarkdownMessage key={index} text={String(part.text ?? '')} />;
+          return null;
+        })
+      ) : (
+        <MarkdownMessage text={message.content} />
+      )}
     </article>
+  );
+}
+
+function ToolActivityMessage({ call, result }: { call?: AssistantToolCall; result?: AssistantMessage }) {
+  const [open, setOpen] = React.useState(false);
+  const resultText = messageText(result);
+  const title = toolLabel(call?.name || result?.toolName || undefined);
+  const status = result ? (result.isError ? 'error' : 'done') : 'pending';
+  return (
+    <div className={`assistant-tool-activity ${status}`}>
+      <button type="button" className="assistant-tool-activity-toggle" onClick={() => setOpen((value) => !value)}>
+        {result ? (
+          <span className="assistant-tool-activity-dot">
+            {result.isError ? <span className="assistant-tool-error-dot" /> : <ToolCheckIcon />}
+          </span>
+        ) : null}
+        <span>{title}</span>
+      </button>
+      {open ? (
+        <div className="assistant-tool-activity-body">
+          {call ? (
+            <div>
+              <div className="assistant-tool-payload-label">Arguments</div>
+              <pre>{JSON.stringify(call.args ?? {}, null, 2)}</pre>
+            </div>
+          ) : null}
+          {result ? (
+            <div className={call ? 'assistant-tool-result-block' : ''}>
+              <div className="assistant-tool-payload-label">Result</div>
+              {resultText ? <pre>{resultText}</pre> : <div className="assistant-tool-waiting">No result payload.</div>}
+            </div>
+          ) : (
+            <div className={call ? 'assistant-tool-result-block assistant-tool-waiting' : 'assistant-tool-waiting'}>Waiting for result...</div>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ToolCheckIcon() {
+  return (
+    <svg className="assistant-tool-check-icon" width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M2 5.2l2 2 4-4.4" />
+    </svg>
+  );
+}
+
+function ThinkingPulseDots() {
+  return (
+    <span className="assistant-thinking-dots" aria-hidden="true">
+      <span />
+      <span />
+      <span />
+    </span>
+  );
+}
+
+function AssistantThinkingRow() {
+  return (
+    <div className="assistant-thinking-row" role="status" aria-label="Assistant is thinking">
+      <div className="assistant-message-role">Assistant</div>
+      <ThinkingPulseDots />
+    </div>
+  );
+}
+
+const ASSISTANT_TOOL_CATEGORY_LABELS: Record<string, string> = {
+  artifacts: 'Artifacts',
+  speech: 'Speech',
+  prompts: 'Prompts',
+  settings: 'Settings',
+};
+
+function AssistantToolsPanel({
+  tools,
+  enabledTools,
+  disabled,
+  onToggleTool,
+  onEnableAll,
+  onDisableAll,
+  onClose,
+}: {
+  tools: AssistantToolSummary[];
+  enabledTools: string[];
+  disabled: boolean;
+  onToggleTool: (toolName: string, enabled: boolean) => void;
+  onEnableAll: () => void;
+  onDisableAll: () => void;
+  onClose: () => void;
+}) {
+  const enabled = new Set(enabledTools);
+  const categories = React.useMemo(() => {
+    const groups = new Map<string, AssistantToolSummary[]>();
+    for (const tool of tools) {
+      const current = groups.get(tool.category) ?? [];
+      current.push(tool);
+      groups.set(tool.category, current);
+    }
+    return Array.from(groups.entries());
+  }, [tools]);
+
+  return (
+    <div className="assistant-tools-popover">
+      <div className="assistant-tools-popover-header">
+        <div>
+          <strong>Assistant tools</strong>
+          <small>Tool changes apply when the assistant starts its next turn.</small>
+        </div>
+        <button type="button" onClick={onClose}>Close</button>
+      </div>
+      <div className="assistant-tools-popover-actions">
+        <button type="button" onClick={onEnableAll} disabled={disabled}>Enable all</button>
+        <button type="button" onClick={onDisableAll} disabled={disabled}>Disable all</button>
+        <span>{enabledTools.length} / {tools.length}</span>
+      </div>
+      <div className="assistant-tools-popover-body">
+        {categories.map(([category, categoryTools]) => (
+          <section key={category}>
+            <div className="assistant-tools-category">{ASSISTANT_TOOL_CATEGORY_LABELS[category] ?? category}</div>
+            <div className="assistant-tools-category-list">
+              {categoryTools.map((tool) => {
+                const checked = enabled.has(tool.name);
+                return (
+                  <label key={tool.name} className={checked ? 'assistant-tool-option active' : 'assistant-tool-option'} title={tool.description}>
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      disabled={disabled}
+                      onChange={(event) => onToggleTool(tool.name, event.target.checked)}
+                    />
+                    <span>
+                      <strong>{tool.label}</strong>
+                      <small>{tool.description}</small>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </section>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -178,6 +442,7 @@ function approvalSummary(approval: AssistantApprovalRecord): {
 type AssistantPromptEvent =
   | { type: 'snapshot'; snapshot: AssistantSnapshot }
   | { type: 'delta'; delta: string }
+  | { type: 'thinking_delta'; delta: string }
   | { type: 'message'; message: AssistantMessage }
   | { type: 'approval_pending'; snapshot: AssistantSnapshot }
   | { type: 'done'; snapshot: AssistantSnapshot }
@@ -212,6 +477,28 @@ async function readAssistantEventStream(response: Response, handleEvent: (event:
   if (line) handleEvent(JSON.parse(line));
 }
 
+function formatArtifactSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(kb >= 10 ? 0 : 1)} KB`;
+  const mb = kb / 1024;
+  return `${mb.toFixed(mb >= 10 ? 0 : 1)} MB`;
+}
+
+function artifactFileName(path: string): string {
+  return path.split('/').filter(Boolean).pop() || path || 'Untitled';
+}
+
+function chooseDefaultArtifact(artifacts: AssistantArtifactRecord[], preferredPath?: string | null): AssistantArtifactRecord | null {
+  return (
+    artifacts.find((artifact) => artifact.path === preferredPath) ??
+    artifacts.find((artifact) => artifact.path === 'status.md' || artifact.path.endsWith('/status.md')) ??
+    artifacts[0] ??
+    null
+  );
+}
+
 function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: React.ReactNode }) {
   const [dashboard, setDashboard] = React.useState<DashboardData | null>(null);
   const [assistantSnapshotData, setAssistantSnapshotData] = React.useState<AssistantSnapshot | null>(null);
@@ -221,18 +508,34 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   const [activeThreadId, setActiveThreadId] = React.useState<string | null>(null);
   const [messages, setMessages] = React.useState<AssistantMessage[]>([]);
   const [streamingReply, setStreamingReply] = React.useState('');
+  const [streamingThinking, setStreamingThinking] = React.useState('');
   const [artifacts, setArtifacts] = React.useState<AssistantArtifactRecord[]>([]);
   const [selectedArtifact, setSelectedArtifact] = React.useState<AssistantArtifactRecord | null>(null);
   const [artifactPathDraft, setArtifactPathDraft] = React.useState('');
   const [artifactContentDraft, setArtifactContentDraft] = React.useState('');
   const [artifactDirty, setArtifactDirty] = React.useState(false);
-  const [overviewModalOpen, setOverviewModalOpen] = React.useState(false);
+  const [artifactsLoading, setArtifactsLoading] = React.useState(false);
+  const [artifactsError, setArtifactsError] = React.useState<string | null>(null);
+  const [assistantFilesOpen, setAssistantFilesOpen] = React.useState(false);
+  const [assistantToolsOpen, setAssistantToolsOpen] = React.useState(false);
+  const [systemPromptOpen, setSystemPromptOpen] = React.useState(false);
+  const [systemPromptMode, setSystemPromptMode] = React.useState<AssistantSystemPromptMode>('thread');
+  const [systemPromptGlobalKind, setSystemPromptGlobalKind] = React.useState<AssistantSystemPromptKind>('normal');
+  const [normalSystemPromptDraft, setNormalSystemPromptDraft] = React.useState(ASSISTANT_NORMAL_SYSTEM_PROMPT_DEFAULT);
+  const [voiceSystemPromptDraft, setVoiceSystemPromptDraft] = React.useState(ASSISTANT_VOICE_SYSTEM_PROMPT_DEFAULT);
+  const [threadSystemPromptDraft, setThreadSystemPromptDraft] = React.useState('');
+  const [systemPromptSaving, setSystemPromptSaving] = React.useState(false);
+  const [promoteSystemPromptSaving, setPromoteSystemPromptSaving] = React.useState(false);
+  const [systemPromptError, setSystemPromptError] = React.useState<string | null>(null);
+  const [systemPromptNotice, setSystemPromptNotice] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [notice, setNotice] = React.useState<string | null>(null);
   const [messageDraft, setMessageDraft] = React.useState('');
   const [threadTitleDraft, setThreadTitleDraft] = React.useState('');
+  const [codexConnectFlow, setCodexConnectFlow] = React.useState<{ state: string; authorizationUrl: string; redirectUri: string; expiresAt: string } | null>(null);
+  const [codexCodeDraft, setCodexCodeDraft] = React.useState('');
   const [deviceName, setDeviceName] = React.useState('Desktop dev client');
   const [deviceType, setDeviceType] = React.useState('desktop');
   const [pairingText, setPairingText] = React.useState('');
@@ -257,6 +560,31 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
     setArtifactContentDraft(artifact?.content ?? '');
     setArtifactDirty(false);
   }, []);
+  const activeInheritedSystemPrompt = React.useMemo(() => {
+    const settings = assistantSnapshotData?.assistantSettings;
+    if (activeThread?.voiceEnabled) return settings?.voiceSystemPrompt ?? ASSISTANT_VOICE_SYSTEM_PROMPT_DEFAULT;
+    return settings?.normalSystemPrompt ?? ASSISTANT_NORMAL_SYSTEM_PROMPT_DEFAULT;
+  }, [activeThread?.voiceEnabled, assistantSnapshotData?.assistantSettings]);
+  const seedSystemPromptDrafts = React.useCallback(() => {
+    const normalPrompt = assistantSnapshotData?.assistantSettings.normalSystemPrompt ?? ASSISTANT_NORMAL_SYSTEM_PROMPT_DEFAULT;
+    const voicePrompt = assistantSnapshotData?.assistantSettings.voiceSystemPrompt ?? ASSISTANT_VOICE_SYSTEM_PROMPT_DEFAULT;
+    setNormalSystemPromptDraft(normalPrompt);
+    setVoiceSystemPromptDraft(voicePrompt);
+    setThreadSystemPromptDraft(activeThread?.systemPrompt ?? '');
+    setSystemPromptGlobalKind(activeThread?.voiceEnabled ? 'voice' : 'normal');
+  }, [activeThread?.systemPrompt, activeThread?.voiceEnabled, assistantSnapshotData?.assistantSettings]);
+
+  React.useEffect(() => {
+    if (systemPromptOpen) seedSystemPromptDrafts();
+  }, [activeThread?.id, seedSystemPromptDrafts, systemPromptOpen]);
+
+  function openSystemPromptEditor() {
+    seedSystemPromptDrafts();
+    setSystemPromptMode('thread');
+    setSystemPromptError(null);
+    setSystemPromptNotice(null);
+    setSystemPromptOpen(true);
+  }
 
   const loadAssistantSnapshot = React.useCallback(
     async (preferredThreadId?: string | null) => {
@@ -430,13 +758,14 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
     }
   }
 
-  async function sendMessage(event: React.FormEvent) {
-    event.preventDefault();
+  async function sendMessage(event?: React.FormEvent) {
+    event?.preventDefault();
     const content = messageDraft.trim();
     if (!activeThread || !content) return;
     setBusy(true);
     setError(null);
     setStreamingReply('');
+    setStreamingThinking('');
     try {
       const response = await client.stream(
         `/api/assistant/threads/${encodeURIComponent(activeThread.id)}/stream`,
@@ -461,6 +790,10 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
           setStreamingReply((current) => `${current}${String(promptEvent.delta ?? '')}`);
           return;
         }
+        if (promptEvent.type === 'thinking_delta') {
+          setStreamingThinking((current) => `${current}${String(promptEvent.delta ?? '')}`);
+          return;
+        }
         if (promptEvent.type === 'message' && promptEvent.message) {
           setMessages((current) => upsertMessage(current, promptEvent.message as AssistantMessage));
           return;
@@ -482,6 +815,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
       setError(err?.message ?? String(err));
     } finally {
       setStreamingReply('');
+      setStreamingThinking('');
       setBusy(false);
     }
   }
@@ -500,6 +834,69 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
       );
       setAssistantSnapshotData(data.snapshot);
       setNotice('Updated assistant thread.');
+      await loadDashboard();
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function startCodexConnect() {
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await client.request<{ ok: true; state: string; authorizationUrl: string; redirectUri: string; expiresAt: string }>(
+        '/api/assistant/codex/connect',
+        { method: 'POST', body: '{}' },
+      );
+      setCodexConnectFlow(data);
+      setCodexCodeDraft('');
+      window.open(data.authorizationUrl, '_blank', 'noopener,noreferrer');
+      setNotice('Opened Codex sign-in. Paste the final redirect URL or code here when it completes.');
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function completeCodexConnect() {
+    if (!codexConnectFlow || !codexCodeDraft.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await client.request<{ ok: true; snapshot: AssistantSnapshot }>(
+        '/api/assistant/codex/complete',
+        {
+          method: 'POST',
+          body: JSON.stringify({ state: codexConnectFlow.state, codeOrUrl: codexCodeDraft }),
+        },
+      );
+      setAssistantSnapshotData(data.snapshot);
+      setCodexConnectFlow(null);
+      setCodexCodeDraft('');
+      setNotice('Connected Codex.');
+      await loadDashboard();
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function disconnectCodex() {
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await client.request<{ ok: true; snapshot: AssistantSnapshot }>(
+        '/api/assistant/codex/connection',
+        { method: 'DELETE' },
+      );
+      setAssistantSnapshotData(data.snapshot);
+      setCodexConnectFlow(null);
+      setCodexCodeDraft('');
+      setNotice('Disconnected Codex.');
       await loadDashboard();
     } catch (err: any) {
       setError(err?.message ?? String(err));
@@ -574,24 +971,6 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
     }
   }
 
-  async function generateOverview(force = true) {
-    if (!activeThread) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const data = await client.request<{ ok: true; snapshot: AssistantSnapshot }>(
-        `/api/assistant/threads/${encodeURIComponent(activeThread.id)}/overview`,
-        { method: 'POST', body: JSON.stringify({ force }) },
-      );
-      setAssistantSnapshotData(data.snapshot);
-      setNotice(force ? 'Regenerated thread overview.' : 'Loaded cached thread overview when possible.');
-    } catch (err: any) {
-      setError(err?.message ?? String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function stopActiveRun() {
     if (!activeThread) return;
     setBusy(true);
@@ -616,15 +995,21 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
       hydrateArtifactDraft(null);
       return;
     }
+    setArtifactsLoading(true);
+    setArtifactsError(null);
     try {
       const data = await client.request<{ ok: true; artifacts: AssistantArtifactRecord[] }>(
         `/api/assistant/threads/${encodeURIComponent(threadId)}/artifacts`,
       );
       setArtifacts(data.artifacts);
-      const nextSelected = data.artifacts.find((artifact) => artifact.path === selectedArtifact?.path) ?? data.artifacts[0] ?? null;
+      const nextSelected = chooseDefaultArtifact(data.artifacts, selectedArtifact?.path);
       if (!artifactDirty) hydrateArtifactDraft(nextSelected);
     } catch (err: any) {
-      setError(err?.message ?? String(err));
+      const message = err?.message ?? String(err);
+      setArtifactsError(message);
+      setError(message);
+    } finally {
+      setArtifactsLoading(false);
     }
   }
 
@@ -679,7 +1064,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
       );
       setArtifacts(data.artifacts);
       setAssistantSnapshotData(data.snapshot);
-      hydrateArtifactDraft(data.artifacts[0] ?? null);
+      hydrateArtifactDraft(chooseDefaultArtifact(data.artifacts));
       setNotice('Deleted assistant artifact.');
     } catch (err: any) {
       setError(err?.message ?? String(err));
@@ -752,6 +1137,81 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
       setError(err?.message ?? String(err));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function saveGlobalSystemPrompt() {
+    const prompt = systemPromptGlobalKind === 'voice' ? voiceSystemPromptDraft : normalSystemPromptDraft;
+    if (!prompt.trim()) {
+      setSystemPromptError('System prompt is required.');
+      return;
+    }
+    setSystemPromptSaving(true);
+    setSystemPromptError(null);
+    setSystemPromptNotice(null);
+    try {
+      const patch = systemPromptGlobalKind === 'voice'
+        ? { voiceSystemPrompt: prompt }
+        : { normalSystemPrompt: prompt };
+      const data = await client.request<{ ok: true; settings: AssistantSnapshot['assistantSettings']; snapshot: AssistantSnapshot }>(
+        '/api/assistant/settings',
+        { method: 'PATCH', body: JSON.stringify(patch) },
+      );
+      setAssistantSnapshotData(data.snapshot);
+      setNormalSystemPromptDraft(data.snapshot.assistantSettings.normalSystemPrompt);
+      setVoiceSystemPromptDraft(data.snapshot.assistantSettings.voiceSystemPrompt);
+      setSystemPromptNotice(`Saved ${systemPromptGlobalKind} default prompt.`);
+    } catch (err: any) {
+      setSystemPromptError(err?.message ?? String(err));
+    } finally {
+      setSystemPromptSaving(false);
+    }
+  }
+
+  async function saveThreadSystemPrompt() {
+    if (!activeThread) return;
+    setSystemPromptSaving(true);
+    setSystemPromptError(null);
+    setSystemPromptNotice(null);
+    try {
+      const data = await client.request<{ ok: true; thread: AssistantThread; snapshot: AssistantSnapshot }>(
+        `/api/assistant/threads/${encodeURIComponent(activeThread.id)}`,
+        { method: 'PATCH', body: JSON.stringify({ systemPrompt: threadSystemPromptDraft.trim() }) },
+      );
+      setAssistantSnapshotData(data.snapshot);
+      setThreadSystemPromptDraft(data.thread.systemPrompt ?? '');
+      setSystemPromptNotice(data.thread.systemPrompt ? 'Saved thread prompt override.' : 'Thread now uses the default prompt.');
+      await loadDashboard();
+    } catch (err: any) {
+      setSystemPromptError(err?.message ?? String(err));
+    } finally {
+      setSystemPromptSaving(false);
+    }
+  }
+
+  async function promoteThreadSystemPrompt() {
+    const prompt = threadSystemPromptDraft.trim();
+    if (!prompt) return;
+    const kind: AssistantSystemPromptKind = activeThread?.voiceEnabled ? 'voice' : 'normal';
+    setPromoteSystemPromptSaving(true);
+    setSystemPromptError(null);
+    setSystemPromptNotice(null);
+    try {
+      const data = await client.request<{ ok: true; settings: AssistantSnapshot['assistantSettings']; snapshot: AssistantSnapshot }>(
+        '/api/assistant/settings',
+        {
+          method: 'PATCH',
+          body: JSON.stringify(kind === 'voice' ? { voiceSystemPrompt: prompt } : { normalSystemPrompt: prompt }),
+        },
+      );
+      setAssistantSnapshotData(data.snapshot);
+      setNormalSystemPromptDraft(data.snapshot.assistantSettings.normalSystemPrompt);
+      setVoiceSystemPromptDraft(data.snapshot.assistantSettings.voiceSystemPrompt);
+      setSystemPromptNotice(`Saved thread prompt as the ${kind} default.`);
+    } catch (err: any) {
+      setSystemPromptError(err?.message ?? String(err));
+    } finally {
+      setPromoteSystemPromptSaving(false);
     }
   }
 
@@ -923,11 +1383,83 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   const logs = dashboard?.logs ?? [];
   const transcripts = dashboard?.transcripts ?? [];
   const pendingApprovals = assistantSnapshotData?.pendingApprovals ?? [];
-  const latestOverview = (activeThread as AssistantThreadView | null)?.latestOverview ?? null;
+  const activePendingApprovals = pendingApprovals.filter((approval) => approval.threadId === activeThread?.id && approval.status === 'pending');
   const activeRuns = (activeThread as AssistantThreadView | null)?.runs?.filter((run) => run.status === 'running' || run.status === 'waiting_for_approval') ?? [];
   const queuedPrompts = (activeThread as AssistantThreadView | null)?.queuedPrompts ?? [];
   const enabledTools = new Set(activeThread?.enabledTools ?? []);
-  const modelValue = `${activeThread?.provider ?? 'openai'}|${activeThread?.model ?? 'gpt-5.2'}|${activeThread?.thinkingLevel ?? 'off'}`;
+  const enabledToolNames = activeThread?.enabledTools ?? [];
+  const availableTools = assistantSnapshotData?.availableTools ?? [];
+  const autoApprove = Boolean(activeThread?.autoApprove);
+  const codexConnection = assistantSnapshotData?.codexConnection ?? { connected: false, accountId: null, expiresAt: null, updatedAt: null };
+  const activeProvider = activeThread?.provider ?? 'openai';
+  const activeModel = activeThread?.model ?? 'gpt-5.5';
+  const activeThinkingLevel = activeThread?.thinkingLevel ?? 'off';
+  const modelOptions = assistantSnapshotData?.models ?? [];
+  const providerOptions = ASSISTANT_PROVIDERS.map((provider) => ({
+    ...provider,
+    models: modelOptions.filter((model) => model.provider === provider.id),
+  }));
+  const activeProviderModels = providerOptions.find((provider) => provider.id === activeProvider)?.models ?? [];
+  const selectedModelKey = activeThread ? modelSelectionKey({ provider: activeProvider, model: activeModel, thinkingLevel: activeThinkingLevel }) : '';
+  const displayedModelOptions = activeThread && activeProviderModels.some((model) => modelSelectionKey({ provider: model.provider, model: model.id, thinkingLevel: model.thinkingLevel }) === selectedModelKey)
+    ? activeProviderModels
+    : activeThread
+      ? [
+          ...activeProviderModels,
+          {
+            provider: activeProvider,
+            id: activeModel,
+            name: activeModel,
+            thinkingLevel: activeThinkingLevel,
+          },
+        ]
+      : activeProviderModels;
+  const modelMenuEntries: UiMenuSelectEntry[] = displayedModelOptions.map((model) => {
+    const key = `${model.provider}:${model.id}:${model.thinkingLevel}`;
+    return {
+      value: key,
+      title: `${model.provider}/${model.id}${model.thinkingLevel !== 'off' ? ` ${model.thinkingLevel}` : ''}`,
+      searchText: `${model.provider} ${model.name} ${model.id} ${model.thinkingLevel}`,
+      label: (
+        <span className="assistant-model-option-label">
+          <span>{compactModelSelectionLabel(model.name)}</span>
+          <small>{model.provider}{model.thinkingLevel !== 'off' ? ` · ${model.thinkingLevel}` : ''}</small>
+        </span>
+      ),
+    };
+  });
+  const selectedModelLabel = activeThread
+    ? modelSelectionLabel({ provider: activeProvider, model: activeModel, thinkingLevel: activeThinkingLevel }, modelOptions)
+    : 'Model';
+  const providerAuthLabel = activeProvider === 'codex'
+    ? codexConnection.connected
+      ? `Codex connected${codexConnection.accountId ? ` · ${codexConnection.accountId}` : ''}`
+      : 'Codex not connected'
+    : 'OpenAI API key';
+  const activeProviderMeta = providerOptions.find((provider) => provider.id === activeProvider) ?? providerOptions[0];
+  const activeRunningModel = activeRuns[0];
+  const streamingMessage: AssistantMessage | null = streamingReply || streamingThinking
+    ? {
+        id: 'streaming-assistant-message',
+        role: 'assistant',
+        content: streamingReply,
+        contentJson: JSON.stringify([
+          ...(streamingThinking ? [{ type: 'thinking', thinking: streamingThinking }] : []),
+          ...(streamingReply ? [{ type: 'text', text: streamingReply }] : []),
+        ]),
+        toolName: null,
+        toolCallId: null,
+        isError: false,
+        spokenText: null,
+        createdAt: new Date().toISOString(),
+      }
+    : null;
+  const visibleAssistantMessages = streamingMessage ? [...messages, streamingMessage] : messages;
+  const assistantRenderItems = renderItemsFromMessages(visibleAssistantMessages);
+  const showThinking = Boolean(activeThread) && activeRuns.length > 0 && activePendingApprovals.length === 0 && !messageText(streamingMessage ?? undefined).trim();
+  const activeRunningModelLabel = activeRunningModel
+    ? modelSelectionLabel({ provider: activeRunningModel.provider, model: activeRunningModel.model, thinkingLevel: activeRunningModel.thinkingLevel }, modelOptions)
+    : '';
   const connectedDeviceIds = new Set((dashboard?.clientStatuses ?? []).map((status) => status.deviceId));
   const navItems: Array<{ id: DashboardView; label: string; count?: number }> = [
     { id: 'threads', label: 'Chat', count: threads.length },
@@ -1015,8 +1547,32 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
         </div>
 
         <div className="assistant-sidebar-footer">
-          <span>Connected devices</span>
-          <strong>{connectedDeviceIds.size}/{devices.length}</strong>
+          <button type="button" className="assistant-sidebar-voice-orb" onClick={() => void createThread({ voiceEnabled: true })} disabled={busy}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="9" y="3" width="6" height="11" rx="3" />
+              <path d="M5 11a7 7 0 0 0 14 0" />
+              <path d="M12 18v3" />
+              <path d="M8 21h8" />
+            </svg>
+            <span>Start Voice</span>
+          </button>
+          <button
+            type="button"
+            className={threadFilter === 'voice' ? 'assistant-sidebar-wide-button active' : 'assistant-sidebar-wide-button'}
+            onClick={() => {
+              setThreadFilter('voice');
+              setActiveView('threads');
+            }}
+          >
+            Voice Mode
+          </button>
+          <button type="button" className="assistant-sidebar-wide-button" onClick={() => setActiveView('devices')}>
+            Pair Android
+          </button>
+          <div className="assistant-sidebar-device-count">
+            <span>Connected devices</span>
+            <strong>{connectedDeviceIds.size}/{devices.length}</strong>
+          </div>
         </div>
       </aside> : null}
 
@@ -1053,17 +1609,19 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
           </div>
 
           <div className="assistant-toolbar-actions">
-            {navItems.map((item) => (
+            {activeView !== 'threads' ? (
               <button
-                key={item.id}
                 type="button"
-                className={activeView === item.id ? 'assistant-toolbar-tab active' : 'assistant-toolbar-tab'}
-                onClick={() => setActiveView(item.id)}
+                className="assistant-toolbar-icon-button"
+                onClick={() => setActiveView('threads')}
+                title="Back to assistant chat"
+                aria-label="Back to assistant chat"
               >
-                {item.label}
-                {typeof item.count === 'number' ? <span>{item.count}</span> : null}
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M4 5h16v10H8l-4 4V5Z" />
+                </svg>
               </button>
-            ))}
+            ) : null}
             {!threadSidebarOpen ? (
               <button
                 type="button"
@@ -1079,6 +1637,113 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                 </svg>
               </button>
             ) : null}
+            {activeView === 'threads' ? (
+              <>
+                <button
+                  type="button"
+                  className={assistantFilesOpen ? 'assistant-toolbar-icon-button active' : 'assistant-toolbar-icon-button'}
+                  onClick={() => setAssistantFilesOpen((open) => !open)}
+                  disabled={!activeThread}
+                  title={assistantFilesOpen ? 'Hide assistant files' : 'Show assistant files'}
+                  aria-label={assistantFilesOpen ? 'Hide assistant files' : 'Show assistant files'}
+                  aria-pressed={assistantFilesOpen}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" />
+                    <path d="M14 2v6h6" />
+                  </svg>
+                  {artifacts.length > 0 ? <span>{artifacts.length > 9 ? '9+' : artifacts.length}</span> : null}
+                </button>
+                <button
+                  type="button"
+                  className="assistant-toolbar-icon-button"
+                  onClick={openSystemPromptEditor}
+                  disabled={!activeThread}
+                  title="Edit assistant system prompts"
+                  aria-label="Edit assistant system prompts"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 20h9" />
+                    <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  className={assistantToolsOpen ? 'assistant-toolbar-icon-button active' : 'assistant-toolbar-icon-button'}
+                  onClick={() => setAssistantToolsOpen((open) => !open)}
+                  disabled={!activeThread}
+                  title={assistantToolsOpen ? 'Hide assistant tools' : 'Show assistant tools'}
+                  aria-label={assistantToolsOpen ? 'Hide assistant tools' : 'Show assistant tools'}
+                  aria-pressed={assistantToolsOpen}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" />
+                    <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.2.34.6.6 1 .6h.6a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1.4Z" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  className={activeThread?.voiceEnabled ? 'assistant-toolbar-icon-button active' : 'assistant-toolbar-icon-button'}
+                  onClick={() => void updateThreadSettings({ voiceEnabled: !activeThread?.voiceEnabled })}
+                  disabled={!activeThread || busy}
+                  title={activeThread?.voiceEnabled ? 'Voice replies are on' : 'Voice replies are off'}
+                  aria-label={activeThread?.voiceEnabled ? 'Turn off voice replies' : 'Turn on voice replies'}
+                  aria-pressed={Boolean(activeThread?.voiceEnabled)}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <rect x="9" y="3" width="6" height="11" rx="3" />
+                    <path d="M5 11a7 7 0 0 0 14 0" />
+                    <path d="M12 18v3" />
+                    <path d="M8 21h8" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  className={autoApprove ? 'assistant-toolbar-icon-button active' : 'assistant-toolbar-icon-button'}
+                  onClick={() => void updateThreadSettings({ autoApprove: !autoApprove })}
+                  disabled={!activeThread || busy}
+                  title={autoApprove ? 'Auto-approve tool calls is on' : 'Auto-approve tool calls is off'}
+                  aria-label={autoApprove ? 'Turn off auto-approve' : 'Turn on auto-approve'}
+                  aria-pressed={autoApprove}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M20 6 9 17l-5-5" />
+                    <path d="M15 6h5v5" />
+                  </svg>
+                </button>
+              </>
+            ) : null}
+            <div className="assistant-toolbar-secondary">
+              {navItems.filter((item) => item.id !== 'threads').map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={activeView === item.id ? 'assistant-toolbar-icon-button active' : 'assistant-toolbar-icon-button'}
+                  onClick={() => setActiveView(item.id)}
+                  title={item.label}
+                  aria-label={item.label}
+                  aria-pressed={activeView === item.id}
+                >
+                  {item.id === 'devices' ? (
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <rect x="7" y="2" width="10" height="20" rx="2" />
+                      <path d="M11 18h2" />
+                    </svg>
+                  ) : item.id === 'settings' ? (
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" />
+                      <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.2.34.6.6 1 .6h.6a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1.4Z" />
+                    </svg>
+                  ) : (
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M3 3v18h18" />
+                      <path d="M7 15l4-4 3 3 5-7" />
+                    </svg>
+                  )}
+                  {typeof item.count === 'number' ? <span>{item.count}</span> : null}
+                </button>
+              ))}
+            </div>
             <span className="assistant-live-indicator">Live</span>
             {identitySlot ? <div className="assistant-identity">{identitySlot}</div> : null}
           </div>
@@ -1087,120 +1752,26 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
         {error ? <div className="banner error">{error}</div> : null}
         {notice ? <div className="banner notice">{notice}</div> : null}
 
+        {activeView === 'threads' && assistantToolsOpen && activeThread ? (
+          <AssistantToolsPanel
+            tools={availableTools}
+            enabledTools={enabledToolNames}
+            disabled={busy}
+            onToggleTool={(toolName, checked) => {
+              const next = new Set(enabledTools);
+              if (checked) next.add(toolName);
+              else next.delete(toolName);
+              void updateThreadSettings({ enabledTools: [...next] });
+            }}
+            onEnableAll={() => void updateThreadSettings({ enabledTools: availableTools.map((tool) => tool.name) })}
+            onDisableAll={() => void updateThreadSettings({ enabledTools: [] })}
+            onClose={() => setAssistantToolsOpen(false)}
+          />
+        ) : null}
+
         <section className="assistant-dock-content">
           {activeView === 'threads' ? (
             <section className="assistant-chat-pane">
-              {activeThread ? (
-                <div className="assistant-thread-controls">
-                  <div className="assistant-control-row assistant-title-row">
-                    <label>
-                      Title
-                      <input
-                        value={threadTitleDraft}
-                        disabled={busy}
-                        onChange={(event) => setThreadTitleDraft(event.currentTarget.value)}
-                        onBlur={() => void renameActiveThread()}
-                        onKeyDown={(event) => {
-                          if (event.key === 'Enter') {
-                            event.currentTarget.blur();
-                          }
-                        }}
-                      />
-                    </label>
-                    <button type="button" onClick={() => void deleteThread(activeThread.id)} disabled={busy}>
-                      Delete Thread
-                    </button>
-                  </div>
-                  <div className="assistant-control-row">
-                    <label>
-                      Model
-                      <select
-                        value={modelValue}
-                        disabled={busy}
-                        onChange={(event) => {
-                          const [provider, model, thinkingLevel] = event.target.value.split('|');
-                          void updateThreadSettings({ provider, model, thinkingLevel });
-                        }}
-                      >
-                        {(assistantSnapshotData?.models ?? []).map((model) => (
-                          <option key={`${model.provider}-${model.id}-${model.thinkingLevel}`} value={`${model.provider}|${model.id}|${model.thinkingLevel}`}>
-                            {model.name}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label>
-                      Delivery
-                      <select
-                        value={activeThread.promptDeliveryMode ?? 'queue'}
-                        disabled={busy}
-                        onChange={(event) => void updateThreadSettings({ promptDeliveryMode: event.target.value === 'asap' ? 'asap' : 'queue' })}
-                      >
-                        <option value="queue">Queue</option>
-                        <option value="asap">ASAP</option>
-                      </select>
-                    </label>
-                    <label className="toggle-row">
-                      <input
-                        type="checkbox"
-                        checked={Boolean(activeThread.voiceEnabled)}
-                        disabled={busy}
-                        onChange={(event) => void updateThreadSettings({ voiceEnabled: event.target.checked })}
-                      />
-                      Spoken replies
-                    </label>
-                    {activeRuns.length > 0 ? (
-                      <button type="button" onClick={() => void stopActiveRun()} disabled={busy}>
-                        Stop Run
-                      </button>
-                    ) : null}
-                  </div>
-
-                  <details className="assistant-control-details">
-                    <summary>Tools and prompt</summary>
-                    <div className="assistant-tool-grid">
-                      {(assistantSnapshotData?.availableTools ?? []).map((tool) => (
-                        <label key={tool.name} className="assistant-tool-toggle" title={tool.description}>
-                          <input
-                            type="checkbox"
-                            checked={enabledTools.has(tool.name)}
-                            disabled={busy}
-                            onChange={(event) => {
-                              const next = new Set(enabledTools);
-                              if (event.target.checked) next.add(tool.name);
-                              else next.delete(tool.name);
-                              void updateThreadSettings({ enabledTools: [...next] });
-                            }}
-                          />
-                          <span>
-                            <strong>{tool.label}</strong>
-                            <small>{tool.approval === 'never' ? 'no approval' : tool.approval === 'always' ? 'approval required' : 'approval in normal threads'}</small>
-                          </span>
-                        </label>
-                      ))}
-                    </div>
-                    <label className="assistant-system-prompt">
-                      Thread system prompt
-                      <textarea
-                        value={activeThread.systemPrompt ?? ''}
-                        disabled={busy}
-                        placeholder={assistantSnapshotData?.assistantSettings.normalSystemPrompt ?? 'System prompt'}
-                        onBlur={(event) => void updateThreadSettings({ systemPrompt: event.currentTarget.value })}
-                        onChange={(event) => {
-                          const next = event.currentTarget.value;
-                          setAssistantSnapshotData((snapshot) => snapshot
-                            ? {
-                                ...snapshot,
-                                threads: snapshot.threads.map((thread) => thread.id === activeThread.id ? { ...thread, systemPrompt: next } : thread),
-                              }
-                            : snapshot);
-                        }}
-                      />
-                    </label>
-                  </details>
-                </div>
-              ) : null}
-
               {activeThread?.error ? (
                 <div className="assistant-thread-error">
                   <strong>Assistant error</strong>
@@ -1208,197 +1779,302 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                 </div>
               ) : null}
 
-              {queuedPrompts.length > 0 ? (
-                <div className="assistant-queue-strip">
-                  <div className="assistant-queue-header">
-                    <strong>Queued prompts</strong>
-                    <small>{queuedPrompts.length} waiting</small>
-                  </div>
-                  {queuedPrompts.map((queuedPrompt) => (
-                    <article key={queuedPrompt.id} className="assistant-queue-item">
-                      <div>
-                        <strong>{queuedPrompt.prompt}</strong>
-                        <small>
-                          {queuedPrompt.provider}/{queuedPrompt.model}
-                          {queuedPrompt.thinkingLevel !== 'off' ? ` · ${queuedPrompt.thinkingLevel}` : ''}
-                          {' · '}
-                          {timeLabel(queuedPrompt.createdAt)}
-                        </small>
-                      </div>
-                      <button type="button" disabled={busy} onClick={() => void cancelQueuedPrompt(queuedPrompt)}>
-                        Cancel
+              {assistantFilesOpen && activeThread ? (
+                <section className="assistant-files-view">
+                  <div className="assistant-files-header">
+                    <div>
+                      <span className="hub-kicker">Files</span>
+                      <h2>Assistant Files</h2>
+                      <small>{artifacts.length} file{artifacts.length === 1 ? '' : 's'} in this thread</small>
+                    </div>
+                    <div className="assistant-artifact-actions">
+                      <button type="button" onClick={newArtifactDraft} disabled={busy}>
+                        New
                       </button>
-                    </article>
-                  ))}
-                </div>
-              ) : null}
-
-              {pendingApprovals.length > 0 ? (
-                <div className="assistant-approval-strip">
-                  {pendingApprovals.map((approval) => {
-                    const summary = approvalSummary(approval);
-                    return (
-                      <article key={approval.id} className="assistant-approval-card">
-                        <div>
-                          <strong>{summary.title}</strong>
-                          <small>{approval.toolName} · {timeLabel(approval.createdAt)}</small>
-                        </div>
-                        <div className="assistant-approval-detail">
-                          {summary.rows.map((row) => (
-                            <div key={row.label} className="assistant-approval-row">
-                              <span>{row.label}</span>
-                              <strong>{row.value}</strong>
-                            </div>
-                          ))}
-                          {summary.block ? (
-                            <pre>
-                              {summary.blockLabel ? `${summary.blockLabel}\n` : ''}
-                              {summary.block}
-                            </pre>
-                          ) : null}
-                        </div>
-                        <div>
-                          <button type="button" disabled={busy} onClick={() => void resolveApproval(approval.id, true)}>
-                            Approve
-                          </button>
-                          <button type="button" disabled={busy} onClick={() => void resolveApproval(approval.id, false)}>
-                            Deny
-                          </button>
-                        </div>
-                      </article>
-                    );
-                  })}
-                </div>
-              ) : null}
-
-              <div className="assistant-messages">
-                {messages.map((message) => (
-                  <ToolActivityMessage key={message.id} message={message} />
-                ))}
-                {streamingReply ? (
-                  <article className="assistant-message assistant streaming">
-                    <div className="assistant-message-role">Assistant</div>
-                    <p>{streamingReply}</p>
-                  </article>
-                ) : null}
-                {activeThread && messages.length === 0 ? <div className="empty-note">This thread is empty.</div> : null}
-                {!activeThread ? <div className="empty-note">Create a thread to start.</div> : null}
-              </div>
-
-              <form className="assistant-composer" onSubmit={(event) => void sendMessage(event)}>
-                <textarea
-                  value={messageDraft}
-                  onChange={(event) => setMessageDraft(event.target.value)}
-                  placeholder="Ask the assistant..."
-                  disabled={!activeThread || busy}
-                />
-                <button type="submit" disabled={!activeThread || !messageDraft.trim() || busy}>
-                  Send
-                </button>
-              </form>
-
-              {activeThread ? (
-                <div className="assistant-thread-extras">
-                  <section className="assistant-panel">
-                    <div className="assistant-panel-header">
-                      <div>
-                        <span className="hub-kicker">Overview</span>
-                        <h2>Thread Summary</h2>
-                      </div>
-                      <div className="assistant-overview-actions">
-                        <button type="button" onClick={() => void generateOverview(false)} disabled={busy}>
-                          Use Cache
-                        </button>
-                        <button type="button" onClick={() => void generateOverview(true)} disabled={busy}>
-                          Regenerate
-                        </button>
-                        <button type="button" onClick={() => setOverviewModalOpen(true)} disabled={!latestOverview}>
-                          Open
-                        </button>
-                      </div>
+                      <button type="button" onClick={() => void loadArtifacts(activeThread.id)} disabled={busy || artifactsLoading}>
+                        {artifactsLoading ? 'Refreshing...' : 'Refresh'}
+                      </button>
                     </div>
-                    {latestOverview ? (
-                      <div className="assistant-overview-meta">
-                        <span>{latestOverview.cached ? 'cached copy' : 'fresh summary'}</span>
-                        <span>{timeLabel(latestOverview.createdAt)}</span>
-                      </div>
-                    ) : null}
-                    <pre className="assistant-overview">{latestOverview?.markdown ?? 'No overview generated yet.'}</pre>
-                  </section>
-                  <section className="assistant-panel">
-                    <div className="assistant-panel-header">
-                      <div>
-                        <span className="hub-kicker">Artifacts</span>
-                        <h2>Assistant Files</h2>
-                      </div>
-                      <div className="assistant-artifact-actions">
-                        <button type="button" onClick={newArtifactDraft} disabled={busy}>
-                          New
-                        </button>
-                        <button type="button" onClick={() => void loadArtifacts(activeThread.id)} disabled={busy}>
-                          Refresh
-                        </button>
-                      </div>
-                    </div>
-                    <div className="assistant-artifact-layout">
-                      <div className="assistant-artifact-list">
-                        {artifacts.map((artifact) => (
+                  </div>
+                  {artifactsError ? <div className="assistant-files-error">{artifactsError}</div> : null}
+                  <div className="assistant-artifact-layout">
+                    <div className="assistant-artifact-list">
+                      {artifactsLoading && artifacts.length === 0 ? <div className="empty-note">Loading assistant files...</div> : null}
+                      {artifacts.map((artifact) => {
+                        const active = selectedArtifact?.path === artifact.path && !artifactDirty;
+                        return (
                           <button
                             key={artifact.id}
                             type="button"
-                            className={selectedArtifact?.path === artifact.path ? 'active' : ''}
+                            className={active ? 'active' : ''}
                             onClick={() => hydrateArtifactDraft(artifact)}
                           >
-                            <strong>{artifact.path}</strong>
-                            <small>{artifact.size} bytes</small>
+                            <strong>{artifactFileName(artifact.path)}</strong>
+                            <span>{artifact.path}</span>
+                            <small>{formatArtifactSize(artifact.size)} · {timeLabel(artifact.updatedAt)}</small>
                           </button>
-                        ))}
-                        {artifacts.length === 0 ? <div className="empty-note">No assistant files yet.</div> : null}
+                        );
+                      })}
+                      {artifacts.length === 0 && !artifactsLoading ? <div className="empty-note">No assistant files yet.</div> : null}
+                    </div>
+                    <div className="assistant-artifact-editor">
+                      <div className="assistant-artifact-meta">
+                        <div>
+                          <span>Path</span>
+                          <strong>{artifactPathDraft.trim() || 'Draft file'}</strong>
+                        </div>
+                        <div>
+                          <span>Size</span>
+                          <strong>{formatArtifactSize(new Blob([artifactContentDraft]).size)}</strong>
+                        </div>
+                        <div>
+                          <span>Revision</span>
+                          <strong>{selectedArtifact?.revision ? selectedArtifact.revision.slice(0, 8) : 'Draft'}</strong>
+                        </div>
                       </div>
-                      <div className="assistant-artifact-editor">
-                        <label>
-                          Path
-                          <input
-                            value={artifactPathDraft}
+                      <label>
+                        Path
+                        <input
+                          value={artifactPathDraft}
+                          onChange={(event) => {
+                            setArtifactPathDraft(event.target.value);
+                            setArtifactDirty(true);
+                          }}
+                          placeholder="notes/plan.md"
+                          disabled={busy}
+                        />
+                      </label>
+                      <div className="assistant-artifact-content-grid">
+                        <section className="assistant-artifact-preview-pane">
+                          <div className="assistant-artifact-pane-title">Preview</div>
+                          {artifactContentDraft.trim() ? (
+                            <MarkdownMessage text={artifactContentDraft} />
+                          ) : (
+                            <div className="empty-note">Nothing to preview.</div>
+                          )}
+                        </section>
+                        <label className="assistant-artifact-source-pane">
+                          Source
+                          <textarea
+                            value={artifactContentDraft}
                             onChange={(event) => {
-                              setArtifactPathDraft(event.target.value);
+                              setArtifactContentDraft(event.target.value);
                               setArtifactDirty(true);
                             }}
-                            placeholder="notes/plan.md"
+                            placeholder="Artifact content..."
                             disabled={busy}
                           />
                         </label>
-                        <textarea
-                          value={artifactContentDraft}
-                          onChange={(event) => {
-                            setArtifactContentDraft(event.target.value);
-                            setArtifactDirty(true);
-                          }}
-                          placeholder="Artifact content..."
-                          disabled={busy}
-                        />
-                        <div className="assistant-artifact-editor-footer">
-                          <span>{artifactDirty ? 'Unsaved changes' : selectedArtifact ? `${selectedArtifact.size} bytes` : 'Draft'}</span>
-                          <div>
-                            <button type="button" onClick={() => void copyArtifact()} disabled={!artifactContentDraft || busy}>
-                              Copy
-                            </button>
-                            <button type="button" onClick={downloadArtifact} disabled={!artifactPathDraft.trim() || busy}>
-                              Download
-                            </button>
-                            <button type="button" onClick={() => void deleteArtifact()} disabled={!selectedArtifact || busy}>
-                              Delete
-                            </button>
-                            <button type="button" onClick={() => void saveArtifact()} disabled={!artifactPathDraft.trim() || busy}>
-                              Save
-                            </button>
-                          </div>
+                      </div>
+                      <div className="assistant-artifact-editor-footer">
+                        <span>{artifactDirty ? 'Unsaved changes' : selectedArtifact ? `Updated ${timeLabel(selectedArtifact.updatedAt)}` : 'Draft'}</span>
+                        <div>
+                          <button type="button" onClick={() => void copyArtifact()} disabled={!artifactContentDraft || busy}>
+                            Copy
+                          </button>
+                          <button type="button" onClick={downloadArtifact} disabled={!artifactPathDraft.trim() || busy}>
+                            Download
+                          </button>
+                          <button type="button" onClick={() => void deleteArtifact()} disabled={!selectedArtifact || busy}>
+                            Delete
+                          </button>
+                          <button type="button" onClick={() => void saveArtifact()} disabled={!artifactPathDraft.trim() || busy}>
+                            Save
+                          </button>
                         </div>
                       </div>
                     </div>
-                  </section>
+                  </div>
+                </section>
+              ) : (
+                <>
+                <div className="assistant-messages">
+                  {assistantRenderItems.map((item) =>
+                    item.type === 'message' ? (
+                      <AssistantMessageRow key={item.key} message={item.message} streaming={item.message.id === streamingMessage?.id} />
+                    ) : (
+                      <ToolActivityMessage key={item.key} call={item.call} result={item.result} />
+                    ),
+                  )}
+                  {showThinking ? <AssistantThinkingRow /> : null}
+                  {queuedPrompts.length > 0 ? (
+                    <div className="assistant-queue-strip">
+                      {queuedPrompts.map((queuedPrompt) => (
+                        <article key={queuedPrompt.id} className="assistant-queue-item">
+                          <div>
+                            <strong>{queuedPrompt.prompt}</strong>
+                            <small>
+                              {queuedPrompt.provider}/{queuedPrompt.model}
+                              {queuedPrompt.thinkingLevel !== 'off' ? ` · ${queuedPrompt.thinkingLevel}` : ''}
+                              {' · '}
+                              {timeLabel(queuedPrompt.createdAt)}
+                            </small>
+                          </div>
+                          <button type="button" disabled={busy} onClick={() => void cancelQueuedPrompt(queuedPrompt)}>
+                            Cancel
+                          </button>
+                        </article>
+                      ))}
+                    </div>
+                  ) : null}
+                  {activePendingApprovals.length > 0 ? (
+                    <div className="assistant-approval-strip">
+                      {activePendingApprovals.map((approval) => {
+                        const summary = approvalSummary(approval);
+                        return (
+                          <article key={approval.id} className="assistant-approval-card">
+                            <div>
+                              <strong>{summary.title}</strong>
+                              <small>{approval.toolName} · {timeLabel(approval.createdAt)}</small>
+                            </div>
+                            <div className="assistant-approval-detail">
+                              {summary.rows.map((row) => (
+                                <div key={row.label} className="assistant-approval-row">
+                                  <span>{row.label}</span>
+                                  <strong>{row.value}</strong>
+                                </div>
+                              ))}
+                              {summary.block ? (
+                                <pre>
+                                  {summary.blockLabel ? `${summary.blockLabel}\n` : ''}
+                                  {summary.block}
+                                </pre>
+                              ) : null}
+                            </div>
+                            <div>
+                              <button type="button" disabled={busy} onClick={() => void resolveApproval(approval.id, true)}>
+                                Approve
+                              </button>
+                              <button type="button" disabled={busy} onClick={() => void resolveApproval(approval.id, false)}>
+                                Deny
+                              </button>
+                            </div>
+                          </article>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                  {activeThread && messages.length === 0 && queuedPrompts.length === 0 && activePendingApprovals.length === 0 && !showThinking ? <div className="empty-note">This thread is empty.</div> : null}
+                  {!activeThread ? <div className="empty-note">Create a thread to start.</div> : null}
                 </div>
-              ) : null}
+
+                <form className="assistant-composer" onSubmit={(event) => void sendMessage(event)}>
+                <div className="assistant-composer-toolbar">
+                  <div className="assistant-provider-switch" role="group" aria-label="Assistant provider">
+                    {providerOptions.map((provider) => {
+                      const selected = provider.id === activeProvider;
+                      const disabled = !activeThread || busy || provider.models.length === 0;
+                      return (
+                        <button
+                          key={provider.id}
+                          type="button"
+                          disabled={disabled}
+                          aria-pressed={selected}
+                          title={provider.title}
+                          onClick={() => {
+                            const nextModel = provider.models[0];
+                            void updateThreadSettings({
+                              provider: provider.id,
+                              ...(nextModel ? { model: nextModel.id, thinkingLevel: nextModel.thinkingLevel } : {}),
+                            });
+                          }}
+                          className={selected ? 'active' : ''}
+                        >
+                          {provider.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <UiMenuSelect
+                    value={selectedModelKey}
+                    entries={modelMenuEntries}
+                    variant="toolbar"
+                    role="listbox"
+                    itemRole="option"
+                    title={selectedModelLabel}
+                    header="Model"
+                    searchable
+                    searchPlaceholder="Search models"
+                    triggerLabel={compactModelSelectionLabel(selectedModelLabel)}
+                    triggerClassName="assistant-model-select-trigger"
+                    panelClassName="assistant-model-select-panel"
+                    menuClassName="assistant-model-select-menu"
+                    disabled={!activeThread || busy}
+                    onValueChange={(value) => {
+                      const [provider, nextModel, thinkingLevel] = value.split(':');
+                      void updateThreadSettings({ provider, model: nextModel, thinkingLevel });
+                    }}
+                  />
+                  <div className="assistant-delivery-switch" role="group" aria-label="Assistant message delivery">
+                    {(['queue', 'asap'] as const).map((mode) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        disabled={!activeThread || busy}
+                        aria-pressed={(activeThread?.promptDeliveryMode ?? 'queue') === mode}
+                        className={(activeThread?.promptDeliveryMode ?? 'queue') === mode ? 'active' : ''}
+                        onClick={() => void updateThreadSettings({ promptDeliveryMode: mode })}
+                        title={mode === 'queue' ? 'Queue after the assistant finishes' : 'Send at the next assistant turn'}
+                      >
+                        {mode === 'queue' ? 'Queue' : 'ASAP'}
+                      </button>
+                    ))}
+                  </div>
+                  <div className={activeProvider === 'codex' && !codexConnection.connected ? 'assistant-auth-chip needs-auth' : 'assistant-auth-chip'} title={activeProviderMeta?.title ?? providerAuthLabel}>
+                    <span className={activeProvider === 'codex' && codexConnection.connected ? 'connected' : ''} />
+                    <small>{providerAuthLabel}</small>
+                    {activeProvider === 'codex' && !codexConnection.connected ? (
+                      <button type="button" onClick={() => void startCodexConnect()} disabled={busy}>Connect</button>
+                    ) : null}
+                  </div>
+                  <div className="assistant-composer-actions">
+                    {activeRuns.length > 0 ? (
+                      <button type="button" className="danger" onClick={() => void stopActiveRun()} disabled={busy}>
+                        Stop
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+                {codexConnectFlow ? (
+                  <div className="assistant-codex-complete composer">
+                    <input
+                      value={codexCodeDraft}
+                      disabled={busy}
+                      placeholder="Paste redirect URL or authorization code"
+                      onChange={(event) => setCodexCodeDraft(event.currentTarget.value)}
+                    />
+                    <button type="button" onClick={() => void completeCodexConnect()} disabled={busy || !codexCodeDraft.trim()}>
+                      Complete
+                    </button>
+                  </div>
+                ) : null}
+                <div className="assistant-composer-input">
+                  <textarea
+                    value={messageDraft}
+                    onChange={(event) => setMessageDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' && !event.shiftKey) {
+                        event.preventDefault();
+                        if (activeThread && messageDraft.trim() && !busy) {
+                          void sendMessage();
+                        }
+                      }
+                    }}
+                    placeholder={activeRuns.length > 0 ? ((activeThread?.promptDeliveryMode ?? 'queue') === 'asap' ? 'Send at next turn' : 'Queue a message') : 'Ask the assistant'}
+                    disabled={!activeThread || busy}
+                  />
+                  {activeRunningModel ? (
+                    <span className="assistant-running-model" title={`Running model: ${activeRunningModelLabel}`}>
+                      Running {compactModelSelectionLabel(activeRunningModelLabel)}
+                    </span>
+                  ) : null}
+                  <button type="submit" className="assistant-send-button" disabled={!activeThread || !messageDraft.trim() || busy}>
+                    Send
+                  </button>
+                </div>
+              </form>
+                </>
+              )}
             </section>
           ) : null}
 
@@ -1526,19 +2202,44 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                       onBlur={(event) => void updateAssistantSettings({ voiceSystemPrompt: event.currentTarget.value })}
                     />
                   </label>
-                  <label>
-                    Overview prompt
-                    <textarea
-                      value={assistantSnapshotData?.assistantSettings.overviewPrompt ?? ''}
-                      onChange={(event) => {
-                        const value = event.currentTarget.value;
-                        setAssistantSnapshotData((snapshot) => snapshot
-                          ? { ...snapshot, assistantSettings: { ...snapshot.assistantSettings, overviewPrompt: value } }
-                          : snapshot);
-                      }}
-                      onBlur={(event) => void updateAssistantSettings({ overviewPrompt: event.currentTarget.value })}
-                    />
-                  </label>
+                </div>
+              </section>
+
+              <section className="assistant-panel settings-section">
+                <div className="assistant-panel-header">
+                  <div>
+                    <span className="hub-kicker">Assistant</span>
+                    <h2>Codex Connection</h2>
+                  </div>
+                  {codexConnection.connected ? (
+                    <button type="button" onClick={() => void disconnectCodex()} disabled={busy}>
+                      Disconnect
+                    </button>
+                  ) : (
+                    <button type="button" onClick={() => void startCodexConnect()} disabled={busy}>
+                      Connect Codex
+                    </button>
+                  )}
+                </div>
+                <div className="assistant-provider-auth-row settings">
+                  <div className="assistant-provider-pill">
+                    <span className={codexConnection.connected ? 'connected' : ''} />
+                    <strong>{codexConnection.connected ? 'Connected' : 'Not connected'}</strong>
+                    <small>{codexConnection.accountId ?? 'Use Codex models without OpenAI API keys'}</small>
+                  </div>
+                  {codexConnectFlow ? (
+                    <div className="assistant-codex-complete">
+                      <input
+                        value={codexCodeDraft}
+                        disabled={busy}
+                        placeholder="Paste redirect URL or authorization code"
+                        onChange={(event) => setCodexCodeDraft(event.currentTarget.value)}
+                      />
+                      <button type="button" onClick={() => void completeCodexConnect()} disabled={busy || !codexCodeDraft.trim()}>
+                        Complete
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
               </section>
 
@@ -1708,33 +2409,36 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
           ) : null}
         </section>
       </section>
-      {overviewModalOpen && latestOverview ? (
-        <div className="assistant-modal-backdrop" role="dialog" aria-modal="true" aria-label="Thread overview">
-          <section className="assistant-overview-modal">
-            <header>
-              <div>
-                <span className="hub-kicker">Overview</span>
-                <h2>{activeThread?.title ?? 'Assistant'} Summary</h2>
-                <small>
-                  {latestOverview.cached ? 'cached copy' : 'fresh summary'} · {timeLabel(latestOverview.createdAt)}
-                </small>
-              </div>
-              <div>
-                <button type="button" onClick={() => void generateOverview(false)} disabled={busy}>
-                  Use Cache
-                </button>
-                <button type="button" onClick={() => void generateOverview(true)} disabled={busy}>
-                  Regenerate
-                </button>
-                <button type="button" onClick={() => setOverviewModalOpen(false)}>
-                  Close
-                </button>
-              </div>
-            </header>
-            <pre>{latestOverview.markdown}</pre>
-          </section>
-        </div>
-      ) : null}
+      <AssistantSystemPromptModal
+        open={systemPromptOpen}
+        threadTitle={activeThread?.title ?? ''}
+        threadVoiceEnabled={Boolean(activeThread?.voiceEnabled)}
+        mode={systemPromptMode}
+        onModeChange={setSystemPromptMode}
+        globalKind={systemPromptGlobalKind}
+        onGlobalKindChange={setSystemPromptGlobalKind}
+        threadDraft={threadSystemPromptDraft}
+        onThreadDraftChange={setThreadSystemPromptDraft}
+        normalDraft={normalSystemPromptDraft}
+        onNormalDraftChange={setNormalSystemPromptDraft}
+        voiceDraft={voiceSystemPromptDraft}
+        onVoiceDraftChange={setVoiceSystemPromptDraft}
+        inheritedPrompt={activeInheritedSystemPrompt}
+        maxChars={ASSISTANT_SYSTEM_PROMPT_MAX_CHARS}
+        saving={systemPromptSaving}
+        promoteSaving={promoteSystemPromptSaving}
+        error={systemPromptError}
+        notice={systemPromptNotice}
+        onClose={() => setSystemPromptOpen(false)}
+        onSaveThread={() => void saveThreadSystemPrompt()}
+        onSaveGlobal={() => void saveGlobalSystemPrompt()}
+        onPromoteThread={() => void promoteThreadSystemPrompt()}
+        onUseInherited={() => setThreadSystemPromptDraft('')}
+        onResetGlobal={() => {
+          if (systemPromptGlobalKind === 'voice') setVoiceSystemPromptDraft(ASSISTANT_VOICE_SYSTEM_PROMPT_DEFAULT);
+          else setNormalSystemPromptDraft(ASSISTANT_NORMAL_SYSTEM_PROMPT_DEFAULT);
+        }}
+      />
     </main>
   );
 }
@@ -2352,7 +3056,7 @@ function wakePhraseMatch(text: string): 'start' | 'patch' | 'clipboard' | 'sleep
   const words = text.toLowerCase().split(/[^a-z]+/).filter(Boolean);
   const compact = words.join('');
   if (words.some((word, index) => word === 'go' && words[index + 1] === 'to' && words[index + 2] === 'sleep')) return 'sleep';
-  if (words.some((word, index) => (word === 'hey' || word === 'hay') && words[index + 1] === 'sebastian')) return 'start';
+  if (words.some((word, index) => (word === 'hey' || word === 'hay') && (words[index + 1] === 'sebastian' || words[index + 1] === 'sebastien'))) return 'start';
   if (words.some((word, index) => word === 'patch' && words[index + 1] === 'me' && words[index + 2] === 'in')) return 'patch';
   if (words.includes('transcribe')) return 'clipboard';
   if (words.includes('status') || compact === 'stateus' || compact === 'checkstatus') return 'status';

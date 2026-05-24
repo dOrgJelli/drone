@@ -28,7 +28,7 @@ function groqTtsApiKey(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 function assistantModel(): string {
-  return process.env.VOICE_STREAM_NEXT_ASSISTANT_MODEL?.trim() || 'gpt-5.2';
+  return process.env.VOICE_STREAM_NEXT_ASSISTANT_MODEL?.trim() || 'gpt-5.5';
 }
 
 function groqSttModel(): string {
@@ -65,12 +65,8 @@ export function hasGroqSpeechRuntime(env: NodeJS.ProcessEnv = process.env): bool
 }
 
 export async function generateAssistantReply(messages: { role: 'user' | 'assistant'; content: string }[]): Promise<RuntimeResult> {
-  const lastUserMessage = [...messages].reverse().find((message) => message.role === 'user')?.content.trim() || '';
   if (!openAiApiKey()) {
-    return {
-      provider: 'fallback',
-      text: fallbackReply(lastUserMessage),
-    };
+    throw new Error('OpenAI API key is not configured for assistant replies.');
   }
 
   const response = await fetch('https://api.openai.com/v1/responses', {
@@ -83,9 +79,11 @@ export async function generateAssistantReply(messages: { role: 'user' | 'assista
     }),
   });
   const body = await parseOpenAiResponse(response);
+  const text = String(body.output_text ?? '').trim();
+  if (!text) throw new Error('OpenAI response did not include assistant text.');
   return {
     provider: 'openai',
-    text: String(body.output_text ?? '').trim() || fallbackReply(lastUserMessage),
+    text,
   };
 }
 
@@ -153,11 +151,6 @@ export async function synthesizeSpeech(text: string): Promise<{ audio: Uint8Arra
     provider: 'groq',
     audio: new Uint8Array(await response.arrayBuffer()),
   };
-}
-
-function fallbackReply(prompt: string): string {
-  if (!prompt) return 'I did not catch anything yet.';
-  return `I heard: ${prompt}`;
 }
 
 function openAiHeaders(): Record<string, string> {

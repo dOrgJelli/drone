@@ -23,7 +23,6 @@ Out of scope for this roadmap:
 | Rich assistant threads | Threads have run lifecycle state, streaming events, queued prompts, ASAP steering prompts, stop/cancel behavior, and structured message rendering. |
 | Model controls | Users can choose provider/model per thread, set supported reasoning/thinking level, and see the model currently running. |
 | Thread system prompts | Global prompt defaults, voice-specific defaults, per-thread overrides, reset-to-default, and promote-thread-to-global flows. |
-| Thread overviews | Generate a Markdown status overview, rerun it, optionally auto-refresh it, and edit the overview prompt. |
 | Assistant artifacts | Thread-scoped files/notes that the assistant can create, read, update, append, patch, and delete through a safe artifact tool. |
 | Spoken replies | Voice-originated threads can request short spoken replies for connected Android or desktop clients. |
 | Per-thread tool controls | UI can enable/disable available tools per thread and show why disabled tools are unavailable. |
@@ -70,7 +69,6 @@ Initial non-drone tools:
 - `speak`
 - `get_system_prompt`
 - `update_system_prompt`
-- `get_thread_overview`
 - `set_thinking_level`
 
 Acceptance:
@@ -129,23 +127,7 @@ Acceptance:
 - user can inspect artifact contents in the web dashboard
 - artifact writes are bounded and path-normalized
 
-### Phase F: Thread Overviews
-
-Deliverables:
-
-- overview generation endpoint
-- overview prompt settings
-- cached overview metadata
-- rerun and reuse-last-input options
-- optional auto-refresh interval in UI
-
-Acceptance:
-
-- user can generate a concise Markdown overview for a thread
-- overview does not invent missing state
-- cached and regenerated overviews are distinguishable
-
-### Phase G: Spoken Replies And Voice Threads
+### Phase F: Spoken Replies And Voice Threads
 
 Deliverables:
 
@@ -196,7 +178,6 @@ Likely new or expanded tables:
 - `assistant_approvals`
 - `assistant_artifacts`
 - `assistant_settings`
-- `assistant_overviews`
 - `assistant_thread_capabilities`
 
 Keep rows scoped by user id. Device-originated voice threads should still resolve through the owning user profile.
@@ -217,4 +198,3 @@ Keep rows scoped by user id. Device-originated voice threads should still resolv
 3. Should artifact writes require approval, or only path/size validation?
 4. Should ASAP prompts interrupt only before the next assistant response, or should they be allowed to inject while a tool is waiting?
 5. Should model/provider defaults be global per user or per assistant profile?
-6. Should overview generation use the same selected thread model or a separate overview model setting?

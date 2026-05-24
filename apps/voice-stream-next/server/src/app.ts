@@ -7,7 +7,7 @@ import websocket from '@fastify/websocket';
 import { clerkPlugin } from '@clerk/fastify';
 import { VoiceStreamNextDb, type AssistantMessage } from './db.js';
 import { requireAdmin, resolveRequestUser, type AuthContext } from './auth.js';
-import { generateAssistantReply, synthesizeSpeech, transcribePcm16 } from './assistant-runtime.js';
+import { synthesizeSpeech, transcribePcm16 } from './assistant-runtime.js';
 import {
   StreamingTranscriptionManager,
   buildStreamingTranscriptionConfigFromEnv,
@@ -19,7 +19,6 @@ import { parseVoiceApprovalSettings, voiceApprovalSettingsResponse } from './voi
 import {
   assistantSnapshot,
   assistantToolSummaries,
-  generateThreadOverview,
   promptAssistantThread,
   resolveAssistantApproval,
   sanitizeArtifactPath,
@@ -233,6 +232,9 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
   const handleAssistantPromptEvent = (userId: string, threadId: string, event: any) => {
     if (event?.type === 'message' && event.message?.spokenText) {
       emitAssistantSpeak(userId, threadId, event.message as AssistantMessage);
+    }
+    if (['snapshot', 'message', 'queued', 'tool_call', 'tool_result', 'approval_pending', 'done', 'error'].includes(String(event?.type ?? ''))) {
+      emitAssistantChange(`assistant_${String(event.type)}`, threadId);
     }
   };
   const emitNewSpokenMessages = (userId: string, threadId: string, beforeIds: Set<string>) => {
@@ -770,7 +772,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
         source,
         voiceEnabled: Boolean(body.voiceEnabled) || source === 'voice',
         provider: requestedProvider || (codexConnected ? 'codex' : undefined),
-        model: cleanText(body.model) || (!requestedProvider && codexConnected ? 'gpt-5.3-codex' : undefined),
+        model: cleanText(body.model) || (!requestedProvider && codexConnected ? 'gpt-5.5' : undefined),
         thinkingLevel: cleanText(body.thinkingLevel) || undefined,
         promptDeliveryMode: body.promptDeliveryMode === 'asap' ? 'asap' : 'queue',
       });
@@ -787,9 +789,10 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       const patch: Parameters<VoiceStreamNextDb['updateThread']>[2] = {};
       if (body.title !== undefined) patch.title = cleanText(body.title, 'Assistant thread') || 'Assistant thread';
       if (body.provider !== undefined) patch.provider = cleanText(body.provider, 'openai') || 'openai';
-      if (body.model !== undefined) patch.model = cleanText(body.model, 'gpt-5.2') || 'gpt-5.2';
+      if (body.model !== undefined) patch.model = cleanText(body.model, 'gpt-5.5') || 'gpt-5.5';
       if (body.thinkingLevel !== undefined) patch.thinkingLevel = cleanText(body.thinkingLevel, 'off') || 'off';
       if (body.voiceEnabled !== undefined) patch.voiceEnabled = Boolean(body.voiceEnabled);
+      if (body.autoApprove !== undefined) patch.autoApprove = Boolean(body.autoApprove);
       if (body.systemPrompt !== undefined) patch.systemPrompt = cleanText(body.systemPrompt) || null;
       if (Array.isArray(body.enabledTools)) patch.enabledTools = body.enabledTools.map((tool: unknown) => cleanText(tool)).filter(Boolean);
       if (body.promptDeliveryMode !== undefined) patch.promptDeliveryMode = body.promptDeliveryMode === 'asap' ? 'asap' : 'queue';
@@ -995,9 +998,20 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       db.deleteCodexOAuthState(state);
       db.updateAssistantSettings(ctx.user.id, {
         defaultProvider: 'codex',
-        defaultModel: 'gpt-5.3-codex',
+        defaultModel: 'gpt-5.5',
         defaultThinkingLevel: 'medium',
       });
+      for (const thread of db.listThreads(ctx.user.id)) {
+        if (thread.provider === 'openai' && thread.model === 'gpt-5.2') {
+          db.updateThread(ctx.user.id, thread.id, {
+            provider: 'codex',
+            model: 'gpt-5.5',
+            thinkingLevel: thread.thinkingLevel === 'off' ? 'medium' : thread.thinkingLevel,
+            status: thread.status === 'error' ? 'idle' : thread.status,
+            error: null,
+          });
+        }
+      }
       emitAssistantChange('codex_connected');
       return {
         ok: true,
@@ -1026,9 +1040,8 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       const settings = db.updateAssistantSettings(ctx.user.id, {
         normalSystemPrompt: body.normalSystemPrompt === undefined ? undefined : cleanText(body.normalSystemPrompt),
         voiceSystemPrompt: body.voiceSystemPrompt === undefined ? undefined : cleanText(body.voiceSystemPrompt),
-        overviewPrompt: body.overviewPrompt === undefined ? undefined : cleanText(body.overviewPrompt),
         defaultProvider: body.defaultProvider === undefined ? undefined : cleanText(body.defaultProvider, 'openai'),
-        defaultModel: body.defaultModel === undefined ? undefined : cleanText(body.defaultModel, 'gpt-5.2'),
+        defaultModel: body.defaultModel === undefined ? undefined : cleanText(body.defaultModel, 'gpt-5.5'),
         defaultThinkingLevel: body.defaultThinkingLevel === undefined ? undefined : cleanText(body.defaultThinkingLevel, 'off'),
       });
       emitAssistantChange('assistant_settings_updated');
@@ -1108,15 +1121,6 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       const deleted = db.deleteArtifact(ctx.user.id, threadId, artifactPath);
       emitAssistantChange('artifact_deleted', threadId);
       return { ok: true, deleted, artifacts: db.listArtifacts(ctx.user.id, threadId), snapshot: assistantSnapshot(db, ctx.user.id, threadId) };
-    }),
-  );
-
-  app.post('/api/assistant/threads/:threadId/overview', async (req, reply) =>
-    withUser(req, reply, db, clerkEnabled, async (ctx) => {
-      const threadId = String((req.params as any).threadId ?? '');
-      const overview = generateThreadOverview(db, ctx.user.id, threadId, { force: Boolean(jsonBody(req).force) });
-      emitAssistantChange('overview_generated', threadId);
-      return { ok: true, overview, snapshot: assistantSnapshot(db, ctx.user.id, threadId) };
     }),
   );
 
@@ -1315,31 +1319,53 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
               socket.send(JSON.stringify({ type: 'sleep', mode: streamMode, transcriptText: transcript }));
             }
           } else {
-            db.addMessage(device.userId, session.assistantThreadId, { role: 'user', content: transcript });
             if (streamMode === 'patch') {
+              db.addMessage(device.userId, session.assistantThreadId, { role: 'user', content: transcript });
               if ((socket as any).readyState === 1) {
                 socket.send(JSON.stringify({ type: 'transcript_result', mode: streamMode, transcript, status: 'Transcript patched into chat.' }));
               }
             } else {
-              const history = db.listMessages(device.userId, session.assistantThreadId)
-                .filter((message) => message.role === 'user' || message.role === 'assistant')
-                .map((message) => ({
-                  role: message.role as 'user' | 'assistant',
-                  content: message.content,
-                }));
-              const assistant = await generateAssistantReply(history);
-              runtime = assistant.provider;
-              assistantText = assistant.text;
-              db.addMessage(device.userId, session.assistantThreadId, {
-                role: 'assistant',
-                content: assistantText,
-                spokenText: assistantText,
+              let assistantError = '';
+              let pendingStatus = '';
+              await promptAssistantThread(db, device.userId, session.assistantThreadId, { prompt: transcript }, (event) => {
+                handleAssistantPromptEvent(device.userId, session.assistantThreadId, event);
+                if ((event as any)?.type === 'queued') {
+                  pendingStatus = 'Queued voice prompt.';
+                }
+                if ((event as any)?.type === 'approval_pending') {
+                  pendingStatus = 'Assistant is waiting for approval.';
+                }
+                if ((event as any)?.type === 'message' && (event as any).message?.role === 'assistant') {
+                  const message = (event as any).message as AssistantMessage;
+                  if (message.isError) {
+                    assistantError = String(message.content ?? 'Voice assistant failed.').trim();
+                    return;
+                  }
+                  assistantText = String(message.spokenText ?? message.content ?? '').trim();
+                }
+                if ((event as any)?.type === 'error') {
+                  assistantError = String((event as any).error ?? 'Voice assistant failed.');
+                }
               });
+              const thread = db.thread(device.userId, session.assistantThreadId);
+              runtime = thread ? `${thread.provider}:${thread.model}` : 'assistant';
+              emitAssistantChange('voice_thread_prompted', session.assistantThreadId);
+              if (!assistantText && assistantError) {
+                throw new Error(assistantError);
+              }
+              if (!assistantText && pendingStatus) {
+                if ((socket as any).readyState === 1) {
+                  socket.send(JSON.stringify({ type: 'transcript_result', mode: streamMode, transcript, status: pendingStatus }));
+                }
+                return;
+              }
               if ((socket as any).readyState === 1) {
                 socket.send(JSON.stringify({ type: 'assistant_result', transcript, assistantText, runtime }));
-                const speech = await synthesizeSpeech(assistantText);
-                if (speech.audio && (socket as any).readyState === 1) {
-                  socket.send(Buffer.from(speech.audio));
+                if (assistantText) {
+                  const speech = await synthesizeSpeech(assistantText);
+                  if (speech.audio && (socket as any).readyState === 1) {
+                    socket.send(Buffer.from(speech.audio));
+                  }
                 }
               }
             }

@@ -262,7 +262,7 @@ export function stripTranscriptCommands(text: string): {
   let abortDetected = false;
   let abortPhrase: string | undefined;
 
-  cleaned = cleaned.replace(/\b(?:hey|hay)\s+sebastian\b[\s,.:;!?-]*/gi, () => {
+  cleaned = cleaned.replace(/\b(?:hey|hay)\s+sebasti[ae]n\b[\s,.:;!?-]*/gi, () => {
     wakeDetected = true;
     return ' ';
   });

@@ -12,6 +12,7 @@ let compactMode = true;
 let normalWindowBounds = null;
 let tray = null;
 let isQuitting = false;
+let trayStatus = { mode: 'off', status: 'Off.' };
 
 const fullWindow = {
   width: 1180,
@@ -28,10 +29,13 @@ const compactWindow = {
 const sampleRate = 16_000;
 const wakeGrammar = [
   'hey sebastian',
+  'hey sebastien',
   'hay sebastian',
+  'hay sebastien',
   'hey',
   'hay',
   'sebastian',
+  'sebastien',
   'patch me in',
   'can you transcribe',
   'transcribe',
@@ -496,9 +500,79 @@ function pngChunk(type, data) {
   return Buffer.concat([length, typeBuffer, data, crc]);
 }
 
-function trayIconPngBuffer() {
+function trayModeLabel(mode) {
+  const labels = {
+    off: 'Off',
+    awake: 'Awake',
+    sleeping: 'Asleep',
+    recording: 'Recording',
+    transcribing: 'Working',
+    error: 'Error',
+  };
+  return labels[mode] || 'Voice';
+}
+
+function normalizeTrayMode(mode) {
+  const value = String(mode || '').trim().toLowerCase();
+  if (value === 'asleep' || value === 'sleep') return 'sleeping';
+  if (['off', 'awake', 'sleeping', 'recording', 'transcribing', 'error'].includes(value)) return value;
+  return 'off';
+}
+
+function trayModeColor(mode) {
+  const colors = {
+    off: [118, 124, 135],
+    awake: [36, 181, 116],
+    sleeping: [245, 158, 11],
+    recording: [239, 68, 68],
+    transcribing: [56, 137, 255],
+    error: [220, 38, 38],
+  };
+  return colors[normalizeTrayMode(mode)] || colors.off;
+}
+
+function trayStatusTooltip() {
+  const label = trayModeLabel(trayStatus.mode);
+  const detail = String(trayStatus.status || '').trim();
+  return detail && detail !== label ? `VoiceStream: ${label}\n${detail}` : `VoiceStream: ${label}`;
+}
+
+function trayStatusMenuTemplate() {
+  return [
+    { label: `Status: ${trayModeLabel(trayStatus.mode)}`, enabled: false },
+    { type: 'separator' },
+    { label: 'Show VoiceStream', click: showMainWindow },
+    { type: 'separator' },
+    {
+      label: 'Quit',
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      },
+    },
+  ];
+}
+
+function applyTrayStatus() {
+  if (!tray) return;
+  tray.setImage(trayIconImage(trayStatus.mode));
+  tray.setToolTip(trayStatusTooltip());
+  tray.setContextMenu(Menu.buildFromTemplate(trayStatusMenuTemplate()));
+}
+
+function updateTrayStatus(mode, status) {
+  trayStatus = {
+    mode: normalizeTrayMode(mode),
+    status: String(status || trayModeLabel(normalizeTrayMode(mode))),
+  };
+  applyTrayStatus();
+  return trayStatus;
+}
+
+function trayIconPngBuffer(mode = trayStatus.mode) {
   const size = 32;
   const raw = Buffer.alloc(size * (1 + size * 4));
+  const [baseR, baseG, baseB] = trayModeColor(mode);
 
   function setPixel(x, y, r, g, b, a) {
     const offset = y * (1 + size * 4) + 1 + x * 4;
@@ -516,7 +590,7 @@ function trayIconPngBuffer() {
       const distance = Math.sqrt(dx * dx + dy * dy);
       if (distance <= 15) {
         const alpha = distance < 14 ? 255 : Math.round((15 - distance) * 255);
-        setPixel(x, y, 157, 124, 255, alpha);
+        setPixel(x, y, baseR, baseG, baseB, alpha);
       }
     }
   }
@@ -552,8 +626,8 @@ function trayIconPngBuffer() {
   ]);
 }
 
-function trayIconImage() {
-  const image = nativeImage.createFromBuffer(trayIconPngBuffer());
+function trayIconImage(mode = trayStatus.mode) {
+  const image = nativeImage.createFromBuffer(trayIconPngBuffer(mode));
   if (process.platform === 'darwin') image.setTemplateImage(false);
   return image;
 }
@@ -574,18 +648,7 @@ function showMainWindow() {
 function ensureTray() {
   if (tray) return tray;
   tray = new Tray(trayIconImage());
-  tray.setToolTip('VoiceStream');
-  tray.setContextMenu(Menu.buildFromTemplate([
-    { label: 'Show VoiceStream', click: showMainWindow },
-    { type: 'separator' },
-    {
-      label: 'Quit',
-      click: () => {
-        isQuitting = true;
-        app.quit();
-      },
-    },
-  ]));
+  applyTrayStatus();
   tray.on('click', showMainWindow);
   tray.on('double-click', showMainWindow);
   return tray;
@@ -698,6 +761,7 @@ if (!gotSingleInstanceLock) {
     const win = windowFromEvent(event);
     hideToTray(win);
   });
+  ipcMain.handle('tray:status', (_event, payload) => updateTrayStatus(payload?.mode, payload?.status));
   ipcMain.handle('vosk:status', () => statusForVosk());
   ipcMain.handle('vosk:start', () => ensureVoskRecognizer());
   ipcMain.handle('vosk:stop', () => {

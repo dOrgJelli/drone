@@ -288,6 +288,9 @@ function setMode(mode, status) {
   state.mode = mode;
   if (status) showStatus(status);
   updateVoiceButtons();
+  if (desktop.setTrayStatus) {
+    void desktop.setTrayStatus({ mode, status: status || els.micStatus.textContent || mode }).catch(() => undefined);
+  }
   void reportClientStatus(mode, status || els.micStatus.textContent || mode);
 }
 
@@ -1302,7 +1305,7 @@ function wakePhraseMatch(text) {
   const words = String(text || '').toLowerCase().split(/[^a-z]+/).filter(Boolean);
   const compact = words.join('');
   if (words.some((word, index) => word === 'go' && words[index + 1] === 'to' && words[index + 2] === 'sleep')) return 'sleep';
-  if (words.some((word, index) => (word === 'hey' || word === 'hay') && words[index + 1] === 'sebastian')) return 'start';
+  if (words.some((word, index) => (word === 'hey' || word === 'hay') && (words[index + 1] === 'sebastian' || words[index + 1] === 'sebastien'))) return 'start';
   if (words.some((word, index) => word === 'patch' && words[index + 1] === 'me' && words[index + 2] === 'in')) return 'patch';
   if (words.some((word, index) => word === 'can' && words[index + 1] === 'you' && words[index + 2] === 'transcribe')) return 'clipboard';
   if (words.includes('status') || compact === 'stateus' || compact === 'checkstatus') return 'status';

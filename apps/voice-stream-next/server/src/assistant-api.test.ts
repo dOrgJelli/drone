@@ -84,8 +84,8 @@ describe('assistant API parity', () => {
     }).then((response) => response.json());
     db.createRun(created.thread.userId, created.thread.id, {
       prompt: 'already running',
-      provider: 'fallback',
-      model: 'fallback',
+      provider: 'openai',
+      model: 'gpt-5.2',
       thinkingLevel: 'off',
     });
 
@@ -93,7 +93,7 @@ describe('assistant API parity', () => {
       method: 'POST',
       url: `/api/assistant/threads/${created.thread.id}/prompt`,
       headers: devHeaders,
-      payload: JSON.stringify({ prompt: 'run this next', provider: 'fallback' }),
+      payload: JSON.stringify({ prompt: 'run this next', provider: 'openai' }),
     }).then((response) => response.json());
     const queuedPrompt = queued.snapshot.threads.find((thread: any) => thread.id === created.thread.id).queuedPrompts[0];
     expect(queued.events.some((event: any) => event.type === 'queued')).toBe(true);
@@ -108,33 +108,60 @@ describe('assistant API parity', () => {
     expect(cancelled.snapshot.threads.find((thread: any) => thread.id === created.thread.id).queuedPrompts).toHaveLength(0);
   });
 
-  test('generates fresh and cached overviews through the API', async () => {
-    const created = await built.app.inject({
-      method: 'POST',
-      url: '/api/assistant/threads',
-      headers: devHeaders,
-      payload: JSON.stringify({ title: 'Overview API thread' }),
-    }).then((response) => response.json());
-    db.addMessage(created.thread.userId, created.thread.id, { role: 'user', content: 'Need a parity overview.' });
+  test('connects and disconnects Codex OAuth credentials through assistant routes', async () => {
+    const originalFetch = globalThis.fetch;
+    const accessPayload = Buffer.from(JSON.stringify({
+      'https://api.openai.com/auth': { chatgpt_account_id: 'acct_test_123' },
+    })).toString('base64url');
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({
+        access_token: `header.${accessPayload}.sig`,
+        refresh_token: 'refresh-test-token',
+        expires_in: 3600,
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as unknown as typeof fetch;
+    try {
+      const started = await built.app.inject({
+        method: 'POST',
+        url: '/api/assistant/codex/connect',
+        headers: devHeaders,
+        payload: '{}',
+      }).then((response) => response.json());
+      expect(started.authorizationUrl).toContain('auth.openai.com/oauth/authorize');
+      expect(started.state).toBeTruthy();
 
-    const fresh = await built.app.inject({
-      method: 'POST',
-      url: `/api/assistant/threads/${created.thread.id}/overview`,
-      headers: devHeaders,
-      payload: JSON.stringify({ force: true }),
-    }).then((response) => response.json());
-    const freshOverview = fresh.snapshot.threads.find((thread: any) => thread.id === created.thread.id).latestOverview;
-    expect(freshOverview.cached).toBe(false);
-    expect(freshOverview.markdown).toContain('## Queue');
-    expect(freshOverview.markdown).toContain('## Pending Approvals');
+      const completed = await built.app.inject({
+        method: 'POST',
+        url: '/api/assistant/codex/complete',
+        headers: devHeaders,
+        payload: JSON.stringify({
+          state: started.state,
+          codeOrUrl: `http://localhost:1455/auth/callback?code=test-code&state=${started.state}`,
+        }),
+      }).then((response) => response.json());
+      expect(completed.codexConnection.connected).toBe(true);
+      expect(completed.codexConnection.accountId).toBe('acct_test_123');
+      expect(completed.snapshot.assistantSettings.defaultProvider).toBe('codex');
 
-    const cached = await built.app.inject({
-      method: 'POST',
-      url: `/api/assistant/threads/${created.thread.id}/overview`,
-      headers: devHeaders,
-      payload: JSON.stringify({ force: false }),
-    }).then((response) => response.json());
-    expect(cached.overview.cached).toBe(true);
+      const codexThread = await built.app.inject({
+        method: 'POST',
+        url: '/api/assistant/threads',
+        headers: devHeaders,
+        payload: JSON.stringify({ title: 'Codex default thread' }),
+      }).then((response) => response.json());
+      expect(codexThread.thread.provider).toBe('codex');
+
+      const disconnected = await built.app.inject({
+        method: 'DELETE',
+        url: '/api/assistant/codex/connection',
+        headers: devAuthHeaders,
+      }).then((response) => response.json());
+      expect(disconnected.codexConnection.connected).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   test('returns and stores spoken replies for voice thread prompts', async () => {

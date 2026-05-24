@@ -5,7 +5,7 @@
 - [x] Rich assistant threads
 - [x] Model/provider/thinking controls
 - [x] Thread system prompts
-- [x] Global normal/voice/overview prompts
+- [x] Global normal/voice prompts
 - [x] Tool registry and per-thread tool toggles
 - [x] Run lifecycle state: `idle`, `running`, `waiting_for_approval`, `cancelled`, `error`
 - [x] Approval-gated tool calls
@@ -21,7 +21,6 @@
 - [x] Artifact list/read preview
 - [x] Artifact create/edit/delete UI
 - [x] Artifact copy/download UI
-- [x] Thread overview generation
 - [x] Spoken reply flagging/storage
 - [x] Continue original model run after approval
 - [x] Tool activity rows in the message stream
@@ -29,7 +28,6 @@
 - [x] Queued prompt visibility and cancel controls
 - [x] Voice/normal thread filtering and voice thread creation
 - [x] Spoken reply delivery over assistant events with browser speech playback
-- [x] Richer overview workflow with cached reuse, regenerate, and modal view
 - [x] Broader assistant API tests
 - [x] Assistant artifact list/patch parity
 - [x] System prompt patch parity

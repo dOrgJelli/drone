@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('voiceStreamDesktop', {
   expandWindow: () => ipcRenderer.invoke('window:expand'),
   signedOutWindow: () => ipcRenderer.invoke('window:signedOut'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
+  setTrayStatus: (status) => ipcRenderer.invoke('tray:status', status),
   onWindowState: (callback) => {
     const listener = (_event, status) => callback(status);
     ipcRenderer.on('window:state', listener);

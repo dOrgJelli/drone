@@ -27,7 +27,7 @@ Build Voice Stream Next in parallel. Keep the current system working. Move share
 | Desktop diagnostics | Exists through Hub | Move into desktop client | Yes |
 | Admin monitor | Not current standalone model | Admin-only connected-device monitor | Yes |
 | Assistant threads | Exists in Hub | New assistant module in Voice Stream Next backend | Yes |
-| Assistant rich-thread parity | Exists in Hub | Runtime, streaming, tools, approvals, prompts, artifacts, overviews, model controls, and spoken replies without Drone Hub dependencies | Yes |
+| Assistant rich-thread parity | Exists in Hub | Runtime, streaming, tools, approvals, prompts, artifacts, model controls, and spoken replies without Drone Hub dependencies | Yes |
 | Drone Hub control | Exists in Hub | Future Drone Hub adapter | No |
 
 ## Phase 0: Docs And Contracts
@@ -143,7 +143,6 @@ Deliverables:
 - system approval workflow for non-drone tool calls
 - per-thread model controls
 - global and per-thread system prompts
-- thread overviews
 - assistant artifacts
 - spoken replies for voice threads
 

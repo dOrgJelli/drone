@@ -3,7 +3,6 @@ import path from 'node:path';
 
 import {
   assistantSnapshot,
-  generateThreadOverview,
   promptAssistantThread,
   resolveAssistantApproval,
   sanitizeArtifactPath,
@@ -32,6 +31,7 @@ describe('assistant parity runtime', () => {
     dbs.length = 0;
     delete process.env.VOICE_STREAM_NEXT_TEST_MODEL_TOOL_CALLS;
     delete process.env.OPENAI_API_KEY;
+    delete process.env.VOICE_STREAM_NEXT_OPENAI_API_KEY;
   });
 
   test('writes assistant artifacts without approval', async () => {
@@ -82,24 +82,6 @@ describe('assistant parity runtime', () => {
     expect(db.listMessages(user.id, thread.id).some((message) => message.role === 'toolResult')).toBe(true);
   });
 
-  test('generates and caches thread overviews', () => {
-    const db = tempDb('assistant-overview');
-    dbs.push(db);
-    const user = testUser(db);
-    const thread = db.createThread(user.id, { title: 'Overview' });
-    db.addMessage(user.id, thread.id, { role: 'user', content: 'Summarize the project status.' });
-    db.addMessage(user.id, thread.id, { role: 'assistant', content: 'The project is ready for parity work.' });
-
-    const first = generateThreadOverview(db, user.id, thread.id);
-    const second = generateThreadOverview(db, user.id, thread.id);
-
-    expect(first.markdown).toContain('# Overview Overview');
-    expect(first.cached).toBe(false);
-    expect(second.markdown).toBe(first.markdown);
-    expect(second.cached).toBe(true);
-    expect(assistantSnapshot(db, user.id, thread.id).threads[0]?.latestOverview?.markdown).toBe(first.markdown);
-  });
-
   test('persists thread model controls', () => {
     const db = tempDb('assistant-models');
     dbs.push(db);
@@ -107,15 +89,15 @@ describe('assistant parity runtime', () => {
     const thread = db.createThread(user.id, { title: 'Models' });
 
     const updated = db.updateThread(user.id, thread.id, {
-      provider: 'fallback',
-      model: 'fallback',
+      provider: 'codex',
+      model: 'gpt-5.5',
       thinkingLevel: 'high',
       promptDeliveryMode: 'asap',
       voiceEnabled: true,
     });
 
-    expect(updated?.provider).toBe('fallback');
-    expect(updated?.model).toBe('fallback');
+    expect(updated?.provider).toBe('codex');
+    expect(updated?.model).toBe('gpt-5.5');
     expect(updated?.thinkingLevel).toBe('high');
     expect(updated?.promptDeliveryMode).toBe('asap');
     expect(updated?.voiceEnabled).toBe(true);
@@ -160,6 +142,25 @@ describe('assistant parity runtime', () => {
     expect(waiting.pendingApprovals).toHaveLength(1);
     expect(db.thread(user.id, thread.id)?.systemPrompt).toBeNull();
     expect(db.listToolCalls(user.id, thread.id)[0]?.status).toBe('waiting_for_approval');
+  });
+
+  test('auto-approve skips pending approval and executes approval tools', async () => {
+    const db = tempDb('assistant-auto-approve');
+    dbs.push(db);
+    const user = testUser(db);
+    const thread = db.createThread(user.id, { title: 'Auto approve', autoApprove: true });
+    process.env.VOICE_STREAM_NEXT_TEST_MODEL_TOOL_CALLS = JSON.stringify([
+      {
+        name: 'update_system_prompt',
+        arguments: { prompt: 'Auto-approved prompt.' },
+      },
+    ]);
+
+    const snapshot = await promptAssistantThread(db, user.id, thread.id, { prompt: 'Update without stopping.' }, () => undefined);
+
+    expect(snapshot.pendingApprovals).toHaveLength(0);
+    expect(db.thread(user.id, thread.id)?.systemPrompt).toBe('Auto-approved prompt.');
+    expect(db.listToolCalls(user.id, thread.id)[0]?.status).toBe('completed');
   });
 
   test('denying a pending approval cancels the waiting run', async () => {
@@ -215,10 +216,10 @@ describe('assistant parity runtime', () => {
     dbs.push(db);
     const user = testUser(db);
     const thread = db.createThread(user.id, { title: 'Queue mode', promptDeliveryMode: 'queue' });
-    db.createRun(user.id, thread.id, { prompt: 'running', provider: 'fallback', model: 'fallback', thinkingLevel: 'off' });
+    db.createRun(user.id, thread.id, { prompt: 'running', provider: 'openai', model: 'gpt-5.2', thinkingLevel: 'off' });
     const events: any[] = [];
 
-    const snapshot = await promptAssistantThread(db, user.id, thread.id, { prompt: 'run after this', provider: 'fallback' }, (event) => events.push(event));
+    const snapshot = await promptAssistantThread(db, user.id, thread.id, { prompt: 'run after this', provider: 'openai' }, (event) => events.push(event));
 
     expect(snapshot.threads[0]?.queuedPrompts).toHaveLength(1);
     expect(db.listQueuedPrompts(user.id, thread.id)[0]?.prompt).toBe('run after this');
@@ -232,8 +233,8 @@ describe('assistant parity runtime', () => {
     const thread = db.createThread(user.id, { title: 'Delete me' });
     const queued = db.enqueuePrompt(user.id, thread.id, {
       prompt: 'later',
-      provider: 'fallback',
-      model: 'fallback',
+      provider: 'openai',
+      model: 'gpt-5.2',
       thinkingLevel: 'off',
     });
 
@@ -243,21 +244,26 @@ describe('assistant parity runtime', () => {
     expect(db.thread(user.id, thread.id)).toBeNull();
   });
 
-  test('emits text deltas for streamed fallback replies', async () => {
-    const db = tempDb('assistant-fallback-delta');
+  test('errors visibly when OpenAI is selected without an API key', async () => {
+    const db = tempDb('assistant-missing-openai-key');
     dbs.push(db);
     const user = testUser(db);
-    const thread = db.createThread(user.id, { title: 'Fallback', provider: 'fallback', model: 'fallback' });
+    const thread = db.createThread(user.id, { title: 'OpenAI', provider: 'openai', model: 'gpt-5.2' });
     const events: any[] = [];
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.VOICE_STREAM_NEXT_OPENAI_API_KEY;
 
-    await promptAssistantThread(db, user.id, thread.id, { prompt: 'hello there', provider: 'fallback' }, (event) => events.push(event));
+    await promptAssistantThread(db, user.id, thread.id, { prompt: 'hello there', provider: 'openai' }, (event) => events.push(event));
+    const assistantMessage = db.listMessages(user.id, thread.id).find((message) => message.role === 'assistant');
 
-    expect(events.find((event) => event.type === 'delta')?.delta).toBe('I heard: hello there');
-    expect(events.some((event) => event.type === 'done')).toBe(true);
+    expect(db.thread(user.id, thread.id)?.status).toBe('error');
+    expect(assistantMessage?.isError).toBe(true);
+    expect(assistantMessage?.content).toContain('OpenAI API key is not configured');
+    expect(events.some((event) => event.type === 'error')).toBe(true);
   });
 
-  test('falls back visibly when the configured assistant provider fails', async () => {
-    const db = tempDb('assistant-provider-fallback');
+  test('shows provider errors without local fallback replies', async () => {
+    const db = tempDb('assistant-provider-error');
     dbs.push(db);
     const user = testUser(db);
     const thread = db.createThread(user.id, {
@@ -278,10 +284,11 @@ describe('assistant parity runtime', () => {
       await promptAssistantThread(db, user.id, thread.id, { prompt: 'hello', provider: 'openai' }, (event) => events.push(event));
       const assistantMessage = db.listMessages(user.id, thread.id).find((message) => message.role === 'assistant');
 
-      expect(db.thread(user.id, thread.id)?.status).toBe('idle');
-      expect(assistantMessage?.content).toContain('I heard: hello');
-      expect(assistantMessage?.content).toContain('Assistant provider unavailable');
-      expect(events.some((event) => event.type === 'error')).toBe(false);
+      expect(db.thread(user.id, thread.id)?.status).toBe('error');
+      expect(assistantMessage?.isError).toBe(true);
+      expect(assistantMessage?.content).toContain('quota exceeded');
+      expect(assistantMessage?.content).not.toContain('I heard: hello');
+      expect(events.some((event) => event.type === 'error')).toBe(true);
     } finally {
       globalThis.fetch = originalFetch;
     }

@@ -90,6 +90,7 @@ export type AssistantThread = {
   status: AssistantRunStatus;
   error: string | null;
   voiceEnabled: boolean;
+  autoApprove: boolean;
   systemPrompt: string | null;
   enabledTools: string[];
   capabilities: AssistantThreadCapabilities;
@@ -199,22 +200,10 @@ export type AssistantArtifactRecord = {
   updatedAt: string;
 };
 
-export type AssistantOverviewRecord = {
-  id: string;
-  userId: string;
-  threadId: string;
-  markdown: string;
-  prompt: string;
-  inputHash: string;
-  cached: boolean;
-  createdAt: string;
-};
-
 export type AssistantSettingsRecord = {
   userId: string;
   normalSystemPrompt: string;
   voiceSystemPrompt: string;
-  overviewPrompt: string;
   defaultProvider: string;
   defaultModel: string;
   defaultThinkingLevel: string;
@@ -332,14 +321,13 @@ function asBool(value: unknown): boolean {
 }
 
 const ASSISTANT_DEFAULT_PROVIDER = 'openai';
-const ASSISTANT_DEFAULT_MODEL = 'gpt-5.2';
+const ASSISTANT_DEFAULT_MODEL = 'gpt-5.5';
 const ASSISTANT_DEFAULT_THINKING_LEVEL = 'off';
 const ASSISTANT_DEFAULT_ENABLED_TOOLS = [
   'assistant_artifacts',
   'speak',
   'get_system_prompt',
   'update_system_prompt',
-  'get_thread_overview',
   'set_thinking_level',
 ] as const;
 const ASSISTANT_DEFAULT_CAPABILITIES: AssistantThreadCapabilities = {
@@ -351,7 +339,6 @@ const ASSISTANT_DEFAULT_CAPABILITIES: AssistantThreadCapabilities = {
 };
 const ASSISTANT_NORMAL_SYSTEM_PROMPT_DEFAULT = 'You are VoiceStream, a concise standalone assistant. Answer directly and keep useful context in the thread.';
 const ASSISTANT_VOICE_SYSTEM_PROMPT_DEFAULT = 'You are VoiceStream, a concise voice assistant. Keep spoken replies short and practical.';
-const ASSISTANT_OVERVIEW_PROMPT_DEFAULT = 'Write a concise Markdown overview of this assistant thread. Focus on current state, recent actions, blockers, and next steps. Do not invent facts.';
 
 function parseJsonArray(raw: unknown, fallback: string[]): string[] {
   if (Array.isArray(raw)) return raw.map((item) => String(item)).filter(Boolean);
@@ -479,6 +466,7 @@ function rowThread(row: any): AssistantThread {
     status: normalizeRunStatus(row.status),
     error: row.error == null ? null : String(row.error),
     voiceEnabled: asBool(row.voice_enabled) || String(row.source ?? '') === 'voice',
+    autoApprove: asBool(row.auto_approve),
     systemPrompt: row.system_prompt == null ? null : String(row.system_prompt),
     enabledTools: parseJsonArray(row.enabled_tools_json, [...ASSISTANT_DEFAULT_ENABLED_TOOLS]),
     capabilities: parseJsonObject(row.capabilities_json, ASSISTANT_DEFAULT_CAPABILITIES),
@@ -607,25 +595,11 @@ function rowAssistantArtifact(row: any): AssistantArtifactRecord {
   };
 }
 
-function rowAssistantOverview(row: any): AssistantOverviewRecord {
-  return {
-    id: String(row.id),
-    userId: String(row.user_id),
-    threadId: String(row.thread_id),
-    markdown: String(row.markdown ?? ''),
-    prompt: String(row.prompt ?? ''),
-    inputHash: String(row.input_hash ?? ''),
-    cached: asBool(row.cached),
-    createdAt: String(row.created_at),
-  };
-}
-
 function rowAssistantSettings(row: any): AssistantSettingsRecord {
   return {
     userId: String(row.user_id),
     normalSystemPrompt: String(row.normal_system_prompt ?? ASSISTANT_NORMAL_SYSTEM_PROMPT_DEFAULT),
     voiceSystemPrompt: String(row.voice_system_prompt ?? ASSISTANT_VOICE_SYSTEM_PROMPT_DEFAULT),
-    overviewPrompt: String(row.overview_prompt ?? ASSISTANT_OVERVIEW_PROMPT_DEFAULT),
     defaultProvider: String(row.default_provider ?? ASSISTANT_DEFAULT_PROVIDER),
     defaultModel: String(row.default_model ?? ASSISTANT_DEFAULT_MODEL),
     defaultThinkingLevel: String(row.default_thinking_level ?? ASSISTANT_DEFAULT_THINKING_LEVEL),
@@ -881,29 +855,21 @@ export class VoiceStreamNextDb {
       )
     `);
     this.db.run(`
-      CREATE TABLE IF NOT EXISTS assistant_overviews (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        thread_id TEXT NOT NULL REFERENCES assistant_threads(id) ON DELETE CASCADE,
-        markdown TEXT NOT NULL,
-        prompt TEXT NOT NULL,
-        input_hash TEXT NOT NULL,
-        cached INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL
-      )
-    `);
-    this.db.run(`
       CREATE TABLE IF NOT EXISTS assistant_settings (
         user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
         normal_system_prompt TEXT NOT NULL,
         voice_system_prompt TEXT NOT NULL,
-        overview_prompt TEXT NOT NULL,
         default_provider TEXT NOT NULL,
         default_model TEXT NOT NULL,
         default_thinking_level TEXT NOT NULL,
         updated_at TEXT NOT NULL
       )
     `);
+    try {
+      this.db.run('ALTER TABLE assistant_settings DROP COLUMN overview_prompt');
+    } catch {
+      // Older local databases may not have this legacy column anymore.
+    }
     this.db.run(`
       CREATE TABLE IF NOT EXISTS assistant_codex_connections (
         user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -1011,6 +977,7 @@ export class VoiceStreamNextDb {
     this.ensureColumn('assistant_threads', 'status', "TEXT NOT NULL DEFAULT 'idle'");
     this.ensureColumn('assistant_threads', 'error', 'TEXT');
     this.ensureColumn('assistant_threads', 'voice_enabled', 'INTEGER NOT NULL DEFAULT 0');
+    this.ensureColumn('assistant_threads', 'auto_approve', 'INTEGER NOT NULL DEFAULT 0');
     this.ensureColumn('assistant_threads', 'system_prompt', 'TEXT');
     this.ensureColumn(
       'assistant_threads',
@@ -1530,7 +1497,6 @@ export class VoiceStreamNextDb {
           user_id,
           normal_system_prompt,
           voice_system_prompt,
-          overview_prompt,
           default_provider,
           default_model,
           default_thinking_level,
@@ -1540,7 +1506,6 @@ export class VoiceStreamNextDb {
           $userId,
           $normalSystemPrompt,
           $voiceSystemPrompt,
-          $overviewPrompt,
           $defaultProvider,
           $defaultModel,
           $defaultThinkingLevel,
@@ -1552,7 +1517,6 @@ export class VoiceStreamNextDb {
         $userId: userId,
         $normalSystemPrompt: ASSISTANT_NORMAL_SYSTEM_PROMPT_DEFAULT,
         $voiceSystemPrompt: ASSISTANT_VOICE_SYSTEM_PROMPT_DEFAULT,
-        $overviewPrompt: ASSISTANT_OVERVIEW_PROMPT_DEFAULT,
         $defaultProvider: ASSISTANT_DEFAULT_PROVIDER,
         $defaultModel: ASSISTANT_DEFAULT_MODEL,
         $defaultThinkingLevel: ASSISTANT_DEFAULT_THINKING_LEVEL,
@@ -1563,7 +1527,7 @@ export class VoiceStreamNextDb {
 
   updateAssistantSettings(
     userId: string,
-    input: Partial<Pick<AssistantSettingsRecord, 'normalSystemPrompt' | 'voiceSystemPrompt' | 'overviewPrompt' | 'defaultProvider' | 'defaultModel' | 'defaultThinkingLevel'>>,
+    input: Partial<Pick<AssistantSettingsRecord, 'normalSystemPrompt' | 'voiceSystemPrompt' | 'defaultProvider' | 'defaultModel' | 'defaultThinkingLevel'>>,
   ): AssistantSettingsRecord {
     const current = this.ensureAssistantSettings(userId);
     const at = nowIso();
@@ -1573,7 +1537,6 @@ export class VoiceStreamNextDb {
         UPDATE assistant_settings
         SET normal_system_prompt = $normalSystemPrompt,
             voice_system_prompt = $voiceSystemPrompt,
-            overview_prompt = $overviewPrompt,
             default_provider = $defaultProvider,
             default_model = $defaultModel,
             default_thinking_level = $defaultThinkingLevel,
@@ -1584,7 +1547,6 @@ export class VoiceStreamNextDb {
       .run({
         $normalSystemPrompt: input.normalSystemPrompt ?? current.normalSystemPrompt,
         $voiceSystemPrompt: input.voiceSystemPrompt ?? current.voiceSystemPrompt,
-        $overviewPrompt: input.overviewPrompt ?? current.overviewPrompt,
         $defaultProvider: input.defaultProvider ?? current.defaultProvider,
         $defaultModel: input.defaultModel ?? current.defaultModel,
         $defaultThinkingLevel: input.defaultThinkingLevel ?? current.defaultThinkingLevel,
@@ -1721,6 +1683,7 @@ export class VoiceStreamNextDb {
       enabledTools?: string[];
       capabilities?: AssistantThreadCapabilities;
       promptDeliveryMode?: 'queue' | 'asap';
+      autoApprove?: boolean;
     },
   ): AssistantThread {
     const id = newId('thr');
@@ -1742,6 +1705,7 @@ export class VoiceStreamNextDb {
           status,
           error,
           voice_enabled,
+          auto_approve,
           system_prompt,
           enabled_tools_json,
           capabilities_json,
@@ -1761,6 +1725,7 @@ export class VoiceStreamNextDb {
           'idle',
           NULL,
           $voiceEnabled,
+          $autoApprove,
           NULL,
           $enabledToolsJson,
           $capabilitiesJson,
@@ -1780,6 +1745,7 @@ export class VoiceStreamNextDb {
         $model: input.model?.trim() || settings.defaultModel,
         $thinkingLevel: input.thinkingLevel?.trim() || settings.defaultThinkingLevel,
         $voiceEnabled: voiceEnabled ? 1 : 0,
+        $autoApprove: input.autoApprove ? 1 : 0,
         $enabledToolsJson: JSON.stringify(input.enabledTools ?? [...ASSISTANT_DEFAULT_ENABLED_TOOLS]),
         $capabilitiesJson: JSON.stringify(input.capabilities ?? ASSISTANT_DEFAULT_CAPABILITIES),
         $promptDeliveryMode: input.promptDeliveryMode === 'asap' ? 'asap' : 'queue',
@@ -1815,7 +1781,7 @@ export class VoiceStreamNextDb {
   updateThread(
     userId: string,
     threadId: string,
-    input: Partial<Pick<AssistantThread, 'title' | 'provider' | 'model' | 'thinkingLevel' | 'status' | 'error' | 'voiceEnabled' | 'systemPrompt' | 'enabledTools' | 'capabilities' | 'promptDeliveryMode'>>,
+    input: Partial<Pick<AssistantThread, 'title' | 'provider' | 'model' | 'thinkingLevel' | 'status' | 'error' | 'voiceEnabled' | 'autoApprove' | 'systemPrompt' | 'enabledTools' | 'capabilities' | 'promptDeliveryMode'>>,
   ): AssistantThread | null {
     const current = this.thread(userId, threadId);
     if (!current) return null;
@@ -1831,6 +1797,7 @@ export class VoiceStreamNextDb {
             status = $status,
             error = $error,
             voice_enabled = $voiceEnabled,
+            auto_approve = $autoApprove,
             system_prompt = $systemPrompt,
             enabled_tools_json = $enabledToolsJson,
             capabilities_json = $capabilitiesJson,
@@ -1847,6 +1814,7 @@ export class VoiceStreamNextDb {
         $status: input.status ?? current.status,
         $error: input.error === undefined ? current.error : input.error,
         $voiceEnabled: (input.voiceEnabled ?? current.voiceEnabled) ? 1 : 0,
+        $autoApprove: (input.autoApprove ?? current.autoApprove) ? 1 : 0,
         $systemPrompt: input.systemPrompt === undefined ? current.systemPrompt : input.systemPrompt,
         $enabledToolsJson: JSON.stringify(input.enabledTools ?? current.enabledTools),
         $capabilitiesJson: JSON.stringify(input.capabilities ?? current.capabilities),
@@ -2475,43 +2443,6 @@ export class VoiceStreamNextDb {
       .query('DELETE FROM assistant_artifacts WHERE user_id = $userId AND thread_id = $threadId AND path = $path')
       .run({ $userId: userId, $threadId: threadId, $path: artifactPath });
     return result.changes > 0;
-  }
-
-  createOverview(userId: string, threadId: string, input: { markdown: string; prompt: string; inputHash: string; cached?: boolean }): AssistantOverviewRecord {
-    const id = newId('ovw');
-    this.db
-      .query(
-        `
-        INSERT INTO assistant_overviews (id, user_id, thread_id, markdown, prompt, input_hash, cached, created_at)
-        VALUES ($id, $userId, $threadId, $markdown, $prompt, $inputHash, $cached, $createdAt)
-      `,
-      )
-      .run({
-        $id: id,
-        $userId: userId,
-        $threadId: threadId,
-        $markdown: input.markdown,
-        $prompt: input.prompt,
-        $inputHash: input.inputHash,
-        $cached: input.cached ? 1 : 0,
-        $createdAt: nowIso(),
-      });
-    const row = this.db.query('SELECT * FROM assistant_overviews WHERE id = $id').get({ $id: id });
-    return rowAssistantOverview(row);
-  }
-
-  latestOverview(userId: string, threadId: string): AssistantOverviewRecord | null {
-    const row = this.db
-      .query(
-        `
-        SELECT * FROM assistant_overviews
-        WHERE user_id = $userId AND thread_id = $threadId
-        ORDER BY created_at DESC
-        LIMIT 1
-      `,
-      )
-      .get({ $userId: userId, $threadId: threadId });
-    return row ? rowAssistantOverview(row) : null;
   }
 
   createVoiceSession(userId: string, deviceId: string, mode = 'recording'): VoiceSession {

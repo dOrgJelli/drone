@@ -34,6 +34,10 @@ describe('stripTranscriptCommands', () => {
     expect(wake.sleepDetected).toBe(false);
     expect(wake.abortDetected).toBe(false);
     expect(wake.text).toBe('for the meeting.');
+
+    const alternateSpelling = stripTranscriptCommands('Hey Sebastien, what is next?');
+    expect(alternateSpelling.wakeDetected).toBe(true);
+    expect(alternateSpelling.text).toBe('what is next?');
   });
 });
 

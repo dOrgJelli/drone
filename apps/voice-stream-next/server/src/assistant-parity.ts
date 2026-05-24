@@ -1,8 +1,6 @@
 import {
   type AssistantApprovalRecord,
-  type AssistantArtifactRecord,
   type AssistantMessage,
-  type AssistantOverviewRecord,
   type AssistantQueuedPromptRecord,
   type AssistantRunRecord,
   type AssistantSettingsRecord,
@@ -11,7 +9,6 @@ import {
   type AssistantToolCallRecord,
   type VoiceStreamNextDb,
 } from './db.js';
-import { generateAssistantReply } from './assistant-runtime.js';
 import { refreshCodexAccessToken } from './codex-auth.js';
 
 export type AssistantProviderId = 'openai' | 'codex';
@@ -26,7 +23,7 @@ export type AssistantModelOption = {
 export type AssistantToolSummary = {
   name: string;
   label: string;
-  category: 'artifacts' | 'speech' | 'prompts' | 'overview' | 'settings';
+  category: 'artifacts' | 'speech' | 'prompts' | 'settings';
   description: string;
   approval: 'never' | 'normal_threads' | 'always';
 };
@@ -50,7 +47,6 @@ export type AssistantThreadView = AssistantThread & {
   queuedPrompts: AssistantQueuedPromptRecord[];
   toolCalls: AssistantToolCallRecord[];
   artifactsCount: number;
-  latestOverview: AssistantOverviewRecord | null;
 };
 
 export type AssistantApprovalView = AssistantApprovalRecord & {
@@ -60,6 +56,7 @@ export type AssistantApprovalView = AssistantApprovalRecord & {
 type PromptEvent =
   | { type: 'snapshot'; snapshot: AssistantSnapshot }
   | { type: 'delta'; delta: string }
+  | { type: 'thinking_delta'; delta: string }
   | { type: 'message'; message: AssistantMessage }
   | { type: 'queued'; queuedPrompt: AssistantQueuedPromptRecord; snapshot: AssistantSnapshot }
   | { type: 'tool_call'; toolCall: AssistantToolCallRecord; modelCallId: string | null; args: unknown }
@@ -98,13 +95,6 @@ const ASSISTANT_TOOLS: AssistantToolSummary[] = [
     approval: 'always',
   },
   {
-    name: 'get_thread_overview',
-    label: 'Thread overview',
-    category: 'overview',
-    description: 'Generate a concise Markdown status overview for this thread.',
-    approval: 'never',
-  },
-  {
     name: 'set_thinking_level',
     label: 'Set thinking level',
     category: 'settings',
@@ -114,14 +104,14 @@ const ASSISTANT_TOOLS: AssistantToolSummary[] = [
 ];
 
 const MODEL_OPTIONS: AssistantModelOption[] = [
-  { provider: 'openai', id: 'gpt-5.2', name: 'GPT-5.2 Instant', thinkingLevel: 'off' },
-  { provider: 'openai', id: 'gpt-5.2', name: 'GPT-5.2 Low', thinkingLevel: 'low' },
-  { provider: 'openai', id: 'gpt-5.2', name: 'GPT-5.2 Medium', thinkingLevel: 'medium' },
-  { provider: 'openai', id: 'gpt-5.2', name: 'GPT-5.2 High', thinkingLevel: 'high' },
-  { provider: 'codex', id: 'gpt-5.3-codex', name: 'Codex GPT-5.3 Instant', thinkingLevel: 'off' },
-  { provider: 'codex', id: 'gpt-5.3-codex', name: 'Codex GPT-5.3 Low', thinkingLevel: 'low' },
-  { provider: 'codex', id: 'gpt-5.3-codex', name: 'Codex GPT-5.3 Medium', thinkingLevel: 'medium' },
-  { provider: 'codex', id: 'gpt-5.3-codex', name: 'Codex GPT-5.3 High', thinkingLevel: 'high' },
+  { provider: 'openai', id: 'gpt-5.5', name: 'GPT-5.5 Instant', thinkingLevel: 'off' },
+  { provider: 'openai', id: 'gpt-5.5', name: 'GPT-5.5 Low', thinkingLevel: 'low' },
+  { provider: 'openai', id: 'gpt-5.5', name: 'GPT-5.5 Medium', thinkingLevel: 'medium' },
+  { provider: 'openai', id: 'gpt-5.5', name: 'GPT-5.5 High', thinkingLevel: 'high' },
+  { provider: 'codex', id: 'gpt-5.5', name: 'GPT-5.5 Instant', thinkingLevel: 'off' },
+  { provider: 'codex', id: 'gpt-5.5', name: 'GPT-5.5 Low', thinkingLevel: 'low' },
+  { provider: 'codex', id: 'gpt-5.5', name: 'GPT-5.5 Medium', thinkingLevel: 'medium' },
+  { provider: 'codex', id: 'gpt-5.5', name: 'GPT-5.5 High', thinkingLevel: 'high' },
   { provider: 'codex', id: 'gpt-5.3-codex-spark', name: 'Codex Spark', thinkingLevel: 'off' },
 ];
 
@@ -144,6 +134,7 @@ type ModelToolResult = {
 
 type OpenAiStreamResult = {
   text: string;
+  thinking: string;
   toolCalls: ModelToolCall[];
 };
 
@@ -194,7 +185,6 @@ export function assistantSnapshot(db: VoiceStreamNextDb, userId: string, activeT
       queuedPrompts: db.listQueuedPrompts(userId, thread.id),
       toolCalls: db.listToolCalls(userId, thread.id),
       artifactsCount: db.listArtifacts(userId, thread.id).length,
-      latestOverview: db.latestOverview(userId, thread.id),
     };
   });
   return {
@@ -224,9 +214,14 @@ export async function promptAssistantThread(
   const prompt = String(input.prompt ?? '').trim();
   if (!prompt) throw Object.assign(new Error('prompt is required'), { statusCode: 400 });
   const activeRun = db.activeRun(userId, threadId);
-  const provider = cleanProvider(input.provider ?? thread.provider);
-  const model = cleanModel(input.model ?? thread.model, provider);
+  let provider = cleanProvider(input.provider ?? thread.provider);
+  let model = cleanModel(input.model ?? thread.model, provider);
   const thinkingLevel = cleanThinkingLevel(input.thinkingLevel ?? thread.thinkingLevel);
+  if (input.provider === undefined && provider === 'openai' && db.codexConnection(userId)) {
+    provider = 'codex';
+    model = cleanModel(input.model ?? 'gpt-5.5', provider);
+    db.updateThread(userId, threadId, { provider, model, thinkingLevel, error: null });
+  }
   if (activeRun) {
     if (thread.promptDeliveryMode !== 'asap') {
       const queuedPrompt = db.enqueuePrompt(userId, threadId, { prompt, provider, model, thinkingLevel });
@@ -399,128 +394,6 @@ async function approvalContinuationText(
   }
 }
 
-export function generateThreadOverview(
-  db: VoiceStreamNextDb,
-  userId: string,
-  threadId: string,
-  options: { force?: boolean } = {},
-): AssistantOverviewRecord {
-  const thread = db.thread(userId, threadId);
-  if (!thread) throw Object.assign(new Error('unknown assistant thread'), { statusCode: 404 });
-  const settings = db.ensureAssistantSettings(userId);
-  const messages = db.listMessages(userId, threadId);
-  const artifacts = db.listArtifacts(userId, threadId);
-  const runs = db.listRuns(userId, threadId, 8);
-  const toolCalls = db.listToolCalls(userId, threadId);
-  const queuedPrompts = db.listQueuedPrompts(userId, threadId);
-  const approvals = db.listApprovals(userId, threadId).filter((approval) => approval.status === 'pending');
-  const input = buildOverviewInput({ thread, settings, messages, artifacts, runs, toolCalls, queuedPrompts, approvals });
-  const inputHash = new Bun.CryptoHasher('sha256').update(input).digest('hex');
-  const existing = db.latestOverview(userId, threadId);
-  if (!options.force && existing?.inputHash === inputHash) {
-    return db.createOverview(userId, threadId, {
-      markdown: existing.markdown,
-      prompt: settings.overviewPrompt,
-      inputHash,
-      cached: true,
-    });
-  }
-  const markdown = [
-    `# ${thread.title || 'Assistant thread'} Overview`,
-    '',
-    `Status: ${thread.status}`,
-    `Mode: ${thread.voiceEnabled ? 'voice' : 'normal'} (${thread.source})`,
-    `Model: ${thread.provider}/${thread.model}${thread.thinkingLevel !== 'off' ? ` (${thread.thinkingLevel})` : ''}`,
-    `Delivery: ${thread.promptDeliveryMode}`,
-    thread.error ? `Error: ${thread.error}` : '',
-    '',
-    '## Queue',
-    queuedPrompts.length > 0
-      ? queuedPrompts.map((prompt, index) => `- ${index + 1}. ${clipOverviewText(prompt.prompt, 220)} (${prompt.provider}/${prompt.model}, ${prompt.createdAt})`).join('\n')
-      : '- No queued prompts.',
-    '',
-    '## Pending Approvals',
-    approvals.length > 0
-      ? approvals.map((approval, index) => `- ${index + 1}. ${approval.label || approval.toolName} (${approval.toolName}, ${approval.createdAt})`).join('\n')
-      : '- No pending approvals.',
-    '',
-    '## Recent Runs',
-    runs.length > 0
-      ? runs.map((run) => `- ${run.status}: ${clipOverviewText(run.prompt, 160)} (${run.provider}/${run.model}, ${run.startedAt})`).join('\n')
-      : '- No runs yet.',
-    '',
-    '## Tool Activity',
-    toolCalls.length > 0
-      ? toolCalls.slice(-10).map((call) => `- ${call.status}: ${call.toolName}${call.approvalRequired ? ' (approval)' : ''}`).join('\n')
-      : '- No tool calls yet.',
-    '',
-    '## Recent Activity',
-    overviewMessageBullets(messages),
-    '',
-    '## Artifacts',
-    artifacts.length > 0
-      ? artifacts.slice(0, 12).map((artifact) => `- ${artifact.path} (${artifact.size} bytes, revision ${artifact.revision.slice(0, 12)})`).join('\n')
-      : '- No artifacts yet.',
-  ].filter((line) => line !== '').join('\n');
-  return db.createOverview(userId, threadId, {
-    markdown,
-    prompt: settings.overviewPrompt,
-    inputHash,
-    cached: false,
-  });
-}
-
-function buildOverviewInput(input: {
-  thread: AssistantThread;
-  settings: AssistantSettingsRecord;
-  messages: AssistantMessage[];
-  artifacts: AssistantArtifactRecord[];
-  runs: AssistantRunRecord[];
-  toolCalls: AssistantToolCallRecord[];
-  queuedPrompts: AssistantQueuedPromptRecord[];
-  approvals: AssistantApprovalRecord[];
-}): string {
-  return JSON.stringify({
-    prompt: input.settings.overviewPrompt,
-    thread: {
-      id: input.thread.id,
-      title: input.thread.title,
-      status: input.thread.status,
-      source: input.thread.source,
-      voiceEnabled: input.thread.voiceEnabled,
-      provider: input.thread.provider,
-      model: input.thread.model,
-      thinkingLevel: input.thread.thinkingLevel,
-      promptDeliveryMode: input.thread.promptDeliveryMode,
-      error: input.thread.error,
-      updatedAt: input.thread.updatedAt,
-    },
-    queue: input.queuedPrompts.map((prompt) => [prompt.prompt, prompt.provider, prompt.model, prompt.thinkingLevel, prompt.createdAt]),
-    approvals: input.approvals.map((approval) => [approval.toolName, approval.label, approval.argsJson, approval.createdAt]),
-    runs: input.runs.map((run) => [run.status, run.provider, run.model, run.thinkingLevel, run.prompt, run.startedAt, run.completedAt, run.cancelledAt]),
-    tools: input.toolCalls.map((call) => [call.toolName, call.status, call.argsJson, call.resultJson, call.approvalRequired, call.createdAt]),
-    artifacts: input.artifacts.map((artifact) => [artifact.path, artifact.size, artifact.revision, artifact.updatedAt]),
-    messages: input.messages.map((message) => [message.role, message.toolName, message.content, message.spokenText, message.createdAt]),
-  });
-}
-
-function overviewMessageBullets(messages: AssistantMessage[]): string {
-  const selected = messages.slice(-12);
-  if (selected.length === 0) return '- No messages yet.';
-  return selected
-    .map((message) => {
-      const label = message.role === 'toolResult' ? `tool:${message.toolName ?? 'tool'}` : message.role;
-      return `- **${label}**: ${clipOverviewText(message.content, 260)}`;
-    })
-    .join('\n');
-}
-
-function clipOverviewText(text: string, max: number): string {
-  const clean = String(text ?? '').replace(/\s+/g, ' ').trim();
-  if (clean.length <= max) return clean;
-  return `${clean.slice(0, Math.max(0, max - 1))}...`;
-}
-
 async function runModelDrivenTurn(
   db: VoiceStreamNextDb,
   userId: string,
@@ -537,7 +410,7 @@ async function runModelDrivenTurn(
     thread.voiceEnabled ? settings.voiceSystemPrompt : settings.normalSystemPrompt,
     thread.systemPrompt ? `Thread system prompt:\n${thread.systemPrompt}` : '',
     enabledTools.length > 0
-      ? 'You may call the provided assistant tools when they help. Prefer tools for artifacts, spoken replies, prompt reads/updates, overviews, and thread settings instead of describing those actions.'
+      ? 'You may call the provided assistant tools when they help. Prefer tools for artifacts, spoken replies, prompt reads/updates, and thread settings instead of describing those actions.'
       : '',
   ].filter(Boolean).join('\n\n');
   const inputText = renderConversation(messages);
@@ -550,6 +423,7 @@ async function runModelDrivenTurn(
     const assistantMessage = db.addMessage(userId, threadId, {
       role: 'assistant',
       content: finalText,
+      contentJson: assistantContentJson(finalText, ''),
       spokenText: thread.voiceEnabled ? finalText : null,
     });
     emit({ type: 'message', message: assistantMessage });
@@ -561,7 +435,7 @@ async function runModelDrivenTurn(
     throw new Error('OpenAI API key is not configured. Add OPENAI_API_KEY or connect Codex for subscription-backed assistant runs.');
   }
 
-  if (modelConfig.provider === 'openai' && enabledTools.length > 0) {
+  if (modelConfig.provider === 'openai') {
     const first = await streamOpenAiResponse({
       model: modelConfig.model,
       thinkingLevel: modelConfig.thinkingLevel,
@@ -586,6 +460,7 @@ async function runModelDrivenTurn(
       const assistantMessage = db.addMessage(userId, threadId, {
         role: 'assistant',
         content: finalText,
+        contentJson: assistantContentJson(finalText, final.thinking),
         spokenText: thread.voiceEnabled ? finalText : null,
       });
       emit({ type: 'message', message: assistantMessage });
@@ -597,12 +472,14 @@ async function runModelDrivenTurn(
       const assistantMessage = db.addMessage(userId, threadId, {
         role: 'assistant',
         content: replyText,
+        contentJson: assistantContentJson(replyText, first.thinking),
         spokenText: thread.voiceEnabled ? replyText : null,
       });
       emit({ type: 'message', message: assistantMessage });
       finishRun(db, userId, threadId, run.id);
       return;
     }
+    throw new Error('OpenAI completed without text or tool calls.');
   }
 
   if (modelConfig.provider === 'codex') {
@@ -630,6 +507,7 @@ async function runModelDrivenTurn(
       const assistantMessage = db.addMessage(userId, threadId, {
         role: 'assistant',
         content: finalText,
+        contentJson: assistantContentJson(finalText, final.thinking),
         spokenText: thread.voiceEnabled ? finalText : null,
       });
       emit({ type: 'message', message: assistantMessage });
@@ -641,6 +519,7 @@ async function runModelDrivenTurn(
       const assistantMessage = db.addMessage(userId, threadId, {
         role: 'assistant',
         content: replyText,
+        contentJson: assistantContentJson(replyText, first.thinking),
         spokenText: thread.voiceEnabled ? replyText : null,
       });
       emit({ type: 'message', message: assistantMessage });
@@ -650,19 +529,7 @@ async function runModelDrivenTurn(
     throw new Error('Codex completed without text or tool calls.');
   }
 
-  const reply = await generateAssistantReply(
-    messages
-      .filter((message) => message.role === 'user' || message.role === 'assistant')
-      .map((message) => ({ role: message.role as 'user' | 'assistant', content: message.content })),
-  );
-  const assistantMessage = db.addMessage(userId, threadId, {
-    role: 'assistant',
-    content: reply.text,
-    spokenText: thread.voiceEnabled ? reply.text : null,
-  });
-  emit({ type: 'delta', delta: reply.text });
-  emit({ type: 'message', message: assistantMessage });
-  finishRun(db, userId, threadId, run.id);
+  throw new Error(`Unsupported assistant provider: ${modelConfig.provider}`);
 }
 
 function providerErrorMessage(error: any): string {
@@ -684,7 +551,7 @@ async function streamCodexResponse(
 ): Promise<CodexStreamResult> {
   const apiKey = await codexAccessToken(db, userId);
   const ai = await import('@mariozechner/pi-ai');
-  const model = ai.getModel('openai-codex' as any, input.model as any) || ai.getModel('openai-codex' as any, 'gpt-5.3-codex' as any);
+  const model = ai.getModel('openai-codex' as any, input.model as any) || ai.getModel('openai-codex' as any, 'gpt-5.5' as any);
   if (!model) throw new Error(`Unknown Codex model: ${input.model}`);
 
   const context = {
@@ -699,6 +566,7 @@ async function streamCodexResponse(
     sessionId: `vsn-${userId}`,
   } as any);
   let text = '';
+  let thinking = '';
   const toolCalls: ModelToolCall[] = [];
   let finalMessage: any = null;
   for await (const event of stream as AsyncIterable<any>) {
@@ -706,6 +574,10 @@ async function streamCodexResponse(
       const delta = String(event.delta ?? '');
       text += delta;
       if (delta) input.emit({ type: 'delta', delta });
+    } else if (event.type === 'thinking_delta' || event.type === 'reasoning_delta') {
+      const delta = String(event.delta ?? event.thinking ?? event.reasoning ?? '');
+      thinking += delta;
+      if (delta) input.emit({ type: 'thinking_delta', delta });
     } else if (event.type === 'toolcall_end' && event.toolCall) {
       toolCalls.push({
         id: event.toolCall.id == null ? null : String(event.toolCall.id),
@@ -724,8 +596,10 @@ async function streamCodexResponse(
     throw new Error(String(finalMessage.errorMessage ?? 'Codex request failed'));
   }
   if (!text) text = textFromPiAssistantMessage(finalMessage);
+  if (!thinking) thinking = thinkingFromPiAssistantMessage(finalMessage);
   return {
     text,
+    thinking,
     toolCalls: toolCalls.filter((call) => call.name),
   };
 }
@@ -762,6 +636,15 @@ function textFromPiAssistantMessage(message: any): string {
   return message.content
     .filter((part: any) => part?.type === 'text' && typeof part.text === 'string')
     .map((part: any) => part.text)
+    .join('')
+    .trim();
+}
+
+function thinkingFromPiAssistantMessage(message: any): string {
+  if (!message?.content || !Array.isArray(message.content)) return '';
+  return message.content
+    .filter((part: any) => part?.type === 'thinking' && typeof part.thinking === 'string')
+    .map((part: any) => part.thinking)
     .join('')
     .trim();
 }
@@ -866,6 +749,7 @@ async function streamOpenAiResponse(input: {
   const reader = response.body.getReader();
   let buffer = '';
   let text = '';
+  let thinking = '';
 
   const handleEvent = (event: any) => {
     const type = String(event?.type ?? '');
@@ -874,6 +758,14 @@ async function streamOpenAiResponse(input: {
       if (delta) {
         text += delta;
         input.emit({ type: 'delta', delta });
+      }
+      return;
+    }
+    if (type.includes('reasoning') && type.includes('delta')) {
+      const delta = String(event.delta ?? event.text ?? event.summary_text ?? '');
+      if (delta) {
+        thinking += delta;
+        input.emit({ type: 'thinking_delta', delta });
       }
       return;
     }
@@ -931,8 +823,18 @@ async function streamOpenAiResponse(input: {
 
   return {
     text,
+    thinking,
     toolCalls: [...toolCallsByKey.values()].filter((call) => call.name),
   };
+}
+
+function assistantContentJson(text: string, thinking: string): string | null {
+  const parts: Array<Record<string, string>> = [];
+  const cleanThinking = thinking.trim();
+  const cleanText = text.trim();
+  if (cleanThinking) parts.push({ type: 'thinking', thinking: cleanThinking });
+  if (cleanText) parts.push({ type: 'text', text: cleanText });
+  return parts.length > 0 ? JSON.stringify(parts) : null;
 }
 
 function openAiApiKey(): string {
@@ -1006,20 +908,6 @@ function responseToolDefinitions(thread: AssistantThread): unknown[] {
             newText: { type: 'string', description: 'Replacement text for oldText. Use an empty string for full replacement.' },
           },
           required: ['prompt', 'oldText', 'newText'],
-          additionalProperties: false,
-        },
-        strict: true,
-      });
-    }
-    if (toolName === 'get_thread_overview') {
-      definitions.push({
-        type: 'function',
-        name: 'get_thread_overview',
-        description: 'Generate a concise Markdown overview of the current assistant thread.',
-        parameters: {
-          type: 'object',
-          properties: {},
-          required: [],
           additionalProperties: false,
         },
         strict: true,
@@ -1136,8 +1024,8 @@ function cleanProvider(raw: unknown): string {
 
 function cleanModel(raw: unknown, provider: string): string {
   const value = String(raw ?? '').trim();
-  if (provider === 'codex') return value || 'gpt-5.3-codex';
-  return value || 'gpt-5.2';
+  if (provider === 'codex') return value || 'gpt-5.5';
+  return value || 'gpt-5.5';
 }
 
 function cleanThinkingLevel(raw: unknown): string {
@@ -1151,7 +1039,6 @@ type ParsedCommand =
   | { kind: 'artifact_delete'; path: string }
   | { kind: 'speak'; text: string }
   | { kind: 'system_prompt'; prompt: string }
-  | { kind: 'overview' }
   | { kind: 'thinking'; level: string };
 
 function parseAssistantCommand(prompt: string): ParsedCommand | null {
@@ -1169,7 +1056,6 @@ function parseAssistantCommand(prompt: string): ParsedCommand | null {
   }
   if (command === '/speak') return { kind: 'speak', text: `${parts.join(' ')}${rest ? `\n${rest}` : ''}`.trim() };
   if (command === '/system-prompt') return { kind: 'system_prompt', prompt: `${parts.join(' ')}${rest ? `\n${rest}` : ''}`.trim() };
-  if (command === '/overview') return { kind: 'overview' };
   if (command === '/thinking') return { kind: 'thinking', level: parts[0] ?? '' };
   return null;
 }
@@ -1214,9 +1100,7 @@ async function executeCommand(
   }
 
   try {
-    const result = command.kind === 'overview'
-      ? generateThreadOverview(db, userId, threadId, { force: true })
-      : executeApprovedTool(db, userId, thread, toolName, args);
+    const result = executeApprovedTool(db, userId, thread, toolName, args);
     db.updateToolCall(userId, toolCall.id, { status: 'completed', resultJson: JSON.stringify(result) });
     const toolResult = db.addMessage(userId, threadId, {
       role: 'toolResult',
@@ -1248,7 +1132,6 @@ function toolNameForCommand(command: ParsedCommand): string {
   if (command.kind.startsWith('artifact_')) return 'assistant_artifacts';
   if (command.kind === 'speak') return 'speak';
   if (command.kind === 'system_prompt') return 'update_system_prompt';
-  if (command.kind === 'overview') return 'get_thread_overview';
   return 'set_thinking_level';
 }
 
@@ -1292,9 +1175,6 @@ function executeApprovedTool(db: VoiceStreamNextDb, userId: string, thread: Assi
     const thinkingLevel = cleanThinkingLevel(parsed.thinkingLevel);
     const updated = db.updateThread(userId, thread.id, { thinkingLevel });
     return { ok: true, thinkingLevel: updated?.thinkingLevel ?? thinkingLevel };
-  }
-  if (toolName === 'get_thread_overview') {
-    return generateThreadOverview(db, userId, thread.id, { force: true });
   }
   throw Object.assign(new Error(`unknown assistant tool: ${toolName}`), { statusCode: 400 });
 }
@@ -1363,6 +1243,7 @@ function ensureCapability(thread: AssistantThread, toolName: string): void {
 }
 
 function approvalRequiredFor(thread: AssistantThread, toolName: string): boolean {
+  if (thread.autoApprove) return false;
   if (!thread.capabilities.approvals) return false;
   const summary = ASSISTANT_TOOLS.find((tool) => tool.name === toolName);
   if (summary?.approval === 'always') return true;
@@ -1404,12 +1285,10 @@ function toolResultText(toolName: string, result: unknown): string {
   if (toolName === 'speak') return `Spoken reply prepared: ${String((result as any)?.text ?? '').slice(0, 120)}`;
   if (toolName === 'update_system_prompt') return 'Thread system prompt updated.';
   if (toolName === 'set_thinking_level') return `Thinking level set to ${(result as any)?.thinkingLevel ?? 'off'}.`;
-  if (toolName === 'get_thread_overview') return 'Thread overview generated.';
   return 'Tool completed.';
 }
 
 function approvedAssistantText(toolName: string, result: unknown): string {
   if (toolName === 'speak') return String((result as any)?.text ?? 'Spoken reply prepared.');
-  if (toolName === 'get_thread_overview') return 'I generated the thread overview.';
   return toolResultText(toolName, result);
 }
