@@ -350,6 +350,10 @@ function ensureControlSocket() {
       socket.send(JSON.stringify({ type: 'client_ping', sentAt: new Date().toISOString() }));
       return;
     }
+    if (message.type === 'speech_audio') {
+      playWavBase64(message.audioBase64);
+      return;
+    }
     if (message.type === 'server_command') {
       handleRemoteControlCommand(message, socket);
     }
@@ -1324,7 +1328,38 @@ async function copyText(text) {
   }
 }
 
-async function playWav(data) {
+const speechPlaybackQueue = [];
+let speechPlaybackActive = false;
+
+function playWav(data) {
+  speechPlaybackQueue.push(data);
+  void drainSpeechPlaybackQueue();
+}
+
+function playWavBase64(audioBase64) {
+  const clean = String(audioBase64 || '').trim();
+  if (!clean) return;
+  const binary = atob(clean);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  playWav(bytes.buffer);
+}
+
+async function drainSpeechPlaybackQueue() {
+  if (speechPlaybackActive) return;
+  speechPlaybackActive = true;
+  try {
+    while (speechPlaybackQueue.length > 0) {
+      await playWavNow(speechPlaybackQueue.shift());
+    }
+  } finally {
+    speechPlaybackActive = false;
+  }
+}
+
+async function playWavNow(data) {
   const url = URL.createObjectURL(new Blob([data], { type: 'audio/wav' }));
   const audio = new Audio(url);
   const outputDeviceId = state.config?.outputDeviceId || '';
@@ -1332,14 +1367,16 @@ async function playWav(data) {
     if (outputDeviceId && typeof audio.setSinkId === 'function') {
       await audio.setSinkId(outputDeviceId);
     }
-    await audio.play();
+    await new Promise((resolve) => {
+      const finish = () => resolve();
+      audio.addEventListener('ended', finish, { once: true });
+      audio.addEventListener('error', finish, { once: true });
+      audio.play().catch(finish);
+    });
   } catch (err) {
     showStatus(err?.message ? `Audio playback failed: ${err.message}` : 'Audio playback failed.');
   } finally {
-    const cleanup = () => URL.revokeObjectURL(url);
-    audio.addEventListener('ended', cleanup, { once: true });
-    audio.addEventListener('error', cleanup, { once: true });
-    window.setTimeout(cleanup, 60_000);
+    URL.revokeObjectURL(url);
   }
 }
 

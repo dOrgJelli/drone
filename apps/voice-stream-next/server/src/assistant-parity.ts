@@ -425,7 +425,7 @@ async function runModelDrivenTurn(
       role: 'assistant',
       content: finalText,
       contentJson: assistantContentJson(finalText, ''),
-      spokenText: thread.voiceEnabled ? finalText : null,
+      spokenText: null,
     });
     emit({ type: 'message', message: assistantMessage });
     finishRun(db, userId, threadId, run.id);
@@ -476,7 +476,7 @@ async function runModelDrivenTurn(
         role: 'assistant',
         content: finalText,
         contentJson: assistantContentJson(finalText, final.thinking),
-        spokenText: thread.voiceEnabled ? finalText : null,
+        spokenText: null,
       });
       emit({ type: 'message', message: assistantMessage });
       finishRun(db, userId, threadId, run.id);
@@ -488,7 +488,7 @@ async function runModelDrivenTurn(
         role: 'assistant',
         content: replyText,
         contentJson: assistantContentJson(replyText, first.thinking),
-        spokenText: thread.voiceEnabled ? replyText : null,
+        spokenText: null,
       });
       emit({ type: 'message', message: assistantMessage });
       finishRun(db, userId, threadId, run.id);
@@ -537,7 +537,7 @@ async function runModelDrivenTurn(
         role: 'assistant',
         content: finalText,
         contentJson: assistantContentJson(finalText, final.thinking),
-        spokenText: thread.voiceEnabled ? finalText : null,
+        spokenText: null,
       });
       emit({ type: 'message', message: assistantMessage });
       finishRun(db, userId, threadId, run.id);
@@ -549,7 +549,7 @@ async function runModelDrivenTurn(
         role: 'assistant',
         content: replyText,
         contentJson: assistantContentJson(replyText, first.thinking),
-        spokenText: thread.voiceEnabled ? replyText : null,
+        spokenText: null,
       });
       emit({ type: 'message', message: assistantMessage });
       finishRun(db, userId, threadId, run.id);
@@ -1219,7 +1219,8 @@ async function executeCommand(
 
   try {
     const result = executeApprovedTool(db, userId, thread, toolName, args);
-    db.updateToolCall(userId, toolCall.id, { status: 'completed', resultJson: JSON.stringify(result) });
+    const updatedToolCall = db.updateToolCall(userId, toolCall.id, { status: 'completed', resultJson: JSON.stringify(result) }) ?? toolCall;
+    emit({ type: 'tool_result', toolCall: updatedToolCall, result });
     const toolResult = db.addMessage(userId, threadId, {
       role: 'toolResult',
       toolName,

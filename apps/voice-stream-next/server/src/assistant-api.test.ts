@@ -183,4 +183,30 @@ describe('assistant API parity', () => {
     expect(spokenMessage.message.spokenText).toBe('Hello from assistant.');
     expect(db.listMessages(created.thread.userId, created.thread.id).some((message) => message.spokenText === 'Hello from assistant.')).toBe(true);
   });
+
+  test('stores speech playback target and does not expose direct assistant speech endpoint', async () => {
+    const updated = await built.app.inject({
+      method: 'PATCH',
+      url: '/api/settings/speech-playback',
+      headers: devHeaders,
+      payload: JSON.stringify({ target: 'desktop' }),
+    }).then((response) => response.json());
+    expect(updated.settings.speechPlaybackTarget).toBe('desktop');
+    expect(updated.speechPlayback.preferredTarget).toBe('desktop');
+
+    const dashboard = await built.app.inject({
+      method: 'GET',
+      url: '/api/dashboard',
+      headers: devAuthHeaders,
+    }).then((response) => response.json());
+    expect(dashboard.settings.speechPlaybackTarget).toBe('desktop');
+
+    const removed = await built.app.inject({
+      method: 'POST',
+      url: '/api/assistant/speech',
+      headers: devHeaders,
+      payload: JSON.stringify({ text: 'not a public TTS endpoint' }),
+    });
+    expect(removed.statusCode).toBe(404);
+  });
 });

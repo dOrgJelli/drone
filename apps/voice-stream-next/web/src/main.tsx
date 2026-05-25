@@ -27,6 +27,7 @@ import type {
   DesktopVoskStatus,
   DesktopVoskText,
   DeviceRecord,
+  SpeechPlaybackTarget,
   VoiceApprovalFormState,
   VoiceSettings,
 } from './dashboardTypes.js';
@@ -226,14 +227,48 @@ function renderItemsFromMessages(sourceMessages: AssistantMessage[]): AssistantR
   return items;
 }
 
-function speakAssistantText(text: string): void {
-  const clean = text.trim();
-  if (!clean || typeof window.speechSynthesis === 'undefined' || typeof window.SpeechSynthesisUtterance === 'undefined') return;
-  window.speechSynthesis.cancel();
-  const utterance = new window.SpeechSynthesisUtterance(clean);
-  utterance.rate = 1;
-  utterance.pitch = 1;
-  window.speechSynthesis.speak(utterance);
+const speechAudioQueue: Array<{ src: string; revoke?: () => void }> = [];
+let speechAudioPlaying = false;
+
+function queueSpeechAudio(audioBase64: string, contentType = 'audio/wav'): void {
+  const clean = audioBase64.trim();
+  if (!clean || typeof Audio === 'undefined') return;
+  speechAudioQueue.push({ src: `data:${contentType.trim() || 'audio/wav'};base64,${clean}` });
+  void drainSpeechAudioQueue();
+}
+
+function queueSpeechAudioBytes(data: BlobPart, contentType = 'audio/wav'): void {
+  if (typeof Audio === 'undefined') return;
+  const url = URL.createObjectURL(new Blob([data], { type: contentType }));
+  speechAudioQueue.push({ src: url, revoke: () => URL.revokeObjectURL(url) });
+  void drainSpeechAudioQueue();
+}
+
+async function drainSpeechAudioQueue(): Promise<void> {
+  if (speechAudioPlaying) return;
+  speechAudioPlaying = true;
+  try {
+    while (speechAudioQueue.length > 0) {
+      const item = speechAudioQueue.shift()!;
+      try {
+        await playSpeechAudio(item.src);
+      } finally {
+        item.revoke?.();
+      }
+    }
+  } finally {
+    speechAudioPlaying = false;
+  }
+}
+
+function playSpeechAudio(src: string): Promise<void> {
+  return new Promise((resolve) => {
+    const audio = new Audio(src);
+    const finish = () => resolve();
+    audio.addEventListener('ended', finish, { once: true });
+    audio.addEventListener('error', finish, { once: true });
+    audio.play().catch(finish);
+  });
 }
 
 function ReasoningBlock({ text, streaming = false }: { text: string; streaming?: boolean }) {
@@ -829,19 +864,9 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
     source.onmessage = refresh;
     source.addEventListener('connected', refresh);
     source.addEventListener('assistant_change', refresh);
-    source.addEventListener('assistant_speak', (event) => {
-      try {
-        const data = JSON.parse((event as MessageEvent).data);
-        const text = String(data?.text ?? '').trim();
-        if (text) speakAssistantText(text);
-        refresh();
-      } catch {
-        // Ignore malformed assistant speech events.
-      }
-    });
     source.onerror = () => {
       if (closed) return;
-      source.close();
+      scheduleAssistantEventRefresh();
     };
     return () => {
       closed = true;
@@ -850,6 +875,34 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
         window.clearTimeout(assistantEventRefreshTimerRef.current);
         assistantEventRefreshTimerRef.current = null;
       }
+    };
+  }, [scheduleAssistantEventRefresh]);
+
+  React.useEffect(() => {
+    if (typeof window.EventSource === 'undefined') return undefined;
+    let closed = false;
+    const source = new window.EventSource('/api/speech/events');
+    source.addEventListener('connected', () => {
+      if (!closed) scheduleAssistantEventRefresh();
+    });
+    source.addEventListener('speech_audio', (event) => {
+      try {
+        const data = JSON.parse((event as MessageEvent).data);
+        const audioBase64 = String(data?.audioBase64 ?? '').trim();
+        const contentType = String(data?.contentType ?? 'audio/wav').trim() || 'audio/wav';
+        if (audioBase64) queueSpeechAudio(audioBase64, contentType);
+        scheduleAssistantEventRefresh();
+      } catch {
+        // Ignore malformed speech events.
+      }
+    });
+    source.onerror = () => {
+      if (closed) return;
+      scheduleAssistantEventRefresh();
+    };
+    return () => {
+      closed = true;
+      source.close();
     };
   }, [scheduleAssistantEventRefresh]);
 
@@ -1247,6 +1300,28 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
       });
       await loadDashboard();
       setNotice('Saved voice approval settings.');
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function updateSpeechPlaybackTarget(target: SpeechPlaybackTarget) {
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await client.request<{ ok: true; settings: VoiceSettings; speechPlayback: DashboardData['speechPlayback'] }>(
+        '/api/settings/speech-playback',
+        {
+          method: 'PATCH',
+          body: JSON.stringify({ target }),
+        },
+      );
+      setDashboard((current) => current
+        ? { ...current, settings: data.settings, speechPlayback: data.speechPlayback }
+        : current);
+      setNotice('Saved speech playback target.');
     } catch (err: any) {
       setError(err?.message ?? String(err));
     } finally {
@@ -1693,6 +1768,8 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   });
   const logs = dashboard?.logs ?? [];
   const transcripts = dashboard?.transcripts ?? [];
+  const speechPlayback = dashboard?.speechPlayback;
+  const speechPlaybackTarget = dashboard?.settings.speechPlaybackTarget ?? speechPlayback?.preferredTarget ?? 'auto';
   const pendingApprovals = assistantSnapshotData?.pendingApprovals ?? [];
   const activePendingApprovals = pendingApprovals.filter((approval) => approval.threadId === activeThread?.id && approval.status === 'pending');
   const activeRuns = (activeThread as AssistantThreadView | null)?.runs?.filter((run) => run.status === 'running' || run.status === 'waiting_for_approval') ?? [];
@@ -2597,6 +2674,51 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
               <section className={assistantPanelClass}>
                 <div className={assistantPanelHeaderClass}>
                   <div>
+                    <span className={assistantKickerClass}>Speech</span>
+                    <h2 className={assistantPanelTitleClass}>Playback Target</h2>
+                  </div>
+                  <span className="text-[11px] text-[var(--muted)]">
+                    Active: {speechPlayback?.resolvedTarget ?? 'none'}
+                  </span>
+                </div>
+                <div className="grid gap-2">
+                  <div className="flex flex-wrap gap-1.5">
+                    {(['auto', 'web', 'desktop', 'android'] as SpeechPlaybackTarget[]).map((target) => (
+                      <button
+                        key={target}
+                        type="button"
+                        className={cn(
+                          assistantActionButtonClass,
+                          speechPlaybackTarget === target && 'border-[rgba(74,222,128,.28)] bg-[rgba(74,222,128,.08)] text-[var(--green)]',
+                        )}
+                        disabled={busy}
+                        onClick={() => void updateSpeechPlaybackTarget(target)}
+                      >
+                        {target}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {(['web', 'desktop', 'android'] as const).map((target) => (
+                      <span
+                        key={target}
+                        className={cn(
+                          'rounded border px-1.5 py-0.5 text-[10px] font-bold uppercase',
+                          speechPlayback?.connectedTargets.includes(target)
+                            ? 'border-[rgba(74,222,128,.22)] bg-[rgba(74,222,128,.08)] text-[var(--green)]'
+                            : 'border-[var(--border-subtle)] bg-white/[.02] text-[var(--muted)]',
+                        )}
+                      >
+                        {target}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </section>
+
+              <section className={assistantPanelClass}>
+                <div className={assistantPanelHeaderClass}>
+                  <div>
                     <span className={assistantKickerClass}>Settings</span>
                     <h2 className={assistantPanelTitleClass}>Voice Approval</h2>
                   </div>
@@ -3087,6 +3209,12 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
         socket.send(JSON.stringify({ type: 'client_ping', sentAt: new Date().toISOString() }));
         return;
       }
+      if (message.type === 'speech_audio') {
+        const audioBase64 = String(message.audioBase64 ?? '').trim();
+        const contentType = String(message.contentType ?? 'audio/wav').trim() || 'audio/wav';
+        if (audioBase64) queueSpeechAudio(audioBase64, contentType);
+        return;
+      }
       if (message.type === 'server_command') {
         void handleRemoteControlCommand(message, socket);
       }
@@ -3187,8 +3315,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
         }
         return;
       }
-      const audio = new Audio(URL.createObjectURL(new Blob([event.data], { type: 'audio/wav' })));
-      void audio.play().catch(() => undefined);
+      queueSpeechAudioBytes(event.data, 'audio/wav');
     };
     source.connect(processor);
     processor.connect(context.destination);

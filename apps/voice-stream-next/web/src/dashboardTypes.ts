@@ -9,7 +9,16 @@ export type UserProfile = {
 };
 
 export type VoiceSettings = VoiceApprovalSettings & {
+  speechPlaybackTarget: SpeechPlaybackTarget;
   updatedAt: string;
+};
+
+export type SpeechPlaybackTarget = 'auto' | 'web' | 'desktop' | 'android';
+
+export type SpeechPlaybackStatus = {
+  preferredTarget: SpeechPlaybackTarget;
+  connectedTargets: Array<Exclude<SpeechPlaybackTarget, 'auto'>>;
+  resolvedTarget: Exclude<SpeechPlaybackTarget, 'auto'> | null;
 };
 
 export type VoiceApprovalFormState = VoiceApprovalSettings;
@@ -282,6 +291,7 @@ export type DashboardData = {
   authMode: 'clerk' | 'dev';
   user: UserProfile;
   settings: VoiceSettings;
+  speechPlayback?: SpeechPlaybackStatus;
   assistantSettings?: AssistantSettingsRecord;
   threads: AssistantThread[];
   assistantApprovals?: AssistantApprovalRecord[];

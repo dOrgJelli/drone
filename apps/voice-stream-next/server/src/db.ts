@@ -7,6 +7,8 @@ import {
   type VoiceApprovalSettings,
 } from './voice-approval-settings.js';
 
+export type SpeechPlaybackTarget = 'auto' | 'web' | 'desktop' | 'android';
+
 export type UserProfile = {
   id: string;
   clerkUserId: string;
@@ -19,6 +21,7 @@ export type UserProfile = {
 };
 
 export type VoiceSettings = VoiceApprovalSettings & {
+  speechPlaybackTarget: SpeechPlaybackTarget;
   updatedAt: string;
 };
 
@@ -345,6 +348,11 @@ function asBool(value: unknown): boolean {
   return value === 1 || value === true;
 }
 
+function cleanSpeechPlaybackTarget(raw: unknown): SpeechPlaybackTarget {
+  const value = String(raw ?? '').trim().toLowerCase();
+  return value === 'web' || value === 'desktop' || value === 'android' || value === 'auto' ? value : 'auto';
+}
+
 const ASSISTANT_DEFAULT_PROVIDER = 'openai';
 const ASSISTANT_DEFAULT_MODEL = 'gpt-5.5';
 const ASSISTANT_DEFAULT_THINKING_LEVEL = 'off';
@@ -425,6 +433,7 @@ function rowVoiceSettings(row: any): VoiceSettings {
     postPromptCommandSuppressionMs: Number(
       row.post_prompt_command_suppression_ms ?? VOICE_APPROVAL_SETTINGS_DEFAULT.postPromptCommandSuppressionMs,
     ),
+    speechPlaybackTarget: cleanSpeechPlaybackTarget(row.speech_playback_target),
     updatedAt: String(row.updated_at),
   };
 }
@@ -963,6 +972,7 @@ export class VoiceStreamNextDb {
           duplicate_cooldown_ms,
           finalize_check_interval_ms,
           post_prompt_command_suppression_ms,
+          speech_playback_target,
           updated_at
         )
         VALUES (
@@ -979,6 +989,7 @@ export class VoiceStreamNextDb {
           $duplicateCooldownMs,
           $finalizeCheckIntervalMs,
           $postPromptCommandSuppressionMs,
+          $speechPlaybackTarget,
           $updatedAt
         )
       `,
@@ -997,6 +1008,7 @@ export class VoiceStreamNextDb {
         $duplicateCooldownMs: defaults.duplicateCooldownMs,
         $finalizeCheckIntervalMs: defaults.finalizeCheckIntervalMs,
         $postPromptCommandSuppressionMs: defaults.postPromptCommandSuppressionMs,
+        $speechPlaybackTarget: 'auto',
         $updatedAt: at,
       });
     return this.ensureVoiceSettings(userId);
@@ -1049,6 +1061,26 @@ export class VoiceStreamNextDb {
         $duplicateCooldownMs: input.duplicateCooldownMs,
         $finalizeCheckIntervalMs: input.finalizeCheckIntervalMs,
         $postPromptCommandSuppressionMs: input.postPromptCommandSuppressionMs,
+        $updatedAt: at,
+        $userId: userId,
+      });
+    return this.ensureVoiceSettings(userId);
+  }
+
+  updateSpeechPlaybackTarget(userId: string, target: SpeechPlaybackTarget): VoiceSettings {
+    const at = nowIso();
+    this.ensureVoiceSettings(userId);
+    this.db
+      .query(
+        `
+        UPDATE voice_settings
+        SET speech_playback_target = $target,
+            updated_at = $updatedAt
+        WHERE user_id = $userId
+      `,
+      )
+      .run({
+        $target: cleanSpeechPlaybackTarget(target),
         $updatedAt: at,
         $userId: userId,
       });

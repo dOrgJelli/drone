@@ -11,6 +11,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.util.Base64
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -271,6 +272,15 @@ class VoiceSessionService : Service() {
                                 .put("sentAt", java.time.Instant.now().toString())
                                 .toString()
                         )
+                        "speech_audio" -> {
+                            val audioBase64 = message.optString("audioBase64")
+                            if (audioBase64.isNotBlank()) {
+                                runCatching {
+                                    AssistantAudioPlayer.playWav(Base64.decode(audioBase64, Base64.DEFAULT))
+                                    publishStatus("Assistant audio received.", lastMode, currentMicrophone, lastApprovalStatus)
+                                }
+                            }
+                        }
                         "server_command" -> handleRemoteControlCommand(webSocket, message)
                     }
                 }

@@ -4,49 +4,81 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
 import android.os.SystemClock
+import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.max
 
 object AssistantAudioPlayer {
     private val generation = AtomicInteger(0)
+    private val lock = Any()
+    private val queue = ArrayDeque<ByteArray>()
     @Volatile private var activeTrack: AudioTrack? = null
+    @Volatile private var workerRunning = false
 
     fun stopAll() {
         generation.incrementAndGet()
+        synchronized(lock) {
+            queue.clear()
+            workerRunning = false
+        }
         releaseActiveTrack()
     }
 
     fun playWav(wav: ByteArray) {
-        val playbackGeneration = generation.incrementAndGet()
-        releaseActiveTrack()
+        synchronized(lock) {
+            queue.add(wav)
+            if (workerRunning) return
+            workerRunning = true
+        }
+        startWorker()
+    }
+
+    private fun startWorker() {
         Thread {
-            runCatching {
-                if (playbackGeneration != generation.get()) return@runCatching
-                val audio = WavPcm.parse(wav)
-                val channelMask = if (audio.channels == 1) AudioFormat.CHANNEL_OUT_MONO else AudioFormat.CHANNEL_OUT_STEREO
-                val minBuffer = AudioTrack.getMinBufferSize(audio.sampleRateHz, channelMask, AudioFormat.ENCODING_PCM_16BIT)
-                val track = AudioTrack.Builder()
-                    .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
-                    .setAudioFormat(AudioFormat.Builder().setSampleRate(audio.sampleRateHz).setEncoding(AudioFormat.ENCODING_PCM_16BIT).setChannelMask(channelMask).build())
-                    .setBufferSizeInBytes(max(minBuffer, audio.bytesPerFrame * audio.sampleRateHz / 4))
-                    .setTransferMode(AudioTrack.MODE_STREAM)
-                    .build()
-                activeTrack = track
-                try {
-                    track.play()
-                    var offset = 0
-                    while (offset < audio.pcm.size) {
-                        if (playbackGeneration != generation.get()) return@runCatching
-                        val written = track.write(audio.pcm, offset, audio.pcm.size - offset, AudioTrack.WRITE_BLOCKING)
-                        if (written <= 0) return@runCatching
-                        offset += written
+            val playbackGeneration = generation.get()
+            try {
+                while (playbackGeneration == generation.get()) {
+                    val next = synchronized(lock) { queue.poll() } ?: break
+                    runCatching {
+                        val audio = WavPcm.parse(next)
+                        val channelMask = if (audio.channels == 1) AudioFormat.CHANNEL_OUT_MONO else AudioFormat.CHANNEL_OUT_STEREO
+                        val minBuffer = AudioTrack.getMinBufferSize(audio.sampleRateHz, channelMask, AudioFormat.ENCODING_PCM_16BIT)
+                        val track = AudioTrack.Builder()
+                            .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+                            .setAudioFormat(AudioFormat.Builder().setSampleRate(audio.sampleRateHz).setEncoding(AudioFormat.ENCODING_PCM_16BIT).setChannelMask(channelMask).build())
+                            .setBufferSizeInBytes(max(minBuffer, audio.bytesPerFrame * audio.sampleRateHz / 4))
+                            .setTransferMode(AudioTrack.MODE_STREAM)
+                            .build()
+                        activeTrack = track
+                        try {
+                            track.play()
+                            var offset = 0
+                            while (offset < audio.pcm.size) {
+                                if (playbackGeneration != generation.get()) return@runCatching
+                                val written = track.write(audio.pcm, offset, audio.pcm.size - offset, AudioTrack.WRITE_BLOCKING)
+                                if (written <= 0) return@runCatching
+                                offset += written
+                            }
+                            SystemClock.sleep(audio.durationMs + 180L)
+                        } finally {
+                            if (activeTrack === track) activeTrack = null
+                            runCatching { track.stop() }
+                            runCatching { track.release() }
+                        }
                     }
-                    SystemClock.sleep(audio.durationMs + 180L)
-                } finally {
-                    if (activeTrack === track) activeTrack = null
-                    runCatching { track.stop() }
-                    runCatching { track.release() }
                 }
+            } finally {
+                var restart = false
+                synchronized(lock) {
+                    if (playbackGeneration == generation.get()) {
+                        workerRunning = false
+                        if (queue.isNotEmpty()) {
+                            workerRunning = true
+                            restart = true
+                        }
+                    }
+                }
+                if (restart) startWorker()
             }
         }.apply {
             name = "VoiceStreamAssistantAudio"

@@ -150,7 +150,7 @@ export function parseVoiceApprovalSettings(raw: unknown): VoiceApprovalSettings 
   };
 }
 
-export function voiceApprovalSettingsResponse(settings: VoiceApprovalSettings & { updatedAt: string }) {
+export function voiceApprovalSettingsResponse(settings: VoiceApprovalSettings & { updatedAt: string; speechPlaybackTarget?: string }) {
   return {
     ok: true as const,
     settings: {
@@ -165,6 +165,7 @@ export function voiceApprovalSettingsResponse(settings: VoiceApprovalSettings & 
       duplicateCooldownMs: settings.duplicateCooldownMs,
       finalizeCheckIntervalMs: settings.finalizeCheckIntervalMs,
       postPromptCommandSuppressionMs: settings.postPromptCommandSuppressionMs,
+      speechPlaybackTarget: settings.speechPlaybackTarget ?? 'auto',
       updatedAt: settings.updatedAt,
     },
     defaults: VOICE_APPROVAL_SETTINGS_DEFAULT,
