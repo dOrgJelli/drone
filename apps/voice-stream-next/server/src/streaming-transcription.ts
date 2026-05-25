@@ -9,6 +9,16 @@ export type TerminalCommand = {
   transcriptText: string;
 };
 
+export type TerminalDetection = {
+  type: TerminalCommandType;
+  phrase: string;
+  detectedAt: string;
+  partialTranscriptText: string;
+  segmentSequence: number;
+  segmentReason: QueuedSegment['reason'];
+  finalTranscriptionMode: StreamingTranscriptionConfig['finalTranscriptionMode'];
+};
+
 export type StreamingTranscriptionConfig = {
   intervalMs: number;
   minSpeechMs: number;
@@ -86,6 +96,7 @@ export class StreamingTranscriptionManager {
   constructor(
     private readonly config: StreamingTranscriptionConfig,
     private readonly onCommand: (command: TerminalCommand) => void,
+    private readonly onDetection: (detection: TerminalDetection) => void = () => undefined,
   ) {
     this.segmenter = new PcmSpeechSegmenter(config);
     this.timer = setInterval(() => {
@@ -144,10 +155,20 @@ export class StreamingTranscriptionManager {
     const commandResult = stripTranscriptCommands(result.text);
     if (commandResult.abortDetected) {
       this.enterTerminalCommandState({ clearContext: true });
+      const detectedAt = new Date().toISOString();
+      this.onDetection({
+        type: 'abort',
+        phrase: commandResult.abortPhrase ?? 'okay stop',
+        detectedAt,
+        partialTranscriptText: '',
+        segmentSequence: segment.sequence,
+        segmentReason: segment.reason,
+        finalTranscriptionMode: this.config.finalTranscriptionMode,
+      });
       this.onCommand({
         type: 'abort',
         phrase: commandResult.abortPhrase ?? 'okay stop',
-        detectedAt: new Date().toISOString(),
+        detectedAt,
         transcriptText: '',
       });
       return;
@@ -158,11 +179,21 @@ export class StreamingTranscriptionManager {
       if (this.config.ignoreEmptySleepCommands && !hasTranscriptContent(fallbackTranscriptText)) {
         return;
       }
+      const detectedAt = new Date().toISOString();
       const sessionPcm = this.config.finalTranscriptionMode === 'full-recording' ? this.takeSessionAudio() : new Uint8Array(0);
       if (this.config.finalTranscriptionMode === 'segments') {
         this.clearSessionAudio();
       }
       this.enterTerminalCommandState({ clearContext: false });
+      this.onDetection({
+        type: 'sleep',
+        phrase: commandResult.sleepPhrase ?? "that's it",
+        detectedAt,
+        partialTranscriptText: fallbackTranscriptText,
+        segmentSequence: segment.sequence,
+        segmentReason: segment.reason,
+        finalTranscriptionMode: this.config.finalTranscriptionMode,
+      });
       const transcriptText =
         this.config.finalTranscriptionMode === 'full-recording'
           ? await this.transcribeFinalSession(sessionPcm, fallbackTranscriptText)
@@ -171,7 +202,7 @@ export class StreamingTranscriptionManager {
       this.onCommand({
         type: 'sleep',
         phrase: commandResult.sleepPhrase ?? "that's it",
-        detectedAt: new Date().toISOString(),
+        detectedAt,
         transcriptText,
       });
       return;

@@ -55,8 +55,11 @@ describe('StreamingTranscriptionManager', () => {
     process.env.VOICE_STREAM_NEXT_TEST_TRANSCRIPT = "Please capture this note, that's it.";
     const config = buildStreamingTranscriptionConfigFromEnv(process.env);
     const commands: Array<{ type: string; transcriptText: string }> = [];
+    const detections: Array<{ type: string; partialTranscriptText: string }> = [];
     const manager = new StreamingTranscriptionManager(config, (command) => {
       commands.push({ type: command.type, transcriptText: command.transcriptText });
+    }, (detection) => {
+      detections.push({ type: detection.type, partialTranscriptText: detection.partialTranscriptText });
     });
 
     const speechChunk = speechLikeChunk();
@@ -81,6 +84,9 @@ describe('StreamingTranscriptionManager', () => {
     expect(commands).toHaveLength(1);
     expect(commands[0]?.type).toBe('sleep');
     expect(commands[0]?.transcriptText).toContain('Please capture this note');
+    expect(detections).toHaveLength(1);
+    expect(detections[0]?.type).toBe('sleep');
+    expect(detections[0]?.partialTranscriptText).toContain('Please capture this note');
   });
 
   test('auto-aborts on stop phrase using test transcript hook', async () => {

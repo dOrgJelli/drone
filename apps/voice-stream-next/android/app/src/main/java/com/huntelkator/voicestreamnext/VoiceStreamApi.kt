@@ -291,21 +291,19 @@ class VoiceStreamApi(private val context: Context) {
         )
     }
 
-    fun uploadLog(message: String) {
+    fun uploadLog(message: String, details: JSONObject? = null) {
         val deviceId = pairedDeviceId()
         val token = pairedDeviceToken()
-        request(
-            "POST",
-            "/api/logs",
-            JSONObject()
-                .put("deviceId", if (deviceId.isBlank()) JSONObject.NULL else deviceId)
-                .put("token", if (token.isBlank()) JSONObject.NULL else token)
-                .put("source", "android")
-                .put("level", "info")
-                .put("message", message)
-                .put("protocolVersion", 1)
-                .put("clientVersion", BuildConfig.VERSION_CODE)
-        )
+        val body = JSONObject()
+            .put("deviceId", if (deviceId.isBlank()) JSONObject.NULL else deviceId)
+            .put("token", if (token.isBlank()) JSONObject.NULL else token)
+            .put("source", "android")
+            .put("level", "info")
+            .put("message", message)
+            .put("protocolVersion", 1)
+            .put("clientVersion", BuildConfig.VERSION_CODE)
+        if (details != null) body.put("details", details)
+        request("POST", "/api/logs", body)
     }
 
     fun uploadDiagnostics(reason: String, logText: String) {

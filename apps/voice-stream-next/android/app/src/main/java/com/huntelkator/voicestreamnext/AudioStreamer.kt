@@ -242,6 +242,7 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
                             recording.set(false)
                             onStatus(message.optString("status", "Transcript received."))
                         }
+                        "terminal_detected" -> handleServerTerminalDetected(message, onStatus)
                         "sleep" -> handleServerSleep(message, onStatus)
                         "abort" -> handleServerAbort(onStatus)
                         "assistant_error" -> {
@@ -298,6 +299,38 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
             "Awake: waiting for \"hey sebastian\""
         }
         onStatus(status)
+    }
+
+    private fun handleServerTerminalDetected(message: JSONObject, onStatus: (String) -> Unit) {
+        if (!recording.getAndSet(false)) return
+        outgoingReady.set(false)
+        pendingStreamBuffer.clear()
+        cuePlayer.play(LocalCue.STOP_BUTTON)
+        wakeDetector?.reset()
+        val commandType = message.optString("commandType")
+        val status = when {
+            commandType == "abort" -> "Awake: voice command cancelled"
+            currentTarget == Constants.STREAM_TARGET_CLIPBOARD -> "Awake: finishing clipboard transcription"
+            else -> "Awake: finishing voice request"
+        }
+        onStatus(status)
+        ClientLog.i(
+            "AudioStreamer",
+            "Server terminal phrase detected type=$commandType phrase=${message.optString("phrase")} partialTranscriptChars=${message.optInt("partialTranscriptChars")} detectedAt=${message.optString("detectedAt")}"
+        )
+        thread(name = "VoiceStreamTerminalDetectedLog") {
+            runCatching {
+                api.uploadLog(
+                    "Android microphone capture stopped after terminal phrase",
+                    JSONObject()
+                        .put("commandType", commandType)
+                        .put("phrase", message.optString("phrase"))
+                        .put("detectedAt", message.optString("detectedAt"))
+                        .put("partialTranscriptChars", message.optInt("partialTranscriptChars"))
+                        .put("target", currentTarget)
+                )
+            }
+        }
     }
 
     private fun handleServerSleep(message: JSONObject, onStatus: (String) -> Unit) {

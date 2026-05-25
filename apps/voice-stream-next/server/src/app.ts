@@ -1445,8 +1445,9 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     const chunks: Uint8Array[] = [];
     const startedAt = Date.now();
     const streamingEnabled = streamingTranscriptionEnabled();
+    const transcriptionConfig = buildStreamingTranscriptionConfigFromEnv();
     const streamingManager = streamingEnabled
-      ? new StreamingTranscriptionManager(buildStreamingTranscriptionConfigFromEnv(), (command) => {
+      ? new StreamingTranscriptionManager(transcriptionConfig, (command) => {
           if (finalized || terminalFinalize) return;
           terminalFinalize = command;
           if ((socket as any).readyState === 1) {
@@ -1474,9 +1475,44 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
               phrase: command.phrase,
               transcriptChars: command.transcriptText.length,
               mode: streamMode,
+              detectedAt: command.detectedAt,
             }),
           });
           void finalizeVoiceStream();
+        }, (detection) => {
+          if (finalized || terminalFinalize) return;
+          if ((socket as any).readyState === 1) {
+            socket.send(
+              JSON.stringify({
+                type: 'terminal_detected',
+                commandType: detection.type,
+                phrase: detection.phrase,
+                detectedAt: detection.detectedAt,
+                partialTranscriptChars: detection.partialTranscriptText.length,
+                mode: streamMode,
+              }),
+            );
+          }
+          db.upsertClientStatus(device.userId, device.id, {
+            mode: 'transcribing',
+            status: detection.type === 'abort' ? 'Voice stop phrase detected' : 'Voice finish phrase detected',
+            protocolVersion: VOICE_STREAM_PROTOCOL_VERSION,
+          });
+          db.addLog(device.userId, {
+            deviceId: device.id,
+            source: device.deviceType,
+            level: 'info',
+            message: detection.type === 'abort' ? 'Voice stop phrase detected' : 'Voice finish phrase detected',
+            detailsJson: JSON.stringify({
+              phrase: detection.phrase,
+              partialTranscriptChars: detection.partialTranscriptText.length,
+              mode: streamMode,
+              segmentSequence: detection.segmentSequence,
+              segmentReason: detection.segmentReason,
+              finalTranscriptionMode: detection.finalTranscriptionMode,
+              detectedAt: detection.detectedAt,
+            }),
+          });
         })
       : null;
     socket.send(JSON.stringify({ type: 'server_hello', protocolVersion: VOICE_STREAM_PROTOCOL_VERSION, maxBytes: MAX_STREAM_BYTES, maxDurationMs: MAX_STREAM_DURATION_MS }));

@@ -1144,12 +1144,19 @@ function openVoiceSocket(target) {
       if (message.type === 'assistant_result') {
         terminalMessageReceived = true;
         showStatus(`Transcript: ${message.transcript || 'empty'} / Reply: ${message.assistantText || 'empty'}`);
+        state.voicePostStopStatus = els.micStatus.textContent || state.voicePostStopStatus;
+        state.voicePostStopMode = 'awake';
         await finishMicFromServer();
       }
       if (message.type === 'transcript_result') {
         terminalMessageReceived = true;
         showStatus(message.status || 'Transcript patched into chat.');
+        state.voicePostStopStatus = els.micStatus.textContent || state.voicePostStopStatus;
+        state.voicePostStopMode = 'awake';
         await finishMicFromServer();
+      }
+      if (message.type === 'terminal_detected') {
+        await handleTerminalDetected(message, socket, target);
       }
       if (message.type === 'sleep') {
         terminalMessageReceived = true;
@@ -1163,11 +1170,15 @@ function openVoiceSocket(target) {
         } else {
           showStatus('Awake. Waiting for voice command.');
         }
+        state.voicePostStopStatus = els.micStatus.textContent || state.voicePostStopStatus;
+        state.voicePostStopMode = 'awake';
         await finishMicFromServer();
       }
       if (message.type === 'assistant_error') {
         terminalMessageReceived = true;
         showStatus(message.error || 'Voice runtime failed.');
+        state.voicePostStopStatus = els.micStatus.textContent || state.voicePostStopStatus;
+        state.voicePostStopMode = 'awake';
         await finishMicFromServer();
       }
     } catch {
@@ -1176,7 +1187,7 @@ function openVoiceSocket(target) {
   };
   socket.onclose = (event) => {
     state.voiceOutgoingReady = false;
-    if (state.mode === 'transcribing' && state.voiceStreamEnding && state.voiceSocket === socket) {
+    if (state.voiceStreamEnding && state.voiceSocket === socket) {
       if (target === 'clipboard' && !terminalMessageReceived) {
         void logDesktopEvent('warn', 'Voice stream closed before clipboard result', { code: event.code, reason: event.reason || '' });
       }
@@ -1207,6 +1218,32 @@ function openVoiceSocket(target) {
     }
   };
   return socket;
+}
+
+async function handleTerminalDetected(message, socket, target) {
+  if (state.voiceSocket !== socket || state.voiceStreamEnding) return;
+  state.voiceStreamEnding = true;
+  clearVoiceReconnectTimer();
+  await cleanupLocalCapture();
+  state.voiceOutgoingReady = false;
+  pendingStreamBuffer.clear();
+  playLocalVoiceCue('stop_button');
+  const commandType = String(message.commandType || '');
+  const status = commandType === 'abort'
+    ? 'Awake. Voice command cancelled.'
+    : target === 'clipboard'
+      ? 'Awake. Finishing clipboard transcription.'
+      : 'Awake. Finishing voice request.';
+  state.voicePostStopMode = 'awake';
+  state.voicePostStopStatus = status;
+  setMode('awake', status);
+  void logDesktopEvent('info', 'Desktop microphone capture stopped after terminal phrase', {
+    commandType,
+    phrase: message.phrase || '',
+    detectedAt: message.detectedAt || '',
+    partialTranscriptChars: Number(message.partialTranscriptChars || 0),
+    target,
+  });
 }
 
 async function finishMicFromServer() {
