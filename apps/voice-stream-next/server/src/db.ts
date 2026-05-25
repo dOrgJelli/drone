@@ -326,7 +326,11 @@ function sha256(value: string): string {
 }
 
 function dataDir(): string {
-  return path.resolve(process.env.VOICE_STREAM_NEXT_DATA_DIR?.trim() || path.join(process.cwd(), 'server', 'data'));
+  return path.resolve(
+    process.env.VOICE_STREAM_NEXT_DATA_DIR?.trim() ||
+      process.env.RAILWAY_VOLUME_MOUNT_PATH?.trim() ||
+      path.join(process.cwd(), 'server', 'data'),
+  );
 }
 
 function dbPath(): string {
@@ -1069,6 +1073,7 @@ export class VoiceStreamNextDb {
           $clerkUserId: input.clerkUserId,
         });
     } else {
+      const shouldBootstrapAdmin = this.userCount() === 0;
       this.db
         .query(
           `
@@ -1081,7 +1086,7 @@ export class VoiceStreamNextDb {
           $clerkUserId: input.clerkUserId,
           $displayName: input.displayName,
           $email: input.email,
-          $admin: input.admin ? 1 : 0,
+          $admin: input.admin || shouldBootstrapAdmin ? 1 : 0,
           $createdAt: at,
           $updatedAt: at,
           $lastSeenAt: at,
@@ -1091,6 +1096,11 @@ export class VoiceStreamNextDb {
     if (!user) throw new Error('failed to upsert user');
     this.ensureVoiceSettings(user.id);
     return user;
+  }
+
+  private userCount(): number {
+    const row = this.db.query('SELECT COUNT(*) AS count FROM users').get() as { count?: number } | undefined;
+    return Number(row?.count ?? 0);
   }
 
   userByClerkId(clerkUserId: string): UserProfile | null {

@@ -99,7 +99,11 @@ function queryValue(value: unknown): string {
 }
 
 function voiceStreamDataDir(): string {
-  return path.resolve(process.env.VOICE_STREAM_NEXT_DATA_DIR?.trim() || path.join(process.cwd(), 'server', 'data'));
+  return path.resolve(
+    process.env.VOICE_STREAM_NEXT_DATA_DIR?.trim() ||
+      process.env.RAILWAY_VOLUME_MOUNT_PATH?.trim() ||
+      path.join(process.cwd(), 'server', 'data'),
+  );
 }
 
 function androidApkDir(): string {
