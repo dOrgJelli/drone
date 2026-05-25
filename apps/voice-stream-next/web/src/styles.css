@@ -1883,20 +1883,90 @@ pre {
   vertical-align: -2px;
 }
 
-.assistant-dock-shell .banner,
-.assistant-dock-shell + .banner,
-.banner.notice {
+.toast-stack {
   position: fixed;
-  z-index: 20;
-  top: 56px;
+  z-index: 40;
+  top: 62px;
   right: 16px;
   width: min(520px, calc(100vw - 32px));
-  margin: 0;
+  display: grid;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.app-toast {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 28px;
+  align-items: center;
+  gap: 10px;
+  min-height: 46px;
+  overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: rgba(255,255,255,.04);
+  background: rgba(23,27,33,.96);
   color: var(--fg-secondary);
+  box-shadow: 0 18px 48px rgba(0,0,0,.26);
+  padding: 8px;
+  pointer-events: auto;
+  backdrop-filter: blur(16px);
+}
+
+.app-toast.is-error {
+  border-color: rgba(255,90,90,.32);
+  background: rgba(39,23,27,.96);
+  color: #fecaca;
+}
+
+.app-toast-icon {
+  display: grid;
+  height: 28px;
+  width: 28px;
+  place-items: center;
+  border-radius: 7px;
+  background: rgba(74,222,128,.10);
+  color: var(--green);
+}
+
+.app-toast.is-error .app-toast-icon {
+  background: rgba(255,90,90,.12);
+  color: #fca5a5;
+}
+
+.app-toast svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.app-toast p {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.app-toast button {
+  display: grid;
+  height: 28px;
+  min-height: 0;
+  width: 28px;
+  place-items: center;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: rgba(255,255,255,.025);
+  color: var(--muted);
+  padding: 0;
   box-shadow: none;
+}
+
+.app-toast button:hover {
+  border-color: rgba(167,139,250,.4);
+  color: var(--fg);
 }
 
 @tailwind utilities;

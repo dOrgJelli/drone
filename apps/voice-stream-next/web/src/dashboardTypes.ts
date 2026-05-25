@@ -308,7 +308,7 @@ export type DevUser = {
   admin: boolean;
 };
 
-export type DashboardView = 'threads' | 'devices' | 'settings' | 'activity';
+export type DashboardView = 'threads' | 'devices' | 'settings' | 'activity' | 'admin';
 
 export type DesktopVoskStatus = {
   available: boolean;

@@ -175,6 +175,12 @@ describe('voice session device validation', () => {
     process.env.VOICE_STREAM_NEXT_DATA_DIR = dataDir;
     const built = await buildApp({ logger: false });
     try {
+      built.db.upsertUser({
+        clerkUserId: 'dev_existing_release_admin',
+        displayName: 'Existing Admin',
+        email: 'existing-release-admin@example.local',
+        admin: true,
+      });
       const response = await built.app.inject({
         method: 'POST',
         url: '/api/voice/sessions',
@@ -289,6 +295,123 @@ describe('desktop app downloads', () => {
 
       expect(metadata.json().desktop.fileName).toBe('voice-stream-next-desktop-latest.tar.gz');
       expect(metadata.json().desktop.size).toBe('desktop archive'.length);
+    } finally {
+      await built.app.close();
+      built.db.db.close();
+    }
+  });
+
+  test('lets admins upload Android and desktop release artifacts', async () => {
+    const dataDir = path.join(process.cwd(), 'server', 'data', 'tests', crypto.randomUUID());
+    process.env.VOICE_STREAM_NEXT_DATA_DIR = dataDir;
+    const built = await buildApp({ logger: false });
+    try {
+      const adminHeaders = {
+        'content-type': 'application/octet-stream',
+        'x-voice-dev-user-email': 'release-admin@example.local',
+        'x-voice-dev-user-name': 'Release Admin',
+        'x-voice-dev-admin': '1',
+      };
+      const androidResponse = await built.app.inject({
+        method: 'PUT',
+        url: '/api/admin/releases/android',
+        headers: {
+          ...adminHeaders,
+          'x-voice-release-file-name': 'voice-stream-next-android-release.apk',
+          'x-voice-release-metadata': JSON.stringify({
+            app: 'voice-stream-next',
+            platform: 'android',
+            variant: 'release',
+            versionCode: 77,
+            versionName: '1.2.3',
+            builtAt: '2026-05-25T00:00:00.000Z',
+          }),
+        },
+        payload: Buffer.from('apk bytes'),
+      });
+      expect(androidResponse.statusCode).toBe(200);
+      expect(androidResponse.json().android.available).toBe(true);
+      expect(androidResponse.json().android.versionCode).toBe(77);
+
+      const desktopResponse = await built.app.inject({
+        method: 'PUT',
+        url: '/api/admin/releases/desktop',
+        headers: {
+          ...adminHeaders,
+          'x-voice-release-file-name': 'VoiceStream-linux-x64.tar.gz',
+          'x-voice-release-metadata': JSON.stringify({
+            app: 'voice-stream-next',
+            platform: 'desktop',
+            variant: 'linux-x64',
+            fileName: 'VoiceStream-linux-x64.tar.gz',
+            builtAt: '2026-05-25T00:00:00.000Z',
+          }),
+        },
+        payload: Buffer.from('desktop bytes'),
+      });
+      expect(desktopResponse.statusCode).toBe(200);
+      expect(desktopResponse.json().desktop.available).toBe(true);
+      expect(desktopResponse.json().desktop.fileName).toBe('voice-stream-next-desktop-latest.tar.gz');
+
+      const androidMetadata = await built.app.inject({ method: 'GET', url: '/api/mobile/android' });
+      expect(androidMetadata.json().android.downloadUrl).toContain('/api/mobile/android/apk');
+      const desktopMetadata = await built.app.inject({ method: 'GET', url: '/api/desktop' });
+      expect(desktopMetadata.json().desktop.downloadUrl).toContain('/api/desktop/download');
+    } finally {
+      await built.app.close();
+      built.db.db.close();
+    }
+  });
+
+  test('rejects release uploads from non-admin users', async () => {
+    const dataDir = path.join(process.cwd(), 'server', 'data', 'tests', crypto.randomUUID());
+    process.env.VOICE_STREAM_NEXT_DATA_DIR = dataDir;
+    const built = await buildApp({ logger: false });
+    try {
+      built.db.upsertUser({
+        clerkUserId: 'dev_existing_release_admin',
+        displayName: 'Existing Admin',
+        email: 'existing-release-admin@example.local',
+        admin: true,
+      });
+      const response = await built.app.inject({
+        method: 'PUT',
+        url: '/api/admin/releases/android?variant=release',
+        headers: {
+          'content-type': 'application/octet-stream',
+          'x-voice-dev-user-email': 'release-user@example.local',
+          'x-voice-dev-user-name': 'Release User',
+          'x-voice-dev-admin': '0',
+        },
+        payload: Buffer.from('apk bytes'),
+      });
+      expect(response.statusCode).toBe(403);
+      expect(response.json().error).toBe('admin access required');
+    } finally {
+      await built.app.close();
+      built.db.db.close();
+    }
+  });
+
+  test('rejects admin release uploads without companion metadata', async () => {
+    const dataDir = path.join(process.cwd(), 'server', 'data', 'tests', crypto.randomUUID());
+    process.env.VOICE_STREAM_NEXT_DATA_DIR = dataDir;
+    const built = await buildApp({ logger: false });
+    try {
+      const response = await built.app.inject({
+        method: 'PUT',
+        url: '/api/admin/releases/android',
+        headers: {
+          'content-type': 'application/octet-stream',
+          'x-voice-dev-user-email': 'missing-metadata-admin@example.local',
+          'x-voice-dev-user-name': 'Missing Metadata Admin',
+          'x-voice-dev-admin': '1',
+          'x-voice-release-file-name': 'voice-stream-next-android-release.apk',
+        },
+        payload: Buffer.from('apk bytes'),
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json().error).toBe('android release metadata file is required');
     } finally {
       await built.app.close();
       built.db.db.close();

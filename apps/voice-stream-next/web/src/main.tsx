@@ -137,6 +137,12 @@ type AssistantRenderItem =
   | { type: 'message'; key: string; message: AssistantMessage }
   | { type: 'tool'; key: string; call?: AssistantToolCall; result?: AssistantMessage };
 
+type AppToast = {
+  id: string;
+  kind: 'notice' | 'error';
+  message: string;
+};
+
 const TOOL_LABELS: Record<string, string> = {
   assistant_artifacts: 'Assistant artifacts',
   speak: 'Speak',
@@ -590,8 +596,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   const [systemPromptNotice, setSystemPromptNotice] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [busy, setBusy] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
-  const [notice, setNotice] = React.useState<string | null>(null);
+  const [toasts, setToasts] = React.useState<AppToast[]>([]);
   const [messageDraft, setMessageDraft] = React.useState('');
   const [threadTitleDraft, setThreadTitleDraft] = React.useState('');
   const [codexConnectFlow, setCodexConnectFlow] = React.useState<{ state: string; authorizationUrl: string; redirectUri: string; expiresAt: string } | null>(null);
@@ -600,6 +605,8 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   const [deviceType, setDeviceType] = React.useState('android');
   const [androidApkInfo, setAndroidApkInfo] = React.useState<AndroidApkInfo | null>(null);
   const [desktopAppInfo, setDesktopAppInfo] = React.useState<DesktopAppInfo | null>(null);
+  const [adminAndroidFile, setAdminAndroidFile] = React.useState<File | null>(null);
+  const [adminDesktopFile, setAdminDesktopFile] = React.useState<File | null>(null);
   const [androidSetupInfo, setAndroidSetupInfo] = React.useState<AndroidSetupInfo | null>(null);
   const [androidSetupQr, setAndroidSetupQr] = React.useState('');
   const [pairingText, setPairingText] = React.useState('');
@@ -615,6 +622,24 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
     assistantThreads.find((thread) => thread.id === activeThreadId) ??
     assistantThreads[0] ??
     null;
+  const dismissToast = React.useCallback((id: string) => {
+    setToasts((current) => current.filter((toast) => toast.id !== id));
+  }, []);
+  const pushToast = React.useCallback((kind: AppToast['kind'], message: string | null) => {
+    const clean = String(message ?? '').trim();
+    if (!clean) return;
+    const id = `${Date.now()}:${Math.random().toString(36).slice(2)}`;
+    setToasts((current) => [...current.slice(-3), { id, kind, message: clean }]);
+  }, []);
+  const setError = React.useCallback((message: string | null) => pushToast('error', message), [pushToast]);
+  const setNotice = React.useCallback((message: string | null) => pushToast('notice', message), [pushToast]);
+  React.useEffect(() => {
+    if (toasts.length === 0) return undefined;
+    const timers = toasts.map((toast) => window.setTimeout(() => dismissToast(toast.id), toast.kind === 'error' ? 7200 : 4200));
+    return () => {
+      timers.forEach((timer) => window.clearTimeout(timer));
+    };
+  }, [dismissToast, toasts]);
   React.useEffect(() => {
     setThreadTitleDraft(activeThread?.title ?? '');
   }, [activeThread?.id, activeThread?.title]);
@@ -1451,6 +1476,184 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
     setNotice('Copied visible logs.');
   }
 
+  async function parseUploadResponse<T>(response: Response, path: string): Promise<T> {
+    const text = await response.text();
+    let data: any = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      throw new Error(`Expected JSON from ${path}`);
+    }
+    if (!response.ok) throw new Error(data?.error ?? `${response.status} ${response.statusText}`);
+    return data as T;
+  }
+
+  async function parseReleaseMetadataFile(file: File): Promise<Record<string, unknown>> {
+    let metadata: any = null;
+    try {
+      metadata = JSON.parse(await file.text());
+    } catch {
+      throw new Error(`${file.name} must be valid JSON.`);
+    }
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+      throw new Error(`${file.name} must be a JSON object.`);
+    }
+    return metadata;
+  }
+
+  function normalizeReleaseMetadata(raw: Record<string, unknown>, platform: 'android' | 'desktop'): Record<string, unknown> | null {
+    if (String(raw.platform ?? '').trim().toLowerCase() === platform) return raw;
+    if (platform !== 'android') return null;
+
+    const elements = Array.isArray(raw.elements) ? raw.elements : [];
+    const firstElement = elements.find((entry) => entry && typeof entry === 'object') as Record<string, unknown> | undefined;
+    const versionCode = Number(firstElement?.versionCode);
+    const versionName = String(firstElement?.versionName ?? '').trim();
+    const variant = String(raw.variantName ?? '').trim();
+    const outputFile = String(firstElement?.outputFile ?? '').trim();
+    if (!Number.isInteger(versionCode) || versionCode <= 0 || !versionName || !variant) return null;
+
+    return {
+      app: 'voice-stream-next',
+      platform: 'android',
+      variant,
+      versionCode,
+      versionName,
+      fileName: outputFile || 'voice-stream-next-android-latest.apk',
+      variantFileName: outputFile || undefined,
+      builtAt: new Date().toISOString(),
+    };
+  }
+
+  async function releaseFiles(files: File[], platform: 'android' | 'desktop'): Promise<{ artifact: File | null; metadata: Record<string, unknown> | null }> {
+    const metadataCandidates = [
+      ...files.filter((file) => /^latest\.json$/i.test(file.name)),
+      ...files.filter((file) => /\.json$/i.test(file.name) && !/^latest\.json$/i.test(file.name)),
+    ];
+    let metadata: Record<string, unknown> | null = null;
+    for (const candidate of metadataCandidates) {
+      const parsed = await parseReleaseMetadataFile(candidate);
+      const normalized = normalizeReleaseMetadata(parsed, platform);
+      if (normalized) {
+        metadata = normalized;
+        break;
+      }
+    }
+    const artifact = platform === 'android'
+      ? files.find((file) => /\.apk$/i.test(file.name)) ?? null
+      : files.find((file) => /\.(zip|dmg|exe|appimage|tar\.gz|tgz)$/i.test(file.name)) ?? null;
+    return { artifact, metadata };
+  }
+
+  function fileList(files: FileList | File[] | null | undefined): File[] {
+    return Array.from(files ?? []);
+  }
+
+  type DroppedEntry = {
+    isFile: boolean;
+    isDirectory: boolean;
+    file?: (success: (file: File) => void, failure?: (error: unknown) => void) => void;
+    createReader?: () => {
+      readEntries: (success: (entries: DroppedEntry[]) => void, failure?: (error: unknown) => void) => void;
+    };
+  };
+
+  async function filesFromEntry(entry: DroppedEntry): Promise<File[]> {
+    if (entry.isFile && entry.file) {
+      return new Promise((resolve, reject) => entry.file?.((file) => resolve([file]), reject));
+    }
+    if (!entry.isDirectory || !entry.createReader) return [];
+    const reader = entry.createReader();
+    const entries: DroppedEntry[] = [];
+    for (;;) {
+      const batch = await new Promise<DroppedEntry[]>((resolve, reject) => reader.readEntries(resolve, reject));
+      if (batch.length === 0) break;
+      entries.push(...batch);
+    }
+    const nested = await Promise.all(entries.map((child) => filesFromEntry(child)));
+    return nested.flat();
+  }
+
+  async function filesFromDrop(dataTransfer: DataTransfer): Promise<File[]> {
+    const itemEntries = Array.from(dataTransfer.items ?? [])
+      .map((item) => {
+        const getter = (item as DataTransferItem & { webkitGetAsEntry?: () => DroppedEntry | null }).webkitGetAsEntry;
+        return getter ? getter.call(item) : null;
+      })
+      .filter((entry): entry is DroppedEntry => Boolean(entry));
+    if (itemEntries.length === 0) return fileList(dataTransfer.files);
+    const nested = await Promise.all(itemEntries.map((entry) => filesFromEntry(entry)));
+    return nested.flat();
+  }
+
+  async function uploadAndroidReleaseFiles(files: File[]) {
+    const { artifact, metadata } = await releaseFiles(files, 'android');
+    if (!artifact || !metadata) {
+      setError('Drop or choose both the Android APK and latest.json or Gradle output-metadata.json.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      setAdminAndroidFile(artifact);
+      const path = '/api/admin/releases/android';
+      const response = await client.stream(path, {
+        method: 'PUT',
+        headers: {
+          'content-type': artifact.type || 'application/vnd.android.package-archive',
+          'x-voice-release-file-name': artifact.name,
+          'x-voice-release-metadata': JSON.stringify(metadata),
+        },
+        body: artifact,
+      });
+      const data = await parseUploadResponse<{ ok: true; android: AndroidApkInfo }>(response, path);
+      setAndroidApkInfo(data.android);
+      await refreshAndroidSetup();
+      await loadDashboard();
+      setNotice('Uploaded Android app release.');
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function uploadDesktopReleaseFiles(files: File[]) {
+    const { artifact, metadata } = await releaseFiles(files, 'desktop');
+    if (!artifact || !metadata) {
+      setError('Drop or choose both the desktop archive and a latest.json with platform "desktop".');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      setAdminDesktopFile(artifact);
+      const path = '/api/admin/releases/desktop';
+      const response = await client.stream(path, {
+        method: 'PUT',
+        headers: {
+          'content-type': artifact.type || 'application/octet-stream',
+          'x-voice-release-file-name': artifact.name,
+          'x-voice-release-metadata': JSON.stringify(metadata),
+        },
+        body: artifact,
+      });
+      const data = await parseUploadResponse<{ ok: true; desktop: DesktopAppInfo }>(response, path);
+      setDesktopAppInfo(data.desktop);
+      await loadDashboard();
+      setNotice('Uploaded desktop app release.');
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function droppedFiles(event: React.DragEvent<HTMLElement>): Promise<File[]> {
+    event.preventDefault();
+    return filesFromDrop(event.dataTransfer);
+  }
+
   function openThreadFromTranscript(threadId: string) {
     setActiveView('threads');
     setActiveThreadId(threadId);
@@ -1472,8 +1675,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
           <div className="identity">{identitySlot}</div>
         </header>
 
-        {error ? <div className="banner error">{error}</div> : null}
-        {notice ? <div className="banner notice">{notice}</div> : null}
+        <ToastStack toasts={toasts} onDismiss={dismissToast} />
 
         <DesktopVoicePanel client={client} onRefresh={loadDashboard} />
       </main>
@@ -1575,6 +1777,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
     { id: 'devices', label: 'Devices', count: devices.length },
     { id: 'settings', label: 'Settings' },
     { id: 'activity', label: 'Activity', count: transcripts.length + logs.length },
+    ...(dashboard?.user.admin ? [{ id: 'admin' as const, label: 'Admin' }] : []),
   ];
 
   return (
@@ -1870,6 +2073,11 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                       <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" />
                       <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.2.34.6.6 1 .6h.6a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1.4Z" />
                     </svg>
+                  ) : item.id === 'admin' ? (
+                    <svg viewBox="0 0 24 24" aria-hidden="true" className={assistantIconSvgClass}>
+                      <path d="M12 3 5 6v5c0 4.5 3 8.5 7 10 4-1.5 7-5.5 7-10V6l-7-3Z" />
+                      <path d="M9 12l2 2 4-4" />
+                    </svg>
                   ) : (
                     <svg viewBox="0 0 24 24" aria-hidden="true" className={assistantIconSvgClass}>
                       <path d="M3 3v18h18" />
@@ -1885,8 +2093,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
           </div>
         </header>
 
-        {error ? <div className="banner error">{error}</div> : null}
-        {notice ? <div className="banner notice">{notice}</div> : null}
+        <ToastStack toasts={toasts} onDismiss={dismissToast} />
 
         {activeView === 'threads' && assistantToolsOpen && activeThread ? (
           <AssistantToolsPanel
@@ -2550,6 +2757,108 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                 </section>
               ) : null}
             </section>
+          ) : null}
+
+          {activeView === 'admin' ? (
+            dashboard?.user.admin ? (
+              <section className="grid min-h-0 gap-3 overflow-auto p-3">
+                <section className={assistantPanelClass}>
+                  <div className={assistantPanelHeaderClass}>
+                    <div>
+                      <span className={assistantKickerClass}>Admin</span>
+                      <h2 className={assistantPanelTitleClass}>App Releases</h2>
+                    </div>
+                  </div>
+                  <div className="mb-3 grid gap-2 rounded border border-[var(--border-subtle)] bg-white/[.02] p-3">
+                    <span className={assistantKickerClass}>Current downloads</span>
+                    <AppDownloadLinks androidInfo={androidApkInfo} desktopInfo={desktopAppInfo} />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 max-[880px]:grid-cols-1">
+                    <section className="grid gap-2.5 rounded border border-[var(--border-subtle)] bg-white/[.02] p-3">
+                      <div>
+                        <span className={assistantKickerClass}>Desktop</span>
+                        <h3 className="m-0 mt-1 text-sm leading-tight text-[var(--fg)]">Upload desktop app</h3>
+                      </div>
+                      <label
+                        className={cn(
+                          'grid min-h-[132px] cursor-pointer place-items-center gap-2 rounded border border-dashed border-[var(--border)] bg-black/[.12] p-4 text-center transition hover:border-[rgba(167,139,250,.52)] hover:bg-white/[.035]',
+                          busy && 'pointer-events-none opacity-50',
+                        )}
+                        onDragOver={(event) => event.preventDefault()}
+                        onDrop={(event) => void droppedFiles(event).then((files) => uploadDesktopReleaseFiles(files))}
+                      >
+                        <input
+                          type="file"
+                          className="hidden"
+                          multiple
+                          accept=".tar.gz,.tgz,.zip,.dmg,.exe,.AppImage,.json,application/gzip,application/zip,application/json"
+                          onChange={(event) => void uploadDesktopReleaseFiles(fileList(event.currentTarget.files))}
+                        />
+                        <span className="font-display text-[10px] font-bold uppercase text-[var(--fg-secondary)]">{busy ? 'Uploading...' : 'Drop desktop build folder or archive + latest.json'}</span>
+                        <small className="max-w-full truncate text-[11px] text-[var(--muted)]">{adminDesktopFile ? `${adminDesktopFile.name} / ${formatBytes(adminDesktopFile.size)}` : 'Click to choose the archive and companion latest.json'}</small>
+                        <small className="text-[10px] text-[var(--muted-dim)]">Current: {appDownloadMeta(desktopAppInfo)}</small>
+                      </label>
+                    </section>
+
+                    <section className="grid gap-2.5 rounded border border-[var(--border-subtle)] bg-white/[.02] p-3">
+                      <div>
+                        <span className={assistantKickerClass}>Android</span>
+                        <h3 className="m-0 mt-1 text-sm leading-tight text-[var(--fg)]">Upload Android APK</h3>
+                      </div>
+                      <label
+                        className={cn(
+                          'grid min-h-[132px] cursor-pointer place-items-center gap-2 rounded border border-dashed border-[var(--border)] bg-black/[.12] p-4 text-center transition hover:border-[rgba(167,139,250,.52)] hover:bg-white/[.035]',
+                          busy && 'pointer-events-none opacity-50',
+                        )}
+                        onDragOver={(event) => event.preventDefault()}
+                        onDrop={(event) => void droppedFiles(event).then((files) => uploadAndroidReleaseFiles(files))}
+                      >
+                        <input
+                          type="file"
+                          className="hidden"
+                          multiple
+                          accept=".apk,.json,application/vnd.android.package-archive,application/json"
+                          onChange={(event) => void uploadAndroidReleaseFiles(fileList(event.currentTarget.files))}
+                        />
+                        <span className="font-display text-[10px] font-bold uppercase text-[var(--fg-secondary)]">{busy ? 'Uploading...' : 'Drop Android build folder or APK + metadata'}</span>
+                        <small className="max-w-full truncate text-[11px] text-[var(--muted)]">{adminAndroidFile ? `${adminAndroidFile.name} / ${formatBytes(adminAndroidFile.size)}` : 'Click to choose the APK and latest.json or output-metadata.json'}</small>
+                        <small className="text-[10px] text-[var(--muted-dim)]">Current: {appDownloadMeta(androidApkInfo)}</small>
+                      </label>
+                    </section>
+                  </div>
+                </section>
+
+                <section className={assistantPanelClass}>
+                  <div className={assistantPanelHeaderClass}>
+                    <div>
+                      <span className={assistantKickerClass}>Admin</span>
+                      <h2 className={assistantPanelTitleClass}>Device Monitor</h2>
+                    </div>
+                  </div>
+                  <div className="grid gap-2">
+                    {dashboard.adminDevices.map((device) => (
+                      <article key={device.id} className={cn(assistantRowClass, 'grid grid-cols-[minmax(0,1fr)_120px_140px_auto] items-center gap-2 p-2 max-[620px]:grid-cols-1')}>
+                        <strong className="min-w-0 text-xs text-[var(--fg)]">{device.displayName}</strong>
+                        <span className="text-xs text-[var(--muted)]">{device.deviceType}</span>
+                        <span className="text-xs text-[var(--muted)]">token {device.tokenHint}...</span>
+                        <time className="text-xs text-[var(--muted)]">{timeLabel(device.lastSeenAt)}</time>
+                      </article>
+                    ))}
+                    {dashboard.adminClientStatuses.map((status) => (
+                      <article key={`admin-status-${status.deviceId}`} className="grid grid-cols-[minmax(0,1fr)_120px_140px_auto] items-center gap-2 rounded-[7px] border border-[rgba(74,222,128,.18)] bg-[rgba(74,222,128,.06)] p-2 text-[var(--fg-secondary)] max-[620px]:grid-cols-1">
+                        <strong className="min-w-0 text-xs text-[var(--fg)]">{status.displayName}</strong>
+                        <span className="text-xs text-[var(--muted)]">{status.mode}</span>
+                        <span className="text-xs text-[var(--muted)]">{status.microphone || status.status}</span>
+                        <time className="text-xs text-[var(--muted)]">{timeLabel(status.updatedAt)}</time>
+                      </article>
+                    ))}
+                    {dashboard.adminDevices.length === 0 ? <div className={assistantEmptyClass}>No connected devices yet.</div> : null}
+                  </div>
+                </section>
+              </section>
+            ) : (
+              <div className={assistantEmptyClass}>Admin access required.</div>
+            )
           ) : null}
         </section>
       </section>
@@ -3254,6 +3563,38 @@ function Metric({ label, value }: { label: string; value: React.ReactNode }) {
       <span>{label}</span>
       <strong>{value}</strong>
     </article>
+  );
+}
+
+function ToastStack({ toasts, onDismiss }: { toasts: AppToast[]; onDismiss: (id: string) => void }) {
+  if (toasts.length === 0) return null;
+  return (
+    <div className="toast-stack" role="status" aria-live="polite">
+      {toasts.map((toast) => (
+        <article key={toast.id} className={cn('app-toast', toast.kind === 'error' && 'is-error')}>
+          <div className="app-toast-icon" aria-hidden="true">
+            {toast.kind === 'error' ? (
+              <svg viewBox="0 0 24 24" focusable="false">
+                <path d="M12 8v5" />
+                <path d="M12 17h.01" />
+                <path d="M10.3 4.5 2.8 18a2 2 0 0 0 1.7 3h15a2 2 0 0 0 1.7-3L13.7 4.5a2 2 0 0 0-3.4 0Z" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 24 24" focusable="false">
+                <path d="M20 6 9 17l-5-5" />
+              </svg>
+            )}
+          </div>
+          <p>{toast.message}</p>
+          <button type="button" onClick={() => onDismiss(toast.id)} aria-label="Dismiss notification">
+            <svg viewBox="0 0 24 24" focusable="false">
+              <path d="M18 6 6 18" />
+              <path d="m6 6 12 12" />
+            </svg>
+          </button>
+        </article>
+      ))}
+    </div>
   );
 }
 

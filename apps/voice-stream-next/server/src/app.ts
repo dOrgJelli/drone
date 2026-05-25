@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { createReadStream, existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
@@ -76,6 +76,11 @@ function parsePort(raw: unknown, fallback: number): number {
   return Number.isInteger(value) && value > 0 && value <= 65535 ? value : fallback;
 }
 
+function uploadLimitBytes(): number {
+  const raw = Number(process.env.VOICE_STREAM_NEXT_RELEASE_UPLOAD_LIMIT_BYTES ?? 1024 * 1024 * 1024);
+  return Number.isInteger(raw) && raw > 0 ? raw : 1024 * 1024 * 1024;
+}
+
 function jsonBody(req: FastifyRequest): any {
   return req.body && typeof req.body === 'object' ? (req.body as any) : {};
 }
@@ -133,6 +138,47 @@ function desktopAppDownloadPath(): string {
   return '/api/desktop/download';
 }
 
+function safeReleaseVariant(raw: unknown, fallback: string): string {
+  return cleanText(raw, fallback).toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || fallback;
+}
+
+function safeReleaseFileName(raw: unknown, fallback: string): string {
+  const baseName = path.basename(cleanText(raw, fallback) || fallback).replace(/[^a-zA-Z0-9._-]+/g, '-');
+  return baseName || fallback;
+}
+
+function headerValue(raw: unknown): string {
+  return String(Array.isArray(raw) ? raw[0] : raw ?? '').trim();
+}
+
+function releaseUploadMetadata(req: FastifyRequest, platform: 'android' | 'desktop'): Record<string, unknown> {
+  const raw = headerValue(req.headers['x-voice-release-metadata']);
+  if (!raw) throw Object.assign(new Error(`${platform} release metadata file is required`), { statusCode: 400 });
+  let metadata: any = null;
+  try {
+    metadata = JSON.parse(raw);
+  } catch {
+    throw Object.assign(new Error(`${platform} release metadata must be valid JSON`), { statusCode: 400 });
+  }
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    throw Object.assign(new Error(`${platform} release metadata must be a JSON object`), { statusCode: 400 });
+  }
+  if (cleanText(metadata.platform).toLowerCase() !== platform) {
+    throw Object.assign(new Error(`${platform} release metadata has the wrong platform`), { statusCode: 400 });
+  }
+  return metadata;
+}
+
+function requiredMetadataText(metadata: Record<string, unknown>, key: string, label: string): string {
+  const value = cleanText(metadata[key]);
+  if (!value) throw Object.assign(new Error(`${label} is required in release metadata`), { statusCode: 400 });
+  return value;
+}
+
+function releaseUploadFileName(req: FastifyRequest, fallback: string): string {
+  return safeReleaseFileName(req.headers['x-voice-release-file-name'], fallback);
+}
+
 function publicUrlForPath(req: FastifyRequest, urlPath: string): string {
   return `${serverPublicUrl(req)}${urlPath.startsWith('/') ? urlPath : `/${urlPath}`}`;
 }
@@ -181,6 +227,35 @@ function readAndroidApkInfo(req: FastifyRequest): AndroidApkInfo {
     downloadUrl,
     updatePayload: versionCode ? buildUpdatePayload({ versionCode, apkUrl: downloadUrl }) : null,
   };
+}
+
+function writeAndroidApkRelease(req: FastifyRequest, body: unknown): AndroidApkInfo {
+  const buffer = Buffer.isBuffer(body) ? body : Buffer.from(body instanceof Uint8Array ? body : []);
+  if (buffer.byteLength === 0) throw Object.assign(new Error('APK upload is empty'), { statusCode: 400 });
+  const releaseMetadata = releaseUploadMetadata(req, 'android');
+  const variant = safeReleaseVariant(requiredMetadataText(releaseMetadata, 'variant', 'Android variant'), 'manual');
+  const versionCode = parseClientVersion(releaseMetadata.versionCode, null);
+  if (versionCode == null) throw Object.assign(new Error('Android versionCode is required in release metadata'), { statusCode: 400 });
+  const versionName = requiredMetadataText(releaseMetadata, 'versionName', 'Android versionName');
+  const latestFileName = 'voice-stream-next-android-latest.apk';
+  const variantFileName = `voice-stream-next-android-${variant}.apk`;
+  const outputDir = androidApkDir();
+  mkdirSync(outputDir, { recursive: true });
+  writeFileSync(path.join(outputDir, variantFileName), buffer);
+  writeFileSync(path.join(outputDir, latestFileName), buffer);
+  const metadata = {
+    app: 'voice-stream-next',
+    platform: 'android',
+    variant,
+    versionCode,
+    versionName,
+    fileName: latestFileName,
+    variantFileName,
+    size: buffer.byteLength,
+    builtAt: cleanText(releaseMetadata.builtAt) || new Date().toISOString(),
+  };
+  writeFileSync(path.join(outputDir, 'latest.json'), `${JSON.stringify(metadata, null, 2)}\n`);
+  return readAndroidApkInfo(req);
 }
 
 function newestDesktopArtifact(dir: string): string | null {
@@ -235,13 +310,42 @@ function readDesktopAppInfo(req: FastifyRequest): DesktopAppInfo {
   };
 }
 
+function writeDesktopAppRelease(req: FastifyRequest, body: unknown): DesktopAppInfo {
+  const buffer = Buffer.isBuffer(body) ? body : Buffer.from(body instanceof Uint8Array ? body : []);
+  if (buffer.byteLength === 0) throw Object.assign(new Error('Desktop upload is empty'), { statusCode: 400 });
+  const releaseMetadata = releaseUploadMetadata(req, 'desktop');
+  const requestedFileName = releaseUploadFileName(req, safeReleaseFileName(releaseMetadata.fileName, 'voice-stream-next-desktop-latest.tar.gz'));
+  if (!/\.(zip|dmg|exe|appimage|tar\.gz|tgz)$/i.test(requestedFileName)) {
+    throw Object.assign(new Error('Desktop upload must be .zip, .dmg, .exe, .AppImage, .tgz, or .tar.gz'), { statusCode: 400 });
+  }
+  const extension = requestedFileName.match(/\.tar\.gz$/i) ? '.tar.gz' : path.extname(requestedFileName);
+  const variant = safeReleaseVariant(requiredMetadataText(releaseMetadata, 'variant', 'Desktop variant'), 'manual');
+  const latestFileName = `voice-stream-next-desktop-latest${extension}`;
+  const variantFileName = `voice-stream-next-desktop-${variant}${extension}`;
+  const outputDir = desktopAppDir();
+  mkdirSync(outputDir, { recursive: true });
+  writeFileSync(path.join(outputDir, variantFileName), buffer);
+  writeFileSync(path.join(outputDir, latestFileName), buffer);
+  const metadata = {
+    app: 'voice-stream-next',
+    platform: 'desktop',
+    variant,
+    fileName: latestFileName,
+    variantFileName,
+    size: buffer.byteLength,
+    builtAt: cleanText(releaseMetadata.builtAt) || new Date().toISOString(),
+  };
+  writeFileSync(path.join(outputDir, 'latest.json'), `${JSON.stringify(metadata, null, 2)}\n`);
+  return readDesktopAppInfo(req);
+}
+
 function desktopContentType(fileName: string): string {
   const lower = fileName.toLowerCase();
   if (lower.endsWith('.zip')) return 'application/zip';
   if (lower.endsWith('.dmg')) return 'application/x-apple-diskimage';
   if (lower.endsWith('.exe')) return 'application/vnd.microsoft.portable-executable';
   if (lower.endsWith('.appimage')) return 'application/octet-stream';
-  if (lower.endsWith('.tar.gz')) return 'application/gzip';
+  if (lower.endsWith('.tar.gz') || lower.endsWith('.tgz')) return 'application/gzip';
   return 'application/octet-stream';
 }
 
@@ -450,6 +554,19 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
   });
   await app.register(websocket);
 
+  app.addContentTypeParser(
+    [
+      'application/octet-stream',
+      'application/vnd.android.package-archive',
+      'application/gzip',
+      'application/zip',
+      'application/x-apple-diskimage',
+      'application/vnd.microsoft.portable-executable',
+    ],
+    { parseAs: 'buffer', bodyLimit: uploadLimitBytes() },
+    (_req, body, done) => done(null, body),
+  );
+
   if (clerkEnabled) {
     await app.register(clerkPlugin);
   }
@@ -470,6 +587,34 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     ok: true,
     desktop: readDesktopAppInfo(req),
   }));
+
+  app.put('/api/admin/releases/android', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      requireAdmin(ctx);
+      const android = writeAndroidApkRelease(req, req.body);
+      db.addLog(ctx.user.id, {
+        source: 'admin',
+        level: 'info',
+        message: `Android release uploaded: ${android.fileName ?? 'latest APK'}`,
+        detailsJson: JSON.stringify({ variant: android.variant, versionCode: android.versionCode, size: android.size }),
+      });
+      return { ok: true, android };
+    }),
+  );
+
+  app.put('/api/admin/releases/desktop', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      requireAdmin(ctx);
+      const desktop = writeDesktopAppRelease(req, req.body);
+      db.addLog(ctx.user.id, {
+        source: 'admin',
+        level: 'info',
+        message: `Desktop release uploaded: ${desktop.fileName ?? 'latest app'}`,
+        detailsJson: JSON.stringify({ variant: desktop.variant, size: desktop.size }),
+      });
+      return { ok: true, desktop };
+    }),
+  );
 
   app.post('/api/mobile/android/setup', async (req, reply) =>
     withUser(req, reply, db, clerkEnabled, async (ctx) => {
