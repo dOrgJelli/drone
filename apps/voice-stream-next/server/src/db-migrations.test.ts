@@ -1,0 +1,84 @@
+import { afterEach, describe, expect, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+
+import { VoiceStreamNextDb, loadMigrations } from './db.js';
+
+function tempDbPath(name: string): string {
+  return path.join(process.cwd(), 'server', 'data', 'tests', `${name}-${crypto.randomUUID()}.sqlite`);
+}
+
+const BASELINE_MIGRATION_VERSION = '20260525173842';
+
+function migrationRows(db: VoiceStreamNextDb): Array<{ version: string; name: string; checksum: string }> {
+  return db.db
+    .query('SELECT version, name, checksum FROM schema_migrations ORDER BY version')
+    .all() as Array<{ version: string; name: string; checksum: string }>;
+}
+
+function columnNames(db: VoiceStreamNextDb, table: string): string[] {
+  return (db.db.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name);
+}
+
+describe('database migrations', () => {
+  const dbs: VoiceStreamNextDb[] = [];
+
+  afterEach(() => {
+    for (const db of dbs) db.db.close();
+    dbs.length = 0;
+  });
+
+  test('applies the baseline migration for a fresh database', () => {
+    const db = new VoiceStreamNextDb(tempDbPath('fresh-migration'));
+    dbs.push(db);
+
+    expect(migrationRows(db).map((row) => row.version)).toEqual([BASELINE_MIGRATION_VERSION]);
+    expect(columnNames(db, 'devices')).toContain('revoked_at');
+    expect(columnNames(db, 'assistant_threads')).toContain('enabled_tools_json');
+  });
+
+  test('does not rerun already applied migrations', () => {
+    const filePath = tempDbPath('idempotent-migration');
+    const first = new VoiceStreamNextDb(filePath);
+    first.db.close();
+
+    const second = new VoiceStreamNextDb(filePath);
+    dbs.push(second);
+
+    expect(migrationRows(second)).toHaveLength(1);
+  });
+
+  test('rejects changed migration checksums', () => {
+    const filePath = tempDbPath('checksum-migration');
+    const db = new VoiceStreamNextDb(filePath);
+    db.db
+      .query('UPDATE schema_migrations SET checksum = $checksum WHERE version = $version')
+      .run({ $checksum: 'changed', $version: BASELINE_MIGRATION_VERSION });
+    db.db.close();
+
+    expect(() => new VoiceStreamNextDb(filePath)).toThrow(/migration checksum mismatch/);
+  });
+
+  test('rejects existing app tables without migration history', () => {
+    const filePath = tempDbPath('untracked-existing-db');
+    const legacy = new Database(filePath, { create: true });
+    legacy.exec('CREATE TABLE users (id TEXT PRIMARY KEY);');
+    legacy.close();
+
+    expect(() => new VoiceStreamNextDb(filePath)).toThrow(/has tables but no migration history/);
+  });
+
+  test('rejects invalid SQL migration file names', () => {
+    const dir = path.join(process.cwd(), 'server', 'data', 'tests', `bad-migration-name-${crypto.randomUUID()}`);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, '20260525173842_initial.sql'), 'CREATE TABLE IF NOT EXISTS demo (id TEXT PRIMARY KEY);');
+    writeFileSync(path.join(dir, '2_bad.sql'), 'SELECT 1;');
+
+    try {
+      expect(() => loadMigrations(dir)).toThrow(/invalid migration file name: 2_bad\.sql/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

@@ -1,4 +1,4 @@
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { Database } from 'bun:sqlite';
 
@@ -326,11 +326,19 @@ function sha256(value: string): string {
 }
 
 function dataDir(): string {
-  return path.resolve(process.env.VOICE_STREAM_NEXT_DATA_DIR?.trim() || path.join(process.cwd(), 'server', 'data'));
+  return path.resolve(
+    process.env.VOICE_STREAM_NEXT_DATA_DIR?.trim() ||
+      process.env.RAILWAY_VOLUME_MOUNT_PATH?.trim() ||
+      path.join(process.cwd(), 'server', 'data'),
+  );
 }
 
 function dbPath(): string {
   return path.join(dataDir(), 'voice-stream-next.sqlite');
+}
+
+function migrationsDir(): string {
+  return path.resolve(process.cwd(), 'server', 'migrations');
 }
 
 function asBool(value: unknown): boolean {
@@ -715,6 +723,48 @@ function rowClientStatus(row: any): ClientStatusRecord {
   };
 }
 
+type Migration = {
+  version: string;
+  name: string;
+  fileName: string;
+  sql: string;
+  checksum: string;
+};
+
+type AppliedMigrationRow = {
+  version: string;
+  name: string;
+  checksum: string;
+};
+
+export function loadMigrations(dir = migrationsDir()): Migration[] {
+  if (!existsSync(dir)) throw new Error(`missing migrations directory: ${dir}`);
+  const migrations = readdirSync(dir)
+    .map((fileName) => {
+      const match = /^(\d{14})_([a-z0-9_]+)\.sql$/.exec(fileName);
+      if (!match && fileName.endsWith('.sql')) throw new Error(`invalid migration file name: ${fileName}`);
+      if (!match) return null;
+      const sql = readFileSync(path.join(dir, fileName), 'utf8');
+      return {
+        version: match[1]!,
+        name: match[2]!,
+        fileName,
+        sql,
+        checksum: sha256(sql),
+      } satisfies Migration;
+    })
+    .filter((migration): migration is Migration => Boolean(migration))
+    .sort((a, b) => a.version.localeCompare(b.version));
+
+  const seen = new Set<string>();
+  for (const migration of migrations) {
+    if (seen.has(migration.version)) throw new Error(`duplicate migration version ${migration.version}`);
+    seen.add(migration.version);
+  }
+  if (migrations.length === 0) throw new Error(`no migrations found in ${dir}`);
+  return migrations;
+}
+
 export class VoiceStreamNextDb {
   readonly db: Database;
   readonly path: string;
@@ -729,316 +779,103 @@ export class VoiceStreamNextDb {
   }
 
   migrate(): void {
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS users (
-        id TEXT PRIMARY KEY,
-        clerk_user_id TEXT NOT NULL UNIQUE,
-        display_name TEXT NOT NULL,
-        email TEXT NOT NULL,
-        admin INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        last_seen_at TEXT NOT NULL
-      )
-    `);
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS voice_settings (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
-        unlock_code TEXT NOT NULL,
-        lock_code TEXT NOT NULL,
-        off_code TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )
-    `);
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS devices (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        device_type TEXT NOT NULL,
-        display_name TEXT NOT NULL,
-        token_hash TEXT NOT NULL,
-        token_hint TEXT NOT NULL,
-        last_seen_at TEXT NOT NULL,
-        created_at TEXT NOT NULL
-      )
-    `);
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS client_logs (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        device_id TEXT REFERENCES devices(id) ON DELETE SET NULL,
-        source TEXT NOT NULL,
-        level TEXT NOT NULL,
-        message TEXT NOT NULL,
-        details_json TEXT,
-        created_at TEXT NOT NULL
-      )
-    `);
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS android_setup_sessions (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        secret_hash TEXT NOT NULL,
-        expires_at TEXT NOT NULL,
-        claimed_at TEXT,
-        device_id TEXT REFERENCES devices(id) ON DELETE SET NULL,
-        created_at TEXT NOT NULL
-      )
-    `);
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS assistant_threads (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        device_id TEXT REFERENCES devices(id) ON DELETE SET NULL,
-        title TEXT NOT NULL,
-        source TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )
-    `);
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS assistant_messages (
-        id TEXT PRIMARY KEY,
-        thread_id TEXT NOT NULL REFERENCES assistant_threads(id) ON DELETE CASCADE,
-        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        role TEXT NOT NULL,
-        content TEXT NOT NULL,
-        content_json TEXT,
-        tool_name TEXT,
-        tool_call_id TEXT,
-        is_error INTEGER NOT NULL DEFAULT 0,
-        spoken_text TEXT,
-        created_at TEXT NOT NULL
-      )
-    `);
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS assistant_runs (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        thread_id TEXT NOT NULL REFERENCES assistant_threads(id) ON DELETE CASCADE,
-        status TEXT NOT NULL,
-        provider TEXT NOT NULL,
-        model TEXT NOT NULL,
-        thinking_level TEXT NOT NULL,
-        prompt TEXT NOT NULL,
-        error TEXT,
-        started_at TEXT NOT NULL,
-        completed_at TEXT,
-        cancelled_at TEXT
-      )
-    `);
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS assistant_tool_calls (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        thread_id TEXT NOT NULL REFERENCES assistant_threads(id) ON DELETE CASCADE,
-        run_id TEXT REFERENCES assistant_runs(id) ON DELETE SET NULL,
-        tool_name TEXT NOT NULL,
-        status TEXT NOT NULL,
-        args_json TEXT NOT NULL,
-        result_json TEXT,
-        approval_required INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )
-    `);
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS assistant_queued_prompts (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        thread_id TEXT NOT NULL REFERENCES assistant_threads(id) ON DELETE CASCADE,
-        prompt TEXT NOT NULL,
-        provider TEXT NOT NULL,
-        model TEXT NOT NULL,
-        thinking_level TEXT NOT NULL,
-        status TEXT NOT NULL,
-        error TEXT,
-        created_at TEXT NOT NULL,
-        started_at TEXT,
-        completed_at TEXT,
-        cancelled_at TEXT
-      )
-    `);
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS assistant_approvals (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        thread_id TEXT NOT NULL REFERENCES assistant_threads(id) ON DELETE CASCADE,
-        run_id TEXT REFERENCES assistant_runs(id) ON DELETE SET NULL,
-        tool_call_id TEXT NOT NULL REFERENCES assistant_tool_calls(id) ON DELETE CASCADE,
-        tool_name TEXT NOT NULL,
-        label TEXT NOT NULL,
-        args_json TEXT NOT NULL,
-        status TEXT NOT NULL,
-        requested_by TEXT NOT NULL,
-        resolved_by TEXT,
-        result_json TEXT,
-        failure_reason TEXT,
-        created_at TEXT NOT NULL,
-        resolved_at TEXT
-      )
-    `);
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS assistant_artifacts (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        thread_id TEXT NOT NULL REFERENCES assistant_threads(id) ON DELETE CASCADE,
-        path TEXT NOT NULL,
-        content TEXT NOT NULL,
-        size INTEGER NOT NULL,
-        revision TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        UNIQUE(thread_id, path)
-      )
-    `);
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS assistant_settings (
-        user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-        normal_system_prompt TEXT NOT NULL,
-        voice_system_prompt TEXT NOT NULL,
-        default_provider TEXT NOT NULL,
-        default_model TEXT NOT NULL,
-        default_thinking_level TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )
-    `);
-    try {
-      this.db.run('ALTER TABLE assistant_settings DROP COLUMN overview_prompt');
-    } catch {
-      // Older local databases may not have this legacy column anymore.
-    }
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS assistant_codex_connections (
-        user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-        access_token TEXT NOT NULL,
-        refresh_token TEXT NOT NULL,
-        account_id TEXT,
-        expires_at TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )
-    `);
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS assistant_codex_oauth_states (
-        state TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        code_verifier TEXT NOT NULL,
-        redirect_uri TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL
-      )
-    `);
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS voice_sessions (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
-        assistant_thread_id TEXT NOT NULL REFERENCES assistant_threads(id) ON DELETE CASCADE,
-        mode TEXT NOT NULL,
-        started_at TEXT NOT NULL,
-        ended_at TEXT
-      )
-    `);
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS transcripts (
-        id TEXT PRIMARY KEY,
-        voice_session_id TEXT NOT NULL REFERENCES voice_sessions(id) ON DELETE CASCADE,
-        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        text TEXT NOT NULL,
-        final INTEGER NOT NULL DEFAULT 1,
-        created_at TEXT NOT NULL
-      )
-    `);
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS client_status (
-        device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
-        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        mode TEXT NOT NULL,
-        status TEXT NOT NULL,
-        microphone TEXT NOT NULL,
-        protocol_version INTEGER,
-        app_version TEXT,
-        last_error TEXT,
-        reported_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      )
-    `);
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS approval_codes (
-        id TEXT PRIMARY KEY,
-        voice_session_id TEXT REFERENCES voice_sessions(id) ON DELETE SET NULL,
-        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        code TEXT NOT NULL,
-        source TEXT NOT NULL,
-        created_at TEXT NOT NULL
-      )
-    `);
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS pairing_sessions (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        device_id TEXT NOT NULL UNIQUE REFERENCES devices(id) ON DELETE CASCADE,
-        expires_at TEXT NOT NULL,
-        claimed_at TEXT,
-        created_at TEXT NOT NULL
-      )
-    `);
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS desktop_auth_requests (
-        id TEXT PRIMARY KEY,
-        secret_hash TEXT NOT NULL,
-        display_name TEXT NOT NULL,
-        expires_at TEXT NOT NULL,
-        claimed_at TEXT,
-        user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
-        device_id TEXT REFERENCES devices(id) ON DELETE SET NULL,
-        created_at TEXT NOT NULL,
-        device_token_hash TEXT,
-        device_token_hint TEXT
-      )
-    `);
-    this.ensureColumn('desktop_auth_requests', 'device_token_hash', 'TEXT');
-    this.ensureColumn('desktop_auth_requests', 'device_token_hint', 'TEXT');
-    this.ensureColumn('devices', 'revoked_at', 'TEXT');
-    this.ensureColumn('voice_settings', 'trigger_phrase', 'TEXT');
-    this.ensureColumn('voice_settings', 'min_digits', 'INTEGER');
-    this.ensureColumn('voice_settings', 'max_digits', 'INTEGER');
-    this.ensureColumn('voice_settings', 'stable_ms', 'INTEGER');
-    this.ensureColumn('voice_settings', 'collect_timeout_ms', 'INTEGER');
-    this.ensureColumn('voice_settings', 'duplicate_cooldown_ms', 'INTEGER');
-    this.ensureColumn('voice_settings', 'finalize_check_interval_ms', 'INTEGER');
-    this.ensureColumn('voice_settings', 'post_prompt_command_suppression_ms', 'INTEGER');
-    this.ensureColumn('assistant_threads', 'provider', `TEXT NOT NULL DEFAULT '${ASSISTANT_DEFAULT_PROVIDER}'`);
-    this.ensureColumn('assistant_threads', 'model', `TEXT NOT NULL DEFAULT '${ASSISTANT_DEFAULT_MODEL}'`);
-    this.ensureColumn('assistant_threads', 'thinking_level', `TEXT NOT NULL DEFAULT '${ASSISTANT_DEFAULT_THINKING_LEVEL}'`);
-    this.ensureColumn('assistant_threads', 'status', "TEXT NOT NULL DEFAULT 'idle'");
-    this.ensureColumn('assistant_threads', 'error', 'TEXT');
-    this.ensureColumn('assistant_threads', 'voice_enabled', 'INTEGER NOT NULL DEFAULT 0');
-    this.ensureColumn('assistant_threads', 'auto_approve', 'INTEGER NOT NULL DEFAULT 0');
-    this.ensureColumn('assistant_threads', 'system_prompt', 'TEXT');
-    this.ensureColumn(
-      'assistant_threads',
-      'enabled_tools_json',
-      `TEXT NOT NULL DEFAULT '${JSON.stringify([...ASSISTANT_DEFAULT_ENABLED_TOOLS]).replace(/'/g, "''")}'`,
-    );
-    this.ensureColumn(
-      'assistant_threads',
-      'capabilities_json',
-      `TEXT NOT NULL DEFAULT '${JSON.stringify(ASSISTANT_DEFAULT_CAPABILITIES).replace(/'/g, "''")}'`,
-    );
-    this.ensureColumn('assistant_threads', 'prompt_delivery_mode', "TEXT NOT NULL DEFAULT 'queue'");
-    this.ensureColumn('assistant_messages', 'content_json', 'TEXT');
-    this.ensureColumn('assistant_messages', 'tool_name', 'TEXT');
-    this.ensureColumn('assistant_messages', 'tool_call_id', 'TEXT');
-    this.ensureColumn('assistant_messages', 'is_error', 'INTEGER NOT NULL DEFAULT 0');
+    this.runMigrations(loadMigrations());
   }
 
-  private ensureColumn(table: string, column: string, definition: string): void {
-    const rows = this.db.query(`PRAGMA table_info(${table})`).all() as Array<{ name?: string }>;
-    if (rows.some((row) => String(row.name) === column)) return;
-    this.db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  private runMigrations(migrations: Migration[]): void {
+    const hasMigrationHistory = this.tableExists('schema_migrations');
+    if (!hasMigrationHistory && this.hasNonMigrationTables()) {
+      throw new Error(
+        `existing Voice Stream database has tables but no migration history; delete ${this.path} or migrate it manually before starting`,
+      );
+    }
+    this.ensureMigrationTable();
+    const appliedRows = this.appliedMigrations();
+    const appliedByVersion = new Map(appliedRows.map((row) => [row.version, row]));
+    for (const row of appliedRows) {
+      const migration = migrations.find((item) => item.version === row.version);
+      if (!migration) throw new Error(`database has unknown migration ${row.version} (${row.name})`);
+      if (migration.checksum !== row.checksum) {
+        throw new Error(`migration checksum mismatch for ${migration.fileName}`);
+      }
+    }
+
+    for (const migration of migrations) {
+      if (appliedByVersion.has(migration.version)) continue;
+      this.applyMigration(migration);
+      appliedByVersion.set(migration.version, {
+        version: migration.version,
+        name: migration.name,
+        checksum: migration.checksum,
+      });
+    }
+  }
+
+  private ensureMigrationTable(): void {
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        version TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        checksum TEXT NOT NULL,
+        applied_at TEXT NOT NULL
+      )
+    `);
+  }
+
+  private appliedMigrations(): AppliedMigrationRow[] {
+    return this.db
+      .query('SELECT version, name, checksum FROM schema_migrations ORDER BY version')
+      .all() as AppliedMigrationRow[];
+  }
+
+  private applyMigration(migration: Migration): void {
+    this.db.run('BEGIN IMMEDIATE');
+    try {
+      this.db.exec(migration.sql);
+      this.recordMigration(migration);
+      this.db.run('COMMIT');
+    } catch (error) {
+      this.db.run('ROLLBACK');
+      throw error;
+    }
+  }
+
+  private recordMigration(migration: Migration): void {
+    this.db
+      .query(
+        `
+        INSERT INTO schema_migrations (version, name, checksum, applied_at)
+        VALUES ($version, $name, $checksum, $appliedAt)
+      `,
+      )
+      .run({
+        $version: migration.version,
+        $name: migration.name,
+        $checksum: migration.checksum,
+        $appliedAt: nowIso(),
+      });
+  }
+
+  private tableExists(table: string): boolean {
+    const row = this.db
+      .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = $table")
+      .get({ $table: table });
+    return Boolean(row);
+  }
+
+  private hasNonMigrationTables(): boolean {
+    const row = this.db
+      .query(
+        `
+        SELECT COUNT(*) AS count
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name NOT LIKE 'sqlite_%'
+          AND name != 'schema_migrations'
+      `,
+      )
+      .get() as { count?: number } | undefined;
+    return Number(row?.count ?? 0) > 0;
   }
 
   upsertUser(input: UpsertUserInput): UserProfile {
@@ -1069,6 +906,7 @@ export class VoiceStreamNextDb {
           $clerkUserId: input.clerkUserId,
         });
     } else {
+      const shouldBootstrapAdmin = this.userCount() === 0;
       this.db
         .query(
           `
@@ -1081,7 +919,7 @@ export class VoiceStreamNextDb {
           $clerkUserId: input.clerkUserId,
           $displayName: input.displayName,
           $email: input.email,
-          $admin: input.admin ? 1 : 0,
+          $admin: input.admin || shouldBootstrapAdmin ? 1 : 0,
           $createdAt: at,
           $updatedAt: at,
           $lastSeenAt: at,
@@ -1091,6 +929,11 @@ export class VoiceStreamNextDb {
     if (!user) throw new Error('failed to upsert user');
     this.ensureVoiceSettings(user.id);
     return user;
+  }
+
+  private userCount(): number {
+    const row = this.db.query('SELECT COUNT(*) AS count FROM users').get() as { count?: number } | undefined;
+    return Number(row?.count ?? 0);
   }
 
   userByClerkId(clerkUserId: string): UserProfile | null {
