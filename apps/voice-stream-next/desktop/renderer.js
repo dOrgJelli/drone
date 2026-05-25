@@ -21,6 +21,9 @@ const state = {
   voiceReconnectAttempt: 0,
   voiceReconnecting: false,
   voiceReconnectTimer: null,
+  voiceFinalizeTimer: null,
+  voicePostStopMode: 'awake',
+  voicePostStopStatus: '',
   desktopAuthPollTimer: null,
   voiceStreamEnding: false,
   wakeUsesVosk: false,
@@ -421,6 +424,13 @@ function clearVoiceReconnectTimer() {
   state.voiceReconnecting = false;
 }
 
+function clearVoiceFinalizeTimer() {
+  if (state.voiceFinalizeTimer) {
+    window.clearTimeout(state.voiceFinalizeTimer);
+    state.voiceFinalizeTimer = null;
+  }
+}
+
 function flushPendingStreamFrames() {
   const socket = state.voiceSocket;
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
@@ -486,10 +496,30 @@ function scheduleVoiceReconnect() {
 
 function resetVoiceStreamState() {
   clearVoiceReconnectTimer();
+  clearVoiceFinalizeTimer();
   state.voiceOutgoingReady = false;
   state.voiceReconnectAttempt = 0;
   state.voiceStreamEnding = false;
+  state.voicePostStopMode = 'awake';
+  state.voicePostStopStatus = '';
   pendingStreamBuffer.clear();
+}
+
+async function cleanupLocalCapture() {
+  if (state.processor) {
+    state.processor.disconnect();
+  }
+  if (state.audioContext) {
+    await state.audioContext.close().catch(() => {});
+  }
+  if (state.stream) {
+    state.stream.getTracks().forEach((track) => track.stop());
+  }
+  state.stream = null;
+  state.audioContext = null;
+  state.processor = null;
+  cancelAnimationFrame(state.meterFrame);
+  els.meterBar.style.width = '0%';
 }
 
 function escapeHtml(value) {
@@ -1039,31 +1069,36 @@ async function stopMic(nextMode = 'awake', options = {}) {
   clearVoiceReconnectTimer();
   const localSocket = state.voiceSocket;
   if (localSocket) {
-    localSocket.send(JSON.stringify({ type: 'end' }));
-    setTimeout(() => localSocket.close(), 1200);
+    const sendEnd = () => {
+      try {
+        localSocket.send(JSON.stringify({ type: 'end' }));
+      } catch {
+        // The socket may have closed between the readyState check and send.
+      }
+    };
+    if (localSocket.readyState === WebSocket.OPEN) {
+      sendEnd();
+    } else if (localSocket.readyState === WebSocket.CONNECTING) {
+      localSocket.addEventListener('open', sendEnd, { once: true });
+    }
   }
-  if (state.processor) {
-    state.processor.disconnect();
-  }
-  if (state.audioContext) {
-    await state.audioContext.close().catch(() => {});
-  }
-  if (state.stream) {
-    state.stream.getTracks().forEach((track) => track.stop());
-  }
-  state.stream = null;
-  state.audioContext = null;
-  state.processor = null;
-  state.voiceSocket = null;
-  state.voiceSessionId = null;
-  resetVoiceStreamState();
-  cancelAnimationFrame(state.meterFrame);
-  els.meterBar.style.width = '0%';
+  await cleanupLocalCapture();
+  state.voiceOutgoingReady = false;
+  pendingStreamBuffer.clear();
   if (options.cue !== null) {
     playLocalVoiceCue(options.cue ?? 'stop_button');
   }
-  setMode(nextMode, 'Capture stopped.');
-  if (nextMode !== 'off') startWakeListener();
+  if (!localSocket || localSocket.readyState === WebSocket.CLOSED || localSocket.readyState === WebSocket.CLOSING) {
+    completeStoppedVoice(nextMode, options.finalStatus || 'Capture stopped.');
+  } else {
+    state.voicePostStopMode = nextMode;
+    state.voicePostStopStatus = options.finalStatus || '';
+    setMode('transcribing', nextMode === 'off' ? 'Finishing voice transcription, then turning off.' : 'Finishing voice transcription.');
+    state.voiceFinalizeTimer = window.setTimeout(() => {
+      void logDesktopEvent('warn', 'Voice stream finalization timed out', { nextMode, target: state.voiceTarget });
+      completeStoppedVoice(nextMode, options.finalStatus || 'Voice transcription timed out.');
+    }, 30_000);
+  }
   await api('/api/logs', {
     method: 'POST',
     body: JSON.stringify({
@@ -1141,6 +1176,13 @@ function openVoiceSocket(target) {
   };
   socket.onclose = (event) => {
     state.voiceOutgoingReady = false;
+    if (state.mode === 'transcribing' && state.voiceStreamEnding && state.voiceSocket === socket) {
+      if (target === 'clipboard' && !terminalMessageReceived) {
+        void logDesktopEvent('warn', 'Voice stream closed before clipboard result', { code: event.code, reason: event.reason || '' });
+      }
+      completeStoppedVoice(state.voicePostStopMode || 'awake', state.voicePostStopStatus || 'Voice stream closed before transcription completed.');
+      return;
+    }
     if (state.mode === 'recording' && !state.voiceStreamEnding && event.code === 1000) {
       if (target === 'clipboard' && !terminalMessageReceived) {
         void logDesktopEvent('warn', 'Voice stream closed before clipboard result', { code: event.code, reason: event.reason || '' });
@@ -1170,21 +1212,40 @@ function openVoiceSocket(target) {
 async function finishMicFromServer() {
   state.voiceStreamEnding = true;
   clearVoiceReconnectTimer();
-  if (state.processor) state.processor.disconnect();
-  if (state.audioContext) await state.audioContext.close().catch(() => {});
-  if (state.stream) state.stream.getTracks().forEach((track) => track.stop());
-  if (state.voiceSocket) state.voiceSocket.close();
-  state.stream = null;
-  state.audioContext = null;
-  state.processor = null;
+  await cleanupLocalCapture();
+  const nextMode = state.voicePostStopMode || 'awake';
+  const nextStatus = state.voicePostStopStatus || els.micStatus.textContent || 'Awake. Waiting for voice command.';
+  completeStoppedVoice(nextMode, nextStatus);
+  await loadDashboard().catch(() => {});
+}
+
+function completeStoppedVoice(nextMode = 'awake', status = '') {
+  clearVoiceFinalizeTimer();
+  const socket = state.voiceSocket;
   state.voiceSocket = null;
   state.voiceSessionId = null;
   resetVoiceStreamState();
-  cancelAnimationFrame(state.meterFrame);
-  els.meterBar.style.width = '0%';
-  setMode('awake', els.micStatus.textContent || 'Awake. Waiting for voice command.');
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    try {
+      socket.close(1000, 'client finalized');
+    } catch {
+      // Ignore close races after the server has already finalized the stream.
+    }
+  }
+  if (nextMode === 'off') {
+    stopWakeListener();
+    resetApprovalCollection();
+    preRollBuffer.clear();
+    setMode('off', 'Off.');
+    return;
+  }
+  if (nextMode === 'sleeping') {
+    setMode('sleeping', status || 'Sleeping.');
+    startWakeListener();
+    return;
+  }
+  setMode('awake', status || 'Awake. Waiting for voice command.');
   startWakeListener();
-  await loadDashboard().catch(() => {});
 }
 
 function floatToPcm16(input) {
@@ -1211,10 +1272,10 @@ async function copyText(text) {
   if (!trimmed) return false;
   if (desktop.writeClipboard) {
     try {
-      desktop.writeClipboard(trimmed);
+      await desktop.writeClipboard(trimmed);
       return true;
     } catch {
-      return false;
+      // Fall through to the browser clipboard API when the desktop bridge is unavailable.
     }
   }
   if (!navigator.clipboard) return false;
@@ -1336,7 +1397,10 @@ async function enterAwake() {
 }
 
 async function enterSleep() {
-  if (state.voiceSocket || state.stream) await stopMic('sleeping', { cue: null });
+  if (state.voiceSocket || state.stream) {
+    await stopMic('sleeping', { cue: null, finalStatus: 'Sleeping.' });
+    return;
+  }
   resetApprovalCollection();
   playLocalVoiceCue('sleep');
   const settings = await loadVoiceSettings().catch(() => null);
@@ -1345,7 +1409,10 @@ async function enterSleep() {
 }
 
 async function turnOff(options = {}) {
-  if (state.voiceSocket || state.stream) await stopMic('off', { cue: null });
+  if (state.voiceSocket || state.stream) {
+    await stopMic('off', { cue: options.cue || 'stop_button' });
+    return;
+  }
   stopWakeListener();
   resetApprovalCollection();
   preRollBuffer.clear();

@@ -1,4 +1,4 @@
-const { clipboard, contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('voiceStreamDesktop', {
   isDesktop: true,
@@ -6,7 +6,7 @@ contextBridge.exposeInMainWorld('voiceStreamDesktop', {
   writeConfig: (config) => ipcRenderer.invoke('config:write', config),
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
   debugWindow: (message, details) => ipcRenderer.invoke('debug:window', message, details),
-  writeClipboard: (text) => clipboard.writeText(String(text || '')),
+  writeClipboard: (text) => ipcRenderer.invoke('clipboard:writeText', text),
   windowState: () => ipcRenderer.invoke('window:state'),
   compactWindow: () => ipcRenderer.invoke('window:compact'),
   expandWindow: () => ipcRenderer.invoke('window:expand'),

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, screen, shell, Menu, Tray, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, shell, Menu, Tray, nativeImage, clipboard } = require('electron');
 const { fork } = require('node:child_process');
 const fs = require('node:fs');
 const { createRequire } = require('node:module');
@@ -749,6 +749,10 @@ if (!gotSingleInstanceLock) {
   ipcMain.handle('pairing:takePending', () => pendingPairingPayloads.splice(0));
   ipcMain.handle('config:write', (_event, config) => writeConfig(config));
   ipcMain.handle('app:openExternal', (_event, url) => shell.openExternal(url));
+  ipcMain.handle('clipboard:writeText', (_event, text) => {
+    clipboard.writeText(String(text || ''));
+    return { ok: true };
+  });
   ipcMain.handle('debug:window', (_event, message, details) => {
     windowDebugLog(String(message || 'renderer'), { renderer: details || {}, snapshot: windowSnapshot(mainWindow) });
     return { ok: true };
