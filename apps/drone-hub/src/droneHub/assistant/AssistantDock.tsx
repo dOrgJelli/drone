@@ -76,6 +76,7 @@ type AssistantRunModel = {
 type AssistantChatIdleSubscription = {
   id: string;
   threadId: string;
+  mode?: 'all' | 'any';
   targets: Array<{ droneId: string; chatName: string }>;
   createdAt: string;
   expiresAt: string;
@@ -362,9 +363,20 @@ const TOOL_LABELS: Record<string, string> = {
   read_chat_messages: 'Read chat messages',
   search_chat_messages: 'Search chat messages',
   set_drone_group: 'Set drone group',
-  subscribe_to_chats_idle: 'Subscribe to chats idle',
+  subscribe_to_any_chat_idle: 'Subscribe to any chat idle',
+  subscribe_to_all_chats_idle: 'Subscribe to all chats idle',
+  subscribe_to_chats_idle: 'Subscribe to all chats idle',
   wait_for_agent_chats_idle: 'Wait for chats idle',
 };
+
+function isChatIdleToolName(name: string | undefined): boolean {
+  return (
+    name === 'subscribe_to_any_chat_idle' ||
+    name === 'subscribe_to_all_chats_idle' ||
+    name === 'subscribe_to_chats_idle' ||
+    name === 'wait_for_agent_chats_idle'
+  );
+}
 
 function toolLabel(name: string | undefined): string {
   const key = String(name ?? '').trim();
@@ -427,7 +439,7 @@ function messageDroneDetails(args: any, droneNameById: AssistantDroneNameMap): A
 function toolActivityTitle(call: AssistantToolCall | undefined, result: AssistantMessage | undefined, droneNameById: AssistantDroneNameMap): string {
   const baseTitle = toolLabel(call?.name || result?.toolName);
   if (!call) return baseTitle;
-  if (call.name === 'wait_for_agent_chats_idle' || call.name === 'subscribe_to_chats_idle') {
+  if (isChatIdleToolName(call.name)) {
     const summary = summarizeWaitTargets(normalizeAssistantWaitTargets(call.args, droneNameById));
     return summary ? `${baseTitle}: ${summary}` : baseTitle;
   }
@@ -442,7 +454,7 @@ function toolDroneLookupKey(items: AssistantRenderItem[]): string {
   const keys: string[] = [];
   for (const item of items) {
     if (item.type !== 'tool' || !item.call) continue;
-    if (item.call.name === 'wait_for_agent_chats_idle' || item.call.name === 'subscribe_to_chats_idle') {
+    if (isChatIdleToolName(item.call.name)) {
       const targets = Array.isArray(item.call.args?.targets) ? item.call.args.targets : [];
       for (const target of targets) {
         const droneId = String(target?.droneId ?? target?.id ?? target?.drone ?? '').trim();
@@ -721,6 +733,13 @@ function summarizeChatIdleBannerTargets(subscriptions: AssistantChatIdleSubscrip
   return extra > 0 ? `${visible.join(' · ')} +${extra}` : visible.join(' · ');
 }
 
+function chatIdleBannerTitle(subscriptions: AssistantChatIdleSubscription[]): string {
+  const modes = new Set(subscriptions.map((sub) => sub.mode ?? 'all'));
+  if (modes.size === 1 && modes.has('any')) return 'Subscribed — waiting for any chat to go idle';
+  if (modes.size === 1 && modes.has('all')) return 'Subscribed — waiting for all chats to go idle';
+  return 'Subscribed — waiting for chat idle events';
+}
+
 function formatChatIdleExpiryHint(expiresAtIso: string): string {
   const ms = Date.parse(expiresAtIso);
   if (!Number.isFinite(ms)) return '';
@@ -749,6 +768,7 @@ function AssistantChatIdleFooterBanner({
   droneNameById: AssistantDroneNameMap;
 }) {
   const targetLine = React.useMemo(() => summarizeChatIdleBannerTargets(subscriptions, droneNameById), [subscriptions, droneNameById]);
+  const title = React.useMemo(() => chatIdleBannerTitle(subscriptions), [subscriptions]);
   const expiryHint = React.useMemo(() => {
     const iso = earliestChatIdleExpiryIso(subscriptions);
     return iso ? formatChatIdleExpiryHint(iso) : '';
@@ -763,7 +783,7 @@ function AssistantChatIdleFooterBanner({
       <div className="flex items-start gap-2">
         <span className="mt-1 h-2 w-2 flex-shrink-0 animate-pulse rounded-full bg-[var(--yellow)]" aria-hidden="true" />
         <div className="min-w-0 flex-1">
-          <div className="text-[11px] font-semibold text-[var(--fg-secondary)]">Subscribed — waiting for chats to go idle</div>
+          <div className="text-[11px] font-semibold text-[var(--fg-secondary)]">{title}</div>
           {targetLine ? (
             <div className="mt-0.5 truncate text-[10px] text-[var(--muted)]" title={targetLine}>
               Watching {targetLine}
@@ -894,6 +914,7 @@ function ChatsIdleActivityRow({
   const [detailsOpen, setDetailsOpen] = React.useState(false);
   const targets = normalizeAssistantWaitTargets(call.args, droneNameById);
   const targetSummary = summarizeWaitTargets(targets);
+  const label = toolLabel(call.name);
   return (
     <div className="mx-3 overflow-hidden rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.025)]">
       <div className="border-b border-[var(--border-subtle)] px-2.5 py-2">
@@ -901,7 +922,7 @@ function ChatsIdleActivityRow({
           <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
             <ToolStatusIndicator result={result} />
             <div className="text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
-              {call.name === 'subscribe_to_chats_idle' ? 'Subscribe to chats idle' : 'Wait for chats idle'}
+              {label}
             </div>
             <ToolDetailsButton open={detailsOpen} onClick={() => setDetailsOpen((value) => !value)} />
           </div>
@@ -949,7 +970,7 @@ function ToolActivityRow({
     return <MessageDroneActivityRow call={call} result={result} droneNameById={droneNameById} />;
   }
 
-  if (call?.name === 'wait_for_agent_chats_idle' || call?.name === 'subscribe_to_chats_idle') {
+  if (call && isChatIdleToolName(call.name)) {
     return <ChatsIdleActivityRow call={call} result={result} droneNameById={droneNameById} />;
   }
 
