@@ -139,6 +139,7 @@ type OpenAiStreamResult = {
 };
 
 type CodexStreamResult = OpenAiStreamResult;
+type ProviderTimingLogger = (phase: string, details?: Record<string, unknown>, level?: 'info' | 'warn' | 'error') => void;
 
 export function assistantToolSummaries(): AssistantToolSummary[] {
   return ASSISTANT_TOOLS;
@@ -436,6 +437,12 @@ async function runModelDrivenTurn(
   }
 
   if (modelConfig.provider === 'openai') {
+    const initialTiming = createProviderTimingLogger(db, userId, threadId, run, {
+      provider: 'openai',
+      model: modelConfig.model,
+      thinkingLevel: modelConfig.thinkingLevel,
+      requestKind: 'initial',
+    });
     const first = await streamOpenAiResponse({
       model: modelConfig.model,
       thinkingLevel: modelConfig.thinkingLevel,
@@ -443,11 +450,18 @@ async function runModelDrivenTurn(
       input: inputText,
       tools: enabledTools,
       emit,
+      logTiming: initialTiming,
     });
     if (first.toolCalls.length > 0) {
       const completed = await executeModelToolCalls(db, userId, threadId, run, thread, first.toolCalls, emit);
       if (!completed) return;
       const followup = renderToolFollowup(inputText, completed);
+      const followupTiming = createProviderTimingLogger(db, userId, threadId, run, {
+        provider: 'openai',
+        model: modelConfig.model,
+        thinkingLevel: modelConfig.thinkingLevel,
+        requestKind: 'followup',
+      });
       const final = await streamOpenAiResponse({
         model: modelConfig.model,
         thinkingLevel: modelConfig.thinkingLevel,
@@ -455,6 +469,7 @@ async function runModelDrivenTurn(
         input: followup,
         tools: [],
         emit,
+        logTiming: followupTiming,
       });
       const finalText = final.text.trim() || completed.map((item) => approvedAssistantText(item.toolName, item.result)).join('\n') || 'Done.';
       const assistantMessage = db.addMessage(userId, threadId, {
@@ -483,6 +498,12 @@ async function runModelDrivenTurn(
   }
 
   if (modelConfig.provider === 'codex') {
+    const initialTiming = createProviderTimingLogger(db, userId, threadId, run, {
+      provider: 'codex',
+      model: modelConfig.model,
+      thinkingLevel: modelConfig.thinkingLevel,
+      requestKind: 'initial',
+    });
     const first = await streamCodexResponse(db, userId, {
       model: modelConfig.model,
       thinkingLevel: modelConfig.thinkingLevel,
@@ -490,11 +511,18 @@ async function runModelDrivenTurn(
       input: inputText,
       tools: enabledTools,
       emit,
+      logTiming: initialTiming,
     });
     if (first.toolCalls.length > 0) {
       const completed = await executeModelToolCalls(db, userId, threadId, run, thread, first.toolCalls, emit);
       if (!completed) return;
       const followup = renderToolFollowup(inputText, completed);
+      const followupTiming = createProviderTimingLogger(db, userId, threadId, run, {
+        provider: 'codex',
+        model: modelConfig.model,
+        thinkingLevel: modelConfig.thinkingLevel,
+        requestKind: 'followup',
+      });
       const final = await streamCodexResponse(db, userId, {
         model: modelConfig.model,
         thinkingLevel: modelConfig.thinkingLevel,
@@ -502,6 +530,7 @@ async function runModelDrivenTurn(
         input: followup,
         tools: [],
         emit,
+        logTiming: followupTiming,
       });
       const finalText = final.text.trim() || completed.map((item) => approvedAssistantText(item.toolName, item.result)).join('\n') || 'Done.';
       const assistantMessage = db.addMessage(userId, threadId, {
@@ -532,6 +561,36 @@ async function runModelDrivenTurn(
   throw new Error(`Unsupported assistant provider: ${modelConfig.provider}`);
 }
 
+function createProviderTimingLogger(
+  db: VoiceStreamNextDb,
+  userId: string,
+  threadId: string,
+  run: AssistantRunRecord,
+  meta: { provider: string; model: string; thinkingLevel: string; requestKind: string },
+): ProviderTimingLogger {
+  const startedAt = Date.now();
+  let previousAt = startedAt;
+  return (phase, details = {}, level = 'info') => {
+    const now = Date.now();
+    const elapsedMs = now - startedAt;
+    const sincePreviousMs = now - previousAt;
+    previousAt = now;
+    db.addLog(userId, {
+      source: 'server',
+      level,
+      message: `Assistant provider ${phase}`,
+      detailsJson: JSON.stringify({
+        ...meta,
+        threadId,
+        runId: run.id,
+        elapsedMs,
+        sincePreviousMs,
+        ...details,
+      }),
+    });
+  };
+}
+
 function providerErrorMessage(error: any): string {
   const message = String(error?.message ?? error ?? '').trim();
   return message || 'assistant provider request failed';
@@ -547,8 +606,15 @@ async function streamCodexResponse(
     input: string;
     tools: unknown[];
     emit: (event: PromptEvent) => void;
+    logTiming?: ProviderTimingLogger;
   },
 ): Promise<CodexStreamResult> {
+  input.logTiming?.('request_start', {
+    transport: 'sse',
+    inputChars: input.input.length,
+    instructionsChars: input.instructions.length,
+    toolCount: input.tools.length,
+  });
   const apiKey = await codexAccessToken(db, userId);
   const ai = await import('@mariozechner/pi-ai');
   const model = ai.getModel('openai-codex' as any, input.model as any) || ai.getModel('openai-codex' as any, 'gpt-5.5' as any);
@@ -569,14 +635,31 @@ async function streamCodexResponse(
   let thinking = '';
   const toolCalls: ModelToolCall[] = [];
   let finalMessage: any = null;
+  let firstEventLogged = false;
+  let firstTextLogged = false;
+  let firstThinkingLogged = false;
+  const logFirstEvent = (eventType: string) => {
+    if (firstEventLogged) return;
+    firstEventLogged = true;
+    input.logTiming?.('first_stream_event', { eventType });
+  };
   for await (const event of stream as AsyncIterable<any>) {
+    logFirstEvent(String(event?.type ?? 'unknown'));
     if (event.type === 'text_delta') {
       const delta = String(event.delta ?? '');
       text += delta;
+      if (delta && !firstTextLogged) {
+        firstTextLogged = true;
+        input.logTiming?.('first_text_delta', { chars: delta.length });
+      }
       if (delta) input.emit({ type: 'delta', delta });
     } else if (event.type === 'thinking_delta' || event.type === 'reasoning_delta') {
       const delta = String(event.delta ?? event.thinking ?? event.reasoning ?? '');
       thinking += delta;
+      if (delta && !firstThinkingLogged) {
+        firstThinkingLogged = true;
+        input.logTiming?.('first_thinking_delta', { chars: delta.length });
+      }
       if (delta) input.emit({ type: 'thinking_delta', delta });
     } else if (event.type === 'toolcall_end' && event.toolCall) {
       toolCalls.push({
@@ -585,18 +668,27 @@ async function streamCodexResponse(
         name: String(event.toolCall.name ?? ''),
         argumentsJson: JSON.stringify(event.toolCall.arguments ?? {}),
       });
+      input.logTiming?.('tool_call_received', { toolName: String(event.toolCall.name ?? '') });
     } else if (event.type === 'done') {
       finalMessage = event.message;
     } else if (event.type === 'error') {
       finalMessage = event.error;
+      input.logTiming?.('provider_error', { error: String(event.error?.errorMessage ?? 'Codex request failed') }, 'error');
       throw new Error(String(event.error?.errorMessage ?? 'Codex request failed'));
     }
   }
   if (finalMessage?.stopReason === 'error') {
+    input.logTiming?.('provider_error', { error: String(finalMessage.errorMessage ?? 'Codex request failed') }, 'error');
     throw new Error(String(finalMessage.errorMessage ?? 'Codex request failed'));
   }
   if (!text) text = textFromPiAssistantMessage(finalMessage);
   if (!thinking) thinking = thinkingFromPiAssistantMessage(finalMessage);
+  input.logTiming?.('request_done', {
+    textChars: text.length,
+    thinkingChars: thinking.length,
+    toolCallCount: toolCalls.length,
+    stopReason: String(finalMessage?.stopReason ?? ''),
+  });
   return {
     text,
     thinking,
@@ -715,6 +807,7 @@ async function streamOpenAiResponse(input: {
   input: string;
   tools: unknown[];
   emit: (event: PromptEvent) => void;
+  logTiming?: ProviderTimingLogger;
 }): Promise<OpenAiStreamResult> {
   const body: Record<string, unknown> = {
     model: input.model,
@@ -730,6 +823,12 @@ async function streamOpenAiResponse(input: {
   const reasoning = reasoningFor(input.thinkingLevel);
   if (reasoning) body.reasoning = reasoning;
 
+  input.logTiming?.('request_start', {
+    transport: 'sse',
+    inputChars: input.input.length,
+    instructionsChars: input.instructions.length,
+    toolCount: input.tools.length,
+  });
   const response = await fetch(OPENAI_RESPONSES_ENDPOINT, {
     method: 'POST',
     headers: {
@@ -738,8 +837,10 @@ async function streamOpenAiResponse(input: {
     },
     body: JSON.stringify(body),
   });
+  input.logTiming?.('response_headers', { status: response.status, ok: response.ok });
   if (!response.ok) {
     const text = await response.text();
+    input.logTiming?.('provider_error', { status: response.status, error: providerError(text, `OpenAI response failed: ${response.status}`) }, 'error');
     throw new Error(providerError(text, `OpenAI response failed: ${response.status}`));
   }
   if (!response.body) throw new Error('OpenAI response did not include a stream body');
@@ -750,6 +851,8 @@ async function streamOpenAiResponse(input: {
   let buffer = '';
   let text = '';
   let thinking = '';
+  let firstTextLogged = false;
+  let firstThinkingLogged = false;
 
   const handleEvent = (event: any) => {
     const type = String(event?.type ?? '');
@@ -757,6 +860,10 @@ async function streamOpenAiResponse(input: {
       const delta = String(event.delta ?? '');
       if (delta) {
         text += delta;
+        if (!firstTextLogged) {
+          firstTextLogged = true;
+          input.logTiming?.('first_text_delta', { eventType: type, chars: delta.length });
+        }
         input.emit({ type: 'delta', delta });
       }
       return;
@@ -765,6 +872,10 @@ async function streamOpenAiResponse(input: {
       const delta = String(event.delta ?? event.text ?? event.summary_text ?? '');
       if (delta) {
         thinking += delta;
+        if (!firstThinkingLogged) {
+          firstThinkingLogged = true;
+          input.logTiming?.('first_thinking_delta', { eventType: type, chars: delta.length });
+        }
         input.emit({ type: 'thinking_delta', delta });
       }
       return;
@@ -789,6 +900,7 @@ async function streamOpenAiResponse(input: {
     if (type === 'response.function_call_arguments.done' && event.item) {
       const call = modelToolCallFromItem(event.item);
       toolCallsByKey.set(toolCallKey(event.item, event.output_index), call);
+      input.logTiming?.('tool_call_received', { toolName: call.name });
       return;
     }
     if (type === 'response.completed' && event.response) {
@@ -800,6 +912,7 @@ async function streamOpenAiResponse(input: {
       }
     }
     if (type === 'error') {
+      input.logTiming?.('provider_error', { error: providerError(JSON.stringify(event), 'OpenAI streaming error') }, 'error');
       throw new Error(providerError(JSON.stringify(event), 'OpenAI streaming error'));
     }
   };
@@ -821,6 +934,11 @@ async function streamOpenAiResponse(input: {
   const data = sseData(buffer);
   if (data && data !== '[DONE]') handleEvent(JSON.parse(data));
 
+  input.logTiming?.('request_done', {
+    textChars: text.length,
+    thinkingChars: thinking.length,
+    toolCallCount: [...toolCallsByKey.values()].filter((call) => call.name).length,
+  });
   return {
     text,
     thinking,
