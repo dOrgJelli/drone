@@ -74,6 +74,7 @@ class WakeToggleController {
 
     fun applyServiceMode(mode: String) {
         state = when (mode) {
+            Constants.MODE_LOADING -> state
             Constants.MODE_AWAKE -> WakeState.AWAKE
             Constants.MODE_SLEEPING -> WakeState.SLEEPING
             Constants.MODE_RECORDING -> WakeState.RECORDING

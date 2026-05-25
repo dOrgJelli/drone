@@ -29,4 +29,3 @@ for (const child of children) {
     }
   });
 }
-

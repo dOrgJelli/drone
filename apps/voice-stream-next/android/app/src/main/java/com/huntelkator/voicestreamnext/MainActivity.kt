@@ -17,6 +17,7 @@ import android.os.SystemClock
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -32,6 +33,7 @@ import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import java.net.URI
 import kotlin.concurrent.thread
+import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
     private lateinit var api: VoiceStreamApi
@@ -44,6 +46,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var pairingMessageText: TextView
     private lateinit var primaryActionButton: Button
     private lateinit var offButton: Button
+    private lateinit var root: LinearLayout
     private lateinit var signedOutPanel: View
     private lateinit var voicePanel: View
     private lateinit var settingsPanel: View
@@ -158,7 +161,7 @@ class MainActivity : ComponentActivity() {
             layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         }
 
-        val root = LinearLayout(this).apply {
+        root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(24.dp(), 48.dp(), 24.dp(), 196.dp())
@@ -324,7 +327,12 @@ class MainActivity : ComponentActivity() {
             bottomMargin = 20.dp()
         })
 
+        screen.setOnApplyWindowInsetsListener { _, insets ->
+            positionSystemBars(insets.topSystemInset(), insets.bottomSystemInset())
+            insets
+        }
         setContentView(screen)
+        screen.requestApplyInsets()
     }
 
     private fun buildSettingsContent(): LinearLayout {
@@ -366,14 +374,18 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun toggleSettings() {
-        settingsPanel.visibility = if (settingsPanel.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+        val showing = settingsPanel.visibility == View.VISIBLE
+        settingsPanel.visibility = if (showing) View.GONE else View.VISIBLE
+        settingsButton.text = if (showing) "Settings" else "Close"
     }
 
     private fun togglePrimaryAction() {
         when (sessionMode) {
             SessionMode.OFF, SessionMode.ERROR -> ensureMicThenStartAwake()
             SessionMode.SLEEPING -> ensureMicThenStartAwake()
-            SessionMode.AWAKE, SessionMode.LOADING, SessionMode.RECORDING -> enterSleep()
+            SessionMode.AWAKE -> enterSleep()
+            SessionMode.RECORDING -> stopRecording()
+            SessionMode.LOADING -> enterSleep()
         }
     }
 
@@ -381,12 +393,14 @@ class MainActivity : ComponentActivity() {
         sessionMode = mode
         statusText.text = status
         statusText.setTextColor(if (mode == SessionMode.ERROR) COLOR_ACCENT else COLOR_MUTED)
+        statusText.visibility = if (mode == SessionMode.OFF) View.GONE else View.VISIBLE
         primaryActionButton.stylePrimaryButton(mode)
         offButton.visibility = if (mode == SessionMode.OFF || mode == SessionMode.ERROR) View.GONE else View.VISIBLE
+        if (mode == SessionMode.OFF) updateApprovalUi("")
     }
 
     private fun updateApprovalUi(approvalStatus: String) {
-        if (approvalStatus.isBlank()) {
+        if (approvalStatus.isBlank() || sessionMode == SessionMode.OFF) {
             approvalText.visibility = View.GONE
             approvalText.text = ""
         } else {
@@ -658,6 +672,7 @@ class MainActivity : ComponentActivity() {
         refreshApprovalSettings()
         wakeController.startAwake()
         cuePlayer.play(LocalCue.WAKE)
+        updateSessionUi(SessionMode.LOADING, "Waking local detector.")
         ContextCompat.startForegroundService(
             this,
             Intent(this, VoiceSessionService::class.java).apply { action = Constants.ACTION_START_AWAKE }
@@ -665,12 +680,12 @@ class MainActivity : ComponentActivity() {
         showStatus("Waking local detector.")
     }
 
-    private fun stopVoiceSession(playCue: Boolean = true) {
-        startService(Intent(this, VoiceSessionService::class.java).apply { action = Constants.ACTION_STOP_VOICE })
+    private fun stopRecording(playCue: Boolean = true) {
+        startService(Intent(this, VoiceSessionService::class.java).apply { action = Constants.ACTION_STOP_RECORDING })
         wakeController.manualStopRecording(returnToAwake = true)
         if (playCue) cuePlayer.play(LocalCue.STOP_BUTTON)
-        showStatus("Voice stream stopped.")
-        updateSessionUi(SessionMode.AWAKE, "Voice stream stopped.")
+        showStatus("Awake. Waiting for voice command.")
+        updateSessionUi(SessionMode.AWAKE, "Awake. Waiting for voice command.")
     }
 
     private fun enterSleep() {
@@ -898,7 +913,7 @@ class MainActivity : ComponentActivity() {
         textSize = 14f
         setTextColor(COLOR_TEXT)
         setHintTextColor(COLOR_MUTED)
-        background = rounded(Color.WHITE, 6.dp(), COLOR_STROKE)
+        background = rounded(COLOR_INPUT, 6.dp(), COLOR_STROKE)
         setPadding(12.dp(), 0, 12.dp(), 0)
         layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 44.dp()).apply {
             topMargin = 10.dp()
@@ -907,10 +922,13 @@ class MainActivity : ComponentActivity() {
 
     private fun button(textValue: String, onClick: () -> Unit): Button = Button(this).apply {
         text = textValue
-        setTextColor(Color.WHITE)
+        isAllCaps = false
+        setTextColor(COLOR_BUTTON_TEXT)
         textSize = 13f
         typeface = Typeface.DEFAULT_BOLD
-        background = rounded(COLOR_DARK, 6.dp(), COLOR_DARK)
+        background = rounded(COLOR_ACCENT, 6.dp(), COLOR_ACCENT_MUTED)
+        minHeight = 0
+        minimumHeight = 0
         setOnClickListener { onClick() }
     }
 
@@ -923,46 +941,53 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun Button.stylePrimaryButton(mode: SessionMode) {
+        isAllCaps = false
         text = when (mode) {
-            SessionMode.OFF, SessionMode.ERROR -> "Awake"
-            SessionMode.SLEEPING -> "Awake"
-            SessionMode.LOADING -> "Loading"
-            SessionMode.AWAKE -> "Sleep"
-            SessionMode.RECORDING -> "Sleep"
+            SessionMode.OFF -> "Off\nStart voice"
+            SessionMode.SLEEPING -> "Sleeping\nWake"
+            SessionMode.LOADING -> "Working\nPlease wait"
+            SessionMode.AWAKE -> "Awake\nSleep"
+            SessionMode.RECORDING -> "Recording\nStop"
+            SessionMode.ERROR -> "Voice error\nRetry"
         }
-        setTextColor(Color.WHITE)
+        gravity = Gravity.CENTER
+        setTextColor(COLOR_TEXT)
         textSize = 18f
         typeface = Typeface.DEFAULT_BOLD
-        background = rounded(
-            when (mode) {
-                SessionMode.OFF, SessionMode.ERROR -> COLOR_DARK
-                SessionMode.SLEEPING -> COLOR_ACCENT
-                SessionMode.LOADING -> COLOR_MUTED
-                SessionMode.AWAKE, SessionMode.RECORDING -> COLOR_ACCENT
-            },
-            83.dp(),
-            Color.TRANSPARENT,
-        )
+        background = actionBackground(mode)
+        minHeight = 0
+        minimumHeight = 0
+        elevation = 12.dp().toFloat()
+        translationZ = 3.dp().toFloat()
     }
 
     private fun Button.styleSecondaryButton() {
         setTextColor(COLOR_TEXT)
         textSize = 14f
         typeface = Typeface.DEFAULT_BOLD
+        isAllCaps = false
         background = rounded(COLOR_FLOATING, 24.dp(), COLOR_STROKE)
+        minHeight = 0
+        minimumHeight = 0
     }
 
     private fun Button.styleFloatingButton() {
         setTextColor(COLOR_TEXT)
         textSize = 14f
         typeface = Typeface.DEFAULT_BOLD
+        isAllCaps = false
         setPadding(18.dp(), 0, 18.dp(), 0)
         background = rounded(COLOR_FLOATING, 27.dp(), COLOR_STROKE)
+        minHeight = 0
+        minimumHeight = 0
+        elevation = 8.dp().toFloat()
     }
 
     private fun ImageButton.styleIconButton() {
         background = rounded(COLOR_FLOATING, 29.dp(), COLOR_STROKE)
         setColorFilter(COLOR_TEXT)
+        elevation = 8.dp().toFloat()
+        setPadding(14.dp(), 14.dp(), 14.dp(), 14.dp())
     }
 
     private fun rounded(fill: Int, radius: Int, stroke: Int): GradientDrawable = GradientDrawable().apply {
@@ -971,7 +996,67 @@ class MainActivity : ComponentActivity() {
         setStroke(1.dp(), stroke)
     }
 
-    private fun Int.dp(): Int = (this * resources.displayMetrics.density).toInt()
+    private fun actionBackground(mode: SessionMode): GradientDrawable {
+        val colors = when (mode) {
+            SessionMode.OFF -> intArrayOf(COLOR_FLOATING, COLOR_DARK)
+            SessionMode.SLEEPING -> intArrayOf(0xff252b34.toInt(), COLOR_DARK)
+            SessionMode.LOADING -> intArrayOf(0xff3a301d.toInt(), 0xff211c15.toInt())
+            SessionMode.AWAKE -> intArrayOf(0xff163425.toInt(), 0xff11251c.toInt())
+            SessionMode.RECORDING -> intArrayOf(0xff31234b.toInt(), 0xff201833.toInt())
+            SessionMode.ERROR -> intArrayOf(0xff371c23.toInt(), 0xff23161a.toInt())
+        }
+        val stroke = when (mode) {
+            SessionMode.OFF -> COLOR_STROKE
+            SessionMode.SLEEPING -> COLOR_MUTED
+            SessionMode.LOADING -> COLOR_YELLOW
+            SessionMode.AWAKE -> COLOR_GREEN
+            SessionMode.RECORDING -> COLOR_ACCENT
+            SessionMode.ERROR -> COLOR_RED
+        }
+        return GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, colors).apply {
+            shape = GradientDrawable.OVAL
+            setStroke(2.dp(), stroke)
+        }
+    }
+
+    private fun positionSystemBars(topInset: Int, bottomInset: Int) {
+        val safeBottom = bottomInset + 26.dp()
+        if (::settingsButton.isInitialized) settingsButton.updateFrameMargins(bottom = safeBottom)
+        if (::qrButton.isInitialized) qrButton.updateFrameMargins(bottom = safeBottom)
+        if (::microphoneText.isInitialized) microphoneText.updateFrameMargins(bottom = safeBottom + 70.dp())
+        if (::statusText.isInitialized) statusText.updateFrameMargins(bottom = safeBottom + 126.dp())
+        if (::approvalText.isInitialized) approvalText.updateFrameMargins(bottom = safeBottom + 102.dp())
+        if (::settingsPanel.isInitialized) settingsPanel.updateFrameMargins(bottom = safeBottom + 74.dp())
+        if (::signOutButton.isInitialized) signOutButton.updateFrameMargins(top = topInset + 12.dp())
+        if (::root.isInitialized) root.setPadding(24.dp(), topInset + 28.dp(), 24.dp(), safeBottom + 172.dp())
+    }
+
+    private fun View.updateFrameMargins(top: Int? = null, bottom: Int? = null) {
+        val params = layoutParams as? FrameLayout.LayoutParams ?: return
+        if (top != null) params.topMargin = top
+        if (bottom != null) params.bottomMargin = bottom
+        layoutParams = params
+    }
+
+    private fun WindowInsets.topSystemInset(): Int {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            getInsets(WindowInsets.Type.systemBars()).top
+        } else {
+            @Suppress("DEPRECATION")
+            systemWindowInsetTop
+        }
+    }
+
+    private fun WindowInsets.bottomSystemInset(): Int {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            getInsets(WindowInsets.Type.systemBars()).bottom
+        } else {
+            @Suppress("DEPRECATION")
+            systemWindowInsetBottom
+        }
+    }
+
+    private fun Int.dp(): Int = (this * resources.displayMetrics.density).roundToInt()
 
     private enum class SessionMode {
         OFF,
@@ -984,24 +1069,44 @@ class MainActivity : ComponentActivity() {
         companion object {
             fun fromBroadcast(mode: String, status: String): SessionMode {
                 return when (mode) {
+                    Constants.MODE_LOADING -> LOADING
                     Constants.MODE_AWAKE -> if (status.contains("Waking", ignoreCase = true)) LOADING else AWAKE
                     Constants.MODE_SLEEPING -> SLEEPING
                     Constants.MODE_RECORDING -> RECORDING
                     Constants.MODE_ERROR -> ERROR
-                    else -> OFF
+                    Constants.MODE_OFF -> OFF
+                    else -> fromStatus(status)
+                }
+            }
+
+            private fun fromStatus(status: String): SessionMode {
+                val lower = status.lowercase()
+                return when {
+                    lower.isBlank() || lower == "off" || lower.contains("sign in") || lower.contains("pair this device") -> OFF
+                    lower.contains("failed") || lower.contains("error") || lower.contains("missing") -> ERROR
+                    lower.contains("waking") || lower.contains("starting") || lower.contains("reconnecting") -> LOADING
+                    lower.startsWith("sleep") || lower.startsWith("unlock") || lower.contains("sleeping") -> SLEEPING
+                    lower.contains("waiting") || lower.contains("listening") || lower.contains("assistant replied") || lower.contains("transcript received") || lower.contains("audio received") -> AWAKE
+                    else -> RECORDING
                 }
             }
         }
     }
 
     private companion object {
-        const val COLOR_BACKGROUND = 0xfff6f3eb.toInt()
-        const val COLOR_SURFACE = 0xfffffcf4.toInt()
-        const val COLOR_FLOATING = 0xfff0ebe0.toInt()
-        const val COLOR_TEXT = 0xff1d211f.toInt()
-        const val COLOR_MUTED = 0xff69716c.toInt()
-        const val COLOR_ACCENT = 0xffc8644b.toInt()
-        const val COLOR_STROKE = 0xffd8d2c4.toInt()
-        const val COLOR_DARK = 0xff202724.toInt()
+        const val COLOR_BACKGROUND = 0xff101216.toInt()
+        const val COLOR_SURFACE = 0xff171b21.toInt()
+        const val COLOR_INPUT = 0xff151a20.toInt()
+        const val COLOR_FLOATING = 0xff1e2329.toInt()
+        const val COLOR_TEXT = 0xffdfe3ea.toInt()
+        const val COLOR_MUTED = 0xff8891a8.toInt()
+        const val COLOR_ACCENT = 0xffa78bfa.toInt()
+        const val COLOR_ACCENT_MUTED = 0xff8b5cf6.toInt()
+        const val COLOR_BUTTON_TEXT = 0xff101216.toInt()
+        const val COLOR_STROKE = 0xff2d3340.toInt()
+        const val COLOR_DARK = 0xff151a20.toInt()
+        const val COLOR_GREEN = 0xff4ade80.toInt()
+        const val COLOR_YELLOW = 0xffffb224.toInt()
+        const val COLOR_RED = 0xffff5a5a.toInt()
     }
 }

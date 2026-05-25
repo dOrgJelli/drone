@@ -94,7 +94,7 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
             { status -> onStatus(status) },
             { text -> handleLocalRecognizerText(text, onStatus) },
         ).also { it.prepare() }
-        onStatus("Waking local detector")
+        onStatus("Awake: waiting for \"hey sebastian\"")
         thread(name = "VoiceStreamNextAwakeAudio") {
             runRecorder(onStatus, detectWake = true)
         }
@@ -138,6 +138,20 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
         } else {
             onStatus?.invoke(sleepingStatus())
         }
+        return true
+    }
+
+    fun stopRecordingToAwake(): Boolean {
+        val onStatus = currentOnStatus ?: return false
+        if (!active.get() || !awakeMode) return false
+        sleeping = false
+        if (recording.get()) {
+            endRecording(onStatus, "Awake: waiting for \"hey sebastian\"")
+            closeSocket("recording stopped", sendEnd = false)
+        } else {
+            onStatus("Awake: waiting for \"hey sebastian\"")
+        }
+        wakeDetector?.reset()
         return true
     }
 

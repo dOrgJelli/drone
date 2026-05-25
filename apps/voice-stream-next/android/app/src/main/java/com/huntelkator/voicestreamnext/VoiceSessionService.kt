@@ -74,6 +74,11 @@ class VoiceSessionService : Service() {
                 }
             }
             Constants.ACTION_STOP_VOICE -> stopVoice()
+            Constants.ACTION_STOP_RECORDING -> {
+                if (!streamer.stopRecordingToAwake()) {
+                    if (serviceActive) startAwake() else stopSelf(startId)
+                }
+            }
             Constants.ACTION_SLEEP -> {
                 if (serviceActive) {
                     enterSleep()
@@ -110,7 +115,7 @@ class VoiceSessionService : Service() {
     private fun startAwake() {
         uploadDiagnostics("awake-start", force = true)
         schedulePeriodicDiagnostics()
-        publishStatus("Waking local detector", Constants.MODE_AWAKE, currentMicrophone, lastApprovalStatus)
+        publishStatus("Waking local detector", Constants.MODE_LOADING, currentMicrophone, lastApprovalStatus)
         startForeground(NOTIFICATION_ID, notification("Waking local detector"))
         acquireWakeLock()
         connectControlChannel()
@@ -125,7 +130,7 @@ class VoiceSessionService : Service() {
     private fun startVoice(target: String) {
         uploadDiagnostics("voice-start", force = true)
         schedulePeriodicDiagnostics()
-        publishStatus("Voice stream starting", Constants.MODE_RECORDING, currentMicrophone, lastApprovalStatus)
+        publishStatus("Voice stream starting", Constants.MODE_LOADING, currentMicrophone, lastApprovalStatus)
         startForeground(NOTIFICATION_ID, notification("Voice stream starting"))
         acquireWakeLock()
         connectControlChannel()
@@ -359,7 +364,9 @@ class VoiceSessionService : Service() {
         return when {
             lower.contains("missing") || lower.contains("failed") || lower.contains("error") -> Constants.MODE_ERROR
             lower.contains("sleeping") || lower.startsWith("sleep") || lower.startsWith("unlock:") -> Constants.MODE_SLEEPING
-            lower.contains("waiting") || lower.contains("waking") || lower.contains("listening") -> Constants.MODE_AWAKE
+            lower.contains("waking") || lower.contains("starting") || lower.contains("reconnecting") -> Constants.MODE_LOADING
+            lower.contains("assistant replied") || lower.contains("transcript received") || lower.contains("audio received") -> Constants.MODE_AWAKE
+            lower.contains("waiting") || lower.contains("listening") || lower.contains("copied voice transcription") || lower.contains("no voice transcription") -> Constants.MODE_AWAKE
             lower.contains("closed") || lower == "off" -> Constants.MODE_OFF
             lower.contains("approval") -> if (lower.contains("sent")) Constants.MODE_AWAKE else lastMode
             else -> Constants.MODE_RECORDING

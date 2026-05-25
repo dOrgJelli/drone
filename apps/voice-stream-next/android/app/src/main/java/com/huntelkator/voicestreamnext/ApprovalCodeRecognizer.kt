@@ -27,7 +27,13 @@ class ApprovalCodeRecognizer(
         get() = collecting
 
     fun configure(nextSettings: ApprovalCodeSettings) {
-        settings = nextSettings
+        val defaults = ApprovalCodeSettings()
+        settings = nextSettings.copy(
+            stableMs = preserveExistingTiming(nextSettings.stableMs, defaults.stableMs, settings.stableMs),
+            collectTimeoutMs = preserveExistingTiming(nextSettings.collectTimeoutMs, defaults.collectTimeoutMs, settings.collectTimeoutMs),
+            duplicateCooldownMs = preserveExistingTiming(nextSettings.duplicateCooldownMs, defaults.duplicateCooldownMs, settings.duplicateCooldownMs),
+            finalizeCheckIntervalMs = preserveExistingTiming(nextSettings.finalizeCheckIntervalMs, defaults.finalizeCheckIntervalMs, settings.finalizeCheckIntervalMs),
+        )
         reset()
     }
 
@@ -107,6 +113,10 @@ class ApprovalCodeRecognizer(
         lastCompletedCode = code
         lastCompletedAtMs = nowMs
         return ApprovalCodeUpdate.Completed(code)
+    }
+
+    private fun preserveExistingTiming(nextValue: Long, defaultValue: Long, currentValue: Long): Long {
+        return if (nextValue == defaultValue && currentValue != defaultValue) currentValue else nextValue
     }
 
     private fun words(text: String): List<String> {

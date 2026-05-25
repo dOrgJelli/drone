@@ -15,6 +15,7 @@ object Constants {
     const val ACTION_START_VOICE = "com.huntelkator.voicestreamnext.action.START_VOICE"
     const val ACTION_START_AWAKE = "com.huntelkator.voicestreamnext.action.START_AWAKE"
     const val ACTION_SLEEP = "com.huntelkator.voicestreamnext.action.SLEEP"
+    const val ACTION_STOP_RECORDING = "com.huntelkator.voicestreamnext.action.STOP_RECORDING"
     const val ACTION_STOP_VOICE = "com.huntelkator.voicestreamnext.action.STOP_VOICE"
     const val ACTION_QUERY_STATUS = "com.huntelkator.voicestreamnext.action.QUERY_STATUS"
     const val ACTION_STATUS = "com.huntelkator.voicestreamnext.action.STATUS"
@@ -26,6 +27,7 @@ object Constants {
     const val EXTRA_STREAM_TARGET = "stream_target"
 
     const val MODE_OFF = "off"
+    const val MODE_LOADING = "loading"
     const val MODE_AWAKE = "awake"
     const val MODE_SLEEPING = "sleeping"
     const val MODE_RECORDING = "recording"

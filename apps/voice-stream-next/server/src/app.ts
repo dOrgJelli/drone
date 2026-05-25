@@ -179,9 +179,29 @@ function binaryChunk(data: unknown): Uint8Array | null {
 function serverPublicUrl(req: FastifyRequest): string {
   const configured = process.env.VOICE_STREAM_NEXT_PUBLIC_URL?.trim();
   if (configured) return configured.replace(/\/+$/, '');
-  const proto = String(req.headers['x-forwarded-proto'] ?? '').split(',')[0].trim() || String((req as any).protocol ?? 'http');
-  const host = String(req.headers['x-forwarded-host'] ?? req.headers.host ?? '').split(',')[0].trim();
+  const forwardedProto = firstHeaderValue(req.headers['x-forwarded-proto']);
+  const forwardedHost = firstHeaderValue(req.headers['x-forwarded-host']);
+  const origin = originUrl(req.headers.origin);
+  if (origin) return origin;
+  const proto = forwardedProto || String((req as any).protocol ?? 'http');
+  const host = forwardedHost || firstHeaderValue(req.headers.host);
   return `${proto}://${host}`.replace(/\/+$/, '');
+}
+
+function firstHeaderValue(raw: unknown): string {
+  return String(Array.isArray(raw) ? raw[0] : raw ?? '').split(',')[0].trim();
+}
+
+function originUrl(raw: unknown): string {
+  const value = firstHeaderValue(raw);
+  if (!value) return '';
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return '';
+    return `${url.protocol}//${url.host}`.replace(/\/+$/, '');
+  } catch {
+    return '';
+  }
 }
 
 function deviceAuthFailureMessage(result: Extract<DeviceAuthResult, { ok: false }>): string {

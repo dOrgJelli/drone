@@ -26,16 +26,29 @@ export default defineConfig(({ mode }) => {
       sourcemap: true,
     },
     server: {
-      allowedHosts: ['007fc160da8d.ngrok.app'],
+      allowedHosts: true,
       proxy: {
         '/api': {
           target: `http://127.0.0.1:${apiPort}`,
-          changeOrigin: true,
+          changeOrigin: false,
+          xfwd: true,
+          configure: (proxy) => {
+            proxy.on('proxyReq', (proxyReq, req) => {
+              const forwardedHost = firstHeaderValue(req.headers['x-forwarded-host']) || firstHeaderValue(req.headers.host);
+              const forwardedProto = firstHeaderValue(req.headers['x-forwarded-proto']) || ((req.socket as { encrypted?: boolean }).encrypted ? 'https' : 'http');
+              if (forwardedHost) proxyReq.setHeader('x-forwarded-host', forwardedHost);
+              if (forwardedProto) proxyReq.setHeader('x-forwarded-proto', forwardedProto);
+            });
+          },
         },
       },
     },
   };
 });
+
+function firstHeaderValue(raw: string | string[] | undefined): string {
+  return String(Array.isArray(raw) ? raw[0] : raw ?? '').split(',')[0].trim();
+}
 
 function loadPublicEnv(dir: string, mode: string): Record<string, string> {
   const names = ['.env', `.env.local`, `.env.${mode}`, `.env.${mode}.local`];
