@@ -48,7 +48,7 @@ class LocalCuePlayer {
     private fun buildCuePcm(cue: LocalCue): CuePcm {
         val tones = when (cue) {
             LocalCue.START_BUTTON -> listOf(Tone(420.0, 70), Tone(640.0, 120))
-            LocalCue.STOP_BUTTON -> listOf(Tone(520.0, 70), Tone(260.0, 150))
+            LocalCue.STOP_BUTTON -> listOf(Tone(520.0, 70), Tone(330.0, 110), Tone(190.0, 220))
             LocalCue.UNLOCK -> listOf(Tone(360.0, 70), Tone(560.0, 80), Tone(820.0, 130))
             LocalCue.SLEEPING_OFF -> listOf(Tone(460.0, 120), Tone(0.0, 50), Tone(330.0, 150), Tone(220.0, 230))
             LocalCue.WAKE -> listOf(Tone(620.0, 80), Tone(880.0, 130))

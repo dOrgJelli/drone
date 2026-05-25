@@ -5,7 +5,8 @@ const LOCAL_VOICE_CUE_TONES = {
   ],
   stop_button: [
     { frequencyHz: 520, durationMs: 70 },
-    { frequencyHz: 260, durationMs: 150 },
+    { frequencyHz: 330, durationMs: 110 },
+    { frequencyHz: 190, durationMs: 220 },
   ],
   unlock: [
     { frequencyHz: 360, durationMs: 70 },
