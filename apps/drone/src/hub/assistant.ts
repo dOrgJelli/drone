@@ -96,11 +96,13 @@ type AssistantQueuedPrompt = {
 type AssistantPromptDeliveryMode = 'queue' | 'asap';
 
 type AssistantChatIdleSubscriptionStatus = 'active' | 'fired' | 'cancelled' | 'expired';
+type AssistantChatIdleWaitMode = 'all' | 'any';
 
 export type AssistantChatIdleSubscription = {
   id: string;
   threadId: string;
   toolCallId: string | null;
+  mode: AssistantChatIdleWaitMode;
   targets: AssistantChatIdleTarget[];
   createdAt: string;
   expiresAt: string;
@@ -447,6 +449,7 @@ export type AssistantChatIdleStatus = {
 export type AssistantChatIdleWaitResult = {
   ok: boolean;
   timedOut: boolean;
+  mode: AssistantChatIdleWaitMode;
   elapsedMs: number;
   timeoutMs: number;
   idleForMs: number;
@@ -568,6 +571,10 @@ const DEFAULT_CODEX_MODEL = 'gpt-5.5';
 const DEFAULT_THREAD_TITLE = 'New thread';
 const ASSISTANT_SYSTEM_PROMPT_RUNTIME_APPENDIX =
   'Current access scope is appended at run time. The assistant must not claim read or write access outside that scope.';
+const ASSISTANT_CHAT_IDLE_PROMPT_LINE_LEGACY =
+  'When you send a drone chat message and need the result later, call subscribe_to_chats_idle on the target chat. This returns immediately so you can continue other work. If there is nothing else to do, end your turn; the system will resume this thread when the subscribed chats become idle.';
+const ASSISTANT_CHAT_IDLE_PROMPT_LINE =
+  'When you send drone chat messages and need results later, call subscribe_to_any_chat_idle to resume as soon as one target chat is idle, or subscribe_to_all_chats_idle to resume only after every target chat is idle. These tools return immediately so you can continue other work. If there is nothing else to do, end your turn; the system will resume this thread when the subscription fires.';
 const ASSISTANT_SYSTEM_PROMPT_DEFAULT = [
   'You are Drone Hub Assistant, a concise operator assistant embedded in the Drone Hub app.',
   'You help the user understand available drones and coordinate work across drone chats.',
@@ -581,9 +588,10 @@ const ASSISTANT_SYSTEM_PROMPT_DEFAULT = [
   'Use read_file line ranges and search_files context when you only need a focused section of a file.',
   'Use bash only when a command is the right tool for inspection, tests, builds, or small scripted checks in an accessible container drone. Bash is approval-gated, non-interactive, and not for background processes.',
   'Use set_thinking_level when the user asks to change how much the assistant thinks. It changes this assistant thread to another supported thinking level for the same selected model and does not require approval.',
+  'Use create_new_thread only when the user explicitly asks to start, open, create, clear, reset, or switch to a new assistant thread or session.',
   'File paths are interpreted by drone id plus path. Relative paths resolve inside the target drone workspace, usually the repo root for repo-backed drones.',
   'Chat timelines contain user messages and agent messages. Queued or pending user messages appear in the same timeline with a non-completed status.',
-  'When you send a drone chat message and need the result later, call subscribe_to_chats_idle on the target chat. This returns immediately so you can continue other work. If there is nothing else to do, end your turn; the system will resume this thread when the subscribed chats become idle.',
+  ASSISTANT_CHAT_IDLE_PROMPT_LINE,
   'Do not load more chat pages than needed. Start with the latest page.',
   'Creating or cloning drones and creating chats do not require approval, and assistant-created drones must use the container (Docker) runtime. Changing drone groups, sending a user message to a drone, and running bash in a drone require user approval; explain briefly what you intend to do.',
   'File write tools require write access to the target drone and should be used carefully for concrete code or content edits.',
@@ -601,6 +609,7 @@ const ASSISTANT_TOOL_SUMMARIES: AssistantToolSummary[] = [
   { name: 'get_system_prompt', label: 'Get system prompt', category: 'prompts', description: 'Read the global and current thread system prompts.' },
   { name: 'update_system_prompt', label: 'Update system prompt', category: 'prompts', description: 'Update only this thread system prompt.' },
   { name: 'set_thinking_level', label: 'Set thinking level', category: 'actions', description: 'Change this assistant thread to a supported thinking level for its current model.' },
+  { name: 'create_new_thread', label: 'Create new thread', category: 'actions', description: 'Open a fresh assistant thread or voice session.' },
   { name: 'inspect_drone', label: 'Inspect drone', category: 'drones', description: 'Inspect one drone by id or name.' },
   { name: 'list_files', label: 'List files', category: 'files', description: 'List files and folders in one drone.' },
   { name: 'list_changed_files', label: 'List changed files', category: 'files', description: 'List changed files in one repo-attached drone.' },
@@ -613,7 +622,8 @@ const ASSISTANT_TOOL_SUMMARIES: AssistantToolSummary[] = [
   { name: 'get_chat_overview', label: 'Get chat overview', category: 'chats', description: 'Read a lightweight overview of drone chats.' },
   { name: 'read_chat_messages', label: 'Read chat messages', category: 'chats', description: 'Read a paginated timeline for a drone chat.' },
   { name: 'search_chat_messages', label: 'Search chat messages', category: 'chats', description: 'Search user and agent messages across drone chats.' },
-  { name: 'subscribe_to_chats_idle', label: 'Subscribe to chats idle', category: 'chats', description: 'Resume this thread when subscribed drone chats become idle.' },
+  { name: 'subscribe_to_any_chat_idle', label: 'Subscribe to any chat idle', category: 'chats', description: 'Resume this thread when any subscribed drone chat becomes idle.' },
+  { name: 'subscribe_to_all_chats_idle', label: 'Subscribe to all chats idle', category: 'chats', description: 'Resume this thread when all subscribed drone chats become idle.' },
   { name: 'speak', label: 'Speak', category: 'actions', description: 'Send a short spoken reply to the connected Android or desktop voice device.' },
   { name: 'create_drone', label: 'Create drone', category: 'actions', description: 'Create a new container drone.' },
   { name: 'clone_drone', label: 'Clone drone', category: 'actions', description: 'Clone an existing container drone into a new container drone.' },
@@ -623,10 +633,14 @@ const ASSISTANT_TOOL_SUMMARIES: AssistantToolSummary[] = [
 ];
 const ASSISTANT_ALL_TOOL_NAMES = ASSISTANT_TOOL_SUMMARIES.map((tool) => tool.name);
 const ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES = ASSISTANT_ALL_TOOL_NAMES.filter(
-  (name) => name !== 'get_system_prompt' && name !== 'update_system_prompt' && name !== 'set_thinking_level' && name !== 'speak',
+  (name) => name !== 'get_system_prompt' && name !== 'update_system_prompt' && name !== 'set_thinking_level' && name !== 'create_new_thread' && name !== 'speak',
 );
 const ASSISTANT_LEGACY_DEFAULT_ENABLED_TOOL_NAMES = ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES.filter((name) => name !== 'create_chat');
-const ASSISTANT_VOICE_DEFAULT_ENABLED_TOOL_NAMES = [...ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES, 'set_thinking_level', 'speak'];
+const ASSISTANT_PRE_CHAT_IDLE_SPLIT_LEGACY_DEFAULT_ENABLED_TOOL_NAMES = ASSISTANT_LEGACY_DEFAULT_ENABLED_TOOL_NAMES
+  .filter((name) => name !== 'subscribe_to_any_chat_idle' && name !== 'subscribe_to_all_chats_idle')
+  .concat('subscribe_to_chats_idle');
+const ASSISTANT_VOICE_DEFAULT_ENABLED_TOOL_NAMES = [...ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES, 'set_thinking_level', 'create_new_thread', 'speak'];
+const ASSISTANT_LEGACY_VOICE_DEFAULT_ENABLED_TOOL_NAMES = [...ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES, 'set_thinking_level', 'speak'];
 const ASSISTANT_OVERVIEW_PROMPT_DEFAULT = [
   'You write a concise Markdown status overview for an assistant thread in Drone Hub.',
   'Focus on the current state of the work, recent actions, tool calls, approvals, blockers, and next likely step.',
@@ -1074,6 +1088,12 @@ function normalizeAssistantSystemPrompt(raw: unknown): string {
     : text;
 }
 
+function migrateAssistantSystemPrompt(raw: unknown): string {
+  const prompt = normalizeAssistantSystemPrompt(raw);
+  if (!prompt.includes(ASSISTANT_CHAT_IDLE_PROMPT_LINE_LEGACY)) return prompt;
+  return normalizeAssistantSystemPrompt(prompt.replace(ASSISTANT_CHAT_IDLE_PROMPT_LINE_LEGACY, ASSISTANT_CHAT_IDLE_PROMPT_LINE));
+}
+
 function normalizeAssistantOverviewPrompt(raw: unknown): string {
   const text = typeof raw === 'string' ? raw.trim() : '';
   if (!text) return '';
@@ -1088,12 +1108,72 @@ function normalizeAssistantEnabledTools(raw: unknown, fallback: string[] = ASSIS
   const seen = new Set<string>();
   const tools: string[] = [];
   for (const item of raw) {
-    const name = String(item ?? '').trim();
-    if (!allowed.has(name) || seen.has(name)) continue;
-    seen.add(name);
-    tools.push(name);
+    const rawName = String(item ?? '').trim();
+    const names =
+      rawName === 'subscribe_to_chats_idle'
+        ? ['subscribe_to_all_chats_idle']
+        : [rawName];
+    for (const name of names) {
+      if (!allowed.has(name) || seen.has(name)) continue;
+      seen.add(name);
+      tools.push(name);
+    }
   }
   return tools;
+}
+
+function normalizeAssistantChatIdleWaitMode(raw: unknown, fallback: AssistantChatIdleWaitMode = 'all'): AssistantChatIdleWaitMode {
+  const value = String(raw ?? '').trim().toLowerCase();
+  if (value === 'any') return 'any';
+  if (value === 'all') return 'all';
+  return fallback;
+}
+
+function chatIdleStatusesMatchMode(statuses: AssistantChatIdleStatus[], mode: AssistantChatIdleWaitMode): boolean {
+  return mode === 'any' ? statuses.some((status) => status.idle) : statuses.every((status) => status.idle);
+}
+
+function chatIdleModeLabel(mode: AssistantChatIdleWaitMode): string {
+  return mode === 'any' ? 'any subscribed chat is idle' : 'all subscribed chats are idle';
+}
+
+function chatIdleModeActionText(mode: AssistantChatIdleWaitMode): string {
+  return mode === 'any' ? 'any chat becoming idle' : 'all chats becoming idle';
+}
+
+function makeSubscribeToChatsIdleParameters(Type: any) {
+  return Type.Object({
+    targets: Type.Array(
+      Type.Object({
+        droneId: Type.String({ description: 'Drone id or visible name.' }),
+        chatName: Type.Optional(Type.String({ description: 'Chat name. Defaults to default.' })),
+      }),
+      { minItems: 1, maxItems: CHAT_IDLE_MAX_TARGETS },
+    ),
+    idleForMs: Type.Optional(Type.Number({ description: `Require the idle condition to remain true for this long before returning. Defaults to ${CHAT_IDLE_DEFAULT_IDLE_FOR_MS}.` })),
+  });
+}
+
+function appendUniqueEnabledTool(tools: string[], name: string): void {
+  if (!tools.includes(name)) tools.push(name);
+}
+
+function normalizeStoredAssistantEnabledTools(raw: unknown, voiceEnabled: boolean): string[] {
+  const base = normalizeAssistantEnabledTools(raw);
+  const rawNames = new Set(Array.isArray(raw) ? raw.map((name) => String(name ?? '').trim()).filter(Boolean) : []);
+  const hadLegacyDefaultTools =
+    rawNames.size > 0 && ASSISTANT_PRE_CHAT_IDLE_SPLIT_LEGACY_DEFAULT_ENABLED_TOOL_NAMES.every((name) => rawNames.has(name));
+  if (hadLegacyDefaultTools) {
+    appendUniqueEnabledTool(base, 'create_chat');
+    appendUniqueEnabledTool(base, 'subscribe_to_any_chat_idle');
+    appendUniqueEnabledTool(base, 'subscribe_to_all_chats_idle');
+  }
+  const hadLegacyVoiceDefaultTools =
+    voiceEnabled && rawNames.size > 0 && ASSISTANT_LEGACY_VOICE_DEFAULT_ENABLED_TOOL_NAMES.every((name) => rawNames.has(name));
+  if (hadLegacyVoiceDefaultTools) {
+    appendUniqueEnabledTool(base, 'create_new_thread');
+  }
+  return enabledToolsForVoiceMode(base, voiceEnabled);
 }
 
 function normalizeAssistantSystemPromptKind(raw: unknown): 'normal' | 'voice' {
@@ -1114,16 +1194,6 @@ function enabledToolsForVoiceMode(enabledTools: string[], voiceEnabled: boolean)
   const base = normalizeAssistantEnabledTools(enabledTools);
   if (!voiceEnabled) return base.filter((name) => name !== 'speak');
   return normalizeAssistantEnabledTools([...base, 'speak'], ASSISTANT_VOICE_DEFAULT_ENABLED_TOOL_NAMES);
-}
-
-function normalizeStoredAssistantEnabledTools(raw: unknown, voiceEnabled: boolean): string[] {
-  const base = normalizeAssistantEnabledTools(raw);
-  const hadLegacyDefaultTools =
-    Array.isArray(raw) && ASSISTANT_LEGACY_DEFAULT_ENABLED_TOOL_NAMES.every((name) => base.includes(name));
-  if (hadLegacyDefaultTools && !base.includes('create_chat')) {
-    base.push('create_chat');
-  }
-  return enabledToolsForVoiceMode(base, voiceEnabled);
 }
 
 function normalizeAssistantSystemPromptPatches(raw: unknown): Array<{ oldText: string; newText: string }> {
@@ -1356,6 +1426,7 @@ export function summarizeAssistantChatIdle(
 
 export async function waitForAssistantChatIdle(opts: {
   targets: AssistantChatIdleTarget[];
+  mode?: unknown;
   timeoutMs?: unknown;
   pollIntervalMs?: unknown;
   idleForMs?: unknown;
@@ -1372,6 +1443,7 @@ export async function waitForAssistantChatIdle(opts: {
   const timeoutMs = clampChatIdleTimeoutMs(opts.timeoutMs);
   const pollIntervalMs = clampChatIdlePollIntervalMs(opts.pollIntervalMs);
   const idleForMs = clampChatIdleForMs(opts.idleForMs);
+  const mode = normalizeAssistantChatIdleWaitMode(opts.mode);
   const startedAt = Date.now();
   const deadline = startedAt + timeoutMs;
   let idleSince: number | null = null;
@@ -1382,13 +1454,14 @@ export async function waitForAssistantChatIdle(opts: {
     const now = Date.now();
     const regAny: any = await loadRegistry();
     lastStatuses = targets.map((target) => summarizeAssistantChatIdle(regAny, target, { requireChat: true }));
-    const allIdle = lastStatuses.every((status) => status.idle);
-    if (allIdle) {
+    const matched = chatIdleStatusesMatchMode(lastStatuses, mode);
+    if (matched) {
       idleSince ??= now;
       if (now - idleSince >= idleForMs) {
         return {
           ok: true,
           timedOut: false,
+          mode,
           elapsedMs: now - startedAt,
           timeoutMs,
           idleForMs,
@@ -1403,13 +1476,14 @@ export async function waitForAssistantChatIdle(opts: {
       return {
         ok: false,
         timedOut: true,
+        mode,
         elapsedMs: now - startedAt,
         timeoutMs,
         idleForMs,
         targets: lastStatuses,
       };
     }
-    const idleRemainingMs = allIdle && idleSince != null ? Math.max(0, idleForMs - (now - idleSince)) : pollIntervalMs;
+    const idleRemainingMs = matched && idleSince != null ? Math.max(0, idleForMs - (now - idleSince)) : pollIntervalMs;
     await sleep(Math.max(1, Math.min(pollIntervalMs, idleRemainingMs || pollIntervalMs, deadline - now)), opts.signal);
   }
 }
@@ -1707,6 +1781,7 @@ function normalizeChatIdleSubscription(raw: any): AssistantChatIdleSubscription 
     id,
     threadId,
     toolCallId: cleanOptionalString(raw.toolCallId) || null,
+    mode: normalizeAssistantChatIdleWaitMode(raw.mode, 'all'),
     targets,
     createdAt,
     expiresAt,
@@ -1723,6 +1798,7 @@ function normalizeChatIdleSubscription(raw: any): AssistantChatIdleSubscription 
 function sanitizeChatIdleSubscription(subscription: AssistantChatIdleSubscription): AssistantChatIdleSubscription {
   return {
     ...subscription,
+    mode: normalizeAssistantChatIdleWaitMode(subscription.mode, 'all'),
     targets: subscription.targets.map((target) => ({ droneId: target.droneId, chatName: normalizeChatNameForAssistant(target.chatName) })),
     lastResult: subscription.lastResult ? sanitizeMessage(subscription.lastResult) : null,
   };
@@ -1734,7 +1810,7 @@ function sanitizeThread(thread: AssistantThread): AssistantThread {
     ...thread,
     voiceEnabled,
     voiceEnabledAt: voiceEnabled ? cleanOptionalString(thread.voiceEnabledAt) || thread.updatedAt || thread.createdAt || null : null,
-    systemPrompt: normalizeAssistantSystemPrompt(thread.systemPrompt) || ASSISTANT_SYSTEM_PROMPT_DEFAULT,
+    systemPrompt: migrateAssistantSystemPrompt(thread.systemPrompt) || ASSISTANT_SYSTEM_PROMPT_DEFAULT,
     systemPromptUpdatedAt: cleanOptionalString(thread.systemPromptUpdatedAt) || null,
     enabledTools: enabledToolsForVoiceMode(thread.enabledTools, voiceEnabled),
     messages: thread.messages.slice(-ASSISTANT_THREAD_MESSAGE_LIMIT).map(sanitizeMessage),
@@ -1768,7 +1844,7 @@ function normalizeThread(raw: any, fallback: { provider: LlmProviderId; model: s
     model,
     provider,
     thinkingLevel,
-    systemPrompt: normalizeAssistantSystemPrompt(raw.systemPrompt) || fallback.systemPrompt || ASSISTANT_SYSTEM_PROMPT_DEFAULT,
+    systemPrompt: migrateAssistantSystemPrompt(raw.systemPrompt) || fallback.systemPrompt || ASSISTANT_SYSTEM_PROMPT_DEFAULT,
     systemPromptUpdatedAt: cleanOptionalString(raw.systemPromptUpdatedAt) || null,
     enabledTools: normalizeStoredAssistantEnabledTools(raw.enabledTools, normalizeAssistantVoiceEnabled(raw.voiceEnabled)),
     accessScope: makeAssistantAccessScope(raw.accessScope),
@@ -1963,7 +2039,8 @@ export class HubAssistantService {
       .map((target) => `${target.droneId}/${target.chatName}: ${target.reason}`)
       .join('\n');
     return [
-      `Subscription ${subscription.id} fired: all subscribed chats are idle.`,
+      `Subscription ${subscription.id} fired: ${chatIdleModeLabel(subscription.mode)}.`,
+      `Mode: ${subscription.mode}`,
       `Subscribed at: ${subscription.createdAt}`,
       `Fired at: ${subscription.firedAt ?? nowIso()}`,
       'Targets:',
@@ -2025,8 +2102,8 @@ export class HubAssistantService {
           changed = true;
           continue;
         }
-        const allIdle = statuses.every((status) => status.idle);
-        if (!allIdle) {
+        const matched = chatIdleStatusesMatchMode(statuses, subscription.mode);
+        if (!matched) {
           if (subscription.idleSince) {
             subscription.idleSince = null;
             changed = true;
@@ -2044,6 +2121,7 @@ export class HubAssistantService {
         const result: AssistantChatIdleWaitResult = {
           ok: true,
           timedOut: false,
+          mode: subscription.mode,
           elapsedMs: now - (Date.parse(subscription.createdAt) || now),
           timeoutMs: CHAT_IDLE_SUBSCRIPTION_EXPIRES_AFTER_MS,
           idleForMs: subscription.idleForMs,
@@ -2441,6 +2519,25 @@ export class HubAssistantService {
     return { ok: true, threadId: thread.id, created: true, thread: sanitizeThread(thread) };
   }
 
+  private async createNewThreadFromThread(threadId: string, input?: { title?: unknown }): Promise<{ ok: true; previousThreadId: string; threadId: string; thread: AssistantThread }> {
+    await this.ensureLoaded();
+    const previousThread = this.getThread(threadId);
+    const voiceEnabled = normalizeAssistantVoiceEnabled(previousThread.voiceEnabled);
+    const title = cleanOptionalString(input?.title) || (voiceEnabled ? 'Voice thread' : DEFAULT_THREAD_TITLE);
+    const thread = this.makeThread({
+      provider: previousThread.provider,
+      model: previousThread.model,
+      title,
+      voiceEnabled,
+      accessScope: this.defaultAccessScopeForNewThread({ voiceEnabled }),
+    });
+    thread.thinkingLevel = allowedThinkingLevelForModel(thread.provider, thread.model, previousThread.thinkingLevel);
+    this.threads = [thread, ...this.threads].slice(0, ASSISTANT_REGISTRY_MAX_THREADS);
+    this.activeThreadId = thread.id;
+    await this.persist();
+    return { ok: true, previousThreadId: previousThread.id, threadId: thread.id, thread: sanitizeThread(thread) };
+  }
+
   async submitVoicePrompt(input: { prompt?: unknown; title?: unknown; source?: AssistantVoiceSource }): Promise<{ ok: true; threadId: string; created: boolean; accepted: boolean }> {
     const prompt = String(input.prompt ?? '').trim();
     if (!prompt) throw new Error('missing prompt');
@@ -2666,7 +2763,7 @@ export class HubAssistantService {
       thread.voiceEnabledAt = thread.voiceEnabled ? nowIso() : null;
       thread.enabledTools =
         thread.voiceEnabled && !wasVoiceEnabled
-          ? normalizeAssistantEnabledTools([...thread.enabledTools, 'set_thinking_level', 'speak'], ASSISTANT_VOICE_DEFAULT_ENABLED_TOOL_NAMES)
+          ? normalizeAssistantEnabledTools([...thread.enabledTools, 'set_thinking_level', 'create_new_thread', 'speak'], ASSISTANT_VOICE_DEFAULT_ENABLED_TOOL_NAMES)
           : enabledToolsForVoiceMode(thread.enabledTools, thread.voiceEnabled);
     }
     thread.updatedAt = nowIso();
@@ -2774,9 +2871,47 @@ export class HubAssistantService {
     return await runAssistantArtifactAction(threadId, input);
   }
 
+  private async subscribeToChatsIdleFromTool(
+    threadId: string,
+    toolCallId: string,
+    params: any,
+    mode: AssistantChatIdleWaitMode,
+  ): Promise<{ content: Array<{ type: 'text'; text: string }>; details: { ok: true; subscription: AssistantChatIdleSubscription } }> {
+    const rawTargets = Array.isArray(params?.targets) ? params.targets : [];
+    if (rawTargets.length === 0) throw new Error('missing targets');
+    const targets: AssistantChatIdleTarget[] = [];
+    const seen = new Set<string>();
+    for (const rawTarget of rawTargets.slice(0, CHAT_IDLE_MAX_TARGETS)) {
+      const droneId = await this.requireDroneInScope(rawTarget?.droneId, 'read', threadId);
+      const chatName = normalizeChatNameForAssistant(rawTarget?.chatName);
+      const key = `${droneId}\u0000${chatName}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      targets.push({ droneId, chatName });
+    }
+    if (targets.length === 0) throw new Error('missing targets');
+    const subscription = await this.subscribeToChatsIdle({
+      threadId,
+      toolCallId,
+      mode,
+      targets,
+      idleForMs: params?.idleForMs,
+    });
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Subscribed to ${subscription.targets.length} chat${subscription.targets.length === 1 ? '' : 's'}: waiting for ${chatIdleModeActionText(subscription.mode)}. Subscription ${subscription.id} expires at ${subscription.expiresAt}.`,
+        },
+      ],
+      details: { ok: true, subscription },
+    };
+  }
+
   async subscribeToChatsIdle(input: {
     threadId: string;
     toolCallId?: unknown;
+    mode?: unknown;
     targets: AssistantChatIdleTarget[];
     idleForMs?: unknown;
   }): Promise<AssistantChatIdleSubscription> {
@@ -2795,10 +2930,12 @@ export class HubAssistantService {
       summarizeAssistantChatIdle(regAny, target, { requireChat: true });
     }
     const now = Date.now();
+    const mode = normalizeAssistantChatIdleWaitMode(input.mode);
     const subscription: AssistantChatIdleSubscription = {
       id: makeAssistantId('chat_idle_sub'),
       threadId: thread.id,
       toolCallId: cleanOptionalString(input.toolCallId) || null,
+      mode,
       targets,
       createdAt: new Date(now).toISOString(),
       expiresAt: new Date(now + CHAT_IDLE_SUBSCRIPTION_EXPIRES_AFTER_MS).toISOString(),
@@ -3098,8 +3235,8 @@ export class HubAssistantService {
   private async ensureLoaded(): Promise<void> {
     if (this.loaded) return;
     const stored = await readAssistantStateFile() ?? undefined;
-    const storedSystemPrompt = normalizeAssistantSystemPrompt(stored?.systemPrompt);
-    const storedVoiceSystemPrompt = normalizeAssistantSystemPrompt(stored?.voiceSystemPrompt);
+    const storedSystemPrompt = migrateAssistantSystemPrompt(stored?.systemPrompt);
+    const storedVoiceSystemPrompt = migrateAssistantSystemPrompt(stored?.voiceSystemPrompt);
     const storedOverviewPrompt = normalizeAssistantOverviewPrompt(stored?.overviewPrompt);
     this.defaultSystemPrompt = storedSystemPrompt || ASSISTANT_SYSTEM_PROMPT_DEFAULT;
     this.defaultSystemPromptUpdatedAt =
@@ -3205,7 +3342,7 @@ export class HubAssistantService {
     let latestMs = -1;
     for (const thread of this.threads) {
       if (!normalizeAssistantVoiceEnabled(thread.voiceEnabled)) continue;
-      const updatedMs = Date.parse(thread.updatedAt || thread.voiceEnabledAt || thread.createdAt);
+      const updatedMs = Date.parse(thread.voiceEnabledAt || thread.createdAt);
       const normalizedMs = Number.isFinite(updatedMs) ? updatedMs : 0;
       if (!latest || normalizedMs > latestMs) {
         latest = thread;
@@ -3436,6 +3573,30 @@ export class HubAssistantService {
                   result.previousThinkingLevel === result.thinkingLevel
                     ? `Thinking level is already ${result.thinkingLevel} for ${result.provider}/${result.model}.`
                     : `Changed thinking level from ${result.previousThinkingLevel} to ${result.thinkingLevel} for ${result.provider}/${result.model}.`,
+              },
+            ],
+            details: result,
+          };
+        },
+      },
+      {
+        name: 'create_new_thread',
+        label: 'Create new thread',
+        description:
+          'Open a fresh assistant thread. Only use this after the user explicitly asks to start, open, create, clear, reset, or switch to a new assistant thread or session. In voice mode, the new voice thread becomes the default target for future voice transcriptions.',
+        parameters: Type.Object({
+          title: Type.Optional(Type.String({ description: 'Optional title for the new thread. Omit unless the user gave a title.' })),
+        }),
+        executionMode: 'sequential',
+        execute: async (_toolCallId: string, params: any) => {
+          const result = await this.createNewThreadFromThread(threadId, { title: params?.title });
+          return {
+            content: [
+              {
+                type: 'text',
+                text: result.thread.voiceEnabled
+                  ? `Created a new voice thread: ${result.thread.title}. Future voice transcriptions will use it by default.`
+                  : `Created a new assistant thread: ${result.thread.title}.`,
               },
             ],
             details: result,
@@ -3724,49 +3885,23 @@ export class HubAssistantService {
         },
       },
       {
-        name: 'subscribe_to_chats_idle',
-        label: 'Subscribe to chats idle',
+        name: 'subscribe_to_any_chat_idle',
+        label: 'Subscribe to any chat idle',
         description:
-          'Subscribe to one or more drone chats becoming idle. This returns immediately so you can continue other work; if you end your turn, the system will resume this assistant thread when all targets are idle.',
-        parameters: Type.Object({
-          targets: Type.Array(
-            Type.Object({
-              droneId: Type.String({ description: 'Drone id or visible name.' }),
-              chatName: Type.Optional(Type.String({ description: 'Chat name. Defaults to default.' })),
-            }),
-            { minItems: 1, maxItems: CHAT_IDLE_MAX_TARGETS },
-          ),
-          idleForMs: Type.Optional(Type.Number({ description: `Require all targets to remain idle for this long before returning. Defaults to ${CHAT_IDLE_DEFAULT_IDLE_FOR_MS}.` })),
-        }),
+          'Subscribe to one or more drone chats and resume this assistant thread as soon as any target chat is idle. This returns immediately so you can continue other work.',
+        parameters: makeSubscribeToChatsIdleParameters(Type),
         execute: async (toolCallId: string, params: any) => {
-          const rawTargets = Array.isArray(params?.targets) ? params.targets : [];
-          if (rawTargets.length === 0) throw new Error('missing targets');
-          const targets: AssistantChatIdleTarget[] = [];
-          const seen = new Set<string>();
-          for (const rawTarget of rawTargets.slice(0, CHAT_IDLE_MAX_TARGETS)) {
-            const droneId = await this.requireDroneInScope(rawTarget?.droneId, 'read', threadId);
-            const chatName = normalizeChatNameForAssistant(rawTarget?.chatName);
-            const key = `${droneId}\u0000${chatName}`;
-            if (seen.has(key)) continue;
-            seen.add(key);
-            targets.push({ droneId, chatName });
-          }
-          if (targets.length === 0) throw new Error('missing targets');
-          const subscription = await this.subscribeToChatsIdle({
-            threadId,
-            toolCallId,
-            targets,
-            idleForMs: params?.idleForMs,
-          });
-          return {
-            content: [
-              {
-                type: 'text',
-                text: `Subscribed to ${subscription.targets.length} chat${subscription.targets.length === 1 ? '' : 's'} becoming idle. Subscription ${subscription.id} expires at ${subscription.expiresAt}.`,
-              },
-            ],
-            details: { ok: true, subscription },
-          };
+          return await this.subscribeToChatsIdleFromTool(threadId, toolCallId, params, 'any');
+        },
+      },
+      {
+        name: 'subscribe_to_all_chats_idle',
+        label: 'Subscribe to all chats idle',
+        description:
+          'Subscribe to one or more drone chats and resume this assistant thread only after every target chat is idle. This returns immediately so you can continue other work.',
+        parameters: makeSubscribeToChatsIdleParameters(Type),
+        execute: async (toolCallId: string, params: any) => {
+          return await this.subscribeToChatsIdleFromTool(threadId, toolCallId, params, 'all');
         },
       },
       {

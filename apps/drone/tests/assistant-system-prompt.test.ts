@@ -128,6 +128,46 @@ describe('assistant system prompt settings', () => {
     });
   });
 
+  test('migrates legacy chat idle prompt text and custom legacy tool enablement', async () => {
+    await withTempDroneDataDir('assistant-chat-idle-tool-migration-', async (droneDataDir) => {
+      const oldLine =
+        'When you send a drone chat message and need the result later, call subscribe_to_chats_idle on the target chat. This returns immediately so you can continue other work. If there is nothing else to do, end your turn; the system will resume this thread when the subscribed chats become idle.';
+      await fs.writeFile(
+        path.join(droneDataDir, 'assistant.json'),
+        JSON.stringify(
+          {
+            activeThreadId: 'thread-old',
+            threads: [
+              {
+                id: 'thread-old',
+                title: 'old thread',
+                createdAt: '2026-01-02T03:04:05.000Z',
+                updatedAt: '2026-01-02T03:04:05.000Z',
+                provider: 'openai',
+                model: 'gpt-5.5',
+                systemPrompt: `Custom preface.\n${oldLine}`,
+                enabledTools: ['subscribe_to_chats_idle'],
+                messages: [],
+              },
+            ],
+          },
+          null,
+          2,
+        ),
+        'utf8',
+      );
+
+      const service = makeAssistantService();
+      const snapshot = await service.snapshot();
+      const thread = snapshot.threads.find((item) => item.id === 'thread-old') as any;
+
+      expect(thread.systemPrompt).toContain('subscribe_to_any_chat_idle');
+      expect(thread.systemPrompt).toContain('subscribe_to_all_chats_idle');
+      expect(thread.systemPrompt).not.toContain('subscribe_to_chats_idle on the target chat');
+      expect(thread.enabledTools).toEqual(['subscribe_to_all_chats_idle']);
+    });
+  });
+
   test('updates thread prompts independently and can promote one to the global prompt', async () => {
     await withTempDroneDataDir('assistant-thread-system-prompt-', async () => {
       const service = makeAssistantService();
