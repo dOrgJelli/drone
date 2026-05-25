@@ -724,7 +724,7 @@ function rowClientStatus(row: any): ClientStatusRecord {
 }
 
 type Migration = {
-  version: number;
+  version: string;
   name: string;
   fileName: string;
   sql: string;
@@ -732,45 +732,21 @@ type Migration = {
 };
 
 type AppliedMigrationRow = {
-  version: number;
+  version: string;
   name: string;
   checksum: string;
 };
 
-const BASELINE_MIGRATION_VERSION = 1;
-const APPLICATION_TABLES = [
-  'users',
-  'voice_settings',
-  'devices',
-  'client_logs',
-  'android_setup_sessions',
-  'assistant_threads',
-  'assistant_messages',
-  'assistant_runs',
-  'assistant_tool_calls',
-  'assistant_queued_prompts',
-  'assistant_approvals',
-  'assistant_artifacts',
-  'assistant_settings',
-  'assistant_codex_connections',
-  'assistant_codex_oauth_states',
-  'voice_sessions',
-  'transcripts',
-  'client_status',
-  'approval_codes',
-  'pairing_sessions',
-  'desktop_auth_requests',
-] as const;
-
-function loadMigrations(dir = migrationsDir()): Migration[] {
+export function loadMigrations(dir = migrationsDir()): Migration[] {
   if (!existsSync(dir)) throw new Error(`missing migrations directory: ${dir}`);
   const migrations = readdirSync(dir)
     .map((fileName) => {
-      const match = /^(\d{4})_([a-z0-9_]+)\.sql$/.exec(fileName);
+      const match = /^(\d{14})_([a-z0-9_]+)\.sql$/.exec(fileName);
+      if (!match && fileName.endsWith('.sql')) throw new Error(`invalid migration file name: ${fileName}`);
       if (!match) return null;
       const sql = readFileSync(path.join(dir, fileName), 'utf8');
       return {
-        version: Number(match[1]),
+        version: match[1]!,
         name: match[2]!,
         fileName,
         sql,
@@ -778,16 +754,14 @@ function loadMigrations(dir = migrationsDir()): Migration[] {
       } satisfies Migration;
     })
     .filter((migration): migration is Migration => Boolean(migration))
-    .sort((a, b) => a.version - b.version);
+    .sort((a, b) => a.version.localeCompare(b.version));
 
-  const seen = new Set<number>();
+  const seen = new Set<string>();
   for (const migration of migrations) {
     if (seen.has(migration.version)) throw new Error(`duplicate migration version ${migration.version}`);
     seen.add(migration.version);
   }
-  if (!migrations.some((migration) => migration.version === BASELINE_MIGRATION_VERSION)) {
-    throw new Error(`missing baseline migration ${String(BASELINE_MIGRATION_VERSION).padStart(4, '0')}`);
-  }
+  if (migrations.length === 0) throw new Error(`no migrations found in ${dir}`);
   return migrations;
 }
 
@@ -809,7 +783,12 @@ export class VoiceStreamNextDb {
   }
 
   private runMigrations(migrations: Migration[]): void {
-    const hadLegacySchema = this.hasApplicationTables();
+    const hasMigrationHistory = this.tableExists('schema_migrations');
+    if (!hasMigrationHistory && this.hasNonMigrationTables()) {
+      throw new Error(
+        `existing Voice Stream database has tables but no migration history; delete ${this.path} or migrate it manually before starting`,
+      );
+    }
     this.ensureMigrationTable();
     const appliedRows = this.appliedMigrations();
     const appliedByVersion = new Map(appliedRows.map((row) => [row.version, row]));
@@ -819,17 +798,6 @@ export class VoiceStreamNextDb {
       if (migration.checksum !== row.checksum) {
         throw new Error(`migration checksum mismatch for ${migration.fileName}`);
       }
-    }
-
-    if (appliedRows.length === 0 && hadLegacySchema) {
-      const baseline = migrations.find((migration) => migration.version === BASELINE_MIGRATION_VERSION);
-      if (!baseline) throw new Error('missing baseline migration');
-      this.applyLegacyBaselineCompatibility(baseline);
-      appliedByVersion.set(baseline.version, {
-        version: baseline.version,
-        name: baseline.name,
-        checksum: baseline.checksum,
-      });
     }
 
     for (const migration of migrations) {
@@ -846,7 +814,7 @@ export class VoiceStreamNextDb {
   private ensureMigrationTable(): void {
     this.db.run(`
       CREATE TABLE IF NOT EXISTS schema_migrations (
-        version INTEGER PRIMARY KEY,
+        version TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         checksum TEXT NOT NULL,
         applied_at TEXT NOT NULL
@@ -888,67 +856,6 @@ export class VoiceStreamNextDb {
       });
   }
 
-  private hasApplicationTables(): boolean {
-    const placeholders = APPLICATION_TABLES.map((table) => `'${table}'`).join(', ');
-    const row = this.db
-      .query(`SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name IN (${placeholders})`)
-      .get() as { count?: number } | undefined;
-    return Number(row?.count ?? 0) > 0;
-  }
-
-  private applyLegacyBaselineCompatibility(baseline: Migration): void {
-    this.db.run('BEGIN IMMEDIATE');
-    try {
-      this.db.exec(baseline.sql);
-      if (this.tableExists('assistant_settings')) {
-        try {
-          this.db.run('ALTER TABLE assistant_settings DROP COLUMN overview_prompt');
-        } catch {
-          // Older local databases may not have this legacy column anymore.
-        }
-      }
-      this.ensureColumnIfTableExists('desktop_auth_requests', 'device_token_hash', 'TEXT');
-      this.ensureColumnIfTableExists('desktop_auth_requests', 'device_token_hint', 'TEXT');
-      this.ensureColumnIfTableExists('devices', 'revoked_at', 'TEXT');
-      this.ensureColumnIfTableExists('voice_settings', 'trigger_phrase', 'TEXT');
-      this.ensureColumnIfTableExists('voice_settings', 'min_digits', 'INTEGER');
-      this.ensureColumnIfTableExists('voice_settings', 'max_digits', 'INTEGER');
-      this.ensureColumnIfTableExists('voice_settings', 'stable_ms', 'INTEGER');
-      this.ensureColumnIfTableExists('voice_settings', 'collect_timeout_ms', 'INTEGER');
-      this.ensureColumnIfTableExists('voice_settings', 'duplicate_cooldown_ms', 'INTEGER');
-      this.ensureColumnIfTableExists('voice_settings', 'finalize_check_interval_ms', 'INTEGER');
-      this.ensureColumnIfTableExists('voice_settings', 'post_prompt_command_suppression_ms', 'INTEGER');
-      this.ensureColumnIfTableExists('assistant_threads', 'provider', `TEXT NOT NULL DEFAULT '${ASSISTANT_DEFAULT_PROVIDER}'`);
-      this.ensureColumnIfTableExists('assistant_threads', 'model', `TEXT NOT NULL DEFAULT '${ASSISTANT_DEFAULT_MODEL}'`);
-      this.ensureColumnIfTableExists('assistant_threads', 'thinking_level', `TEXT NOT NULL DEFAULT '${ASSISTANT_DEFAULT_THINKING_LEVEL}'`);
-      this.ensureColumnIfTableExists('assistant_threads', 'status', "TEXT NOT NULL DEFAULT 'idle'");
-      this.ensureColumnIfTableExists('assistant_threads', 'error', 'TEXT');
-      this.ensureColumnIfTableExists('assistant_threads', 'voice_enabled', 'INTEGER NOT NULL DEFAULT 0');
-      this.ensureColumnIfTableExists('assistant_threads', 'auto_approve', 'INTEGER NOT NULL DEFAULT 0');
-      this.ensureColumnIfTableExists('assistant_threads', 'system_prompt', 'TEXT');
-      this.ensureColumnIfTableExists(
-        'assistant_threads',
-        'enabled_tools_json',
-        `TEXT NOT NULL DEFAULT '${JSON.stringify([...ASSISTANT_DEFAULT_ENABLED_TOOLS]).replace(/'/g, "''")}'`,
-      );
-      this.ensureColumnIfTableExists(
-        'assistant_threads',
-        'capabilities_json',
-        `TEXT NOT NULL DEFAULT '${JSON.stringify(ASSISTANT_DEFAULT_CAPABILITIES).replace(/'/g, "''")}'`,
-      );
-      this.ensureColumnIfTableExists('assistant_threads', 'prompt_delivery_mode', "TEXT NOT NULL DEFAULT 'queue'");
-      this.ensureColumnIfTableExists('assistant_messages', 'content_json', 'TEXT');
-      this.ensureColumnIfTableExists('assistant_messages', 'tool_name', 'TEXT');
-      this.ensureColumnIfTableExists('assistant_messages', 'tool_call_id', 'TEXT');
-      this.ensureColumnIfTableExists('assistant_messages', 'is_error', 'INTEGER NOT NULL DEFAULT 0');
-      this.recordMigration(baseline);
-      this.db.run('COMMIT');
-    } catch (error) {
-      this.db.run('ROLLBACK');
-      throw error;
-    }
-  }
-
   private tableExists(table: string): boolean {
     const row = this.db
       .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = $table")
@@ -956,15 +863,19 @@ export class VoiceStreamNextDb {
     return Boolean(row);
   }
 
-  private ensureColumnIfTableExists(table: string, column: string, definition: string): void {
-    if (!this.tableExists(table)) return;
-    this.ensureColumn(table, column, definition);
-  }
-
-  private ensureColumn(table: string, column: string, definition: string): void {
-    const rows = this.db.query(`PRAGMA table_info(${table})`).all() as Array<{ name?: string }>;
-    if (rows.some((row) => String(row.name) === column)) return;
-    this.db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  private hasNonMigrationTables(): boolean {
+    const row = this.db
+      .query(
+        `
+        SELECT COUNT(*) AS count
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name NOT LIKE 'sqlite_%'
+          AND name != 'schema_migrations'
+      `,
+      )
+      .get() as { count?: number } | undefined;
+    return Number(row?.count ?? 0) > 0;
   }
 
   upsertUser(input: UpsertUserInput): UserProfile {
