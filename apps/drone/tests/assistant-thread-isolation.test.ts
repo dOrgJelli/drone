@@ -534,12 +534,14 @@ describe('assistant thread isolation', () => {
       expect(thread.voiceEnabled).toBe(false);
       expect(thread.enabledTools).not.toContain('speak');
       expect(thread.enabledTools).not.toContain('set_thinking_level');
+      expect(thread.enabledTools).not.toContain('create_new_thread');
 
       const voice = await service.ensureLatestVoiceThread();
       expect(voice.created).toBe(true);
       expect(voice.thread.voiceEnabled).toBe(true);
       expect(voice.thread.enabledTools).toContain('speak');
       expect(voice.thread.enabledTools).toContain('set_thinking_level');
+      expect(voice.thread.enabledTools).toContain('create_new_thread');
 
       const reused = await service.ensureLatestVoiceThread();
       expect(reused.created).toBe(false);
@@ -551,6 +553,61 @@ describe('assistant thread isolation', () => {
       thread = disabled.threads.find((item) => item.id === voice.threadId) as any;
       expect(thread.enabledTools).not.toContain('set_thinking_level');
       expect(thread.enabledTools).toContain('speak');
+      expect(thread.enabledTools).toContain('create_new_thread');
+
+      const reloaded = makeService();
+      const reloadedSnapshot = await reloaded.snapshot();
+      thread = reloadedSnapshot.threads.find((item) => item.id === voice.threadId) as any;
+      expect(thread.enabledTools).not.toContain('set_thinking_level');
+      expect(thread.enabledTools).toContain('create_new_thread');
+    });
+  });
+
+  test('create new thread tool starts a fresh default voice thread', async () => {
+    await withTempDroneDataDir('assistant-voice-create-new-thread-', async () => {
+      const service = makeService();
+      installFakeRuntime(service, {});
+
+      const voice = await service.ensureLatestVoiceThread();
+      const runtime = await (service as any).runtime();
+      const tools = (service as any).buildTools(runtime, voice.threadId);
+      const createNewThread = tools.find((tool: any) => tool.name === 'create_new_thread');
+      expect(createNewThread).toBeTruthy();
+
+      const result = await createNewThread.execute('tool_create_new_thread', {});
+      expect(result.details.previousThreadId).toBe(voice.threadId);
+      expect(result.details.threadId).not.toBe(voice.threadId);
+      expect(result.details.thread.voiceEnabled).toBe(true);
+      expect(result.details.thread.enabledTools).toContain('create_new_thread');
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await service.updateThread(voice.threadId, { title: 'old voice thread updated after tool call' });
+
+      const routed = await service.ensureLatestVoiceThread();
+      expect(routed.threadId).toBe(result.details.threadId);
+    });
+  });
+
+  test('create new thread tool can be enabled for normal assistant threads', async () => {
+    await withTempDroneDataDir('assistant-normal-create-new-thread-', async () => {
+      const service = makeService();
+      installFakeRuntime(service, {});
+
+      const snapshot = await service.createThread({ title: 'normal' });
+      const thread = snapshot.threads.find((item) => item.id === snapshot.activeThreadId) as any;
+      expect(thread.enabledTools).not.toContain('create_new_thread');
+
+      await service.updateThread(thread.id, { enabledTools: [...thread.enabledTools, 'create_new_thread'] });
+      const runtime = await (service as any).runtime();
+      const tools = (service as any).buildTools(runtime, thread.id);
+      const createNewThread = tools.find((tool: any) => tool.name === 'create_new_thread');
+      expect(createNewThread).toBeTruthy();
+
+      const result = await createNewThread.execute('tool_create_new_thread', { title: 'fresh normal' });
+      expect(result.details.previousThreadId).toBe(thread.id);
+      expect(result.details.threadId).not.toBe(thread.id);
+      expect(result.details.thread.title).toBe('fresh normal');
+      expect(result.details.thread.voiceEnabled).toBe(false);
     });
   });
 
