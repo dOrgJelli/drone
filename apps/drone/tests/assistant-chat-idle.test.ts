@@ -24,6 +24,23 @@ function seedChat(reg: any, pendingPrompts: any[] = [], turns: any[] = []): void
   };
 }
 
+function seedNamedChat(reg: any, droneId: string, pendingPrompts: any[] = [], turns: any[] = []): void {
+  const now = new Date().toISOString();
+  reg.drones = reg.drones ?? {};
+  reg.drones[droneId] = {
+    id: droneId,
+    name: droneId,
+    createdAt: now,
+    chats: {
+      default: {
+        createdAt: now,
+        turns,
+        pendingPrompts,
+      },
+    },
+  };
+}
+
 describe('assistant chat idle wait', () => {
   test('treats queued user messages as active and failed pending messages as idle', async () => {
     await withTempDroneDataDir('assistant-chat-idle-', async () => {
@@ -109,6 +126,100 @@ describe('assistant chat idle wait', () => {
       expect(result.targets[0]?.reason).toBe('latest_agent_message');
       expect(result.targets[0]?.latest?.role).toBe('agent');
       expect(result.targets[0]?.latest?.text).toBe('done');
+    });
+  });
+
+  test('can wait for any target chat to become idle', async () => {
+    await withTempDroneDataDir('assistant-chat-idle-wait-any-', async () => {
+      const completedAt = new Date().toISOString();
+      await updateRegistry((reg: any) => {
+        seedNamedChat(
+          reg,
+          'drone-idle',
+          [],
+          [
+            {
+              id: 'prompt-idle',
+              at: completedAt,
+              promptAt: completedAt,
+              completedAt,
+              prompt: 'done already',
+              ok: true,
+              output: 'done',
+            },
+          ],
+        );
+        seedNamedChat(reg, 'drone-active', [
+          {
+            id: 'prompt-active',
+            at: completedAt,
+            prompt: 'still working',
+            state: 'sent',
+          },
+        ]);
+      });
+
+      const result = await waitForAssistantChatIdle({
+        mode: 'any',
+        targets: [
+          { droneId: 'drone-idle', chatName: 'default' },
+          { droneId: 'drone-active', chatName: 'default' },
+        ],
+        timeoutMs: 1000,
+        pollIntervalMs: 25,
+        idleForMs: 0,
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.mode).toBe('any');
+      expect(result.targets.some((target) => target.droneId === 'drone-idle' && target.idle)).toBe(true);
+      expect(result.targets.some((target) => target.droneId === 'drone-active' && !target.idle)).toBe(true);
+    });
+  });
+
+  test('defaults to waiting for all target chats to become idle', async () => {
+    await withTempDroneDataDir('assistant-chat-idle-wait-all-default-', async () => {
+      const completedAt = new Date().toISOString();
+      await updateRegistry((reg: any) => {
+        seedNamedChat(
+          reg,
+          'drone-idle',
+          [],
+          [
+            {
+              id: 'prompt-idle',
+              at: completedAt,
+              promptAt: completedAt,
+              completedAt,
+              prompt: 'done already',
+              ok: true,
+              output: 'done',
+            },
+          ],
+        );
+        seedNamedChat(reg, 'drone-active', [
+          {
+            id: 'prompt-active',
+            at: completedAt,
+            prompt: 'still working',
+            state: 'sent',
+          },
+        ]);
+      });
+
+      const result = await waitForAssistantChatIdle({
+        targets: [
+          { droneId: 'drone-idle', chatName: 'default' },
+          { droneId: 'drone-active', chatName: 'default' },
+        ],
+        timeoutMs: 75,
+        pollIntervalMs: 25,
+        idleForMs: 0,
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.timedOut).toBe(true);
+      expect(result.mode).toBe('all');
     });
   });
 
@@ -253,17 +364,90 @@ describe('assistant chat idle wait', () => {
       const subscription = await service.subscribeToChatsIdle({
         threadId,
         toolCallId: 'tool-call-1',
+        mode: 'any',
         targets: [{ droneId: 'drone-a', chatName: 'default' }],
         idleForMs: 1000,
       });
 
       expect(subscription.status).toBe('active');
+      expect(subscription.mode).toBe('any');
       expect(subscription.targets).toEqual([{ droneId: 'drone-a', chatName: 'default' }]);
 
       const subscribedSnapshot = await service.snapshot();
       const thread = subscribedSnapshot.threads.find((item) => item.id === threadId);
       expect(thread?.status).toBe('waiting_for_chats_idle');
       expect(subscribedSnapshot.chatIdleSubscriptions.some((item) => item.id === subscription.id && item.status === 'active')).toBe(true);
+    });
+  });
+
+  test('fires an any-mode subscription when one watched chat is idle', async () => {
+    await withTempDroneDataDir('assistant-chat-idle-any-subscribe-fire-', async () => {
+      const completedAt = new Date().toISOString();
+      await updateRegistry((reg: any) => {
+        seedNamedChat(
+          reg,
+          'drone-idle',
+          [],
+          [
+            {
+              id: 'prompt-idle',
+              at: completedAt,
+              promptAt: completedAt,
+              completedAt,
+              prompt: 'done already',
+              ok: true,
+              output: 'done',
+            },
+          ],
+        );
+        seedNamedChat(reg, 'drone-active', [
+          {
+            id: 'prompt-active',
+            at: completedAt,
+            prompt: 'still working',
+            state: 'sent',
+          },
+        ]);
+      });
+
+      const service = new HubAssistantService({
+        listDrones: async () => [],
+        createDrone: async () => {
+          throw new Error('not implemented');
+        },
+        createChat: async () => {
+          throw new Error('not implemented');
+        },
+        setDroneGroup: async () => {
+          throw new Error('not implemented');
+        },
+        messageDrone: async () => {
+          throw new Error('not implemented');
+        },
+      });
+      (service as any).drainQueuedPrompts = async () => {};
+      const snapshot = await service.createThread({ title: 'Any subscription test', provider: 'openai', model: 'gpt-5.5' });
+      const threadId = snapshot.activeThreadId;
+      const subscription = await service.subscribeToChatsIdle({
+        threadId,
+        toolCallId: 'tool-call-any',
+        mode: 'any',
+        targets: [
+          { droneId: 'drone-idle', chatName: 'default' },
+          { droneId: 'drone-active', chatName: 'default' },
+        ],
+        idleForMs: 0,
+      });
+
+      await (service as any).checkChatIdleSubscriptions();
+      const firedSnapshot = await service.snapshot();
+      const fired = firedSnapshot.chatIdleSubscriptions.find((item) => item.id === subscription.id);
+      const thread = firedSnapshot.threads.find((item) => item.id === threadId);
+
+      expect(fired?.status).toBe('fired');
+      expect(fired?.lastResult?.mode).toBe('any');
+      expect(fired?.lastResult?.targets.some((target: any) => target.droneId === 'drone-idle' && target.idle)).toBe(true);
+      expect(thread?.queuedPrompts?.some((prompt: any) => prompt.prompt.includes('Mode: any'))).toBe(true);
     });
   });
 });
