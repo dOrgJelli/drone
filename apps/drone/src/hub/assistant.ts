@@ -581,6 +581,7 @@ const ASSISTANT_SYSTEM_PROMPT_DEFAULT = [
   'Use read_file line ranges and search_files context when you only need a focused section of a file.',
   'Use bash only when a command is the right tool for inspection, tests, builds, or small scripted checks in an accessible container drone. Bash is approval-gated, non-interactive, and not for background processes.',
   'Use set_thinking_level when the user asks to change how much the assistant thinks. It changes this assistant thread to another supported thinking level for the same selected model and does not require approval.',
+  'Use create_new_thread only when the user explicitly asks to start, open, create, clear, reset, or switch to a new assistant thread or session.',
   'File paths are interpreted by drone id plus path. Relative paths resolve inside the target drone workspace, usually the repo root for repo-backed drones.',
   'Chat timelines contain user messages and agent messages. Queued or pending user messages appear in the same timeline with a non-completed status.',
   'When you send a drone chat message and need the result later, call subscribe_to_chats_idle on the target chat. This returns immediately so you can continue other work. If there is nothing else to do, end your turn; the system will resume this thread when the subscribed chats become idle.',
@@ -601,6 +602,7 @@ const ASSISTANT_TOOL_SUMMARIES: AssistantToolSummary[] = [
   { name: 'get_system_prompt', label: 'Get system prompt', category: 'prompts', description: 'Read the global and current thread system prompts.' },
   { name: 'update_system_prompt', label: 'Update system prompt', category: 'prompts', description: 'Update only this thread system prompt.' },
   { name: 'set_thinking_level', label: 'Set thinking level', category: 'actions', description: 'Change this assistant thread to a supported thinking level for its current model.' },
+  { name: 'create_new_thread', label: 'Create new thread', category: 'actions', description: 'Open a fresh assistant thread or voice session.' },
   { name: 'inspect_drone', label: 'Inspect drone', category: 'drones', description: 'Inspect one drone by id or name.' },
   { name: 'list_files', label: 'List files', category: 'files', description: 'List files and folders in one drone.' },
   { name: 'list_changed_files', label: 'List changed files', category: 'files', description: 'List changed files in one repo-attached drone.' },
@@ -623,10 +625,11 @@ const ASSISTANT_TOOL_SUMMARIES: AssistantToolSummary[] = [
 ];
 const ASSISTANT_ALL_TOOL_NAMES = ASSISTANT_TOOL_SUMMARIES.map((tool) => tool.name);
 const ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES = ASSISTANT_ALL_TOOL_NAMES.filter(
-  (name) => name !== 'get_system_prompt' && name !== 'update_system_prompt' && name !== 'set_thinking_level' && name !== 'speak',
+  (name) => name !== 'get_system_prompt' && name !== 'update_system_prompt' && name !== 'set_thinking_level' && name !== 'create_new_thread' && name !== 'speak',
 );
 const ASSISTANT_LEGACY_DEFAULT_ENABLED_TOOL_NAMES = ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES.filter((name) => name !== 'create_chat');
-const ASSISTANT_VOICE_DEFAULT_ENABLED_TOOL_NAMES = [...ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES, 'set_thinking_level', 'speak'];
+const ASSISTANT_VOICE_DEFAULT_ENABLED_TOOL_NAMES = [...ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES, 'set_thinking_level', 'create_new_thread', 'speak'];
+const ASSISTANT_LEGACY_VOICE_DEFAULT_ENABLED_TOOL_NAMES = [...ASSISTANT_DEFAULT_ENABLED_TOOL_NAMES, 'set_thinking_level', 'speak'];
 const ASSISTANT_OVERVIEW_PROMPT_DEFAULT = [
   'You write a concise Markdown status overview for an assistant thread in Drone Hub.',
   'Focus on the current state of the work, recent actions, tool calls, approvals, blockers, and next likely step.',
@@ -1122,6 +1125,11 @@ function normalizeStoredAssistantEnabledTools(raw: unknown, voiceEnabled: boolea
     Array.isArray(raw) && ASSISTANT_LEGACY_DEFAULT_ENABLED_TOOL_NAMES.every((name) => base.includes(name));
   if (hadLegacyDefaultTools && !base.includes('create_chat')) {
     base.push('create_chat');
+  }
+  const hadLegacyVoiceDefaultTools =
+    voiceEnabled && Array.isArray(raw) && ASSISTANT_LEGACY_VOICE_DEFAULT_ENABLED_TOOL_NAMES.every((name) => base.includes(name));
+  if (hadLegacyVoiceDefaultTools && !base.includes('create_new_thread')) {
+    base.push('create_new_thread');
   }
   return enabledToolsForVoiceMode(base, voiceEnabled);
 }
@@ -2441,6 +2449,25 @@ export class HubAssistantService {
     return { ok: true, threadId: thread.id, created: true, thread: sanitizeThread(thread) };
   }
 
+  private async createNewThreadFromThread(threadId: string, input?: { title?: unknown }): Promise<{ ok: true; previousThreadId: string; threadId: string; thread: AssistantThread }> {
+    await this.ensureLoaded();
+    const previousThread = this.getThread(threadId);
+    const voiceEnabled = normalizeAssistantVoiceEnabled(previousThread.voiceEnabled);
+    const title = cleanOptionalString(input?.title) || (voiceEnabled ? 'Voice thread' : DEFAULT_THREAD_TITLE);
+    const thread = this.makeThread({
+      provider: previousThread.provider,
+      model: previousThread.model,
+      title,
+      voiceEnabled,
+      accessScope: this.defaultAccessScopeForNewThread({ voiceEnabled }),
+    });
+    thread.thinkingLevel = allowedThinkingLevelForModel(thread.provider, thread.model, previousThread.thinkingLevel);
+    this.threads = [thread, ...this.threads].slice(0, ASSISTANT_REGISTRY_MAX_THREADS);
+    this.activeThreadId = thread.id;
+    await this.persist();
+    return { ok: true, previousThreadId: previousThread.id, threadId: thread.id, thread: sanitizeThread(thread) };
+  }
+
   async submitVoicePrompt(input: { prompt?: unknown; title?: unknown; source?: AssistantVoiceSource }): Promise<{ ok: true; threadId: string; created: boolean; accepted: boolean }> {
     const prompt = String(input.prompt ?? '').trim();
     if (!prompt) throw new Error('missing prompt');
@@ -2666,7 +2693,7 @@ export class HubAssistantService {
       thread.voiceEnabledAt = thread.voiceEnabled ? nowIso() : null;
       thread.enabledTools =
         thread.voiceEnabled && !wasVoiceEnabled
-          ? normalizeAssistantEnabledTools([...thread.enabledTools, 'set_thinking_level', 'speak'], ASSISTANT_VOICE_DEFAULT_ENABLED_TOOL_NAMES)
+          ? normalizeAssistantEnabledTools([...thread.enabledTools, 'set_thinking_level', 'create_new_thread', 'speak'], ASSISTANT_VOICE_DEFAULT_ENABLED_TOOL_NAMES)
           : enabledToolsForVoiceMode(thread.enabledTools, thread.voiceEnabled);
     }
     thread.updatedAt = nowIso();
@@ -3205,7 +3232,7 @@ export class HubAssistantService {
     let latestMs = -1;
     for (const thread of this.threads) {
       if (!normalizeAssistantVoiceEnabled(thread.voiceEnabled)) continue;
-      const updatedMs = Date.parse(thread.updatedAt || thread.voiceEnabledAt || thread.createdAt);
+      const updatedMs = Date.parse(thread.voiceEnabledAt || thread.createdAt);
       const normalizedMs = Number.isFinite(updatedMs) ? updatedMs : 0;
       if (!latest || normalizedMs > latestMs) {
         latest = thread;
@@ -3436,6 +3463,30 @@ export class HubAssistantService {
                   result.previousThinkingLevel === result.thinkingLevel
                     ? `Thinking level is already ${result.thinkingLevel} for ${result.provider}/${result.model}.`
                     : `Changed thinking level from ${result.previousThinkingLevel} to ${result.thinkingLevel} for ${result.provider}/${result.model}.`,
+              },
+            ],
+            details: result,
+          };
+        },
+      },
+      {
+        name: 'create_new_thread',
+        label: 'Create new thread',
+        description:
+          'Open a fresh assistant thread. Only use this after the user explicitly asks to start, open, create, clear, reset, or switch to a new assistant thread or session. In voice mode, the new voice thread becomes the default target for future voice transcriptions.',
+        parameters: Type.Object({
+          title: Type.Optional(Type.String({ description: 'Optional title for the new thread. Omit unless the user gave a title.' })),
+        }),
+        executionMode: 'sequential',
+        execute: async (_toolCallId: string, params: any) => {
+          const result = await this.createNewThreadFromThread(threadId, { title: params?.title });
+          return {
+            content: [
+              {
+                type: 'text',
+                text: result.thread.voiceEnabled
+                  ? `Created a new voice thread: ${result.thread.title}. Future voice transcriptions will use it by default.`
+                  : `Created a new assistant thread: ${result.thread.title}.`,
               },
             ],
             details: result,
