@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import fs from 'node:fs';
 import path from 'node:path';
 
 import { buildApp } from './app.js';
@@ -257,6 +258,40 @@ describe('voice session device validation', () => {
       await built.app.close();
       built.db.db.close();
       delete process.env.VOICE_STREAM_NEXT_DATA_DIR;
+    }
+  });
+});
+
+describe('desktop app downloads', () => {
+  afterEach(() => {
+    delete process.env.VOICE_STREAM_NEXT_DATA_DIR;
+  });
+
+  test('serves the published desktop archive metadata and file', async () => {
+    const dataDir = path.join(process.cwd(), 'server', 'data', 'tests', crypto.randomUUID());
+    const desktopDir = path.join(dataDir, 'desktop');
+    fs.mkdirSync(desktopDir, { recursive: true });
+    fs.writeFileSync(path.join(desktopDir, 'voice-stream-next-desktop-latest.tar.gz'), 'desktop archive');
+    fs.writeFileSync(path.join(desktopDir, 'latest.json'), JSON.stringify({
+      app: 'voice-stream-next',
+      platform: 'desktop',
+      variant: 'linux-x64',
+      fileName: 'voice-stream-next-desktop-latest.tar.gz',
+      builtAt: '2026-05-25T00:00:00.000Z',
+    }));
+    process.env.VOICE_STREAM_NEXT_DATA_DIR = dataDir;
+    const built = await buildApp({ logger: false });
+    try {
+      const metadata = await built.app.inject({ method: 'GET', url: '/api/desktop' });
+      expect(metadata.statusCode).toBe(200);
+      expect(metadata.json().desktop.available).toBe(true);
+      expect(metadata.json().desktop.downloadUrl).toContain('/api/desktop/download');
+
+      expect(metadata.json().desktop.fileName).toBe('voice-stream-next-desktop-latest.tar.gz');
+      expect(metadata.json().desktop.size).toBe('desktop archive'.length);
+    } finally {
+      await built.app.close();
+      built.db.db.close();
     }
   });
 });

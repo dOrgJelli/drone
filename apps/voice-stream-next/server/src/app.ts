@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
@@ -60,6 +60,17 @@ type AndroidApkInfo = {
   updatePayload: string | null;
 };
 
+type DesktopAppInfo = {
+  available: boolean;
+  platform: 'desktop';
+  app: string;
+  variant: string | null;
+  fileName: string | null;
+  size: number | null;
+  builtAt: string | null;
+  downloadUrl: string | null;
+};
+
 function parsePort(raw: unknown, fallback: number): number {
   const value = Number(raw);
   return Number.isInteger(value) && value > 0 && value <= 65535 ? value : fallback;
@@ -114,6 +125,14 @@ function androidApkDownloadPath(): string {
   return '/api/mobile/android/apk';
 }
 
+function desktopAppDir(): string {
+  return process.env.VOICE_STREAM_NEXT_DESKTOP_DOWNLOAD_DIR?.trim() || path.join(voiceStreamDataDir(), 'desktop');
+}
+
+function desktopAppDownloadPath(): string {
+  return '/api/desktop/download';
+}
+
 function publicUrlForPath(req: FastifyRequest, urlPath: string): string {
   return `${serverPublicUrl(req)}${urlPath.startsWith('/') ? urlPath : `/${urlPath}`}`;
 }
@@ -162,6 +181,68 @@ function readAndroidApkInfo(req: FastifyRequest): AndroidApkInfo {
     downloadUrl,
     updatePayload: versionCode ? buildUpdatePayload({ versionCode, apkUrl: downloadUrl }) : null,
   };
+}
+
+function newestDesktopArtifact(dir: string): string | null {
+  if (!existsSync(dir)) return null;
+  const candidates = readdirSync(dir)
+    .filter((fileName) => /\.(zip|dmg|exe|appimage|tar\.gz)$/i.test(fileName))
+    .map((fileName) => ({ fileName, stat: statSync(path.join(dir, fileName)) }))
+    .filter((entry) => entry.stat.isFile())
+    .sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
+  return candidates[0]?.fileName ?? null;
+}
+
+function readDesktopAppInfo(req: FastifyRequest): DesktopAppInfo {
+  const dir = desktopAppDir();
+  const fallback = {
+    available: false,
+    platform: 'desktop' as const,
+    app: 'voice-stream-next',
+    variant: null,
+    fileName: null,
+    size: null,
+    builtAt: null,
+    downloadUrl: null,
+  };
+
+  let metadata: any = null;
+  const metadataFile = path.join(dir, 'latest.json');
+  if (existsSync(metadataFile)) {
+    try {
+      metadata = JSON.parse(readFileSync(metadataFile, 'utf8'));
+    } catch {
+      metadata = null;
+    }
+  }
+
+  const fileName = path.basename(cleanText(metadata?.fileName) || newestDesktopArtifact(dir) || '');
+  if (!fileName) return fallback;
+  const artifactFile = path.join(dir, fileName);
+  if (!existsSync(artifactFile)) return fallback;
+  const stat = statSync(artifactFile);
+  if (!stat.isFile()) return fallback;
+
+  return {
+    available: true,
+    platform: 'desktop',
+    app: cleanText(metadata?.app, 'voice-stream-next') || 'voice-stream-next',
+    variant: cleanText(metadata?.variant) || null,
+    fileName,
+    size: stat.size,
+    builtAt: cleanText(metadata?.builtAt) || stat.mtime.toISOString(),
+    downloadUrl: publicUrlForPath(req, desktopAppDownloadPath()),
+  };
+}
+
+function desktopContentType(fileName: string): string {
+  const lower = fileName.toLowerCase();
+  if (lower.endsWith('.zip')) return 'application/zip';
+  if (lower.endsWith('.dmg')) return 'application/x-apple-diskimage';
+  if (lower.endsWith('.exe')) return 'application/vnd.microsoft.portable-executable';
+  if (lower.endsWith('.appimage')) return 'application/octet-stream';
+  if (lower.endsWith('.tar.gz')) return 'application/gzip';
+  return 'application/octet-stream';
 }
 
 function binarySize(data: unknown): number {
@@ -385,6 +466,11 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     android: readAndroidApkInfo(req),
   }));
 
+  app.get('/api/desktop', async (req) => ({
+    ok: true,
+    desktop: readDesktopAppInfo(req),
+  }));
+
   app.post('/api/mobile/android/setup', async (req, reply) =>
     withUser(req, reply, db, clerkEnabled, async (ctx) => {
       const expiresAt = pairingExpiresAt();
@@ -494,6 +580,20 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       .header('content-disposition', `attachment; filename="${info.fileName}"`)
       .header('content-length', String(info.size ?? statSync(apkFile).size));
     return reply.send(createReadStream(apkFile));
+  });
+
+  app.get('/api/desktop/download', async (req, reply) => {
+    const info = readDesktopAppInfo(req);
+    if (!info.available || !info.fileName) {
+      reply.code(404).send({ ok: false, error: 'Desktop app has not been built yet' });
+      return;
+    }
+    const desktopFile = path.join(desktopAppDir(), info.fileName);
+    reply
+      .type(desktopContentType(info.fileName))
+      .header('content-disposition', `attachment; filename="${info.fileName}"`)
+      .header('content-length', String(info.size ?? statSync(desktopFile).size));
+    return reply.send(createReadStream(desktopFile));
   });
 
   app.get('/api/assistant/events', async (req, reply) => {

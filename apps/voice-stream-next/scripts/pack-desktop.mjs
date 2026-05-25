@@ -68,12 +68,66 @@ function runPackager() {
   }
 }
 
+function voiceStreamDataDir() {
+  const configured = process.env.VOICE_STREAM_NEXT_DATA_DIR?.trim();
+  return configured ? path.resolve(configured) : path.join(appDir, 'server', 'data');
+}
+
+function jsonString(value) {
+  return JSON.stringify(String(value ?? ''));
+}
+
+function publishDesktopDownload() {
+  const releaseRoot = path.join(appDir, 'release', 'desktop');
+  const packagedDir = fs
+    .readdirSync(releaseRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith('VoiceStream-'))
+    .map((entry) => path.join(releaseRoot, entry.name))
+    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
+  if (!packagedDir) {
+    throw new Error(`No packaged desktop app was found in ${releaseRoot}`);
+  }
+
+  const outputDir = path.join(voiceStreamDataDir(), 'desktop');
+  const variant = `${process.platform}-${process.arch}`;
+  const variantFileName = `voice-stream-next-desktop-${variant}.tar.gz`;
+  const latestFileName = 'voice-stream-next-desktop-latest.tar.gz';
+  const variantFile = path.join(outputDir, variantFileName);
+  const latestFile = path.join(outputDir, latestFileName);
+
+  fs.mkdirSync(outputDir, { recursive: true });
+  const result = spawnSync('tar', ['-czf', variantFile, '-C', path.dirname(packagedDir), path.basename(packagedDir)], {
+    cwd: appDir,
+    env: process.env,
+    shell: process.platform === 'win32',
+    stdio: 'inherit',
+  });
+  if (result.status !== 0) {
+    throw new Error(`Failed to archive desktop app ${packagedDir}`);
+  }
+  fs.copyFileSync(variantFile, latestFile);
+
+  const metadata = `{
+  "app": "voice-stream-next",
+  "platform": "desktop",
+  "variant": ${jsonString(variant)},
+  "fileName": ${jsonString(latestFileName)},
+  "variantFileName": ${jsonString(variantFileName)},
+  "size": ${fs.statSync(latestFile).size},
+  "builtAt": ${jsonString(new Date().toISOString())}
+}
+`;
+  fs.writeFileSync(path.join(outputDir, 'latest.json'), metadata);
+  console.log(`Published VoiceStream desktop archive to ${latestFile}`);
+}
+
 fs.rmSync(vendorDir, { recursive: true, force: true });
 fs.mkdirSync(vendorNodeModules, { recursive: true });
 
 try {
   copyRuntimePackage('vosk');
   runPackager();
+  publishDesktopDownload();
 } finally {
   fs.rmSync(vendorDir, { recursive: true, force: true });
 }

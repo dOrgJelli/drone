@@ -9,6 +9,7 @@ pnpm-debug.log*
 dist/
 build/
 out/
+apps/voice-stream-next/release/
 *.tsbuildinfo
 
 # Runtime data

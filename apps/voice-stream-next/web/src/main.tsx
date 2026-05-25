@@ -23,6 +23,7 @@ import type {
   AssistantThreadView,
   DashboardData,
   DashboardView,
+  DesktopAppInfo,
   DesktopVoskStatus,
   DesktopVoskText,
   DeviceRecord,
@@ -598,6 +599,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   const [deviceName, setDeviceName] = React.useState('Android voice client');
   const [deviceType, setDeviceType] = React.useState('android');
   const [androidApkInfo, setAndroidApkInfo] = React.useState<AndroidApkInfo | null>(null);
+  const [desktopAppInfo, setDesktopAppInfo] = React.useState<DesktopAppInfo | null>(null);
   const [androidSetupInfo, setAndroidSetupInfo] = React.useState<AndroidSetupInfo | null>(null);
   const [androidSetupQr, setAndroidSetupQr] = React.useState('');
   const [pairingText, setPairingText] = React.useState('');
@@ -702,6 +704,15 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
     }
   }, [client]);
 
+  const loadDesktopAppInfo = React.useCallback(async () => {
+    try {
+      const data = await client.request<{ ok: true; desktop: DesktopAppInfo }>('/api/desktop');
+      setDesktopAppInfo(data.desktop);
+    } catch {
+      setDesktopAppInfo(null);
+    }
+  }, [client]);
+
   const refreshAndroidSetup = React.useCallback(async () => {
     try {
       const data = await client.request<{ ok: true; android: AndroidApkInfo; setup: AndroidSetupInfo }>('/api/mobile/android/setup', {
@@ -751,6 +762,10 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   React.useEffect(() => {
     void loadAndroidApkInfo();
   }, [loadAndroidApkInfo]);
+
+  React.useEffect(() => {
+    void loadDesktopAppInfo();
+  }, [loadDesktopAppInfo]);
 
   React.useEffect(() => {
     void refreshAndroidSetup();
@@ -1658,6 +1673,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
             ) : (
               <div className="rounded border border-[var(--border-subtle)] bg-black/[.12] p-2 text-[10px] leading-tight text-[var(--muted)]">No setup QR</div>
             )}
+            <AppDownloadLinks androidInfo={androidApkInfo} desktopInfo={desktopAppInfo} />
           </div>
           <button type="button" className="grid min-h-[104px] w-full justify-items-center gap-[7px] rounded border border-[var(--border-subtle)] bg-white/[.025] p-3 font-display text-[10px] font-bold uppercase text-[var(--muted)] transition hover:bg-white/[.05] hover:text-[var(--fg-secondary)] disabled:pointer-events-none disabled:opacity-50" onClick={() => void createThread({ voiceEnabled: true })} disabled={busy}>
             <svg viewBox="0 0 24 24" aria-hidden="true" className="h-11 w-11 rounded-full bg-white/[.045] p-2.5 fill-none stroke-current stroke-[1.8]">
@@ -2244,6 +2260,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                   ) : (
                     <div className={assistantEmptyClass}>No Android setup QR is available.</div>
                   )}
+                  <AppDownloadLinks androidInfo={androidApkInfo} desktopInfo={desktopAppInfo} />
                 </div>
               </section>
 
@@ -3240,6 +3257,86 @@ function Metric({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(kb >= 10 ? 0 : 1)} KB`;
+  const mb = kb / 1024;
+  return `${mb.toFixed(mb >= 10 ? 0 : 1)} MB`;
+}
+
+function appDownloadMeta(info: AndroidApkInfo | DesktopAppInfo | null): string {
+  if (!info?.available) return 'Not built yet';
+  const parts = [
+    info.variant,
+    'versionName' in info ? info.versionName ?? info.versionCode : null,
+    info.size ? formatBytes(info.size) : null,
+  ].filter(Boolean);
+  return parts.join(' / ') || 'Ready';
+}
+
+function AppDownloadLinks({
+  androidInfo,
+  desktopInfo,
+  loading = false,
+}: {
+  androidInfo: AndroidApkInfo | null;
+  desktopInfo: DesktopAppInfo | null;
+  loading?: boolean;
+}) {
+  const entries = [
+    { label: 'Download desktop app', info: desktopInfo, href: desktopInfo?.available ? desktopInfo.downloadUrl : null },
+    { label: 'Download Android app', info: androidInfo, href: androidInfo?.available ? androidInfo.downloadUrl : null },
+  ];
+  return (
+    <div className="download-links" aria-label="App downloads">
+      {entries.map((entry) => {
+        const meta = loading && !entry.info ? 'Checking...' : appDownloadMeta(entry.info);
+        const content = (
+          <>
+            <span>{entry.label}</span>
+            <small>{meta}</small>
+          </>
+        );
+        return entry.href ? (
+          <a key={entry.label} className="download-link" href={entry.href}>
+            {content}
+          </a>
+        ) : (
+          <span key={entry.label} className="download-link is-disabled" aria-disabled="true">
+            {content}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+function SignedOutDownloadLinks() {
+  const [androidInfo, setAndroidInfo] = React.useState<AndroidApkInfo | null>(null);
+  const [desktopInfo, setDesktopInfo] = React.useState<DesktopAppInfo | null>(null);
+  const [loading, setLoading] = React.useState(true);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    void Promise.all([
+      fetch('/api/mobile/android').then((response) => response.ok ? response.json() : null).catch(() => null),
+      fetch('/api/desktop').then((response) => response.ok ? response.json() : null).catch(() => null),
+    ]).then(([androidData, desktopData]) => {
+      if (cancelled) return;
+      setAndroidInfo(androidData?.android ?? null);
+      setDesktopInfo(desktopData?.desktop ?? null);
+      setLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return <AppDownloadLinks androidInfo={androidInfo} desktopInfo={desktopInfo} loading={loading} />;
+}
+
 function readDesktopAuthRequest(): { requestId: string; secret: string } | null {
   const params = new URLSearchParams(window.location.search);
   const requestId = String(params.get('desktopAuthRequest') ?? '').trim();
@@ -3401,9 +3498,10 @@ function Root() {
       <SignedOut>
         <div className="signin-page">
           <div className="signin-copy">
-            <div className="kicker">Drone</div>
-            <h1>Sign in to Drone</h1>
+            <div className="kicker">Voice Stream</div>
+            <h1>Sign in to Voice Stream</h1>
             <p>Access assistant threads and paired devices from your workspace.</p>
+            <SignedOutDownloadLinks />
           </div>
           <SignIn routing="hash" />
         </div>

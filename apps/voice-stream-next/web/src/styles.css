@@ -1543,6 +1543,71 @@ pre {
   color: var(--fg-secondary);
 }
 
+.download-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.download-link {
+  display: grid;
+  min-width: min(100%, 190px);
+  min-height: 44px;
+  align-content: center;
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgba(255,255,255,.035);
+  color: var(--fg-secondary);
+  padding: 7px 10px;
+  text-decoration: none;
+  transition: border-color .16s ease, background .16s ease, color .16s ease, transform .16s ease;
+}
+
+.download-link span {
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.1;
+}
+
+.download-link small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.download-link:hover {
+  border-color: rgba(167, 139, 250, .52);
+  color: var(--fg);
+  transform: translateY(-1px);
+}
+
+.download-link.is-disabled {
+  opacity: .56;
+  pointer-events: none;
+}
+
+.assistant-dock-shell .download-links {
+  margin-top: 0;
+}
+
+.assistant-dock-shell .download-link {
+  min-width: 0;
+  flex: 1 1 150px;
+  min-height: 38px;
+  padding: 6px 8px;
+}
+
+.assistant-dock-shell .download-link span {
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
 .signin-page .kicker {
   color: var(--accent);
   letter-spacing: 0;

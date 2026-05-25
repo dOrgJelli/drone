@@ -48,6 +48,17 @@ export type AndroidApkInfo = {
   updatePayload: string | null;
 };
 
+export type DesktopAppInfo = {
+  available: boolean;
+  platform: 'desktop';
+  app: string;
+  variant: string | null;
+  fileName: string | null;
+  size: number | null;
+  builtAt: string | null;
+  downloadUrl: string | null;
+};
+
 export type AndroidSetupInfo = {
   id: string;
   expiresAt: string;
