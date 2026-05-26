@@ -7986,8 +7986,11 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
       });
       if (staleState !== 'sent') continue;
 
-      // Auto-recover stale "running forever" prompt jobs by closing the prompt tmux session.
-      // This mirrors manual unstick behavior so users do not need to unstick routine stalls.
+      // A running prompt can legitimately exceed the enqueue timeout. Do not kill
+      // active agent work here; cancellation has to preserve an explicit cause.
+      if (jobState === 'running') continue;
+
+      // Auto-recover stale queued prompt jobs by closing any leftover prompt tmux session.
       const recovered = await recoverStalePromptJobSession({ droneId, droneEntry: d, promptId: id });
       if (recovered.jobState && recovered.job) {
         job = recovered.job;
@@ -8137,9 +8140,11 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
           jobStartedAt: job?.startedAt,
           finishedAt,
         });
-        // Self-heal false failed states (daemon finalized too early) by trusting
-        // completed Codex output when it is present in the persisted job payload.
-        if (output) {
+        // Self-heal false failed states only when Codex emitted a terminal
+        // completion event. An in-flight status update is not a final answer.
+        const terminalEvent = String(parsed.terminalEvent ?? '').trim();
+        const hasCompletedTurn = terminalEvent === 'turn.completed' || terminalEvent === 'response.completed';
+        if (output && hasCompletedTurn) {
           if (parsed.threadId) {
             entry.codexThreadId = parsed.threadId;
             changed = true;

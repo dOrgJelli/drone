@@ -52,13 +52,15 @@ function parseUuid(text: string): string | null {
   return match ? match[0] : null;
 }
 
-type CodexJsonlParseResult = { threadId: string | null; message: string | null };
+type CodexTerminalEvent = 'turn.completed' | 'response.completed' | 'response.failed' | 'error';
+type CodexJsonlParseResult = { threadId: string | null; message: string | null; terminalEvent?: CodexTerminalEvent };
 type PiJsonlParseResult = { sessionId: string | null; message: string | null };
 
 function createCodexJsonlParser(): { pushLine: (line: string) => void; result: () => CodexJsonlParseResult } {
   let threadId: string | null = null;
   let lastMsg: string | null = null;
   let streamedMsg = '';
+  let terminalEvent: CodexTerminalEvent | null = null;
 
   function extractItemText(item: any): string | null {
     if (!item || typeof item !== 'object') return null;
@@ -111,6 +113,10 @@ function createCodexJsonlParser(): { pushLine: (line: string) => void; result: (
         return;
       }
       if (!obj || typeof obj !== 'object') return;
+      const type = String(obj.type ?? '').trim();
+      if (type === 'turn.completed' || type === 'response.completed' || type === 'response.failed' || type === 'error') {
+        terminalEvent = type;
+      }
       if (obj.type === 'thread.started' && typeof obj.thread_id === 'string') {
         threadId = obj.thread_id;
         return;
@@ -140,7 +146,11 @@ function createCodexJsonlParser(): { pushLine: (line: string) => void; result: (
       considerResponse(obj?.response);
     },
     result() {
-      return { threadId, message: lastMsg ?? (streamedMsg ? streamedMsg : null) };
+      return {
+        threadId,
+        message: lastMsg ?? (streamedMsg ? streamedMsg : null),
+        ...(terminalEvent ? { terminalEvent } : {}),
+      };
     },
   };
 }
@@ -228,6 +238,7 @@ export type BuiltinPromptJobTranscript =
       kind: 'codex';
       message: string | null;
       threadId: string | null;
+      terminalEvent?: CodexTerminalEvent;
       stdoutBytes?: number;
       stdoutTruncated?: boolean;
       parsedAt?: string;
@@ -271,6 +282,7 @@ export function parseBuiltinPromptJobTranscript(
       kind: 'codex',
       message: parsed.message,
       threadId: parsed.threadId,
+      ...(parsed.terminalEvent ? { terminalEvent: parsed.terminalEvent } : {}),
       ...promptJobTranscriptMeta(opts),
     };
   }
@@ -298,6 +310,7 @@ export async function parseBuiltinPromptJobTranscriptLines(
       kind: 'codex',
       message: parsed.message,
       threadId: parsed.threadId,
+      ...(parsed.terminalEvent ? { terminalEvent: parsed.terminalEvent } : {}),
       ...promptJobTranscriptMeta(opts),
     };
   }
@@ -313,13 +326,22 @@ export async function parseBuiltinPromptJobTranscriptLines(
   return null;
 }
 
-export function parseCodexJobTranscript(job: any): { threadId: string | null; message: string | null } {
+export function parseCodexJobTranscript(job: any): { threadId: string | null; message: string | null; terminalEvent?: CodexTerminalEvent } {
   const transcript = job?.transcript;
   if (transcript && typeof transcript === 'object' && String(transcript.kind ?? '').trim() === 'codex') {
     if (Object.prototype.hasOwnProperty.call(transcript, 'message')) {
+      const terminalEventRaw = String(transcript.terminalEvent ?? '').trim();
+      const terminalEvent =
+        terminalEventRaw === 'turn.completed' ||
+        terminalEventRaw === 'response.completed' ||
+        terminalEventRaw === 'response.failed' ||
+        terminalEventRaw === 'error'
+          ? terminalEventRaw
+          : undefined;
       return {
         threadId: optionalString(transcript.threadId),
         message: optionalString(transcript.message),
+        ...(terminalEvent ? { terminalEvent } : {}),
       };
     }
   }

@@ -64,16 +64,22 @@ type PromptJob = {
   stdoutPath: string;
   stderrPath: string;
   exitPath: string;
+  wrapperPath?: string;
   startedAt?: string;
   finishedAt?: string;
   exitCode?: number;
+  exitStatusSource?: 'exit-file' | 'missing-exit-file';
   stdout?: string;
   stderr?: string;
+  wrapperLog?: string;
   stdoutBytes?: number;
   stderrBytes?: number;
+  wrapperBytes?: number;
   stdoutTruncated?: boolean;
   stderrTruncated?: boolean;
+  wrapperTruncated?: boolean;
   transcript?: BuiltinPromptJobTranscript;
+  failureReason?: string;
   error?: string;
 };
 
@@ -346,6 +352,8 @@ async function startPromptJob(job: PromptJob): Promise<void> {
   const quotedStdoutPath = bashQuote(job.stdoutPath);
   const quotedStderrPath = bashQuote(job.stderrPath);
   const quotedExitPath = bashQuote(job.exitPath);
+  const wrapperPath = job.wrapperPath ?? path.join(path.dirname(job.stdoutPath), `${job.id}.wrapper.log`);
+  const quotedWrapperPath = bashQuote(wrapperPath);
   const cd = job.cwd ? `cd ${bashQuote(job.cwd)}\n` : '';
   const envLines =
     job.env && Object.keys(job.env).length > 0
@@ -355,15 +363,36 @@ async function startPromptJob(job: PromptJob): Promise<void> {
       : '';
   const script = [
     'set +e',
+    `stdout_path=${quotedStdoutPath}`,
+    `stderr_path=${quotedStderrPath}`,
+    `exit_path=${quotedExitPath}`,
+    `wrapper_path=${quotedWrapperPath}`,
+    'wrote_exit=0',
+    'printf \'%s\\n\' "prompt wrapper: started at $(date -Is) pid $$" > "$wrapper_path" 2>/dev/null || true',
+    'record_wrapper_exit() {',
+    '  wrapper_code=$?',
+    '  if [ "$wrote_exit" != "1" ]; then',
+    '    printf \'%s\\n\' "prompt wrapper: exited before command exit capture at $(date -Is) with wrapper code $wrapper_code" >> "$wrapper_path" 2>/dev/null || true',
+    '    if [ ! -e "$exit_path" ]; then',
+    '      printf %s "$wrapper_code" > "$exit_path" 2>/dev/null || true',
+    '    fi',
+    '  fi',
+    '}',
+    'trap record_wrapper_exit EXIT',
+    'trap \'printf \'\\\'\'%s\\n\'\\\'\' "prompt wrapper: received SIGHUP at $(date -Is)" >> "$wrapper_path" 2>/dev/null || true; exit 129\' HUP',
+    'trap \'printf \'\\\'\'%s\\n\'\\\'\' "prompt wrapper: received SIGINT at $(date -Is)" >> "$wrapper_path" 2>/dev/null || true; exit 130\' INT',
+    'trap \'printf \'\\\'\'%s\\n\'\\\'\' "prompt wrapper: received SIGTERM at $(date -Is)" >> "$wrapper_path" 2>/dev/null || true; exit 143\' TERM',
     cd.trimEnd(),
     envLines.trimEnd(),
     // Run and capture exit code.
     `${quotedCmd} ${quotedArgs} > ${quotedStdoutPath} 2> ${quotedStderrPath}`,
     'code=$?',
+    'printf \'%s\\n\' "prompt wrapper: command exited at $(date -Is) with code $code" >> "$wrapper_path" 2>/dev/null || true',
     `if [ "$code" -ne 0 ] && [ ! -s ${quotedStdoutPath} ] && [ ! -s ${quotedStderrPath} ]; then`,
     `  printf '%s\n' "prompt wrapper: command exited with code $code without writing stdout/stderr" >> ${quotedStderrPath}`,
     'fi',
     `printf %s \"$code\" > ${quotedExitPath}`,
+    'wrote_exit=1',
     'exit 0',
   ]
     .filter(Boolean)
@@ -409,8 +438,10 @@ async function finalizePromptJob(job: PromptJob): Promise<PromptJob> {
   let exitCode = await readIntSafe(job.exitPath);
   let stdoutRead = await readTextSafeDetailed(job.stdoutPath);
   let stderrRead = await readTextSafeDetailed(job.stderrPath);
+  let wrapperRead = await readTextSafeDetailed(job.wrapperPath ?? path.join(path.dirname(job.stdoutPath), `${job.id}.wrapper.log`));
   let stdout = stdoutRead.text;
   let stderr = stderrRead.text;
+  let wrapperLog = wrapperRead.text;
 
   const startedLikeCodexTurn =
     /"type":"thread\.started"/.test(stdoutRead.text) &&
@@ -445,8 +476,10 @@ async function finalizePromptJob(job: PromptJob): Promise<PromptJob> {
       exitCode = await readIntSafe(job.exitPath);
       stdoutRead = await readTextSafeDetailed(job.stdoutPath);
       stderrRead = await readTextSafeDetailed(job.stderrPath);
+      wrapperRead = await readTextSafeDetailed(job.wrapperPath ?? path.join(path.dirname(job.stdoutPath), `${job.id}.wrapper.log`));
       stdout = stdoutRead.text;
       stderr = stderrRead.text;
+      wrapperLog = wrapperRead.text;
       const codexNowTerminal =
         /"type":"turn\.completed"/.test(stdoutRead.text) ||
         /"type":"response\.completed"/.test(stdoutRead.text) ||
@@ -460,20 +493,32 @@ async function finalizePromptJob(job: PromptJob): Promise<PromptJob> {
   const ok = exitCode === 0;
   const finishedAt = nowIso();
   const transcript = await parsePromptJobTranscriptFromFile(job, stdoutRead, finishedAt);
+  const exitStatusSource = exitCode == null ? 'missing-exit-file' : 'exit-file';
+  const failureReason =
+    ok
+      ? undefined
+      : exitCode == null
+        ? 'prompt wrapper ended without writing an exit code; the tmux session may have been killed or the wrapper terminated before command exit capture'
+        : undefined;
   return {
     ...job,
     updatedAt: finishedAt,
     finishedAt,
     exitCode: exitCode ?? undefined,
+    exitStatusSource,
     stdout,
     stderr,
+    wrapperLog,
     stdoutBytes: stdoutRead.bytes,
     stderrBytes: stderrRead.bytes,
+    wrapperBytes: wrapperRead.bytes,
     stdoutTruncated: stdoutRead.truncated,
     stderrTruncated: stderrRead.truncated,
+    wrapperTruncated: wrapperRead.truncated,
     ...(transcript ? { transcript } : {}),
     state: ok ? 'done' : 'failed',
-    error: ok ? undefined : (stderr.trim() || stdout.trim() || job.error || 'failed'),
+    failureReason,
+    error: ok ? undefined : (failureReason || stderr.trim() || stdout.trim() || job.error || 'failed'),
   };
 }
 
@@ -481,16 +526,20 @@ async function refreshPromptJobTranscript(job: PromptJob): Promise<PromptJob> {
   if (!promptJobSupportsTranscript(job.kind)) return job;
   const stdoutRead = await readTextSafeDetailed(job.stdoutPath);
   const stderrRead = await readTextSafeDetailed(job.stderrPath);
+  const wrapperRead = await readTextSafeDetailed(job.wrapperPath ?? path.join(path.dirname(job.stdoutPath), `${job.id}.wrapper.log`));
   const nextTranscript = await parsePromptJobTranscriptFromFile(job, stdoutRead, nowIso());
   if (!nextTranscript) return job;
   return {
     ...job,
     stdout: stdoutRead.text,
     stderr: stderrRead.text,
+    wrapperLog: wrapperRead.text,
     stdoutBytes: stdoutRead.bytes,
     stderrBytes: stderrRead.bytes,
+    wrapperBytes: wrapperRead.bytes,
     stdoutTruncated: stdoutRead.truncated,
     stderrTruncated: stderrRead.truncated,
+    wrapperTruncated: wrapperRead.truncated,
     transcript: nextTranscript,
   };
 }
@@ -1360,6 +1409,7 @@ async function main() {
         const stdoutPath = path.join(promptOutDir, `${id}.stdout.txt`);
         const stderrPath = path.join(promptOutDir, `${id}.stderr.txt`);
         const exitPath = path.join(promptOutDir, `${id}.exit.txt`);
+        const wrapperPath = path.join(promptOutDir, `${id}.wrapper.log`);
 
         const createdAt = nowIso();
         const job: PromptJob = {
@@ -1376,6 +1426,7 @@ async function main() {
           stdoutPath,
           stderrPath,
           exitPath,
+          wrapperPath,
         };
         await savePromptJob(promptsDir, job);
         const idx = await loadPromptIndex(promptsDir);

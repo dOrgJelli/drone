@@ -149,6 +149,8 @@ console.log(JSON.stringify({ type: 'turn.completed' }));
       expect(enqueue.status).toBe(202);
 
       const job = await waitForPromptJob(baseUrl, token, id);
+      expect(job.exitStatusSource).toBe('exit-file');
+      expect(String(job.wrapperLog ?? '')).toContain('prompt wrapper: command exited');
       expect(job.stdoutTruncated).toBe(true);
       expect(job.stdoutBytes).toBeGreaterThan(2 * 1024 * 1024);
       expect(String(job.stdout ?? '')).toContain('Interim status.');
@@ -158,6 +160,7 @@ console.log(JSON.stringify({ type: 'turn.completed' }));
         kind: 'codex',
         threadId: '019e1922-047b-74b1-bab8-0eaceadf4062',
         message: 'Final report.',
+        terminalEvent: 'turn.completed',
         stdoutTruncated: true,
       });
       expect(job.transcript.stdoutBytes).toBe(job.stdoutBytes);
