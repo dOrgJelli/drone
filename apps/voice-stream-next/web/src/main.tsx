@@ -299,7 +299,7 @@ function AssistantMessageRow({ message, streaming = false }: { message: Assistan
   return (
     <article
       className={cn(
-        'w-full px-5 py-3 text-[13px] leading-relaxed',
+        'w-full px-3 py-2 text-[13px] leading-relaxed',
         message.role === 'user' && 'border-y border-[var(--border-subtle)] bg-[rgba(255,255,255,.025)] text-[var(--fg-secondary)]',
         message.role === 'assistant' && 'text-[var(--fg)]',
         message.role === 'system' && 'bg-[rgba(255,255,255,.018)] text-[var(--fg-secondary)]',
@@ -307,7 +307,7 @@ function AssistantMessageRow({ message, streaming = false }: { message: Assistan
         streaming && 'assistant-streaming-message',
       )}
     >
-      <div className="mb-1.5 font-display text-[10px] font-semibold uppercase tracking-normal text-[var(--muted-dim)]">{messageRoleLabel(message)}</div>
+      <div className="mb-1 font-display text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]">{messageRoleLabel(message)}</div>
       {hasStructuredContent ? (
         parts.map((part, index) => {
           if (part.type === 'thinking') return <ReasoningBlock key={index} text={String(part.thinking ?? '')} streaming={streaming && index === parts.length - 1} />;
@@ -321,64 +321,89 @@ function AssistantMessageRow({ message, streaming = false }: { message: Assistan
   );
 }
 
-function ToolActivityMessage({ call, result }: { call?: AssistantToolCall; result?: AssistantMessage }) {
+function ToolDisclosure({
+  title,
+  status,
+  children,
+}: {
+  title: string;
+  status?: 'ok' | 'error';
+  children: React.ReactNode;
+}) {
   const [open, setOpen] = React.useState(false);
-  const resultText = messageText(result);
-  const title = toolLabel(call?.name || result?.toolName || undefined);
-  const status = result ? (result.isError ? 'error' : 'done') : 'pending';
   return (
-    <div
-      className={cn(
-        'mx-5 my-3 overflow-hidden rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.018)] text-[var(--fg-secondary)]',
-        status === 'error' && 'border-[rgba(248,113,113,.22)]',
-      )}
-    >
+    <div className={cn('rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)]', status === 'error' && 'border-[rgba(248,113,113,.22)]')}>
       <button
         type="button"
-        className="flex min-h-[38px] w-full min-w-0 items-center gap-2 border-0 bg-transparent px-3 py-2 text-left font-display text-[10px] font-semibold uppercase tracking-normal text-[var(--muted)] hover:bg-[rgba(255,255,255,.025)] hover:text-[var(--fg-secondary)]"
         onClick={() => setOpen((value) => !value)}
+        className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)] hover:bg-[rgba(255,255,255,.025)] hover:text-[var(--fg-secondary)]"
+        style={{ fontFamily: 'var(--display)' }}
+        aria-expanded={open}
       >
-        {result ? (
+        {status ? (
           <span
-            className={cn(
-              'inline-flex h-3 w-3 shrink-0 items-center justify-center rounded-full text-[#071015]',
-              result.isError ? 'bg-[#f87171]' : 'bg-[#4ade80]',
-            )}
+            className={`inline-flex h-3 w-3 flex-shrink-0 items-center justify-center rounded-full ${
+              status === 'error' ? 'bg-[var(--red)] text-[var(--bg)]' : 'bg-[var(--green)] text-[var(--bg)]'
+            }`}
           >
-            {result.isError ? <span className="h-1.5 w-1.5 rounded-full bg-current" /> : <ToolCheckIcon />}
+            {status === 'error' ? <span className="h-1.5 w-1.5 rounded-full bg-current" /> : <ToolCheckIcon className="h-2.5 w-2.5" />}
           </span>
         ) : null}
         <span className="min-w-0 flex-1 truncate">{title}</span>
       </button>
-      {open ? (
-        <div className="grid gap-2 border-t border-[var(--border-subtle)] px-3 py-2.5">
-          {call ? (
-            <div>
-              <div className="font-display text-[10px] font-bold uppercase tracking-normal text-[var(--muted-dim)]">Arguments</div>
-              <pre className="mt-1.5 max-h-32 overflow-auto whitespace-pre-wrap break-words rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.14)] p-2 font-mono text-[11px] leading-normal text-[var(--fg-secondary)]">{JSON.stringify(call.args ?? {}, null, 2)}</pre>
-            </div>
-          ) : null}
-          {result ? (
-            <div className={call ? 'border-t border-[var(--border-subtle)] pt-2' : ''}>
-              <div className="font-display text-[10px] font-bold uppercase tracking-normal text-[var(--muted-dim)]">Result</div>
-              {resultText ? (
-                <pre className="mt-1.5 max-h-32 overflow-auto whitespace-pre-wrap break-words rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.14)] p-2 font-mono text-[11px] leading-normal text-[var(--fg-secondary)]">{resultText}</pre>
-              ) : (
-                <div className="text-[11px] leading-normal text-[var(--muted-dim)]">No result payload.</div>
-              )}
-            </div>
-          ) : (
-            <div className={cn('text-[11px] leading-normal text-[var(--muted-dim)]', call && 'border-t border-[var(--border-subtle)] pt-2')}>Waiting for result...</div>
-          )}
-        </div>
-      ) : null}
+      {open ? <div className="border-t border-[var(--border-subtle)] px-2 py-1.5">{children}</div> : null}
     </div>
   );
 }
 
-function ToolCheckIcon() {
+function ToolPayloadDetails({ call, result }: { call?: AssistantToolCall; result?: AssistantMessage }) {
+  const resultText = result ? messageText(result) : '';
   return (
-    <svg className="h-2.5 w-2.5 shrink-0" width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <>
+      {call ? (
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+            Arguments
+          </div>
+          <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-words text-[10px] text-[var(--muted-dim)]">
+            {JSON.stringify(call.args, null, 2)}
+          </pre>
+        </div>
+      ) : null}
+      {result ? (
+        <div className={call ? 'mt-2 border-t border-[var(--border-subtle)] pt-2' : ''}>
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+            Result
+          </div>
+          {resultText ? (
+            <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-words text-[11px] text-[var(--fg-secondary)]">{resultText}</pre>
+          ) : (
+            <div className="mt-1 text-[11px] text-[var(--muted-dim)]">No result payload.</div>
+          )}
+        </div>
+      ) : (
+        <div className={call ? 'mt-2 border-t border-[var(--border-subtle)] pt-2 text-[11px] text-[var(--muted-dim)]' : 'text-[11px] text-[var(--muted-dim)]'}>
+          Waiting for result...
+        </div>
+      )}
+    </>
+  );
+}
+
+function ToolActivityMessage({ call, result }: { call?: AssistantToolCall; result?: AssistantMessage }) {
+  const title = toolLabel(call?.name || result?.toolName || undefined);
+  return (
+    <div className="mx-3">
+      <ToolDisclosure title={title} status={result ? (result.isError ? 'error' : 'ok') : undefined}>
+        <ToolPayloadDetails call={call} result={result} />
+      </ToolDisclosure>
+    </div>
+  );
+}
+
+function ToolCheckIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M2 5.2l2 2 4-4.4" />
     </svg>
   );
@@ -396,8 +421,8 @@ function ThinkingPulseDots() {
 
 function AssistantThinkingRow() {
   return (
-    <div className="w-full px-5 py-3" role="status" aria-label="Assistant is thinking">
-      <div className="mb-1.5 font-display text-[10px] font-semibold uppercase tracking-normal text-[var(--muted-dim)]">Assistant</div>
+    <div className="w-full px-3 py-2" role="status" aria-label="Assistant is thinking">
+      <div className="mb-1 font-display text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]">Assistant</div>
       <ThinkingPulseDots />
     </div>
   );
@@ -408,6 +433,7 @@ const ASSISTANT_TOOL_CATEGORY_LABELS: Record<string, string> = {
   speech: 'Speech',
   prompts: 'Prompts',
   settings: 'Settings',
+  web: 'Web',
 };
 
 function AssistantToolsPanel({
@@ -546,6 +572,8 @@ type AssistantPromptEvent =
   | { type: 'delta'; delta: string }
   | { type: 'thinking_delta'; delta: string }
   | { type: 'message'; message: AssistantMessage }
+  | { type: 'tool_call'; [key: string]: unknown }
+  | { type: 'tool_result'; [key: string]: unknown }
   | { type: 'approval_pending'; snapshot: AssistantSnapshot }
   | { type: 'done'; snapshot: AssistantSnapshot }
   | { type: 'error'; error: string; snapshot?: AssistantSnapshot }
@@ -625,6 +653,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   const [threadTitleDraft, setThreadTitleDraft] = React.useState('');
   const [codexConnectFlow, setCodexConnectFlow] = React.useState<{ state: string; authorizationUrl: string; redirectUri: string; expiresAt: string } | null>(null);
   const [codexCodeDraft, setCodexCodeDraft] = React.useState('');
+  const [apiKeyDrafts, setApiKeyDrafts] = React.useState<Record<'openai' | 'exa', string>>({ openai: '', exa: '' });
   const [deviceName, setDeviceName] = React.useState('Android voice client');
   const [deviceType, setDeviceType] = React.useState('android');
   const [androidApkInfo, setAndroidApkInfo] = React.useState<AndroidApkInfo | null>(null);
@@ -973,6 +1002,10 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
         }
         if (promptEvent.type === 'message' && promptEvent.message) {
           setMessages((current) => upsertMessage(current, promptEvent.message as AssistantMessage));
+          return;
+        }
+        if (promptEvent.type === 'tool_call' || promptEvent.type === 'tool_result') {
+          void loadMessages(activeThread.id);
           return;
         }
         if ((promptEvent.type === 'snapshot' || promptEvent.type === 'approval_pending' || promptEvent.type === 'queued' || promptEvent.type === 'done') && promptEvent.snapshot) {
@@ -1350,6 +1383,43 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
       );
       setAssistantSnapshotData(data.snapshot);
       setNotice('Saved assistant settings.');
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveAssistantApiKey(provider: 'openai' | 'exa') {
+    const apiKey = apiKeyDrafts[provider].trim();
+    if (!apiKey) {
+      setError('API key is required.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await client.request<{ ok: true; snapshot: AssistantSnapshot }>(`/api/assistant/keys/${provider}`, {
+        method: 'POST',
+        body: JSON.stringify({ apiKey }),
+      });
+      setAssistantSnapshotData(data.snapshot);
+      setApiKeyDrafts((current) => ({ ...current, [provider]: '' }));
+      setNotice(`Saved ${provider === 'openai' ? 'OpenAI' : 'Exa'} key.`);
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteAssistantApiKey(provider: 'openai' | 'exa') {
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await client.request<{ ok: true; snapshot: AssistantSnapshot }>(`/api/assistant/keys/${provider}`, { method: 'DELETE' });
+      setAssistantSnapshotData(data.snapshot);
+      setNotice(`Deleted ${provider === 'openai' ? 'OpenAI' : 'Exa'} key.`);
     } catch (err: any) {
       setError(err?.message ?? String(err));
     } finally {
@@ -2201,7 +2271,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
           {activeView === 'threads' ? (
             <section className="flex h-full min-h-0 flex-col">
               {activeThread?.error ? (
-                <div className="grid shrink-0 gap-1 border-b border-[rgba(248,113,113,.24)] bg-[rgba(248,113,113,.08)] px-5 py-3 text-[var(--fg-secondary)]">
+                <div className="grid shrink-0 gap-1 border-b border-[rgba(248,113,113,.24)] bg-[rgba(248,113,113,.08)] px-3 py-2 text-[var(--fg-secondary)]">
                   <strong className="text-[11px] text-[#fecaca]">Assistant error</strong>
                   <span className="break-words text-xs leading-relaxed">{activeThread.error}</span>
                 </div>
@@ -2242,7 +2312,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                 />
               ) : (
                 <>
-                <div className="flex min-h-0 flex-1 flex-col gap-0 overflow-auto bg-[#151a20] py-4">
+                <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto bg-[#151a20] py-3">
                   {assistantRenderItems.map((item) =>
                     item.type === 'message' ? (
                       <AssistantMessageRow key={item.key} message={item.message} streaming={item.message.id === streamingMessage?.id} />
@@ -2252,7 +2322,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                   )}
                   {showThinking ? <AssistantThinkingRow /> : null}
                   {queuedPrompts.length > 0 ? (
-                    <div className="mx-5 my-3 grid max-h-[220px] gap-1.5 overflow-auto">
+                    <div className="mx-3 grid max-h-[220px] gap-1.5 overflow-auto">
                       {queuedPrompts.map((queuedPrompt) => (
                         <article key={queuedPrompt.id} className="flex min-w-0 items-center justify-between gap-2.5 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.018)] px-2.5 py-2">
                           <div className="min-w-0">
@@ -2272,7 +2342,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                     </div>
                   ) : null}
                   {activePendingApprovals.length > 0 ? (
-                    <div className="mx-5 my-3 grid gap-1.5">
+                    <div className="mx-3 grid gap-1.5">
                       {activePendingApprovals.map((approval) => {
                         const summary = approvalSummary(approval);
                         return (
@@ -2475,6 +2545,43 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                     <div className={assistantEmptyClass}>No Android setup QR is available.</div>
                   )}
                   <AppDownloadLinks androidInfo={androidApkInfo} desktopInfo={desktopAppInfo} />
+                </div>
+              </section>
+
+              <section className={assistantPanelClass}>
+                <div className={assistantPanelHeaderClass}>
+                  <div>
+                    <span className={assistantKickerClass}>Assistant</span>
+                    <h2 className={assistantPanelTitleClass}>API Keys</h2>
+                  </div>
+                </div>
+                <div className="grid gap-2">
+                  {(['openai', 'exa'] as const).map((provider) => {
+                    const key = assistantSnapshotData?.apiKeys?.[provider];
+                    const label = provider === 'openai' ? 'OpenAI' : 'Exa';
+                    return (
+                      <div key={provider} className="grid grid-cols-[120px_minmax(180px,1fr)_auto_auto] items-center gap-2 rounded border border-[var(--border)] bg-white/[.02] p-2 max-[880px]:grid-cols-1">
+                        <div className="min-w-0">
+                          <strong className="block text-xs text-[var(--fg)]">{label}</strong>
+                          <small className="block truncate text-[11px] text-[var(--muted)]">{key?.hasKey ? key.keyHint : 'Not configured'}</small>
+                        </div>
+                        <input
+                          type="password"
+                          value={apiKeyDrafts[provider]}
+                          disabled={busy}
+                          placeholder={key?.hasKey ? 'Paste replacement key' : `Paste ${label} key`}
+                          onChange={(event) => setApiKeyDrafts((current) => ({ ...current, [provider]: event.currentTarget.value }))}
+                          className="h-[30px] min-w-0"
+                        />
+                        <button type="button" className={assistantActionButtonClass} onClick={() => void saveAssistantApiKey(provider)} disabled={busy || !apiKeyDrafts[provider].trim()}>
+                          Save
+                        </button>
+                        <button type="button" className={assistantActionButtonClass} onClick={() => void deleteAssistantApiKey(provider)} disabled={busy || !key?.hasKey}>
+                          Delete
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
               </section>
 
