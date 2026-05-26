@@ -49,7 +49,7 @@ object AssistantAudioPlayer {
                     val next = synchronized(lock) { queue.poll() } ?: break
                     runCatching {
                         val attributes = AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
                             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                             .build()
                         try {
@@ -97,10 +97,10 @@ object AssistantAudioPlayer {
             .build()
         activeTrack = track
         try {
-            ClientLog.i("AssistantAudio", "Playing assistant audio wavBytes=${next.wav.size} pcmBytes=${audio.pcm.size} sampleRate=${audio.sampleRateHz} channels=${audio.channels} durationMs=${audio.durationMs}")
+            ClientLog.i("AssistantAudio", "Playing assistant audio wavBytes=${next.wav.size} pcmBytes=${audio.pcm.size} sampleRate=${audio.sampleRateHz} channels=${audio.channels} durationMs=${audio.durationMs} ${audioRouteSummary(next.context)}")
             next.onStatus?.invoke("Playing assistant audio.")
-            track.play()
             track.setVolume(AudioTrack.getMaxVolume())
+            track.play()
             var offset = 0
             while (offset < audio.pcm.size) {
                 if (playbackGeneration != generation.get()) return
@@ -138,7 +138,7 @@ object AssistantAudioPlayer {
             player.setDataSource(file.absolutePath)
             player.prepare()
             val durationMs = player.duration.takeIf { it > 0 }?.toLong() ?: 0L
-            ClientLog.i("AssistantAudio", "Playing assistant audio with MediaPlayer bytes=${next.wav.size} signature=${signature(next.wav)} durationMs=$durationMs")
+            ClientLog.i("AssistantAudio", "Playing assistant audio with MediaPlayer bytes=${next.wav.size} signature=${signature(next.wav)} durationMs=$durationMs ${audioRouteSummary(next.context)}")
             next.onStatus?.invoke("Playing assistant audio.")
             player.start()
             while (playbackGeneration == generation.get()) {
@@ -195,7 +195,7 @@ object AssistantAudioPlayer {
 
     private fun requestAudioFocus(context: Context, attributes: AudioAttributes): AudioFocusRequest? {
         val audioManager = context.getSystemService(AudioManager::class.java) ?: return null
-        val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+        val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
             .setAudioAttributes(attributes)
             .setAcceptsDelayedFocusGain(false)
             .setOnAudioFocusChangeListener { }
@@ -205,6 +205,15 @@ object AssistantAudioPlayer {
             ClientLog.w("AssistantAudio", "Assistant audio focus not granted result=$result")
         }
         return request
+    }
+
+    private fun audioRouteSummary(context: Context): String {
+        val audioManager = context.getSystemService(AudioManager::class.java) ?: return "audioManager=missing"
+        return runCatching {
+            val volume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+            val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            "mode=${audioManager.mode} musicVolume=$volume/$maxVolume speaker=${audioManager.isSpeakerphoneOn} bluetoothSco=${audioManager.isBluetoothScoOn}"
+        }.getOrDefault("audioRoute=unavailable")
     }
 
     private fun abandonAudioFocus(context: Context, request: AudioFocusRequest?) {
@@ -231,8 +240,10 @@ object AssistantAudioPlayer {
                 var channels = 0
                 var sampleRateHz = 0
                 var bitsPerSample = 0
+                var blockAlign = 0
                 var format = 0
-                var pcm: ByteArray? = null
+                var formatLabel = "unknown"
+                var data: ByteArray? = null
                 while (offset + 8 <= wav.size) {
                     val chunkId = ascii(wav, offset, 4)
                     val chunkSize = readUInt32Le(wav, offset + 4)
@@ -244,19 +255,103 @@ object AssistantAudioPlayer {
                             format = readUInt16Le(wav, dataStart)
                             channels = readUInt16Le(wav, dataStart + 2)
                             sampleRateHz = readUInt32Le(wav, dataStart + 4)
+                            blockAlign = readUInt16Le(wav, dataStart + 12)
                             bitsPerSample = readUInt16Le(wav, dataStart + 14)
+                            if (format == WAVE_FORMAT_EXTENSIBLE && dataStart + 40 <= dataEnd) {
+                                format = readUInt16Le(wav, dataStart + 24)
+                                formatLabel = "extensible:$format"
+                            } else {
+                                formatLabel = format.toString()
+                            }
                         }
-                        "data" -> pcm = wav.copyOfRange(dataStart, dataEnd)
+                        "data" -> data = wav.copyOfRange(dataStart, dataEnd)
                     }
                     offset = dataEnd + (chunkSize % 2)
                 }
-                require(format == 1 && (channels == 1 || channels == 2) && sampleRateHz > 0 && bitsPerSample == 16)
-                return WavPcm(requireNotNull(pcm), sampleRateHz, channels, bitsPerSample)
+                val input = requireNotNull(data) { "WAV missing data chunk" }
+                val converted = convertToPcm16(input, format, channels, sampleRateHz, bitsPerSample, blockAlign)
+                ClientLog.i(
+                    "AssistantAudio",
+                    "Parsed WAV format=$formatLabel inputChannels=$channels outputChannels=${converted.channels} sampleRate=$sampleRateHz bits=$bitsPerSample inputBytes=${input.size} outputBytes=${converted.pcm.size}"
+                )
+                return converted
             }
 
             private fun ascii(bytes: ByteArray, offset: Int, length: Int): String = String(bytes, offset, length, Charsets.US_ASCII)
             private fun readUInt16Le(bytes: ByteArray, offset: Int): Int = (bytes[offset].toInt() and 0xff) or ((bytes[offset + 1].toInt() and 0xff) shl 8)
             private fun readUInt32Le(bytes: ByteArray, offset: Int): Int = (bytes[offset].toInt() and 0xff) or ((bytes[offset + 1].toInt() and 0xff) shl 8) or ((bytes[offset + 2].toInt() and 0xff) shl 16) or ((bytes[offset + 3].toInt() and 0xff) shl 24)
+            private fun readInt32Le(bytes: ByteArray, offset: Int): Int = readUInt32Le(bytes, offset)
+            private fun readInt64Le(bytes: ByteArray, offset: Int): Long {
+                var value = 0L
+                for (index in 0 until 8) {
+                    value = value or ((bytes[offset + index].toLong() and 0xffL) shl (8 * index))
+                }
+                return value
+            }
+
+            private fun convertToPcm16(
+                input: ByteArray,
+                format: Int,
+                channels: Int,
+                sampleRateHz: Int,
+                bitsPerSample: Int,
+                blockAlign: Int,
+            ): WavPcm {
+                require(channels > 0) { "WAV has no channels" }
+                require(sampleRateHz > 0) { "WAV has no sample rate" }
+                require(bitsPerSample == 8 || bitsPerSample == 16 || bitsPerSample == 24 || bitsPerSample == 32 || bitsPerSample == 64) {
+                    "Unsupported WAV bit depth $bitsPerSample"
+                }
+                require(format == WAVE_FORMAT_PCM || format == WAVE_FORMAT_IEEE_FLOAT) { "Unsupported WAV format $format" }
+                val bytesPerSample = bitsPerSample / 8
+                val frameBytes = blockAlign.takeIf { it > 0 } ?: channels * bytesPerSample
+                require(frameBytes >= channels * bytesPerSample) { "Invalid WAV block align $blockAlign" }
+                val outputChannels = if (channels == 1) 1 else 2
+                val frames = input.size / frameBytes
+                val output = ByteArray(frames * outputChannels * 2)
+                var outputOffset = 0
+                for (frame in 0 until frames) {
+                    val frameOffset = frame * frameBytes
+                    for (channel in 0 until outputChannels) {
+                        val inputChannel = channel.coerceAtMost(channels - 1)
+                        val sampleOffset = frameOffset + inputChannel * bytesPerSample
+                        val sample = readSample16(input, sampleOffset, format, bitsPerSample)
+                        output[outputOffset] = (sample and 0xff).toByte()
+                        output[outputOffset + 1] = ((sample shr 8) and 0xff).toByte()
+                        outputOffset += 2
+                    }
+                }
+                return WavPcm(output, sampleRateHz, outputChannels, 16)
+            }
+
+            private fun readSample16(bytes: ByteArray, offset: Int, format: Int, bitsPerSample: Int): Int {
+                return if (format == WAVE_FORMAT_IEEE_FLOAT) {
+                    val value = when (bitsPerSample) {
+                        32 -> java.lang.Float.intBitsToFloat(readInt32Le(bytes, offset)).toDouble()
+                        64 -> java.lang.Double.longBitsToDouble(readInt64Le(bytes, offset))
+                        else -> throw IllegalArgumentException("Unsupported float WAV bit depth $bitsPerSample")
+                    }.coerceIn(-1.0, 1.0)
+                    (value * 32767.0).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                } else {
+                    when (bitsPerSample) {
+                        8 -> ((bytes[offset].toInt() and 0xff) - 128) shl 8
+                        16 -> readUInt16Le(bytes, offset).toShort().toInt()
+                        24 -> {
+                            var value = (bytes[offset].toInt() and 0xff) or
+                                ((bytes[offset + 1].toInt() and 0xff) shl 8) or
+                                ((bytes[offset + 2].toInt() and 0xff) shl 16)
+                            if ((value and 0x800000) != 0) value = value or -0x1000000
+                            (value shr 8).coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                        }
+                        32 -> (readInt32Le(bytes, offset) shr 16).coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                        else -> throw IllegalArgumentException("Unsupported PCM WAV bit depth $bitsPerSample")
+                    }
+                }
+            }
+
+            private const val WAVE_FORMAT_PCM = 1
+            private const val WAVE_FORMAT_IEEE_FLOAT = 3
+            private const val WAVE_FORMAT_EXTENSIBLE = 0xfffe
         }
     }
 }

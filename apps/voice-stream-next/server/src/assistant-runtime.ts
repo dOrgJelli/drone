@@ -1,4 +1,4 @@
-import { pcm16ToWav } from './wav.js';
+import { normalizeWavChunkSizes, pcm16ToWav } from './wav.js';
 
 export type RuntimeResult = {
   text: string;
@@ -114,7 +114,7 @@ export async function synthesizeSpeech(text: string): Promise<{ audio: Uint8Arra
   if (!response.ok) await parseProviderJsonResponse(response, 'GROQ TTS');
   return {
     provider: 'groq',
-    audio: new Uint8Array(await response.arrayBuffer()),
+    audio: normalizeWavChunkSizes(new Uint8Array(await response.arrayBuffer())),
   };
 }
 

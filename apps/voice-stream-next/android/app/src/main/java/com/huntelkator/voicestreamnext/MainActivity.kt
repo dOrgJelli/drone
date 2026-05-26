@@ -124,14 +124,15 @@ class MainActivity : ComponentActivity() {
         api = VoiceStreamApi(applicationContext)
         browserAuth = BrowserAuthCoordinator(api, browserAuthCallbacks())
         DiagnosticsUploader.upload(applicationContext, api, "activity-start", force = true)
-        configureSystemBars()
+        runCatching { configureSystemBars() }.onFailure { error ->
+            ClientLog.w("Activity", "System bar configuration failed", error)
+        }
         buildUi()
         loadConfigIntoForm()
         updateSessionUi(SessionMode.OFF, "Ready")
         renderAuthState()
         if (api.pairedDeviceId().isNotBlank()) {
             refreshDashboard()
-            checkForAppUpdate(force = true)
         }
     }
 
@@ -149,7 +150,6 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         resyncServiceStatus()
-        checkForAppUpdate(force = false)
     }
 
     override fun onStop() {
@@ -437,12 +437,10 @@ class MainActivity : ComponentActivity() {
         if (api.pairedDeviceId().isNotBlank() && api.pairedDeviceToken().isNotBlank()) {
             val displayName = api.pairedDeviceDisplayName().ifBlank { "this phone" }
             showStatus("Connected as $displayName.")
-            checkForAppUpdate(force = false)
             return@runApi
         }
         val dashboard = api.dashboard()
         showStatus("Connected as ${dashboard.displayName}.")
-        checkForAppUpdate(force = false)
     }
 
     private fun pairDevice() {
@@ -692,9 +690,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun resyncServiceStatus() {
-        startService(Intent(this, VoiceSessionService::class.java).apply {
-            action = Constants.ACTION_QUERY_STATUS
-        })
+        runCatching {
+            startService(Intent(this, VoiceSessionService::class.java).apply {
+                action = Constants.ACTION_QUERY_STATUS
+            })
+        }.onFailure { error ->
+            ClientLog.w("Activity", "Service status query failed", error)
+        }
     }
 
     private fun startVoiceSession(target: String = Constants.STREAM_TARGET_ASSISTANT, playCue: Boolean = true) {
@@ -915,18 +917,21 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun currentVersionCode(): Long {
-        val packageInfo = packageManager.getPackageInfo(packageName, 0)
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            packageInfo.longVersionCode
-        } else {
-            @Suppress("DEPRECATION")
-            packageInfo.versionCode.toLong()
-        }
+        return runCatching {
+            val packageInfo = packageManager.getPackageInfo(packageName, 0)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                packageInfo.longVersionCode
+            } else {
+                @Suppress("DEPRECATION")
+                packageInfo.versionCode.toLong()
+            }
+        }.getOrDefault(BuildConfig.VERSION_CODE.toLong())
     }
 
     private fun currentVersionLabel(): String {
-        val packageInfo = packageManager.getPackageInfo(packageName, 0)
-        val versionName = packageInfo.versionName?.takeIf { it.isNotBlank() } ?: "unknown"
+        val versionName = runCatching {
+            packageManager.getPackageInfo(packageName, 0).versionName?.takeIf { it.isNotBlank() }
+        }.getOrNull() ?: BuildConfig.VERSION_NAME
         return "$versionName (versionCode ${currentVersionCode()})"
     }
 
