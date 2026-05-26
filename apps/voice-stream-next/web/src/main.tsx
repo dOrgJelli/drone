@@ -299,7 +299,7 @@ function AssistantMessageRow({ message, streaming = false }: { message: Assistan
   return (
     <article
       className={cn(
-        'w-full px-5 py-3 text-[13px] leading-relaxed',
+        'w-full px-3 py-2 text-[13px] leading-relaxed',
         message.role === 'user' && 'border-y border-[var(--border-subtle)] bg-[rgba(255,255,255,.025)] text-[var(--fg-secondary)]',
         message.role === 'assistant' && 'text-[var(--fg)]',
         message.role === 'system' && 'bg-[rgba(255,255,255,.018)] text-[var(--fg-secondary)]',
@@ -307,7 +307,7 @@ function AssistantMessageRow({ message, streaming = false }: { message: Assistan
         streaming && 'assistant-streaming-message',
       )}
     >
-      <div className="mb-1.5 font-display text-[10px] font-semibold uppercase tracking-normal text-[var(--muted-dim)]">{messageRoleLabel(message)}</div>
+      <div className="mb-1 font-display text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]">{messageRoleLabel(message)}</div>
       {hasStructuredContent ? (
         parts.map((part, index) => {
           if (part.type === 'thinking') return <ReasoningBlock key={index} text={String(part.thinking ?? '')} streaming={streaming && index === parts.length - 1} />;
@@ -332,7 +332,7 @@ function ToolDisclosure({
 }) {
   const [open, setOpen] = React.useState(false);
   return (
-    <div className="rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)]">
+    <div className={cn('rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)]', status === 'error' && 'border-[rgba(248,113,113,.22)]')}>
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
@@ -421,8 +421,8 @@ function ThinkingPulseDots() {
 
 function AssistantThinkingRow() {
   return (
-    <div className="w-full px-5 py-3" role="status" aria-label="Assistant is thinking">
-      <div className="mb-1.5 font-display text-[10px] font-semibold uppercase tracking-normal text-[var(--muted-dim)]">Assistant</div>
+    <div className="w-full px-3 py-2" role="status" aria-label="Assistant is thinking">
+      <div className="mb-1 font-display text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]">Assistant</div>
       <ThinkingPulseDots />
     </div>
   );
@@ -2232,7 +2232,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
           {activeView === 'threads' ? (
             <section className="flex h-full min-h-0 flex-col">
               {activeThread?.error ? (
-                <div className="grid shrink-0 gap-1 border-b border-[rgba(248,113,113,.24)] bg-[rgba(248,113,113,.08)] px-5 py-3 text-[var(--fg-secondary)]">
+                <div className="grid shrink-0 gap-1 border-b border-[rgba(248,113,113,.24)] bg-[rgba(248,113,113,.08)] px-3 py-2 text-[var(--fg-secondary)]">
                   <strong className="text-[11px] text-[#fecaca]">Assistant error</strong>
                   <span className="break-words text-xs leading-relaxed">{activeThread.error}</span>
                 </div>
@@ -2273,7 +2273,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                 />
               ) : (
                 <>
-                <div className="flex min-h-0 flex-1 flex-col gap-0 overflow-auto bg-[#151a20] py-4">
+                <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto bg-[#151a20] py-3">
                   {assistantRenderItems.map((item) =>
                     item.type === 'message' ? (
                       <AssistantMessageRow key={item.key} message={item.message} streaming={item.message.id === streamingMessage?.id} />
@@ -2283,7 +2283,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                   )}
                   {showThinking ? <AssistantThinkingRow /> : null}
                   {queuedPrompts.length > 0 ? (
-                    <div className="mx-5 my-3 grid max-h-[220px] gap-1.5 overflow-auto">
+                    <div className="mx-3 grid max-h-[220px] gap-1.5 overflow-auto">
                       {queuedPrompts.map((queuedPrompt) => (
                         <article key={queuedPrompt.id} className="flex min-w-0 items-center justify-between gap-2.5 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.018)] px-2.5 py-2">
                           <div className="min-w-0">
@@ -2303,7 +2303,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                     </div>
                   ) : null}
                   {activePendingApprovals.length > 0 ? (
-                    <div className="mx-5 my-3 grid gap-1.5">
+                    <div className="mx-3 grid gap-1.5">
                       {activePendingApprovals.map((approval) => {
                         const summary = approvalSummary(approval);
                         return (
