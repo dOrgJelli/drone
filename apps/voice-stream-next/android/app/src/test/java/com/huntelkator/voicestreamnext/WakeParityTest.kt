@@ -11,8 +11,14 @@ class WakeParityTest {
         assertEquals(WakePhrase.PATCH, WakePhraseMatcher.match("patch me in"))
         assertEquals(WakePhrase.CLIPBOARD, WakePhraseMatcher.match("can you transcribe this"))
         assertEquals(WakePhrase.SLEEP, WakePhraseMatcher.match("go to sleep"))
-        assertEquals(WakePhrase.STATUS, WakePhraseMatcher.match("status check"))
         assertNull(WakePhraseMatcher.match("hello there"))
+    }
+
+    @Test
+    fun statusWakeCommandIsDisabled() {
+        assertNull(WakePhraseMatcher.match("status"))
+        assertNull(WakePhraseMatcher.match("status check"))
+        assertNull(WakePhraseMatcher.match("check status"))
     }
 
     @Test

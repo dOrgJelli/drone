@@ -2,6 +2,9 @@ package com.huntelkator.voicestreamnext
 
 import java.util.Locale
 
+// Keep the status command implementation available, but do not detect it from local voice phrases.
+internal const val STATUS_WAKE_COMMAND_ENABLED = false
+
 object WakePhraseMatcher {
     fun match(text: String): WakePhrase? {
         val words = text.lowercase(Locale.US)
@@ -21,12 +24,14 @@ object WakePhraseMatcher {
             triple[0] == "go" && triple[1] == "to" && triple[2] == "sleep"
         }
         val compact = words.joinToString("")
-        val hasStatus = words.any { it == "status" } ||
-            compact == "stateus" ||
-            compact == "stateis" ||
-            compact == "statuse" ||
-            compact == "statuscheck" ||
-            compact == "checkstatus"
+        val hasStatus = STATUS_WAKE_COMMAND_ENABLED && (
+            words.any { it == "status" } ||
+                compact == "stateus" ||
+                compact == "stateis" ||
+                compact == "statuse" ||
+                compact == "statuscheck" ||
+                compact == "checkstatus"
+        )
 
         return when {
             hasSleep -> WakePhrase.SLEEP

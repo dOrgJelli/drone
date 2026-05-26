@@ -28,6 +28,15 @@ const compactWindow = {
 };
 
 const sampleRate = 16_000;
+// Keep status grammar easy to restore, but do not detect spoken status commands locally.
+const enableStatusWakeCommand = false;
+const statusWakeGrammar = [
+  'status',
+  'state us',
+  'state is',
+  'status check',
+  'check status',
+];
 const wakeGrammar = [
   'hey sebastian',
   'hey sebastien',
@@ -44,11 +53,6 @@ const wakeGrammar = [
   'go',
   'to',
   'sleep',
-  'status',
-  'state us',
-  'state is',
-  'status check',
-  'check status',
   'approval',
   'code',
   'approval code',
@@ -64,6 +68,7 @@ const wakeGrammar = [
   'eight',
   'nine',
   '[unk]',
+  ...(enableStatusWakeCommand ? statusWakeGrammar : []),
 ];
 
 const defaultConfig = {
