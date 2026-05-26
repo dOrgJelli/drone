@@ -1,4 +1,5 @@
 import {
+  type AssistantApiKeyView,
   type AssistantApprovalRecord,
   type AssistantMessage,
   type AssistantQueuedPromptRecord,
@@ -10,6 +11,7 @@ import {
   type VoiceStreamNextDb,
 } from './db.js';
 import { refreshCodexAccessToken } from './codex-auth.js';
+import { fetchContent, searchWeb } from './web-search.js';
 
 export type AssistantProviderId = 'openai' | 'codex';
 
@@ -23,7 +25,7 @@ export type AssistantModelOption = {
 export type AssistantToolSummary = {
   name: string;
   label: string;
-  category: 'artifacts' | 'speech' | 'prompts' | 'settings';
+  category: 'artifacts' | 'speech' | 'prompts' | 'settings' | 'web';
   description: string;
   approval: 'never' | 'normal_threads' | 'always';
 };
@@ -37,6 +39,7 @@ export type AssistantSnapshot = {
   models: AssistantModelOption[];
   availableTools: AssistantToolSummary[];
   assistantSettings: AssistantSettingsRecord;
+  apiKeys: Record<'openai' | 'exa', AssistantApiKeyView>;
   codexConnection: { connected: boolean; accountId: string | null; expiresAt: string | null; updatedAt: string | null };
   runningModels: Record<string, { provider: string; model: string; thinkingLevel: string; runId: string }>;
 };
@@ -99,6 +102,20 @@ const ASSISTANT_TOOLS: AssistantToolSummary[] = [
     label: 'Set thinking level',
     category: 'settings',
     description: 'Change this thread reasoning level for future runs.',
+    approval: 'never',
+  },
+  {
+    name: 'web_search',
+    label: 'Web search',
+    category: 'web',
+    description: 'Search the web for current information and source URLs.',
+    approval: 'never',
+  },
+  {
+    name: 'fetch_content',
+    label: 'Fetch content',
+    category: 'web',
+    description: 'Fetch readable page content from a URL.',
     approval: 'never',
   },
 ];
@@ -197,6 +214,7 @@ export function assistantSnapshot(db: VoiceStreamNextDb, userId: string, activeT
     models: MODEL_OPTIONS,
     availableTools: ASSISTANT_TOOLS,
     assistantSettings: db.ensureAssistantSettings(userId),
+    apiKeys: db.assistantApiKeysView(userId),
     codexConnection: db.codexConnectionView(userId),
     runningModels,
   };
@@ -330,7 +348,7 @@ export async function resolveAssistantApproval(
   }
 
   const args = safeJson(pending.argsJson);
-  const result = executeApprovedTool(db, userId, thread, pending.toolName, args);
+  const result = await executeAssistantTool(db, userId, thread, pending.toolName, args);
   db.resolveApproval(userId, approvalId, { approved: true, resolvedBy, result });
   db.updateToolCall(userId, pending.toolCallId, { status: 'completed', resultJson: JSON.stringify(result) });
   db.addMessage(userId, pending.threadId, {
@@ -361,7 +379,8 @@ async function approvalContinuationText(
   const fallback = approvedAssistantText(approval.toolName, result);
   const run = approval.runId ? db.listRuns(userId, approval.threadId, 20).find((item) => item.id === approval.runId) : null;
   const provider = run?.provider ?? thread.provider;
-  if (provider !== 'openai' || !openAiApiKey()) return fallback;
+  const apiKey = provider === 'openai' ? db.assistantApiKey(userId, 'openai') : null;
+  if (provider !== 'openai' || !apiKey) return fallback;
 
   try {
     const settings = db.ensureAssistantSettings(userId);
@@ -388,6 +407,7 @@ async function approvalContinuationText(
       input: followup,
       tools: [],
       emit: () => undefined,
+      apiKey,
     });
     return final.text.trim() || fallback;
   } catch {
@@ -411,7 +431,7 @@ async function runModelDrivenTurn(
     thread.voiceEnabled ? settings.voiceSystemPrompt : settings.normalSystemPrompt,
     thread.systemPrompt ? `Thread system prompt:\n${thread.systemPrompt}` : '',
     enabledTools.length > 0
-      ? 'You may call the provided assistant tools when they help. Prefer tools for artifacts, spoken replies, prompt reads/updates, and thread settings instead of describing those actions.'
+      ? 'You may call the provided assistant tools when they help. Prefer tools for artifacts, spoken replies, web searches, fetched URL content, prompt reads/updates, and thread settings instead of describing those actions. Use web_search for current information, documentation, news, prices, or facts that may have changed. Use fetch_content when the user gives a direct URL to read, inspect, summarize, or analyze. Cite source URLs in the final answer.'
       : '',
   ].filter(Boolean).join('\n\n');
   const inputText = renderConversation(messages);
@@ -432,9 +452,8 @@ async function runModelDrivenTurn(
     return;
   }
 
-  if (modelConfig.provider === 'openai' && !openAiApiKey()) {
-    throw new Error('OpenAI API key is not configured. Add OPENAI_API_KEY or connect Codex for subscription-backed assistant runs.');
-  }
+  const openAiKey = modelConfig.provider === 'openai' ? db.assistantApiKey(userId, 'openai') : null;
+  if (modelConfig.provider === 'openai' && !openAiKey) throw new Error('OpenAI API key is not configured. Add your OpenAI key in assistant settings or connect Codex.');
 
   if (modelConfig.provider === 'openai') {
     const initialTiming = createProviderTimingLogger(db, userId, threadId, run, {
@@ -451,6 +470,7 @@ async function runModelDrivenTurn(
       tools: enabledTools,
       emit,
       logTiming: initialTiming,
+      apiKey: openAiKey ?? '',
     });
     if (first.toolCalls.length > 0) {
       const completed = await executeModelToolCalls(db, userId, threadId, run, thread, first.toolCalls, emit);
@@ -470,6 +490,7 @@ async function runModelDrivenTurn(
         tools: [],
         emit,
         logTiming: followupTiming,
+        apiKey: openAiKey ?? '',
       });
       const finalText = final.text.trim() || completed.map((item) => approvedAssistantText(item.toolName, item.result)).join('\n') || 'Done.';
       const assistantMessage = db.addMessage(userId, threadId, {
@@ -784,7 +805,7 @@ async function executeModelToolCalls(
       return null;
     }
 
-    const result = executeApprovedTool(db, userId, thread, toolName, args);
+    const result = await executeAssistantTool(db, userId, thread, toolName, args);
     const updatedToolCall = db.updateToolCall(userId, toolCall.id, { status: 'completed', resultJson: JSON.stringify(result) }) ?? toolCall;
     emit({ type: 'tool_result', toolCall: updatedToolCall, result });
     const toolResult = db.addMessage(userId, threadId, {
@@ -807,6 +828,7 @@ async function streamOpenAiResponse(input: {
   input: string;
   tools: unknown[];
   emit: (event: PromptEvent) => void;
+  apiKey: string;
   logTiming?: ProviderTimingLogger;
 }): Promise<OpenAiStreamResult> {
   const body: Record<string, unknown> = {
@@ -832,7 +854,7 @@ async function streamOpenAiResponse(input: {
   const response = await fetch(OPENAI_RESPONSES_ENDPOINT, {
     method: 'POST',
     headers: {
-      authorization: `Bearer ${openAiApiKey()}`,
+      authorization: `Bearer ${input.apiKey}`,
       'content-type': 'application/json',
     },
     body: JSON.stringify(body),
@@ -955,10 +977,6 @@ function assistantContentJson(text: string, thinking: string): string | null {
   return parts.length > 0 ? JSON.stringify(parts) : null;
 }
 
-function openAiApiKey(): string {
-  return process.env.OPENAI_API_KEY?.trim() || process.env.VOICE_STREAM_NEXT_OPENAI_API_KEY?.trim() || '';
-}
-
 function responseToolDefinitions(thread: AssistantThread): unknown[] {
   const definitions: unknown[] = [];
   for (const toolName of thread.enabledTools) {
@@ -1042,6 +1060,51 @@ function responseToolDefinitions(thread: AssistantThread): unknown[] {
             thinkingLevel: { type: 'string', enum: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'] },
           },
           required: ['thinkingLevel'],
+          additionalProperties: false,
+        },
+        strict: true,
+      });
+    }
+    if (toolName === 'web_search' && thread.capabilities.externalCalls) {
+      definitions.push({
+        type: 'function',
+        name: 'web_search',
+        description: 'Search the web for current information. Use for docs, news, prices, schedules, or facts that may have changed. Return answers with source URLs.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'Search query.' },
+            numResults: { type: 'number', description: 'Number of results to return. Defaults to 5, max 10.' },
+            recencyFilter: { type: 'string', enum: ['', 'day', 'week', 'month', 'year'], description: 'Optional recency filter. Use empty string for no filter.' },
+            domainFilter: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Optional domains to include, such as docs.example.com. Prefix with - to exclude a domain.',
+            },
+          },
+          required: ['query', 'numResults', 'recencyFilter', 'domainFilter'],
+          additionalProperties: false,
+        },
+        strict: true,
+      });
+    }
+    if (toolName === 'fetch_content' && thread.capabilities.externalCalls) {
+      definitions.push({
+        type: 'function',
+        name: 'fetch_content',
+        description: 'Fetch readable content from a direct http or https URL. Use when the user gives a URL to read, inspect, summarize, or analyze.',
+        parameters: {
+          type: 'object',
+          properties: {
+            url: { type: 'string', description: 'The http or https URL to fetch.' },
+            maxCharacters: { type: 'number', description: 'Maximum content characters to return. Defaults to 12000, max 30000.' },
+            livecrawl: {
+              type: 'string',
+              enum: ['', 'never', 'fallback', 'preferred', 'always'],
+              description: 'Optional Exa livecrawl mode. Use empty string for fallback.',
+            },
+          },
+          required: ['url', 'maxCharacters', 'livecrawl'],
           additionalProperties: false,
         },
         strict: true,
@@ -1218,7 +1281,7 @@ async function executeCommand(
   }
 
   try {
-    const result = executeApprovedTool(db, userId, thread, toolName, args);
+    const result = await executeAssistantTool(db, userId, thread, toolName, args);
     const updatedToolCall = db.updateToolCall(userId, toolCall.id, { status: 'completed', resultJson: JSON.stringify(result) }) ?? toolCall;
     emit({ type: 'tool_result', toolCall: updatedToolCall, result });
     const toolResult = db.addMessage(userId, threadId, {
@@ -1264,7 +1327,7 @@ function argsForCommand(command: ParsedCommand): unknown {
   return {};
 }
 
-function executeApprovedTool(db: VoiceStreamNextDb, userId: string, thread: AssistantThread, toolName: string, args: unknown): unknown {
+async function executeAssistantTool(db: VoiceStreamNextDb, userId: string, thread: AssistantThread, toolName: string, args: unknown): Promise<unknown> {
   const parsed = args && typeof args === 'object' ? args as Record<string, unknown> : {};
   if (toolName === 'assistant_artifacts') return executeArtifactTool(db, userId, thread.id, parsed);
   if (toolName === 'speak') {
@@ -1294,6 +1357,23 @@ function executeApprovedTool(db: VoiceStreamNextDb, userId: string, thread: Assi
     const thinkingLevel = cleanThinkingLevel(parsed.thinkingLevel);
     const updated = db.updateThread(userId, thread.id, { thinkingLevel });
     return { ok: true, thinkingLevel: updated?.thinkingLevel ?? thinkingLevel };
+  }
+  if (toolName === 'web_search') {
+    const apiKey = db.assistantApiKey(userId, 'exa') ?? '';
+    return await searchWeb({
+      query: String(parsed.query ?? ''),
+      numResults: parsed.numResults == null || parsed.numResults === '' ? undefined : Number(parsed.numResults),
+      recencyFilter: cleanRecencyFilter(parsed.recencyFilter),
+      domainFilter: Array.isArray(parsed.domainFilter) ? parsed.domainFilter.map((item) => String(item ?? '')) : [],
+    }, apiKey);
+  }
+  if (toolName === 'fetch_content') {
+    const apiKey = db.assistantApiKey(userId, 'exa') ?? '';
+    return await fetchContent({
+      url: String(parsed.url ?? ''),
+      maxCharacters: parsed.maxCharacters == null || parsed.maxCharacters === '' ? undefined : Number(parsed.maxCharacters),
+      livecrawl: cleanLivecrawl(parsed.livecrawl),
+    }, apiKey);
   }
   throw Object.assign(new Error(`unknown assistant tool: ${toolName}`), { statusCode: 400 });
 }
@@ -1359,6 +1439,7 @@ function ensureCapability(thread: AssistantThread, toolName: string): void {
   const caps: AssistantThreadCapabilities = thread.capabilities;
   if (toolName === 'assistant_artifacts' && !caps.artifacts) throw Object.assign(new Error('artifact capability is disabled'), { statusCode: 403 });
   if (toolName === 'speak' && !caps.speech) throw Object.assign(new Error('speech capability is disabled'), { statusCode: 403 });
+  if ((toolName === 'web_search' || toolName === 'fetch_content') && !caps.externalCalls) throw Object.assign(new Error('external call capability is disabled'), { statusCode: 403 });
 }
 
 function approvalRequiredFor(thread: AssistantThread, toolName: string): boolean {
@@ -1402,6 +1483,8 @@ function toolResultText(toolName: string, result: unknown): string {
     return 'Artifact tool completed.';
   }
   if (toolName === 'speak') return `Spoken reply prepared: ${String((result as any)?.text ?? '').slice(0, 120)}`;
+  if (toolName === 'web_search') return String((result as any)?.answer ?? 'Web search completed.');
+  if (toolName === 'fetch_content') return String((result as any)?.answer ?? 'Content fetch completed.');
   if (toolName === 'update_system_prompt') return 'Thread system prompt updated.';
   if (toolName === 'set_thinking_level') return `Thinking level set to ${(result as any)?.thinkingLevel ?? 'off'}.`;
   return 'Tool completed.';
@@ -1410,4 +1493,14 @@ function toolResultText(toolName: string, result: unknown): string {
 function approvedAssistantText(toolName: string, result: unknown): string {
   if (toolName === 'speak') return String((result as any)?.text ?? 'Spoken reply prepared.');
   return toolResultText(toolName, result);
+}
+
+function cleanRecencyFilter(raw: unknown): 'day' | 'week' | 'month' | 'year' | undefined {
+  const value = String(raw ?? '').trim().toLowerCase();
+  return value === 'day' || value === 'week' || value === 'month' || value === 'year' ? value : undefined;
+}
+
+function cleanLivecrawl(raw: unknown): 'never' | 'fallback' | 'preferred' | 'always' | undefined {
+  const value = String(raw ?? '').trim().toLowerCase();
+  return value === 'never' || value === 'fallback' || value === 'preferred' || value === 'always' ? value : undefined;
 }
