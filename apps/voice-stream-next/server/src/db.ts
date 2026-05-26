@@ -2086,6 +2086,10 @@ export class VoiceStreamNextDb {
   }
 
   latestVoiceThreadForDevice(userId: string, deviceId: string): AssistantThread {
+    return this.latestVoiceThreadForDeviceOrNull(userId, deviceId) ?? this.createThread(userId, { deviceId, source: 'voice', title: 'Voice thread' });
+  }
+
+  latestVoiceThreadForDeviceOrNull(userId: string, deviceId: string): AssistantThread | null {
     const row = this.db
       .query(
         `
@@ -2096,7 +2100,7 @@ export class VoiceStreamNextDb {
       `,
       )
       .get({ $userId: userId, $deviceId: deviceId });
-    return row ? rowThread(row) : this.createThread(userId, { deviceId, source: 'voice', title: 'Voice thread' });
+    return row ? rowThread(row) : null;
   }
 
   addMessage(

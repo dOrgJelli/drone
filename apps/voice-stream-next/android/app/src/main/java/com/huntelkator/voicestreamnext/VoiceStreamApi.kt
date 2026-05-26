@@ -46,6 +46,28 @@ data class AndroidReleaseInfo(
 )
 data class DashboardSummary(val displayName: String, val threadCount: Int, val deviceCount: Int, val logCount: Int, val logs: List<String>)
 data class AssistantExchange(val userMessage: String, val assistantMessage: String)
+data class AssistantThreadSummary(
+    val id: String,
+    val title: String,
+    val status: String,
+    val error: String?,
+    val artifactsCount: Int,
+    val updatedAt: String
+)
+data class AssistantArtifact(
+    val id: String,
+    val threadId: String,
+    val path: String,
+    val content: String,
+    val size: Int,
+    val revision: String,
+    val createdAt: String,
+    val updatedAt: String
+)
+data class AssistantFilesResult(
+    val thread: AssistantThreadSummary,
+    val artifacts: List<AssistantArtifact>
+)
 data class VoiceApprovalSettings(
     val triggerPhrase: String = "approval code",
     val unlockCode: String = "1234",
@@ -307,6 +329,27 @@ class VoiceStreamApi(private val context: Context) {
         )
     }
 
+    fun assistantThreadSummary(): AssistantThreadSummary {
+        val deviceId = pairedDeviceId()
+        if (deviceId.isBlank()) throw IOException("Pair this device before loading assistant files.")
+        val json = deviceRequest("GET", "/api/devices/$deviceId/assistant/thread")
+        val thread = json.optJSONObject("thread") ?: return emptyAssistantThread(json.optInt("artifactsCount", 0))
+        return parseAssistantThread(thread, json.optInt("artifactsCount", thread.optInt("artifactsCount", 0)))
+    }
+
+    fun assistantFiles(): AssistantFilesResult {
+        val deviceId = pairedDeviceId()
+        if (deviceId.isBlank()) throw IOException("Pair this device before loading assistant files.")
+        val json = deviceRequest("GET", "/api/devices/$deviceId/assistant/thread/artifacts")
+        val artifacts = json.optJSONArray("artifacts").orEmptyArtifacts()
+        val thread = json.optJSONObject("thread")?.let { parseAssistantThread(it, artifacts.size) }
+            ?: emptyAssistantThread(artifacts.size)
+        return AssistantFilesResult(
+            thread = thread,
+            artifacts = artifacts
+        )
+    }
+
     fun uploadLog(message: String, details: JSONObject? = null) {
         val deviceId = pairedDeviceId()
         val token = pairedDeviceToken()
@@ -386,6 +429,48 @@ class VoiceStreamApi(private val context: Context) {
         }
     }
 
+    private fun deviceRequest(method: String, path: String): JSONObject {
+        val config = loadConfig()
+        val token = pairedDeviceToken()
+        if (token.isBlank()) throw IOException("Pair this device before loading assistant files.")
+        val url = "${config.serverUrl.trimEnd('/')}$path"
+        val builder = Request.Builder()
+            .url(url)
+            .header("content-type", "application/json")
+            .header("x-voice-device-token", token)
+            .header("x-voice-client-version", BuildConfig.VERSION_CODE.toString())
+        builder.method(method, null)
+        client.newCall(builder.build()).execute().use { response ->
+            val text = response.body.string()
+            if (!response.isSuccessful) {
+                throw IOException(ApiJsonResponse.errorMessage(text, "HTTP ${response.code}"))
+            }
+            return ApiJsonResponse.parseObject(text, method, path)
+        }
+    }
+
+    private fun parseAssistantThread(json: JSONObject, fallbackArtifactsCount: Int): AssistantThreadSummary {
+        return AssistantThreadSummary(
+            id = json.optString("id"),
+            title = json.optString("title", "Voice thread"),
+            status = json.optString("status", "idle"),
+            error = json.optString("error").takeIf { it.isNotBlank() },
+            artifactsCount = json.optInt("artifactsCount", fallbackArtifactsCount),
+            updatedAt = json.optString("updatedAt")
+        )
+    }
+
+    private fun emptyAssistantThread(artifactsCount: Int): AssistantThreadSummary {
+        return AssistantThreadSummary(
+            id = "",
+            title = "Voice thread",
+            status = "idle",
+            error = null,
+            artifactsCount = artifactsCount,
+            updatedAt = ""
+        )
+    }
+
     private fun applyAuth(builder: Request.Builder, config: ApiConfig) {
         builder.header("content-type", "application/json")
         if (config.authMode == Constants.AUTH_BEARER && config.bearerToken.isNotBlank()) {
@@ -402,6 +487,25 @@ class VoiceStreamApi(private val context: Context) {
         val next = mutableListOf<String>()
         for (index in 0 until length()) {
             next += mapper(get(index))
+        }
+        return next
+    }
+
+    private fun JSONArray?.orEmptyArtifacts(): List<AssistantArtifact> {
+        if (this == null) return emptyList()
+        val next = mutableListOf<AssistantArtifact>()
+        for (index in 0 until length()) {
+            val item = optJSONObject(index) ?: continue
+            next += AssistantArtifact(
+                id = item.optString("id"),
+                threadId = item.optString("threadId"),
+                path = item.optString("path"),
+                content = item.optString("content"),
+                size = item.optInt("size"),
+                revision = item.optString("revision"),
+                createdAt = item.optString("createdAt"),
+                updatedAt = item.optString("updatedAt")
+            )
         }
         return next
     }
