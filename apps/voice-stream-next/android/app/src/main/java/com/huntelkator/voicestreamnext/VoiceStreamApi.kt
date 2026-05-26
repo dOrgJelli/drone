@@ -38,6 +38,12 @@ data class AndroidSetupRedeemResult(
     val apkUrl: String?,
     val pairingPayload: String?,
 )
+data class AndroidReleaseInfo(
+    val available: Boolean,
+    val versionCode: Long?,
+    val versionName: String?,
+    val apkUrl: String?,
+)
 data class DashboardSummary(val displayName: String, val threadCount: Int, val deviceCount: Int, val logCount: Int, val logs: List<String>)
 data class AssistantExchange(val userMessage: String, val assistantMessage: String)
 data class VoiceApprovalSettings(
@@ -207,6 +213,16 @@ class VoiceStreamApi(private val context: Context) {
         return DevicePairing(
             deviceId = json.getJSONObject("device").getString("id"),
             token = json.getString("token")
+        )
+    }
+
+    fun androidRelease(): AndroidReleaseInfo {
+        val android = request("GET", "/api/mobile/android").getJSONObject("android")
+        return AndroidReleaseInfo(
+            available = android.optBoolean("available", false),
+            versionCode = android.takeIf { it.has("versionCode") && !it.isNull("versionCode") }?.optLong("versionCode"),
+            versionName = android.optString("versionName").takeIf { it.isNotBlank() },
+            apkUrl = android.optString("downloadUrl").takeIf { it.isNotBlank() },
         )
     }
 

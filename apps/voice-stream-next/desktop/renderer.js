@@ -5,6 +5,8 @@ const MAX_PENDING_STREAM_BYTES = pcmBytesForMs(5000);
 const BASE_RECONNECT_DELAY_MS = 500;
 const MAX_RECONNECT_DELAY_MS = 10_000;
 const MAX_RECONNECT_EXPONENT = 4;
+// Keep the status command path available, but do not match spoken status phrases locally.
+const ENABLE_STATUS_WAKE_COMMAND = false;
 
 const preRollBuffer = new PcmCaptureBuffer(PRE_ROLL_MAX_BYTES);
 const pendingStreamBuffer = new PcmCaptureBuffer(MAX_PENDING_STREAM_BYTES);
@@ -1445,7 +1447,7 @@ function wakePhraseMatch(text) {
   if (words.some((word, index) => (word === 'hey' || word === 'hay') && (words[index + 1] === 'sebastian' || words[index + 1] === 'sebastien'))) return 'start';
   if (words.some((word, index) => word === 'patch' && words[index + 1] === 'me' && words[index + 2] === 'in')) return 'patch';
   if (words.some((word, index) => word === 'can' && words[index + 1] === 'you' && words[index + 2] === 'transcribe')) return 'clipboard';
-  if (words.includes('status') || compact === 'stateus' || compact === 'checkstatus') return 'status';
+  if (ENABLE_STATUS_WAKE_COMMAND && (words.includes('status') || compact === 'stateus' || compact === 'checkstatus')) return 'status';
   return null;
 }
 

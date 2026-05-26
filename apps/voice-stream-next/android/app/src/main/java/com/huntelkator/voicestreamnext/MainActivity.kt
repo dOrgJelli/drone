@@ -18,10 +18,10 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
-import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -53,15 +53,21 @@ class MainActivity : ComponentActivity() {
     private lateinit var settingsButton: Button
     private lateinit var signInButton: Button
     private lateinit var signOutButton: Button
-    private lateinit var qrButton: ImageButton
+    private lateinit var updateBanner: LinearLayout
+    private lateinit var updateBannerTitle: TextView
+    private lateinit var updateBannerSubtitle: TextView
+    private lateinit var updateBannerButton: Button
 
     private val wakeController = WakeToggleController()
     private val approvalCodeRecognizer = ApprovalCodeRecognizer()
     @Volatile private var approvalSettings = VoiceApprovalSettings()
+    @Volatile private var updateCheckRunning = false
     private val cuePlayer = LocalCuePlayer()
     private var pendingStartAwake = false
     private var pendingStartTarget = Constants.STREAM_TARGET_ASSISTANT
     private var sessionMode = SessionMode.OFF
+    private var currentUpdateConfig: UpdateConfig? = null
+    private var lastUpdateCheckAtMs = 0L
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -118,14 +124,14 @@ class MainActivity : ComponentActivity() {
         api = VoiceStreamApi(applicationContext)
         browserAuth = BrowserAuthCoordinator(api, browserAuthCallbacks())
         DiagnosticsUploader.upload(applicationContext, api, "activity-start", force = true)
-        window.statusBarColor = COLOR_BACKGROUND
-        window.navigationBarColor = COLOR_BACKGROUND
+        configureSystemBars()
         buildUi()
         loadConfigIntoForm()
         updateSessionUi(SessionMode.OFF, "Ready")
         renderAuthState()
         if (api.pairedDeviceId().isNotBlank()) {
             refreshDashboard()
+            checkForAppUpdate(force = true)
         }
     }
 
@@ -143,6 +149,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         resyncServiceStatus()
+        checkForAppUpdate(force = false)
     }
 
     override fun onStop() {
@@ -164,34 +171,42 @@ class MainActivity : ComponentActivity() {
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(24.dp(), 48.dp(), 24.dp(), 196.dp())
+            setPadding(24.dp(), 48.dp(), 24.dp(), 132.dp())
         }
         screen.addView(root, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
         ))
 
-        root.addView(label("VoiceStream", 34f, COLOR_TEXT, true).apply { gravity = Gravity.CENTER })
-        root.addView(label("Android client", 13f, COLOR_ACCENT, true).apply {
+        root.addView(label("Drone", 34f, COLOR_TEXT, true).apply {
             gravity = Gravity.CENTER
-            setPadding(0, 2.dp(), 0, 18.dp())
+            setPadding(0, 2.dp(), 0, 0)
+        })
+        updateBanner = buildUpdateBanner()
+        root.addView(updateBanner, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = 6.dp()
         })
 
         signedOutPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            background = rounded(COLOR_SURFACE, 18.dp(), COLOR_STROKE)
-            setPadding(18.dp(), 18.dp(), 18.dp(), 18.dp())
-            addView(label("Sign in to connect this phone", 20f, COLOR_TEXT, true).apply {
+            gravity = Gravity.CENTER
+            val card = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                background = rounded(COLOR_SURFACE, 12.dp(), COLOR_STROKE)
+                setPadding(18.dp(), 18.dp(), 18.dp(), 18.dp())
+            }
+            addView(card, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            card.addView(label("Sign in to connect this phone", 20f, COLOR_TEXT, true).apply {
                 gravity = Gravity.CENTER
             })
-            addView(label("Use the web dashboard sign-in flow, including social login, then return here.", 13f, COLOR_MUTED, false).apply {
+            card.addView(label("Use the web dashboard sign-in flow, including social login, then return here.", 13f, COLOR_MUTED, false).apply {
                 gravity = Gravity.CENTER
                 setPadding(0, 8.dp(), 0, 16.dp())
             })
             signInButton = button("Sign in") { signInWithBrowser() }
-            addView(signInButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 52.dp()))
-            addView(row(
+            card.addView(signInButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 52.dp()))
+            card.addView(row(
                 button("Scan QR") { startQrScan() },
                 button("Open web") { openWebDashboard() },
             ))
@@ -199,10 +214,10 @@ class MainActivity : ComponentActivity() {
                 gravity = Gravity.CENTER
                 setPadding(0, 14.dp(), 0, 0)
             }
-            addView(pairingMessageText)
+            card.addView(pairingMessageText)
         }
-        root.addView(signedOutPanel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-            topMargin = 24.dp()
+        root.addView(signedOutPanel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f).apply {
+            topMargin = 20.dp()
         })
 
         val hero = LinearLayout(this).apply {
@@ -216,8 +231,19 @@ class MainActivity : ComponentActivity() {
             stylePrimaryButton(SessionMode.OFF)
         }
         hero.addView(primaryActionButton, LinearLayout.LayoutParams(166.dp(), 166.dp()))
+        statusText = label("Ready", 15f, COLOR_MUTED, true).apply {
+            gravity = Gravity.CENTER
+            setPadding(18.dp(), 16.dp(), 18.dp(), 0)
+        }
+        hero.addView(statusText, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        approvalText = label("", 14f, COLOR_MUTED, true).apply {
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+            setPadding(18.dp(), 8.dp(), 18.dp(), 0)
+        }
+        hero.addView(approvalText, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         offButton = Button(this).apply {
-            text = "Off"
+            text = "Turn off"
             visibility = View.GONE
             styleSecondaryButton()
             setOnClickListener { turnOff() }
@@ -225,61 +251,18 @@ class MainActivity : ComponentActivity() {
         hero.addView(offButton, LinearLayout.LayoutParams(148.dp(), 48.dp()).apply { topMargin = 18.dp() })
         root.addView(hero)
 
-        signOutButton = Button(this).apply {
-            text = "Sign out"
-            styleFloatingButton()
-            setOnClickListener { signOut() }
-        }
-        screen.addView(signOutButton, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            54.dp(),
-            Gravity.TOP or Gravity.END,
-        ).apply {
-            rightMargin = 18.dp()
-            topMargin = 44.dp()
-        })
-
-        statusText = label("Ready", 15f, COLOR_MUTED, true).apply {
-            gravity = Gravity.CENTER
-            setPadding(18.dp(), 10.dp(), 18.dp(), 10.dp())
-        }
-        screen.addView(statusText, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL,
-        ).apply {
-            leftMargin = 42.dp()
-            rightMargin = 42.dp()
-            bottomMargin = 132.dp()
-        })
-
-        approvalText = label("", 14f, COLOR_MUTED, true).apply {
-            gravity = Gravity.CENTER
-            visibility = View.GONE
-            setPadding(18.dp(), 8.dp(), 18.dp(), 8.dp())
-        }
-        screen.addView(approvalText, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL,
-        ).apply {
-            leftMargin = 42.dp()
-            rightMargin = 42.dp()
-            bottomMargin = 108.dp()
-        })
-
         microphoneText = label("Mic: phone", 12f, COLOR_MUTED, true).apply {
             gravity = Gravity.CENTER
-            setPadding(12.dp(), 8.dp(), 12.dp(), 8.dp())
-            background = rounded(COLOR_FLOATING, 16.dp(), COLOR_STROKE)
+            setPadding(14.dp(), 0, 14.dp(), 0)
+            background = rounded(COLOR_FLOATING, 12.dp(), COLOR_STROKE)
         }
         screen.addView(microphoneText, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
+            50.dp(),
             Gravity.BOTTOM or Gravity.END,
         ).apply {
             rightMargin = 18.dp()
-            bottomMargin = 92.dp()
+            bottomMargin = 22.dp()
         })
 
         settingsPanel = ScrollView(this).apply {
@@ -304,27 +287,11 @@ class MainActivity : ComponentActivity() {
         }
         screen.addView(settingsButton, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
-            54.dp(),
+            50.dp(),
             Gravity.BOTTOM or Gravity.START,
         ).apply {
             leftMargin = 18.dp()
             bottomMargin = 22.dp()
-        })
-
-        qrButton = ImageButton(this).apply {
-            contentDescription = "Scan VoiceStream QR"
-            setImageResource(android.R.drawable.ic_menu_camera)
-            scaleType = android.widget.ImageView.ScaleType.CENTER
-            styleIconButton()
-            setOnClickListener { startQrScan() }
-        }
-        screen.addView(qrButton, FrameLayout.LayoutParams(
-            58.dp(),
-            58.dp(),
-            Gravity.BOTTOM or Gravity.END,
-        ).apply {
-            rightMargin = 18.dp()
-            bottomMargin = 20.dp()
         })
 
         screen.setOnApplyWindowInsetsListener { _, insets ->
@@ -335,13 +302,33 @@ class MainActivity : ComponentActivity() {
         screen.requestApplyInsets()
     }
 
+    private fun configureSystemBars() {
+        window.statusBarColor = COLOR_SYSTEM_BAR
+        window.navigationBarColor = COLOR_BACKGROUND
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.insetsController?.setSystemBarsAppearance(
+                0,
+                WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
+                    WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            var flags = window.decorView.systemUiVisibility and View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR.inv()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                flags = flags and View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR.inv()
+            }
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = flags
+        }
+    }
+
     private fun buildSettingsContent(): LinearLayout {
         serverInput = field("Server URL")
         deviceNameInput = field("Device name")
 
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = rounded(COLOR_SURFACE, 18.dp(), COLOR_STROKE)
+            background = rounded(COLOR_SURFACE, 12.dp(), COLOR_STROKE)
             setPadding(16.dp(), 16.dp(), 16.dp(), 16.dp())
 
             addView(card("Connection").apply {
@@ -349,9 +336,12 @@ class MainActivity : ComponentActivity() {
                 addView(deviceNameInput)
                 addView(row(
                     button("Save") { saveConfigFromForm() },
-                    button("Sign in") { signInWithBrowser() },
                     button("Open web") { openWebDashboard() }
                 ))
+                signOutButton = button("Sign out") { signOut() }
+                addView(signOutButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 48.dp()).apply {
+                    topMargin = 10.dp()
+                })
             })
 
             addView(card("Pairing").apply {
@@ -359,6 +349,12 @@ class MainActivity : ComponentActivity() {
                     button("Scan QR") { startQrScan() },
                     button("Refresh") { refreshDashboard() }
                 ))
+                addView(button("Check update") { checkForAppUpdate(force = true, showNoUpdate = true) }, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    44.dp()
+                ).apply {
+                    topMargin = 8.dp()
+                })
                 addView(label("Scan a pairing or update QR from the web dashboard.", 12f, COLOR_MUTED, false).apply {
                     setPadding(0, 10.dp(), 0, 0)
                 })
@@ -393,7 +389,7 @@ class MainActivity : ComponentActivity() {
         sessionMode = mode
         statusText.text = status
         statusText.setTextColor(if (mode == SessionMode.ERROR) COLOR_ACCENT else COLOR_MUTED)
-        statusText.visibility = if (mode == SessionMode.OFF) View.GONE else View.VISIBLE
+        statusText.visibility = View.VISIBLE
         primaryActionButton.stylePrimaryButton(mode)
         offButton.visibility = if (mode == SessionMode.OFF || mode == SessionMode.ERROR) View.GONE else View.VISIBLE
         if (mode == SessionMode.OFF) updateApprovalUi("")
@@ -441,10 +437,12 @@ class MainActivity : ComponentActivity() {
         if (api.pairedDeviceId().isNotBlank() && api.pairedDeviceToken().isNotBlank()) {
             val displayName = api.pairedDeviceDisplayName().ifBlank { "this phone" }
             showStatus("Connected as $displayName.")
+            checkForAppUpdate(force = false)
             return@runApi
         }
         val dashboard = api.dashboard()
         showStatus("Connected as ${dashboard.displayName}.")
+        checkForAppUpdate(force = false)
     }
 
     private fun pairDevice() {
@@ -456,6 +454,7 @@ class MainActivity : ComponentActivity() {
             showStatus("Paired ${pairing.deviceId.take(14)}.")
             updatePairingMessage()
             runOnUiThread { renderAuthState() }
+            checkForAppUpdate(force = true)
         }
     }
 
@@ -528,6 +527,7 @@ class MainActivity : ComponentActivity() {
         showPairingMessage("Paired ${config.deviceId.take(14)} from QR payload.")
         showStatus("Paired ${config.deviceId.take(14)} from QR payload.")
         renderAuthState()
+        checkForAppUpdate(force = true)
     }
 
     private fun isAndroidSetupUrl(payload: String): Boolean = runCatching {
@@ -560,6 +560,7 @@ class MainActivity : ComponentActivity() {
             showPairingMessage("Paired ${config.deviceId.take(14)} from setup QR.")
             showStatus("Paired ${config.deviceId.take(14)} from setup QR.")
             renderAuthState()
+            checkForAppUpdate(force = true)
         }
     }
 
@@ -567,8 +568,10 @@ class MainActivity : ComponentActivity() {
         val currentVersionCode = currentVersionCode()
         if (currentVersionCode >= config.versionCode) {
             showPairingMessage("VoiceStream app is up to date.")
+            renderUpdateBanner(null)
             return
         }
+        renderUpdateBanner(config)
         showUpdateAvailable(config)
     }
 
@@ -602,6 +605,61 @@ class MainActivity : ComponentActivity() {
             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(apkUrl)))
         }.onFailure { error ->
             Toast.makeText(this, "Could not open APK URL: ${error.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun checkForAppUpdate(force: Boolean = false, showNoUpdate: Boolean = false) {
+        val connected = api.pairedDeviceId().isNotBlank() && api.pairedDeviceToken().isNotBlank()
+        if (!connected) {
+            renderUpdateBanner(null)
+            if (showNoUpdate) showStatus("Sign in to check for app updates.")
+            return
+        }
+
+        val now = SystemClock.elapsedRealtime()
+        if (!force && now - lastUpdateCheckAtMs < UPDATE_CHECK_INTERVAL_MS) return
+        if (updateCheckRunning) return
+
+        lastUpdateCheckAtMs = now
+        updateCheckRunning = true
+        if (showNoUpdate) showStatus("Checking for app update.")
+
+        thread {
+            try {
+                val release = api.androidRelease()
+                val latestVersionCode = release.versionCode
+                if (release.available && latestVersionCode != null && latestVersionCode > currentVersionCode()) {
+                    runOnUiThread {
+                        renderUpdateBanner(UpdateConfig(latestVersionCode, release.apkUrl))
+                        if (showNoUpdate) showStatus("Update available.")
+                    }
+                } else {
+                    runOnUiThread {
+                        renderUpdateBanner(null)
+                        if (showNoUpdate) showStatus("VoiceStream app is up to date.")
+                    }
+                }
+            } catch (error: Exception) {
+                if (showNoUpdate) showStatus(error.message ?: "Update check failed")
+            } finally {
+                updateCheckRunning = false
+            }
+        }
+    }
+
+    private fun renderUpdateBanner(config: UpdateConfig?) {
+        runOnUiThread {
+            currentUpdateConfig = config
+            if (!::updateBanner.isInitialized) return@runOnUiThread
+            if (config == null) {
+                updateBanner.visibility = View.GONE
+                return@runOnUiThread
+            }
+
+            updateBannerTitle.text = "VoiceStream update available"
+            updateBannerSubtitle.text = "Installed: ${currentVersionCode()}. Latest: ${config.versionCode}."
+            updateBannerButton.isEnabled = !config.apkUrl.isNullOrBlank()
+            updateBanner.visibility = View.VISIBLE
         }
     }
 
@@ -782,6 +840,7 @@ class MainActivity : ComponentActivity() {
         api.clearPairing()
         updatePairingMessage()
         renderAuthState()
+        renderUpdateBanner(null)
         showStatus("Signed out.")
     }
 
@@ -810,6 +869,8 @@ class MainActivity : ComponentActivity() {
                 loadConfigIntoForm()
                 renderAuthState()
                 showStatus("Signed in.")
+                refreshDashboard()
+                checkForAppUpdate(force = true)
             }
 
             override fun onAuthExpired() {
@@ -828,9 +889,14 @@ class MainActivity : ComponentActivity() {
         val connected = api.pairedDeviceId().isNotBlank() && api.pairedDeviceToken().isNotBlank()
         signedOutPanel.visibility = if (connected) View.GONE else View.VISIBLE
         voicePanel.visibility = if (connected) View.VISIBLE else View.GONE
+        settingsButton.visibility = if (connected) View.VISIBLE else View.GONE
+        microphoneText.visibility = if (connected) View.VISIBLE else View.GONE
         signOutButton.visibility = if (connected) View.VISIBLE else View.GONE
-        qrButton.visibility = if (connected) View.GONE else View.VISIBLE
-        settingsButton.visibility = View.VISIBLE
+        if (!connected) {
+            settingsPanel.visibility = View.GONE
+            settingsButton.text = "Settings"
+            renderUpdateBanner(null)
+        }
         if (!connected) {
             updateSessionUi(SessionMode.OFF, "Sign in to connect this phone.")
         } else if (sessionMode == SessionMode.OFF) {
@@ -888,7 +954,7 @@ class MainActivity : ComponentActivity() {
 
     private fun card(title: String): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        background = rounded(COLOR_SURFACE, 8.dp(), COLOR_STROKE)
+        background = rounded(COLOR_FLOATING, 8.dp(), COLOR_STROKE)
         setPadding(16.dp(), 14.dp(), 16.dp(), 16.dp())
         val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         params.setMargins(0, 0, 0, 14.dp())
@@ -896,13 +962,39 @@ class MainActivity : ComponentActivity() {
         addView(label(title, 18f, COLOR_TEXT, true))
     }
 
+    private fun buildUpdateBanner(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        visibility = View.GONE
+        background = rounded(COLOR_UPDATE_SURFACE, 8.dp(), COLOR_YELLOW)
+        setPadding(14.dp(), 12.dp(), 12.dp(), 12.dp())
+
+        val textColumn = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            updateBannerTitle = label("", 15f, COLOR_TEXT, true)
+            updateBannerSubtitle = label("", 12f, COLOR_MUTED, false).apply {
+                setPadding(0, 3.dp(), 0, 0)
+            }
+            addView(updateBannerTitle)
+            addView(updateBannerSubtitle)
+        }
+        addView(textColumn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+        updateBannerButton = button("Download") {
+            openUpdateUrl(currentUpdateConfig?.apkUrl)
+        }
+        addView(updateBannerButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, 42.dp()).apply {
+            leftMargin = 12.dp()
+        })
+    }
+
     private fun row(vararg views: View): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
         setPadding(0, 8.dp(), 0, 0)
-        views.forEach { view ->
+        views.forEachIndexed { index, view ->
             addView(view, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                rightMargin = 8.dp()
+                if (index < views.lastIndex) rightMargin = 8.dp()
             })
         }
     }
@@ -943,16 +1035,16 @@ class MainActivity : ComponentActivity() {
     private fun Button.stylePrimaryButton(mode: SessionMode) {
         isAllCaps = false
         text = when (mode) {
-            SessionMode.OFF -> "Off\nStart voice"
-            SessionMode.SLEEPING -> "Sleeping\nWake"
-            SessionMode.LOADING -> "Working\nPlease wait"
-            SessionMode.AWAKE -> "Awake\nSleep"
-            SessionMode.RECORDING -> "Recording\nStop"
-            SessionMode.ERROR -> "Voice error\nRetry"
+            SessionMode.OFF -> "Start"
+            SessionMode.SLEEPING -> "Wake"
+            SessionMode.LOADING -> "Cancel"
+            SessionMode.AWAKE -> "Sleep"
+            SessionMode.RECORDING -> "Stop"
+            SessionMode.ERROR -> "Retry"
         }
         gravity = Gravity.CENTER
         setTextColor(COLOR_TEXT)
-        textSize = 18f
+        textSize = 22f
         typeface = Typeface.DEFAULT_BOLD
         background = actionBackground(mode)
         minHeight = 0
@@ -977,17 +1069,10 @@ class MainActivity : ComponentActivity() {
         typeface = Typeface.DEFAULT_BOLD
         isAllCaps = false
         setPadding(18.dp(), 0, 18.dp(), 0)
-        background = rounded(COLOR_FLOATING, 27.dp(), COLOR_STROKE)
+        background = rounded(COLOR_FLOATING, 12.dp(), COLOR_STROKE)
         minHeight = 0
         minimumHeight = 0
-        elevation = 8.dp().toFloat()
-    }
-
-    private fun ImageButton.styleIconButton() {
-        background = rounded(COLOR_FLOATING, 29.dp(), COLOR_STROKE)
-        setColorFilter(COLOR_TEXT)
-        elevation = 8.dp().toFloat()
-        setPadding(14.dp(), 14.dp(), 14.dp(), 14.dp())
+        elevation = 6.dp().toFloat()
     }
 
     private fun rounded(fill: Int, radius: Int, stroke: Int): GradientDrawable = GradientDrawable().apply {
@@ -1022,13 +1107,9 @@ class MainActivity : ComponentActivity() {
     private fun positionSystemBars(topInset: Int, bottomInset: Int) {
         val safeBottom = bottomInset + 26.dp()
         if (::settingsButton.isInitialized) settingsButton.updateFrameMargins(bottom = safeBottom)
-        if (::qrButton.isInitialized) qrButton.updateFrameMargins(bottom = safeBottom)
-        if (::microphoneText.isInitialized) microphoneText.updateFrameMargins(bottom = safeBottom + 70.dp())
-        if (::statusText.isInitialized) statusText.updateFrameMargins(bottom = safeBottom + 126.dp())
-        if (::approvalText.isInitialized) approvalText.updateFrameMargins(bottom = safeBottom + 102.dp())
+        if (::microphoneText.isInitialized) microphoneText.updateFrameMargins(bottom = safeBottom)
         if (::settingsPanel.isInitialized) settingsPanel.updateFrameMargins(bottom = safeBottom + 74.dp())
-        if (::signOutButton.isInitialized) signOutButton.updateFrameMargins(top = topInset + 12.dp())
-        if (::root.isInitialized) root.setPadding(24.dp(), topInset + 28.dp(), 24.dp(), safeBottom + 172.dp())
+        if (::root.isInitialized) root.setPadding(24.dp(), topInset + 28.dp(), 24.dp(), safeBottom + 94.dp())
     }
 
     private fun View.updateFrameMargins(top: Int? = null, bottom: Int? = null) {
@@ -1098,6 +1179,7 @@ class MainActivity : ComponentActivity() {
         const val COLOR_SURFACE = 0xff171b21.toInt()
         const val COLOR_INPUT = 0xff151a20.toInt()
         const val COLOR_FLOATING = 0xff1e2329.toInt()
+        const val COLOR_UPDATE_SURFACE = 0xff20242a.toInt()
         const val COLOR_TEXT = 0xffdfe3ea.toInt()
         const val COLOR_MUTED = 0xff8891a8.toInt()
         const val COLOR_ACCENT = 0xffa78bfa.toInt()
@@ -1108,5 +1190,7 @@ class MainActivity : ComponentActivity() {
         const val COLOR_GREEN = 0xff4ade80.toInt()
         const val COLOR_YELLOW = 0xffffb224.toInt()
         const val COLOR_RED = 0xffff5a5a.toInt()
+        const val UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000L
+        const val COLOR_SYSTEM_BAR = 0xcc101216.toInt()
     }
 }

@@ -116,7 +116,7 @@ class VoskWakeWordDetector(
         private const val TARGET_MODEL_DIR = "vosk-model-en-us"
         private const val SAMPLE_RATE_HZ = 16_000
         private const val PHRASE_COOLDOWN_MS = 900L
-        private val WAKE_GRAMMAR = listOf(
+        private val BASE_WAKE_GRAMMAR = listOf(
             "hey sebastian",
             "hay sebastian",
             "hey",
@@ -129,11 +129,6 @@ class VoskWakeWordDetector(
             "go",
             "to",
             "sleep",
-            "status",
-            "state us",
-            "state is",
-            "status check",
-            "check status",
             "approval",
             "code",
             "approval code",
@@ -150,5 +145,14 @@ class VoskWakeWordDetector(
             "nine",
             "[unk]",
         )
+        private val STATUS_WAKE_GRAMMAR = listOf(
+            "status",
+            "state us",
+            "state is",
+            "status check",
+            "check status",
+        )
+        private val WAKE_GRAMMAR =
+            BASE_WAKE_GRAMMAR + (if (STATUS_WAKE_COMMAND_ENABLED) STATUS_WAKE_GRAMMAR else emptyList())
     }
 }
