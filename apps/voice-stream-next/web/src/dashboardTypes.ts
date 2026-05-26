@@ -203,6 +203,63 @@ export type AssistantToolSummary = {
   approval: 'never' | 'normal_threads' | 'always';
 };
 
+export type AssistantExtensionTargetKind = 'server' | 'device' | 'any_device';
+
+export type AssistantExtensionToolManifest = {
+  name: string;
+  label: string;
+  description: string;
+  category?: string;
+  inputSchema: Record<string, unknown>;
+  approval?: 'never' | 'normal_threads' | 'always';
+  supportedTargets: AssistantExtensionTargetKind[];
+  defaultTarget: AssistantExtensionTargetKind;
+};
+
+export type AssistantExtensionManifest = {
+  id: string;
+  name: string;
+  version: string;
+  description?: string;
+  tools: AssistantExtensionToolManifest[];
+};
+
+export type AssistantExtensionManifestRecord = {
+  userId: string;
+  extensionId: string;
+  name: string;
+  version: string;
+  description: string | null;
+  manifest: AssistantExtensionManifest;
+  updatedAt: string;
+};
+
+export type AssistantExtensionToolRoute = {
+  userId: string;
+  toolName: string;
+  enabled: boolean;
+  targetKind: AssistantExtensionTargetKind;
+  targetDeviceId: string | null;
+  updatedAt: string;
+};
+
+export type ExtensionBridgeConnection = {
+  userId: string;
+  deviceId: string;
+  deviceType: string;
+  displayName: string;
+  manifests: AssistantExtensionManifest[];
+  connectedAt: string;
+  toolNames: string[];
+};
+
+export type AssistantExtensionsResponse = {
+  ok: true;
+  manifests: AssistantExtensionManifestRecord[];
+  routes: AssistantExtensionToolRoute[];
+  connectedDevices: ExtensionBridgeConnection[];
+};
+
 export type AssistantModelOption = {
   provider: string;
   id: string;

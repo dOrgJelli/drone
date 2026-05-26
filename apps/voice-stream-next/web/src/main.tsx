@@ -14,6 +14,11 @@ import type {
   AndroidSetupInfo,
   AssistantApprovalRecord,
   AssistantArtifactRecord,
+  AssistantExtensionsResponse,
+  AssistantExtensionManifestRecord,
+  AssistantExtensionTargetKind,
+  AssistantExtensionToolManifest,
+  AssistantExtensionToolRoute,
   AssistantMessage,
   AssistantModelOption,
   AssistantQueuedPromptRecord,
@@ -366,6 +371,7 @@ const ASSISTANT_TOOL_CATEGORY_LABELS: Record<string, string> = {
   speech: 'Speech',
   prompts: 'Prompts',
   settings: 'Settings',
+  extensions: 'Extensions',
 };
 
 function AssistantToolsPanel({
@@ -445,6 +451,212 @@ function AssistantToolsPanel({
         ))}
       </div>
     </div>
+  );
+}
+
+const sampleExtensionManifest = JSON.stringify({
+  id: 'drone-hub',
+  name: 'Drone Hub',
+  version: '0.1.0',
+  tools: [{
+    name: 'list_drones',
+    label: 'List drones',
+    description: 'List local Drone Hub drones from a connected device.',
+    approval: 'never',
+    supportedTargets: ['device', 'any_device'],
+    defaultTarget: 'device',
+    inputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+  }],
+}, null, 2);
+
+function extensionToolName(extensionId: string, toolName: string): string {
+  return `${safeExtensionToolSegment(extensionId).replace(/_/g, '-')}__${safeExtensionToolSegment(toolName)}`;
+}
+
+function safeExtensionToolSegment(value: string): string {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 64);
+}
+
+function routeForTool(routes: AssistantExtensionToolRoute[], toolName: string, tool: AssistantExtensionToolManifest): AssistantExtensionToolRoute {
+  return routes.find((route) => route.toolName === toolName) ?? {
+    userId: '',
+    toolName,
+    enabled: false,
+    targetKind: tool.defaultTarget,
+    targetDeviceId: null,
+    updatedAt: '',
+  };
+}
+
+function AssistantExtensionsPanel({
+  data,
+  devices,
+  manifestDraft,
+  busy,
+  onManifestDraftChange,
+  onSaveManifest,
+  onUpdateRoute,
+}: {
+  data: AssistantExtensionsResponse | null;
+  devices: DeviceRecord[];
+  manifestDraft: string;
+  busy: boolean;
+  onManifestDraftChange: (value: string) => void;
+  onSaveManifest: () => void;
+  onUpdateRoute: (toolName: string, route: Pick<AssistantExtensionToolRoute, 'enabled' | 'targetKind' | 'targetDeviceId'>) => void;
+}) {
+  const connectedToolNames = React.useMemo(() => new Set((data?.connectedDevices ?? []).flatMap((device) => device.toolNames)), [data?.connectedDevices]);
+  const routes = data?.routes ?? [];
+  const connectedDevices = data?.connectedDevices ?? [];
+  const manifests = data?.manifests ?? [];
+  const activeDevices = devices.filter((device) => !device.revokedAt);
+
+  function connectedFor(toolName: string, route: AssistantExtensionToolRoute): boolean {
+    if (route.targetKind === 'server') return false;
+    if (route.targetKind === 'device') {
+      return connectedDevices.some((device) => device.deviceId === route.targetDeviceId && device.toolNames.includes(toolName));
+    }
+    return connectedToolNames.has(toolName);
+  }
+
+  function updateRoute(
+    toolName: string,
+    tool: AssistantExtensionToolManifest,
+    current: AssistantExtensionToolRoute,
+    patch: Partial<Pick<AssistantExtensionToolRoute, 'enabled' | 'targetKind' | 'targetDeviceId'>>,
+  ) {
+    const targetKind = patch.targetKind ?? current.targetKind ?? tool.defaultTarget;
+    const targetDeviceId = targetKind === 'device'
+      ? patch.targetDeviceId ?? current.targetDeviceId ?? activeDevices[0]?.id ?? null
+      : null;
+    onUpdateRoute(toolName, {
+      enabled: patch.enabled ?? current.enabled,
+      targetKind,
+      targetDeviceId,
+    });
+  }
+
+  return (
+    <section className={assistantPanelClass}>
+      <div className={assistantPanelHeaderClass}>
+        <div>
+          <span className={assistantKickerClass}>Assistant</span>
+          <h2 className={assistantPanelTitleClass}>Extensions</h2>
+        </div>
+        <button type="button" className={assistantActionButtonClass} onClick={onSaveManifest} disabled={busy || !manifestDraft.trim()}>
+          Add manifest
+        </button>
+      </div>
+
+      <div className="grid gap-3 xl:grid-cols-[minmax(260px,.44fr)_minmax(0,1fr)]">
+        <div className="grid gap-2">
+          <div className={cn(assistantRowClass, 'grid gap-2 p-3')}>
+            <div className="flex items-center justify-between gap-2">
+              <strong className="text-xs text-[var(--fg)]">Connected runners</strong>
+              <span className="text-[10px] text-[var(--muted-dim)]">{connectedDevices.length}</span>
+            </div>
+            {connectedDevices.map((device) => (
+              <div key={`${device.deviceId}-${device.connectedAt}`} className="grid gap-1 rounded border border-[var(--border-subtle)] bg-white/[.025] p-2">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="h-2 w-2 shrink-0 rounded-full bg-[var(--green)] shadow-[0_0_0_3px_rgba(74,222,128,.12)]" />
+                  <strong className="min-w-0 truncate text-xs text-[var(--fg)]">{device.displayName}</strong>
+                  <span className="ml-auto text-[10px] uppercase text-[var(--muted-dim)]">{device.deviceType}</span>
+                </div>
+                <small className="text-[11px] text-[var(--muted)]">{device.toolNames.length} tool{device.toolNames.length === 1 ? '' : 's'} advertised</small>
+              </div>
+            ))}
+            {connectedDevices.length === 0 ? <div className={assistantEmptyClass}>No extension runner is connected.</div> : null}
+          </div>
+
+          <label className={assistantFieldLabelClass}>
+            Manifest JSON
+            <textarea
+              value={manifestDraft}
+              placeholder={sampleExtensionManifest}
+              onChange={(event) => onManifestDraftChange(event.currentTarget.value)}
+              className="min-h-[220px] font-mono text-[11px] normal-case leading-relaxed"
+            />
+          </label>
+        </div>
+
+        <div className="grid content-start gap-2">
+          {manifests.map((record: AssistantExtensionManifestRecord) => (
+            <article key={record.extensionId} className={cn(assistantRowClass, 'grid gap-2 p-3')}>
+              <div className="flex min-w-0 flex-wrap items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <strong className="block truncate text-sm text-[var(--fg)]">{record.name}</strong>
+                  <small className="block text-[11px] text-[var(--muted)]">{record.extensionId} / v{record.version}</small>
+                </div>
+                <span className="rounded border border-[var(--border-subtle)] px-2 py-1 text-[10px] uppercase text-[var(--muted)]">
+                  {record.manifest.tools.length} tool{record.manifest.tools.length === 1 ? '' : 's'}
+                </span>
+              </div>
+              <div className="grid gap-2">
+                {record.manifest.tools.map((tool) => {
+                  const toolName = extensionToolName(record.manifest.id, tool.name);
+                  const route = routeForTool(routes, toolName, tool);
+                  const routeConnected = connectedFor(toolName, route);
+                  const canUseDeviceTarget = activeDevices.length > 0;
+                  return (
+                    <div key={toolName} className="grid gap-2 rounded border border-[var(--border-subtle)] bg-white/[.02] p-2">
+                      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2">
+                        <div className="min-w-0">
+                          <strong className="block truncate text-xs text-[var(--fg-secondary)]">{tool.label}</strong>
+                          <small className="block text-[11px] leading-snug text-[var(--muted)]">{tool.description}</small>
+                        </div>
+                        <label className="flex items-center gap-1.5 text-[10px] font-bold uppercase text-[var(--muted)]">
+                          <input
+                            className="h-3.5 w-3.5 accent-[var(--accent)]"
+                            type="checkbox"
+                            checked={route.enabled}
+                            disabled={busy || (route.targetKind === 'device' && !canUseDeviceTarget)}
+                            onChange={(event) => updateRoute(toolName, tool, route, { enabled: event.currentTarget.checked })}
+                          />
+                          Enabled
+                        </label>
+                      </div>
+                      <div className="grid grid-cols-[110px_minmax(150px,1fr)_auto] items-center gap-2 max-[720px]:grid-cols-1">
+                        <select
+                          value={route.targetKind}
+                          disabled={busy}
+                          onChange={(event) => updateRoute(toolName, tool, route, { targetKind: event.currentTarget.value as AssistantExtensionTargetKind })}
+                          className="h-[30px] text-xs"
+                        >
+                          {tool.supportedTargets.includes('server') ? <option value="server">Server</option> : null}
+                          {tool.supportedTargets.includes('any_device') ? <option value="any_device">Any device</option> : null}
+                          {tool.supportedTargets.includes('device') ? <option value="device">Device</option> : null}
+                        </select>
+                        <select
+                          value={route.targetDeviceId ?? ''}
+                          disabled={busy || route.targetKind !== 'device'}
+                          onChange={(event) => updateRoute(toolName, tool, route, { targetDeviceId: event.currentTarget.value || null })}
+                          className="h-[30px] min-w-0 text-xs"
+                        >
+                          <option value="">Select device</option>
+                          {activeDevices.map((device) => (
+                            <option key={device.id} value={device.id}>{device.displayName} / {device.deviceType}</option>
+                          ))}
+                        </select>
+                        <span className={cn('flex items-center gap-1.5 text-[10px] uppercase text-[var(--muted)]', route.enabled && routeConnected && 'text-[var(--green)]')}>
+                          <span className={cn('h-2 w-2 rounded-full bg-[var(--muted)]', route.enabled && routeConnected && 'bg-[var(--green)]')} />
+                          {route.enabled ? (route.targetKind === 'server' ? 'Server route' : routeConnected ? 'Ready' : 'No runner') : 'Disabled'}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </article>
+          ))}
+          {manifests.length === 0 ? <div className={assistantEmptyClass}>No extension manifests have been added yet.</div> : null}
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -600,6 +812,8 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   const [deviceType, setDeviceType] = React.useState('android');
   const [androidApkInfo, setAndroidApkInfo] = React.useState<AndroidApkInfo | null>(null);
   const [desktopAppInfo, setDesktopAppInfo] = React.useState<DesktopAppInfo | null>(null);
+  const [assistantExtensions, setAssistantExtensions] = React.useState<AssistantExtensionsResponse | null>(null);
+  const [extensionManifestDraft, setExtensionManifestDraft] = React.useState('');
   const [androidSetupInfo, setAndroidSetupInfo] = React.useState<AndroidSetupInfo | null>(null);
   const [androidSetupQr, setAndroidSetupQr] = React.useState('');
   const [pairingText, setPairingText] = React.useState('');
@@ -665,12 +879,23 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
     [activeThreadId, client],
   );
 
+  const loadAssistantExtensions = React.useCallback(async () => {
+    try {
+      const data = await client.request<AssistantExtensionsResponse>('/api/assistant/extensions');
+      setAssistantExtensions(data);
+      return data;
+    } catch {
+      setAssistantExtensions(null);
+      return null;
+    }
+  }, [client]);
+
   const loadDashboard = React.useCallback(async () => {
     setError(null);
     try {
       const data = await client.request<DashboardData>('/api/dashboard');
       setDashboard(data);
-      await loadAssistantSnapshot(activeThreadId);
+      await Promise.all([loadAssistantSnapshot(activeThreadId), loadAssistantExtensions()]);
       if (!settingsHydratedRef.current) {
         setApprovalSettings({
           triggerPhrase: data.settings.triggerPhrase,
@@ -693,7 +918,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
     } finally {
       setLoading(false);
     }
-  }, [activeThreadId, client, loadAssistantSnapshot]);
+  }, [activeThreadId, client, loadAssistantExtensions, loadAssistantSnapshot]);
 
   const loadAndroidApkInfo = React.useCallback(async () => {
     try {
@@ -1242,6 +1467,55 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
       );
       setAssistantSnapshotData(data.snapshot);
       setNotice('Saved assistant settings.');
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveExtensionManifest() {
+    const raw = extensionManifestDraft.trim();
+    if (!raw) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const manifest = JSON.parse(raw);
+      const data = await client.request<{ ok: true; snapshot: AssistantSnapshot }>('/api/assistant/extensions/manifests', {
+        method: 'POST',
+        body: JSON.stringify({ manifest }),
+      });
+      setAssistantSnapshotData(data.snapshot);
+      setExtensionManifestDraft('');
+      await Promise.all([loadAssistantExtensions(), loadDashboard()]);
+      setNotice('Added extension manifest.');
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function updateExtensionToolRoute(
+    toolName: string,
+    route: Pick<AssistantExtensionToolRoute, 'enabled' | 'targetKind' | 'targetDeviceId'>,
+  ) {
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await client.request<{ ok: true; route: AssistantExtensionToolRoute; snapshot: AssistantSnapshot }>(
+        `/api/assistant/extensions/tools/${encodeURIComponent(toolName)}/route`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify(route),
+        },
+      );
+      setAssistantSnapshotData(data.snapshot);
+      setAssistantExtensions((current) => current
+        ? { ...current, routes: [...current.routes.filter((item) => item.toolName !== data.route.toolName), data.route] }
+        : current);
+      await loadAssistantExtensions();
+      setNotice('Updated extension route.');
     } catch (err: any) {
       setError(err?.message ?? String(err));
     } finally {
@@ -2386,6 +2660,16 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                   ) : null}
                 </div>
               </section>
+
+              <AssistantExtensionsPanel
+                data={assistantExtensions}
+                devices={devices}
+                manifestDraft={extensionManifestDraft}
+                busy={busy}
+                onManifestDraftChange={setExtensionManifestDraft}
+                onSaveManifest={() => void saveExtensionManifest()}
+                onUpdateRoute={(toolName, route) => void updateExtensionToolRoute(toolName, route)}
+              />
 
               <section className={assistantPanelClass}>
                 <div className={assistantPanelHeaderClass}>
