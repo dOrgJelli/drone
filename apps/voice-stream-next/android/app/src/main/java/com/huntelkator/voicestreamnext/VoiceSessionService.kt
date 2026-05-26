@@ -252,6 +252,12 @@ class VoiceSessionService : Service() {
         })
     }
 
+    private fun broadcastSpeechHistoryChanged() {
+        sendBroadcast(Intent(Constants.ACTION_SPEECH_HISTORY_CHANGED).apply {
+            setPackage(packageName)
+        })
+    }
+
     private fun connectControlChannel() {
         cancelControlReconnect()
         if (controlSocket != null) return
@@ -282,7 +288,16 @@ class VoiceSessionService : Service() {
                             val audioBase64 = message.optString("audioBase64")
                             if (audioBase64.isNotBlank()) {
                                 runCatching {
-                                    AssistantAudioPlayer.playWav(applicationContext, Base64.decode(audioBase64, Base64.DEFAULT)) { status ->
+                                    val audio = Base64.decode(audioBase64, Base64.DEFAULT)
+                                    SpeechHistoryStore.add(
+                                        context = applicationContext,
+                                        audio = audio,
+                                        text = message.optString("text").takeIf { it.isNotBlank() },
+                                        source = message.optString("source").takeIf { it.isNotBlank() },
+                                        contentType = message.optString("contentType", "audio/wav"),
+                                    )
+                                    broadcastSpeechHistoryChanged()
+                                    AssistantAudioPlayer.playWav(applicationContext, audio) { status ->
                                         publishStatus(status, lastMode, currentMicrophone, lastApprovalStatus)
                                     }
                                     publishStatus("Assistant audio received.", lastMode, currentMicrophone, lastApprovalStatus)

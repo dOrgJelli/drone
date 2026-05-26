@@ -32,6 +32,9 @@ import androidx.core.content.ContextCompat
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import java.net.URI
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import kotlin.concurrent.thread
 import kotlin.math.roundToInt
 
@@ -48,7 +51,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var offButton: Button
     private lateinit var root: LinearLayout
     private lateinit var signedOutPanel: View
-    private lateinit var voicePanel: View
+    private lateinit var voicePanel: LinearLayout
     private lateinit var settingsPanel: View
     private lateinit var settingsButton: Button
     private lateinit var signInButton: Button
@@ -57,6 +60,13 @@ class MainActivity : ComponentActivity() {
     private lateinit var updateBannerTitle: TextView
     private lateinit var updateBannerSubtitle: TextView
     private lateinit var updateBannerButton: Button
+    private lateinit var speechHistoryPanel: LinearLayout
+    private lateinit var speechHistoryTitle: TextView
+    private lateinit var speechHistorySubtitle: TextView
+    private lateinit var speechHistoryPrevButton: Button
+    private lateinit var speechHistoryPlayButton: Button
+    private lateinit var speechHistoryStopButton: Button
+    private lateinit var speechHistoryNextButton: Button
 
     private val wakeController = WakeToggleController()
     private val approvalCodeRecognizer = ApprovalCodeRecognizer()
@@ -68,6 +78,8 @@ class MainActivity : ComponentActivity() {
     private var sessionMode = SessionMode.OFF
     private var currentUpdateConfig: UpdateConfig? = null
     private var lastUpdateCheckAtMs = 0L
+    private var speechHistoryEntries: List<SpeechHistoryEntry> = emptyList()
+    private var speechHistoryIndex = -1
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -85,6 +97,12 @@ class MainActivity : ComponentActivity() {
                 updateMicrophoneUi(microphone)
             }
             updateApprovalUi(approvalStatus)
+        }
+    }
+
+    private val speechHistoryReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            refreshSpeechHistory(selectLatest = true)
         }
     }
 
@@ -130,6 +148,7 @@ class MainActivity : ComponentActivity() {
         buildUi()
         loadConfigIntoForm()
         updateSessionUi(SessionMode.OFF, "Ready")
+        refreshSpeechHistory(selectLatest = true)
         renderAuthState()
         if (api.pairedDeviceId().isNotBlank()) {
             refreshDashboard()
@@ -145,15 +164,23 @@ class MainActivity : ComponentActivity() {
             IntentFilter(Constants.ACTION_STATUS),
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
+        ContextCompat.registerReceiver(
+            this,
+            speechHistoryReceiver,
+            IntentFilter(Constants.ACTION_SPEECH_HISTORY_CHANGED),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
     }
 
     override fun onResume() {
         super.onResume()
+        refreshSpeechHistory(selectLatest = false)
         resyncServiceStatus()
     }
 
     override fun onStop() {
         runCatching { unregisterReceiver(statusReceiver) }
+        runCatching { unregisterReceiver(speechHistoryReceiver) }
         super.onStop()
     }
 
@@ -249,6 +276,10 @@ class MainActivity : ComponentActivity() {
             setOnClickListener { turnOff() }
         }
         hero.addView(offButton, LinearLayout.LayoutParams(148.dp(), 48.dp()).apply { topMargin = 18.dp() })
+        speechHistoryPanel = buildSpeechHistoryPanel()
+        hero.addView(speechHistoryPanel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = 22.dp()
+        })
         root.addView(hero)
 
         microphoneText = label("Mic: phone", 12f, COLOR_MUTED, true).apply {
@@ -407,6 +438,71 @@ class MainActivity : ComponentActivity() {
 
     private fun updateMicrophoneUi(microphone: String) {
         microphoneText.text = microphone
+    }
+
+    private fun refreshSpeechHistory(selectLatest: Boolean = false) {
+        val currentId = speechHistoryEntries.getOrNull(speechHistoryIndex)?.id
+        speechHistoryEntries = SpeechHistoryStore.list(this)
+        speechHistoryIndex = when {
+            speechHistoryEntries.isEmpty() -> -1
+            selectLatest -> speechHistoryEntries.lastIndex
+            currentId != null -> speechHistoryEntries.indexOfFirst { it.id == currentId }.takeIf { it >= 0 } ?: speechHistoryEntries.lastIndex
+            speechHistoryIndex in speechHistoryEntries.indices -> speechHistoryIndex
+            else -> speechHistoryEntries.lastIndex
+        }
+        renderSpeechHistory()
+    }
+
+    private fun renderSpeechHistory() {
+        if (!::speechHistoryPanel.isInitialized) return
+        val entry = speechHistoryEntries.getOrNull(speechHistoryIndex)
+        val hasHistory = entry != null
+        speechHistoryTitle.text = if (hasHistory) {
+            "Speech ${speechHistoryIndex + 1}/${speechHistoryEntries.size}"
+        } else {
+            "Speech history"
+        }
+        speechHistorySubtitle.text = entry?.let { speechHistorySubtitle(it) } ?: "No saved speech yet."
+        speechHistoryPrevButton.isEnabled = speechHistoryIndex > 0
+        speechHistoryNextButton.isEnabled = speechHistoryIndex >= 0 && speechHistoryIndex < speechHistoryEntries.lastIndex
+        speechHistoryPlayButton.isEnabled = hasHistory
+        speechHistoryStopButton.isEnabled = hasHistory
+    }
+
+    private fun moveSpeechHistory(delta: Int) {
+        if (speechHistoryEntries.isEmpty()) return
+        speechHistoryIndex = (speechHistoryIndex + delta).coerceIn(0, speechHistoryEntries.lastIndex)
+        renderSpeechHistory()
+    }
+
+    private fun playSelectedSpeech() {
+        val entry = speechHistoryEntries.getOrNull(speechHistoryIndex) ?: return
+        thread(name = "VoiceStreamSpeechHistoryPlayback") {
+            val audio = SpeechHistoryStore.readAudio(applicationContext, entry)
+            if (audio == null) {
+                showStatus("Saved speech is unavailable.")
+                runOnUiThread { refreshSpeechHistory(selectLatest = false) }
+                return@thread
+            }
+            AssistantAudioPlayer.playWav(applicationContext, audio) { status ->
+                showStatus(status)
+            }
+            showStatus("Playing saved speech.")
+        }
+    }
+
+    private fun stopSpeechPlayback() {
+        AssistantAudioPlayer.stopAll()
+        showStatus("Assistant audio stopped.")
+    }
+
+    private fun speechHistorySubtitle(entry: SpeechHistoryEntry): String {
+        val time = runCatching {
+            SPEECH_TIME_FORMAT.format(Instant.parse(entry.createdAt).atZone(ZoneId.systemDefault()))
+        }.getOrDefault(entry.createdAt.take(16))
+        val text = entry.text?.takeIf { it.isNotBlank() } ?: entry.source?.takeIf { it.isNotBlank() }
+        val size = if (entry.bytes > 0) " | ${entry.bytes / 1024} KB" else ""
+        return if (text.isNullOrBlank()) "$time$size" else "$time | ${text.take(72)}$size"
     }
 
     private fun loadConfigIntoForm() {
@@ -967,6 +1063,38 @@ class MainActivity : ComponentActivity() {
         addView(label(title, 18f, COLOR_TEXT, true))
     }
 
+    private fun buildSpeechHistoryPanel(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        background = rounded(COLOR_FLOATING, 8.dp(), COLOR_STROKE)
+        setPadding(14.dp(), 12.dp(), 14.dp(), 14.dp())
+
+        speechHistoryTitle = label("Speech history", 15f, COLOR_TEXT, true)
+        addView(speechHistoryTitle)
+
+        speechHistorySubtitle = label("No saved speech yet.", 12f, COLOR_MUTED, false).apply {
+            setPadding(0, 4.dp(), 0, 0)
+            maxLines = 2
+        }
+        addView(speechHistorySubtitle)
+
+        val controls = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 10.dp(), 0, 0)
+        }
+        speechHistoryPrevButton = historyButton("<") { moveSpeechHistory(-1) }
+        speechHistoryPlayButton = historyButton("Play") { playSelectedSpeech() }
+        speechHistoryStopButton = historyButton("Stop") { stopSpeechPlayback() }
+        speechHistoryNextButton = historyButton(">") { moveSpeechHistory(1) }
+
+        listOf(speechHistoryPrevButton, speechHistoryPlayButton, speechHistoryStopButton, speechHistoryNextButton).forEachIndexed { index, view ->
+            controls.addView(view, LinearLayout.LayoutParams(0, 42.dp(), if (index == 0 || index == 3) 0.8f else 1.2f).apply {
+                if (index < 3) rightMargin = 8.dp()
+            })
+        }
+        addView(controls)
+    }
+
     private fun buildUpdateBanner(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
@@ -991,6 +1119,12 @@ class MainActivity : ComponentActivity() {
         addView(updateBannerButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, 42.dp()).apply {
             leftMargin = 12.dp()
         })
+    }
+
+    private fun historyButton(textValue: String, onClick: () -> Unit): Button = button(textValue, onClick).apply {
+        textSize = 12f
+        background = rounded(COLOR_SURFACE, 6.dp(), COLOR_STROKE)
+        setTextColor(COLOR_TEXT)
     }
 
     private fun row(vararg views: View): LinearLayout = LinearLayout(this).apply {
@@ -1197,5 +1331,6 @@ class MainActivity : ComponentActivity() {
         const val COLOR_RED = 0xffff5a5a.toInt()
         const val UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000L
         const val COLOR_SYSTEM_BAR = 0xcc101216.toInt()
+        val SPEECH_TIME_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("MMM d HH:mm")
     }
 }
