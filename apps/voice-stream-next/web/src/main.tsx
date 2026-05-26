@@ -66,6 +66,7 @@ const assistantActionButtonClass =
   'inline-flex h-[30px] items-center justify-center rounded border border-[var(--border)] bg-white/[.035] px-2.5 font-display text-[10px] font-semibold uppercase text-[var(--fg-secondary)] transition hover:border-[rgba(136,145,168,.36)] hover:text-[var(--fg)] disabled:pointer-events-none disabled:opacity-50';
 const assistantFieldLabelClass = 'grid gap-1.5 text-[10px] font-extrabold uppercase leading-tight text-[var(--muted)]';
 const assistantRowClass = 'rounded-[7px] border border-[var(--border-subtle)] bg-white/[.025] text-[var(--fg-secondary)]';
+const ASSISTANT_MESSAGES_BOTTOM_THRESHOLD_PX = 1;
 
 function modelSelectionKey(selection: { provider: string; model: string; thinkingLevel: string }): string {
   return `${selection.provider}:${selection.model}:${selection.thinkingLevel}`;
@@ -694,12 +695,47 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   const [approvalSettings, setApprovalSettings] = React.useState<VoiceApprovalFormState>(VOICE_APPROVAL_SETTINGS_DEFAULT);
   const settingsHydratedRef = React.useRef(false);
   const assistantEventRefreshTimerRef = React.useRef<number | null>(null);
+  const messagesScrollRef = React.useRef<HTMLDivElement | null>(null);
+  const messagesStickToBottomRef = React.useRef(true);
+  const messageScrollSignatureRef = React.useRef('');
 
   const assistantThreads = assistantSnapshotData?.threads ?? dashboard?.threads ?? [];
   const activeThread =
     assistantThreads.find((thread) => thread.id === activeThreadId) ??
     assistantThreads[0] ??
     null;
+  const updateMessagesStickToBottom = React.useCallback((node: HTMLDivElement | null) => {
+    if (!node) return;
+    const gap = node.scrollHeight - node.scrollTop - node.clientHeight;
+    messagesStickToBottomRef.current = gap <= ASSISTANT_MESSAGES_BOTTOM_THRESHOLD_PX;
+  }, []);
+  const scrollMessagesToBottom = React.useCallback((options: { force?: boolean; retries?: number } = {}) => {
+    const { force = false, retries = 4 } = options;
+    if (force) messagesStickToBottomRef.current = true;
+    let triesRemaining = retries;
+    const attempt = () => {
+      window.requestAnimationFrame(() => {
+        const node = messagesScrollRef.current;
+        if (!node) {
+          if (triesRemaining > 0) {
+            triesRemaining -= 1;
+            attempt();
+          }
+          return;
+        }
+        if (!force && !messagesStickToBottomRef.current) return;
+        node.scrollTop = node.scrollHeight;
+        updateMessagesStickToBottom(node);
+        if (force) messagesStickToBottomRef.current = true;
+        const gap = node.scrollHeight - node.scrollTop - node.clientHeight;
+        if (gap > 1 && triesRemaining > 0) {
+          triesRemaining -= 1;
+          attempt();
+        }
+      });
+    };
+    attempt();
+  }, [updateMessagesStickToBottom]);
   const dismissToast = React.useCallback((id: string) => {
     setToasts((current) => current.filter((toast) => toast.id !== id));
   }, []);
@@ -965,6 +1001,52 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
     };
   }, [activeThread?.id, loadMessages]);
 
+  React.useEffect(() => {
+    messageScrollSignatureRef.current = '';
+    scrollMessagesToBottom({ force: true });
+  }, [activeThread?.id, scrollMessagesToBottom]);
+
+  React.useEffect(() => {
+    if (assistantFilesOpen) return;
+    scrollMessagesToBottom();
+  }, [assistantFilesOpen, scrollMessagesToBottom]);
+
+  React.useEffect(() => {
+    const thread = activeThread as AssistantThreadView | null;
+    const pendingApprovalsForThread = (assistantSnapshotData?.pendingApprovals ?? []).filter(
+      (approval) => approval.threadId === activeThread?.id && approval.status === 'pending',
+    );
+    const signature = [
+      activeThread?.id ?? '',
+      activeThread?.status ?? '',
+      messages
+        .map((message) =>
+          [
+            message.id,
+            message.role,
+            message.content?.length ?? 0,
+            message.content ? message.content.slice(-80) : '',
+            message.contentJson?.length ?? 0,
+            message.contentJson ? message.contentJson.slice(-80) : '',
+            message.toolName ?? '',
+            message.toolCallId ?? '',
+            message.isError ? '1' : '0',
+          ].join(':'),
+        )
+        .join('|'),
+      streamingReply.length,
+      streamingReply.slice(-80),
+      streamingThinking.length,
+      streamingThinking.slice(-80),
+      (thread?.runs ?? []).map((run) => [run.id, run.status, run.startedAt, run.completedAt ?? '', run.cancelledAt ?? ''].join(':')).join('|'),
+      (thread?.queuedPrompts ?? []).map((prompt) => [prompt.id, prompt.createdAt, prompt.prompt?.length ?? 0].join(':')).join('|'),
+      pendingApprovalsForThread.map((approval) => [approval.id, approval.toolName, approval.createdAt].join(':')).join('|'),
+    ].join('\u0001');
+    if (signature === messageScrollSignatureRef.current) return;
+    messageScrollSignatureRef.current = signature;
+    scrollMessagesToBottom();
+  }, [activeThread, assistantSnapshotData?.pendingApprovals, messages, scrollMessagesToBottom, streamingReply, streamingThinking]);
+
   async function createThread(options: { voiceEnabled?: boolean } = {}) {
     setBusy(true);
     setError(null);
@@ -997,6 +1079,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
     setError(null);
     setStreamingReply('');
     setStreamingThinking('');
+    scrollMessagesToBottom({ force: true });
     try {
       const response = await client.stream(
         `/api/assistant/threads/${encodeURIComponent(activeThread.id)}/stream`,
@@ -1016,6 +1099,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
         throw new Error(data?.error ?? `${response.status} ${response.statusText}`);
       }
       setMessageDraft('');
+      scrollMessagesToBottom({ force: true });
       await readAssistantEventStream(response, (promptEvent) => {
         if (promptEvent.type === 'delta') {
           setStreamingReply((current) => `${current}${String(promptEvent.delta ?? '')}`);
@@ -2337,7 +2421,11 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                 />
               ) : (
                 <>
-                <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto bg-[#151a20] py-3">
+                <div
+                  ref={messagesScrollRef}
+                  onScroll={(event) => updateMessagesStickToBottom(event.currentTarget)}
+                  className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto bg-[#151a20] py-3"
+                >
                   {assistantRenderItems.map((item) =>
                     item.type === 'message' ? (
                       <AssistantMessageRow key={item.key} message={item.message} streaming={item.message.id === streamingMessage?.id} />
