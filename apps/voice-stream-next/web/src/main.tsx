@@ -127,6 +127,7 @@ type AssistantContentPart = {
   type: string;
   text?: string;
   thinking?: string;
+  reasoning?: string;
   name?: string;
   arguments?: unknown;
   args?: unknown;
@@ -166,11 +167,19 @@ function messageParts(message: AssistantMessage | undefined): AssistantContentPa
   return [];
 }
 
+function isReasoningPart(part: AssistantContentPart): boolean {
+  return part.type === 'thinking' || part.type === 'reasoning';
+}
+
+function reasoningPartText(part: AssistantContentPart): string {
+  return String(part.thinking ?? part.reasoning ?? part.text ?? '');
+}
+
 function messageText(message: AssistantMessage | undefined): string {
   if (!message) return '';
   const textFromParts = messageParts(message)
-    .filter((part) => part.type === 'text' || part.type === 'thinking')
-    .map((part) => String(part.text ?? part.thinking ?? ''))
+    .filter((part) => part.type === 'text' || isReasoningPart(part))
+    .map((part) => part.type === 'text' ? String(part.text ?? '') : reasoningPartText(part))
     .join('');
   return (textFromParts || String(message.content ?? '')).trim();
 }
@@ -277,10 +286,10 @@ function ReasoningBlock({ text, streaming = false }: { text: string; streaming?:
   const trimmed = text.trim();
   if (!trimmed && !streaming) return null;
   return (
-    <div className="overflow-hidden rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.015)]">
+    <div className="mb-2 overflow-hidden rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.015)] last:mb-0">
       <button
         type="button"
-        className="flex w-full min-w-0 items-center gap-2 border-0 bg-transparent px-2 py-1.5 text-left text-[var(--muted-dim)]"
+        className="flex w-full min-w-0 items-center gap-2 border-0 bg-transparent px-2.5 py-1.5 text-left text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.035)]"
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
       >
@@ -288,14 +297,30 @@ function ReasoningBlock({ text, streaming = false }: { text: string; streaming?:
         {streaming ? <ThinkingPulseDots /> : null}
         <small className="ml-auto text-[10px] text-[var(--muted)]">{open ? 'Hide' : 'Show'}</small>
       </button>
-      {trimmed && open ? <div className="max-h-[min(70vh,28rem)] overflow-auto whitespace-pre-wrap border-t border-[var(--border-subtle)] p-2 text-[11px] leading-relaxed text-[var(--muted)]">{trimmed}</div> : null}
+      {trimmed ? (
+        open ? (
+          <div className="border-t border-[var(--border-subtle)] px-2.5 py-2">
+            <div className="max-h-[min(70vh,28rem)] overflow-auto whitespace-pre-wrap break-words text-[11px] leading-relaxed text-[var(--muted)]">
+              {trimmed}
+            </div>
+          </div>
+        ) : (
+          <div className="border-t border-[var(--border-subtle)] px-2.5 pb-2 pt-1">
+            <div className="max-h-[4.5em] overflow-hidden whitespace-pre-wrap break-words text-[11px] leading-relaxed text-[var(--muted-dim)]">
+              {trimmed}
+            </div>
+          </div>
+        )
+      ) : streaming ? (
+        <div className="border-t border-[var(--border-subtle)] px-2.5 py-2 text-[11px] text-[var(--muted-dim)]">...</div>
+      ) : null}
     </div>
   );
 }
 
 function AssistantMessageRow({ message, streaming = false }: { message: AssistantMessage; streaming?: boolean }) {
   const parts = messageParts(message);
-  const hasStructuredContent = parts.some((part) => part.type === 'text' || part.type === 'thinking');
+  const hasStructuredContent = parts.some((part) => part.type === 'text' || isReasoningPart(part));
   return (
     <article
       className={cn(
@@ -310,7 +335,7 @@ function AssistantMessageRow({ message, streaming = false }: { message: Assistan
       <div className="mb-1 font-display text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]">{messageRoleLabel(message)}</div>
       {hasStructuredContent ? (
         parts.map((part, index) => {
-          if (part.type === 'thinking') return <ReasoningBlock key={index} text={String(part.thinking ?? '')} streaming={streaming && index === parts.length - 1} />;
+          if (isReasoningPart(part)) return <ReasoningBlock key={index} text={reasoningPartText(part)} streaming={streaming && index === parts.length - 1} />;
           if (part.type === 'text') return <MarkdownMessage key={index} text={String(part.text ?? '')} />;
           return null;
         })
@@ -3669,6 +3694,9 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
 type VoiceMode = 'off' | 'awake' | 'sleeping' | 'recording';
 type VoiceStreamTarget = 'assistant' | 'patch' | 'clipboard';
 
+// Keep the status command path available, but do not match spoken status phrases locally.
+const ENABLE_STATUS_WAKE_COMMAND = false;
+
 function wakePhraseMatch(text: string): 'start' | 'patch' | 'clipboard' | 'sleep' | 'status' | null {
   const words = text.toLowerCase().split(/[^a-z]+/).filter(Boolean);
   const compact = words.join('');
@@ -3676,7 +3704,7 @@ function wakePhraseMatch(text: string): 'start' | 'patch' | 'clipboard' | 'sleep
   if (words.some((word, index) => (word === 'hey' || word === 'hay') && (words[index + 1] === 'sebastian' || words[index + 1] === 'sebastien'))) return 'start';
   if (words.some((word, index) => word === 'patch' && words[index + 1] === 'me' && words[index + 2] === 'in')) return 'patch';
   if (words.includes('transcribe')) return 'clipboard';
-  if (words.includes('status') || compact === 'stateus' || compact === 'checkstatus') return 'status';
+  if (ENABLE_STATUS_WAKE_COMMAND && (words.includes('status') || compact === 'stateus' || compact === 'checkstatus')) return 'status';
   return null;
 }
 

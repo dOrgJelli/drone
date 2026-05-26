@@ -756,8 +756,12 @@ function textFromPiAssistantMessage(message: any): string {
 function thinkingFromPiAssistantMessage(message: any): string {
   if (!message?.content || !Array.isArray(message.content)) return '';
   return message.content
-    .filter((part: any) => part?.type === 'thinking' && typeof part.thinking === 'string')
-    .map((part: any) => part.thinking)
+    .filter(
+      (part: any) =>
+        (part?.type === 'thinking' || part?.type === 'reasoning') &&
+        (typeof part.thinking === 'string' || typeof part.reasoning === 'string'),
+    )
+    .map((part: any) => String(part.thinking ?? part.reasoning ?? ''))
     .join('')
     .trim();
 }
