@@ -31,6 +31,7 @@ export default defineConfig(({ mode }) => {
         '/api': {
           target: `http://127.0.0.1:${apiPort}`,
           changeOrigin: false,
+          ws: true,
           xfwd: true,
           configure: (proxy) => {
             proxy.on('proxyReq', (proxyReq, req) => {

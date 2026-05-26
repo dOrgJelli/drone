@@ -5,8 +5,8 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-val androidVersionCode = 3
-val androidVersionName = "0.1.3"
+val androidVersionCode = 7
+val androidVersionName = "0.1.7"
 
 android {
     namespace = "com.huntelkator.voicestreamnext"

@@ -2570,7 +2570,10 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                           value={apiKeyDrafts[provider]}
                           disabled={busy}
                           placeholder={key?.hasKey ? 'Paste replacement key' : `Paste ${label} key`}
-                          onChange={(event) => setApiKeyDrafts((current) => ({ ...current, [provider]: event.currentTarget.value }))}
+                          onChange={(event) => {
+                            const value = event.currentTarget.value;
+                            setApiKeyDrafts((current) => ({ ...current, [provider]: value }));
+                          }}
                           className="h-[30px] min-w-0"
                         />
                         <button type="button" className={assistantActionButtonClass} onClick={() => void saveAssistantApiKey(provider)} disabled={busy || !apiKeyDrafts[provider].trim()}>
@@ -2765,28 +2768,40 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                     Trigger phrase
                     <input
                       value={approvalSettings.triggerPhrase}
-                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, triggerPhrase: event.target.value }))}
+                      onChange={(event) => {
+                        const value = event.currentTarget.value;
+                        setApprovalSettings((prev) => ({ ...prev, triggerPhrase: value }));
+                      }}
                     />
                   </label>
                   <label className={assistantFieldLabelClass}>
                     Unlock
                     <input
                       value={approvalSettings.unlockCode}
-                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, unlockCode: codeValue(event.target.value) }))}
+                      onChange={(event) => {
+                        const value = codeValue(event.currentTarget.value);
+                        setApprovalSettings((prev) => ({ ...prev, unlockCode: value }));
+                      }}
                     />
                   </label>
                   <label className={assistantFieldLabelClass}>
                     Lock
                     <input
                       value={approvalSettings.lockCode}
-                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, lockCode: codeValue(event.target.value) }))}
+                      onChange={(event) => {
+                        const value = codeValue(event.currentTarget.value);
+                        setApprovalSettings((prev) => ({ ...prev, lockCode: value }));
+                      }}
                     />
                   </label>
                   <label className={assistantFieldLabelClass}>
                     Off
                     <input
                       value={approvalSettings.lockedOffCode}
-                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, lockedOffCode: codeValue(event.target.value) }))}
+                      onChange={(event) => {
+                        const value = codeValue(event.currentTarget.value);
+                        setApprovalSettings((prev) => ({ ...prev, lockedOffCode: value }));
+                      }}
                     />
                   </label>
                   <label className={assistantFieldLabelClass}>
@@ -2796,7 +2811,10 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                       min={1}
                       max={12}
                       value={approvalSettings.minDigits}
-                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, minDigits: Number(event.target.value) }))}
+                      onChange={(event) => {
+                        const value = Number(event.currentTarget.value);
+                        setApprovalSettings((prev) => ({ ...prev, minDigits: value }));
+                      }}
                     />
                   </label>
                   <label className={assistantFieldLabelClass}>
@@ -2806,7 +2824,10 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                       min={1}
                       max={12}
                       value={approvalSettings.maxDigits}
-                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, maxDigits: Number(event.target.value) }))}
+                      onChange={(event) => {
+                        const value = Number(event.currentTarget.value);
+                        setApprovalSettings((prev) => ({ ...prev, maxDigits: value }));
+                      }}
                     />
                   </label>
                   <label className={assistantFieldLabelClass}>
@@ -2816,7 +2837,10 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                       min={250}
                       max={3000}
                       value={approvalSettings.stableMs}
-                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, stableMs: Number(event.target.value) }))}
+                      onChange={(event) => {
+                        const value = Number(event.currentTarget.value);
+                        setApprovalSettings((prev) => ({ ...prev, stableMs: value }));
+                      }}
                     />
                   </label>
                   <label className={assistantFieldLabelClass}>
@@ -2826,7 +2850,10 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                       min={1000}
                       max={15000}
                       value={approvalSettings.collectTimeoutMs}
-                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, collectTimeoutMs: Number(event.target.value) }))}
+                      onChange={(event) => {
+                        const value = Number(event.currentTarget.value);
+                        setApprovalSettings((prev) => ({ ...prev, collectTimeoutMs: value }));
+                      }}
                     />
                   </label>
                   <label className={assistantFieldLabelClass}>
@@ -2836,7 +2863,10 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                       min={0}
                       max={15000}
                       value={approvalSettings.duplicateCooldownMs}
-                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, duplicateCooldownMs: Number(event.target.value) }))}
+                      onChange={(event) => {
+                        const value = Number(event.currentTarget.value);
+                        setApprovalSettings((prev) => ({ ...prev, duplicateCooldownMs: value }));
+                      }}
                     />
                   </label>
                   <label className={assistantFieldLabelClass}>
@@ -2846,9 +2876,10 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                       min={100}
                       max={1000}
                       value={approvalSettings.finalizeCheckIntervalMs}
-                      onChange={(event) =>
-                        setApprovalSettings((prev) => ({ ...prev, finalizeCheckIntervalMs: Number(event.target.value) }))
-                      }
+                      onChange={(event) => {
+                        const value = Number(event.currentTarget.value);
+                        setApprovalSettings((prev) => ({ ...prev, finalizeCheckIntervalMs: value }));
+                      }}
                     />
                   </label>
                   <button type="submit" className={cn(assistantActionButtonClass, 'w-fit')} disabled={busy}>

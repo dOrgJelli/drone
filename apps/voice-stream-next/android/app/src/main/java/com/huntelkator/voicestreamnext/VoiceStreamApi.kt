@@ -169,11 +169,11 @@ class VoiceStreamApi(private val context: Context) {
             .header("x-voice-device-token", token)
             .header("x-voice-client-version", BuildConfig.VERSION_CODE.toString())
         client.newCall(builder.build()).execute().use { response ->
-            val text = response.body?.string().orEmpty()
+            val text = response.body.string()
             if (!response.isSuccessful) {
-                throw IOException(JSONObject(text.ifBlank { "{}" }).optString("error", "HTTP ${response.code}"))
+                throw IOException(ApiJsonResponse.errorMessage(text, "HTTP ${response.code}"))
             }
-            return JSONObject(text.ifBlank { "{}" })
+            return ApiJsonResponse.parseObject(text, "GET", "/api/devices/$deviceId/bootstrap")
                 .getJSONObject("device")
                 .optString("displayName")
         }
@@ -229,11 +229,11 @@ class VoiceStreamApi(private val context: Context) {
             .header("content-type", "application/json")
             .post(body.toString().toRequestBody(JSON))
         client.newCall(builder.build()).execute().use { response ->
-            val text = response.body?.string().orEmpty()
+            val text = response.body.string()
             if (!response.isSuccessful) {
-                throw IOException(JSONObject(text.ifBlank { "{}" }).optString("error", "HTTP ${response.code}"))
+                throw IOException(ApiJsonResponse.errorMessage(text, "HTTP ${response.code}"))
             }
-            val json = JSONObject(text.ifBlank { "{}" })
+            val json = ApiJsonResponse.parseObject(text, "POST", path)
             val android = json.optJSONObject("android")
             val apkUrl = android?.optString("downloadUrl")?.takeIf { it.isNotBlank() }
             return AndroidSetupRedeemResult(
@@ -362,11 +362,11 @@ class VoiceStreamApi(private val context: Context) {
             builder.method(method, body.toString().toRequestBody(JSON))
         }
         client.newCall(builder.build()).execute().use { response ->
-            val text = response.body?.string().orEmpty()
+            val text = response.body.string()
             if (!response.isSuccessful) {
-                throw IOException(JSONObject(text.ifBlank { "{}" }).optString("error", "HTTP ${response.code}"))
+                throw IOException(ApiJsonResponse.errorMessage(text, "HTTP ${response.code}"))
             }
-            return JSONObject(text.ifBlank { "{}" })
+            return ApiJsonResponse.parseObject(text, method, path)
         }
     }
 
@@ -393,4 +393,63 @@ class VoiceStreamApi(private val context: Context) {
     private companion object {
         val JSON = "application/json; charset=utf-8".toMediaType()
     }
+}
+
+object ApiJsonResponse {
+    fun parseObject(text: String, method: String, path: String): JSONObject {
+        val trimmed = text.trim()
+        if (trimmed.isBlank()) return JSONObject()
+        if (!trimmed.startsWith("{")) {
+            throw IOException("Expected JSON object from $method $path, got ${bodyType(trimmed)}: ${previewBody(trimmed)}")
+        }
+        return runCatching { JSONObject(trimmed) }
+            .getOrElse { error ->
+                throw IOException("Expected JSON object from $method $path, got malformed JSON: ${preview(trimmed)}", error)
+            }
+    }
+
+    fun errorMessage(text: String, fallback: String): String {
+        val trimmed = text.trim()
+        if (trimmed.isBlank()) return fallback
+        if (trimmed.startsWith("{")) {
+            val json = runCatching { JSONObject(trimmed) }.getOrNull()
+            if (json != null) {
+                return json.optString("error")
+                    .ifBlank { json.optString("message") }
+                    .ifBlank { fallback }
+            }
+        }
+        val textMessage = previewBody(trimmed)
+        return if (textMessage.isBlank()) fallback else textMessage
+    }
+
+    private fun bodyType(text: String): String = when (text.firstOrNull()) {
+        '"' -> "string"
+        '[' -> "array"
+        '<' -> "html"
+        't', 'f' -> "boolean"
+        'n' -> "null"
+        in '0'..'9', '-' -> "number"
+        else -> "text"
+    }
+
+    private fun previewBody(text: String): String {
+        val trimmed = text.trim()
+        if (trimmed.length >= 2 && trimmed.first() == '"' && trimmed.last() == '"') {
+            return trimmed.substring(1, trimmed.length - 1)
+                .replace("\\\"", "\"")
+                .replace("\\n", " ")
+                .replace("\\r", " ")
+                .replace("\\t", " ")
+                .let(::preview)
+        }
+        return preview(trimmed)
+    }
+
+    private fun preview(text: String): String {
+        val normalized = text.replace(Regex("\\s+"), " ").trim()
+        return normalized.take(MAX_PREVIEW_CHARS)
+    }
+
+    private const val MAX_PREVIEW_CHARS = 180
 }

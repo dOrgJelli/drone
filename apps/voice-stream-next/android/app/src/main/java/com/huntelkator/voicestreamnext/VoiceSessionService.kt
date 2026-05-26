@@ -38,6 +38,8 @@ class VoiceSessionService : Service() {
     @Volatile private var currentMicrophone = "Mic: phone"
     @Volatile private var lastApprovalStatus = ""
     @Volatile private var serviceActive = false
+    @Volatile private var controlReconnectAttempt = 0
+    @Volatile private var controlReconnectRunnable: Runnable? = null
 
     private val logUploadRunnable = object : Runnable {
         override fun run() {
@@ -251,15 +253,19 @@ class VoiceSessionService : Service() {
     }
 
     private fun connectControlChannel() {
+        cancelControlReconnect()
         if (controlSocket != null) return
         val deviceId = api.pairedDeviceId()
         val token = api.pairedDeviceToken()
         if (deviceId.isBlank() || token.isBlank()) return
         val url = buildControlUrl(api.loadConfig().serverUrl, deviceId, token)
+        ClientLog.i("Service", "Opening control websocket")
         controlSocket = controlClient.newWebSocket(
             Request.Builder().url(url).build(),
             object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
+                    ClientLog.i("Service", "Control websocket opened")
+                    controlReconnectAttempt = 0
                     sendControlStatus(lastStatus, lastMode, currentMicrophone, lastApprovalStatus, webSocket)
                 }
 
@@ -276,8 +282,13 @@ class VoiceSessionService : Service() {
                             val audioBase64 = message.optString("audioBase64")
                             if (audioBase64.isNotBlank()) {
                                 runCatching {
-                                    AssistantAudioPlayer.playWav(Base64.decode(audioBase64, Base64.DEFAULT))
+                                    AssistantAudioPlayer.playWav(applicationContext, Base64.decode(audioBase64, Base64.DEFAULT)) { status ->
+                                        publishStatus(status, lastMode, currentMicrophone, lastApprovalStatus)
+                                    }
                                     publishStatus("Assistant audio received.", lastMode, currentMicrophone, lastApprovalStatus)
+                                }.onFailure { error ->
+                                    ClientLog.w("Service", "Assistant audio decode failed", error)
+                                    publishStatus("Assistant audio failed: ${error.message ?: error.javaClass.simpleName}", Constants.MODE_ERROR, currentMicrophone, lastApprovalStatus)
                                 }
                             }
                         }
@@ -286,20 +297,51 @@ class VoiceSessionService : Service() {
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    ClientLog.w("Service", "Control websocket closed code=$code reason=${reason.ifBlank { "(none)" }} active=$serviceActive mode=$lastMode")
                     if (controlSocket === webSocket) controlSocket = null
+                    if (!isTerminalControlCloseCode(code)) scheduleControlReconnect("closed")
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    ClientLog.w("Service", "Control websocket failed responseCode=${response?.code ?: 0} message=${t.message ?: t.javaClass.simpleName}", t)
                     if (controlSocket === webSocket) controlSocket = null
+                    scheduleControlReconnect("failed")
                 }
             }
         )
     }
 
     private fun closeControlChannel() {
+        cancelControlReconnect()
         controlSocket?.close(1000, "service stopped")
         controlSocket = null
     }
+
+    private fun scheduleControlReconnect(reason: String) {
+        if (!shouldMaintainControlChannel()) return
+        if (controlReconnectRunnable != null) return
+        val attempt = controlReconnectAttempt.coerceAtMost(MAX_CONTROL_RECONNECT_EXPONENT)
+        controlReconnectAttempt += 1
+        val delayMs = minOf(MAX_CONTROL_RECONNECT_DELAY_MS, BASE_CONTROL_RECONNECT_DELAY_MS * (1L shl attempt))
+        ClientLog.i("Service", "Scheduling control websocket reconnect reason=$reason attempt=$controlReconnectAttempt delayMs=$delayMs")
+        val runnable = Runnable {
+            controlReconnectRunnable = null
+            if (shouldMaintainControlChannel()) {
+                connectControlChannel()
+            }
+        }
+        controlReconnectRunnable = runnable
+        mainHandler.postDelayed(runnable, delayMs)
+    }
+
+    private fun cancelControlReconnect() {
+        controlReconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+        controlReconnectRunnable = null
+    }
+
+    private fun shouldMaintainControlChannel(): Boolean = serviceActive && lastMode != Constants.MODE_OFF
+
+    private fun isTerminalControlCloseCode(code: Int): Boolean = code == 4401 || code == 4403 || code == 4406 || code == 4408
 
     private fun sendControlStatus(
         status: String,
@@ -364,7 +406,7 @@ class VoiceSessionService : Service() {
             trimmed.startsWith("http://") -> "ws://${trimmed.removePrefix("http://")}"
             else -> trimmed
         }
-        return "$base/api/devices/${encode(deviceId)}/control?token=${encode(token)}"
+        return "$base/api/devices/${encode(deviceId)}/control?token=${encode(token)}&clientVersion=${BuildConfig.VERSION_CODE}&protocolVersion=1"
     }
 
     private fun encode(value: String): String = URLEncoder.encode(value, Charsets.UTF_8.name())
@@ -412,5 +454,8 @@ class VoiceSessionService : Service() {
         const val NOTIFICATION_ID = 821
         const val LOG_UPLOAD_INTERVAL_MS = 60_000L
         const val APPROVAL_STATUS_MS = 4_000L
+        const val BASE_CONTROL_RECONNECT_DELAY_MS = 500L
+        const val MAX_CONTROL_RECONNECT_DELAY_MS = 10_000L
+        const val MAX_CONTROL_RECONNECT_EXPONENT = 5
     }
 }

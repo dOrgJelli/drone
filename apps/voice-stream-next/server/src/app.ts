@@ -1380,6 +1380,16 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     }
     const device = auth.device;
     controlChannels.register(deviceId, socket);
+    db.addLog(device.userId, {
+      deviceId: device.id,
+      source: device.deviceType,
+      level: 'info',
+      message: 'Device control channel connected',
+      detailsJson: JSON.stringify({
+        clientVersion,
+        connectedDeviceIds: controlChannels.connectedDeviceIds().length,
+      }),
+    });
     socket.send(JSON.stringify({
       type: 'control_hello',
       protocolVersion: VOICE_STREAM_PROTOCOL_VERSION,
@@ -1419,13 +1429,19 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       }
       socket.close(VoiceCloseCode.InvalidMessage, 'unknown control message');
     });
-    socket.on('close', () => {
+    socket.on('close', (code: number, reason: Buffer) => {
       clearInterval(heartbeat);
       controlChannels.unregister(deviceId, socket);
-      db.upsertClientStatus(device.userId, device.id, {
-        mode: 'off',
-        status: 'Control channel closed',
-        protocolVersion: VOICE_STREAM_PROTOCOL_VERSION,
+      db.addLog(device.userId, {
+        deviceId: device.id,
+        source: device.deviceType,
+        level: 'warn',
+        message: 'Device control channel disconnected',
+        detailsJson: JSON.stringify({
+          code,
+          reason: reason?.toString() ?? '',
+          connectedDeviceIds: controlChannels.connectedDeviceIds().length,
+        }),
       });
     });
   });
