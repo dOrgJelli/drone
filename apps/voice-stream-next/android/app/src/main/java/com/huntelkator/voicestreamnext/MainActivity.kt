@@ -54,14 +54,21 @@ class MainActivity : ComponentActivity() {
     private lateinit var signInButton: Button
     private lateinit var signOutButton: Button
     private lateinit var qrButton: ImageButton
+    private lateinit var updateBanner: LinearLayout
+    private lateinit var updateBannerTitle: TextView
+    private lateinit var updateBannerSubtitle: TextView
+    private lateinit var updateBannerButton: Button
 
     private val wakeController = WakeToggleController()
     private val approvalCodeRecognizer = ApprovalCodeRecognizer()
     @Volatile private var approvalSettings = VoiceApprovalSettings()
+    @Volatile private var updateCheckRunning = false
     private val cuePlayer = LocalCuePlayer()
     private var pendingStartAwake = false
     private var pendingStartTarget = Constants.STREAM_TARGET_ASSISTANT
     private var sessionMode = SessionMode.OFF
+    private var currentUpdateConfig: UpdateConfig? = null
+    private var lastUpdateCheckAtMs = 0L
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -126,6 +133,7 @@ class MainActivity : ComponentActivity() {
         renderAuthState()
         if (api.pairedDeviceId().isNotBlank()) {
             refreshDashboard()
+            checkForAppUpdate(force = true)
         }
     }
 
@@ -143,6 +151,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         resyncServiceStatus()
+        checkForAppUpdate(force = false)
     }
 
     override fun onStop() {
@@ -175,6 +184,10 @@ class MainActivity : ComponentActivity() {
         root.addView(label("Android client", 13f, COLOR_ACCENT, true).apply {
             gravity = Gravity.CENTER
             setPadding(0, 2.dp(), 0, 18.dp())
+        })
+        updateBanner = buildUpdateBanner()
+        root.addView(updateBanner, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = 6.dp()
         })
 
         signedOutPanel = LinearLayout(this).apply {
@@ -359,6 +372,12 @@ class MainActivity : ComponentActivity() {
                     button("Scan QR") { startQrScan() },
                     button("Refresh") { refreshDashboard() }
                 ))
+                addView(button("Check update") { checkForAppUpdate(force = true, showNoUpdate = true) }, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    44.dp()
+                ).apply {
+                    topMargin = 8.dp()
+                })
                 addView(label("Scan a pairing or update QR from the web dashboard.", 12f, COLOR_MUTED, false).apply {
                     setPadding(0, 10.dp(), 0, 0)
                 })
@@ -441,10 +460,12 @@ class MainActivity : ComponentActivity() {
         if (api.pairedDeviceId().isNotBlank() && api.pairedDeviceToken().isNotBlank()) {
             val displayName = api.pairedDeviceDisplayName().ifBlank { "this phone" }
             showStatus("Connected as $displayName.")
+            checkForAppUpdate(force = false)
             return@runApi
         }
         val dashboard = api.dashboard()
         showStatus("Connected as ${dashboard.displayName}.")
+        checkForAppUpdate(force = false)
     }
 
     private fun pairDevice() {
@@ -456,6 +477,7 @@ class MainActivity : ComponentActivity() {
             showStatus("Paired ${pairing.deviceId.take(14)}.")
             updatePairingMessage()
             runOnUiThread { renderAuthState() }
+            checkForAppUpdate(force = true)
         }
     }
 
@@ -528,6 +550,7 @@ class MainActivity : ComponentActivity() {
         showPairingMessage("Paired ${config.deviceId.take(14)} from QR payload.")
         showStatus("Paired ${config.deviceId.take(14)} from QR payload.")
         renderAuthState()
+        checkForAppUpdate(force = true)
     }
 
     private fun isAndroidSetupUrl(payload: String): Boolean = runCatching {
@@ -560,6 +583,7 @@ class MainActivity : ComponentActivity() {
             showPairingMessage("Paired ${config.deviceId.take(14)} from setup QR.")
             showStatus("Paired ${config.deviceId.take(14)} from setup QR.")
             renderAuthState()
+            checkForAppUpdate(force = true)
         }
     }
 
@@ -567,8 +591,10 @@ class MainActivity : ComponentActivity() {
         val currentVersionCode = currentVersionCode()
         if (currentVersionCode >= config.versionCode) {
             showPairingMessage("VoiceStream app is up to date.")
+            renderUpdateBanner(null)
             return
         }
+        renderUpdateBanner(config)
         showUpdateAvailable(config)
     }
 
@@ -602,6 +628,61 @@ class MainActivity : ComponentActivity() {
             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(apkUrl)))
         }.onFailure { error ->
             Toast.makeText(this, "Could not open APK URL: ${error.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun checkForAppUpdate(force: Boolean = false, showNoUpdate: Boolean = false) {
+        val connected = api.pairedDeviceId().isNotBlank() && api.pairedDeviceToken().isNotBlank()
+        if (!connected) {
+            renderUpdateBanner(null)
+            if (showNoUpdate) showStatus("Sign in to check for app updates.")
+            return
+        }
+
+        val now = SystemClock.elapsedRealtime()
+        if (!force && now - lastUpdateCheckAtMs < UPDATE_CHECK_INTERVAL_MS) return
+        if (updateCheckRunning) return
+
+        lastUpdateCheckAtMs = now
+        updateCheckRunning = true
+        if (showNoUpdate) showStatus("Checking for app update.")
+
+        thread {
+            try {
+                val release = api.androidRelease()
+                val latestVersionCode = release.versionCode
+                if (release.available && latestVersionCode != null && latestVersionCode > currentVersionCode()) {
+                    runOnUiThread {
+                        renderUpdateBanner(UpdateConfig(latestVersionCode, release.apkUrl))
+                        if (showNoUpdate) showStatus("Update available.")
+                    }
+                } else {
+                    runOnUiThread {
+                        renderUpdateBanner(null)
+                        if (showNoUpdate) showStatus("VoiceStream app is up to date.")
+                    }
+                }
+            } catch (error: Exception) {
+                if (showNoUpdate) showStatus(error.message ?: "Update check failed")
+            } finally {
+                updateCheckRunning = false
+            }
+        }
+    }
+
+    private fun renderUpdateBanner(config: UpdateConfig?) {
+        runOnUiThread {
+            currentUpdateConfig = config
+            if (!::updateBanner.isInitialized) return@runOnUiThread
+            if (config == null) {
+                updateBanner.visibility = View.GONE
+                return@runOnUiThread
+            }
+
+            updateBannerTitle.text = "VoiceStream update available"
+            updateBannerSubtitle.text = "Installed: ${currentVersionCode()}. Latest: ${config.versionCode}."
+            updateBannerButton.isEnabled = !config.apkUrl.isNullOrBlank()
+            updateBanner.visibility = View.VISIBLE
         }
     }
 
@@ -782,6 +863,7 @@ class MainActivity : ComponentActivity() {
         api.clearPairing()
         updatePairingMessage()
         renderAuthState()
+        renderUpdateBanner(null)
         showStatus("Signed out.")
     }
 
@@ -810,6 +892,8 @@ class MainActivity : ComponentActivity() {
                 loadConfigIntoForm()
                 renderAuthState()
                 showStatus("Signed in.")
+                refreshDashboard()
+                checkForAppUpdate(force = true)
             }
 
             override fun onAuthExpired() {
@@ -831,6 +915,7 @@ class MainActivity : ComponentActivity() {
         signOutButton.visibility = if (connected) View.VISIBLE else View.GONE
         qrButton.visibility = if (connected) View.GONE else View.VISIBLE
         settingsButton.visibility = View.VISIBLE
+        if (!connected) renderUpdateBanner(null)
         if (!connected) {
             updateSessionUi(SessionMode.OFF, "Sign in to connect this phone.")
         } else if (sessionMode == SessionMode.OFF) {
@@ -894,6 +979,32 @@ class MainActivity : ComponentActivity() {
         params.setMargins(0, 0, 0, 14.dp())
         layoutParams = params
         addView(label(title, 18f, COLOR_TEXT, true))
+    }
+
+    private fun buildUpdateBanner(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        visibility = View.GONE
+        background = rounded(COLOR_UPDATE_SURFACE, 10.dp(), COLOR_YELLOW)
+        setPadding(14.dp(), 12.dp(), 12.dp(), 12.dp())
+
+        val textColumn = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            updateBannerTitle = label("", 15f, COLOR_TEXT, true)
+            updateBannerSubtitle = label("", 12f, COLOR_MUTED, false).apply {
+                setPadding(0, 3.dp(), 0, 0)
+            }
+            addView(updateBannerTitle)
+            addView(updateBannerSubtitle)
+        }
+        addView(textColumn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+        updateBannerButton = button("Download") {
+            openUpdateUrl(currentUpdateConfig?.apkUrl)
+        }
+        addView(updateBannerButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, 42.dp()).apply {
+            leftMargin = 12.dp()
+        })
     }
 
     private fun row(vararg views: View): LinearLayout = LinearLayout(this).apply {
@@ -1098,6 +1209,7 @@ class MainActivity : ComponentActivity() {
         const val COLOR_SURFACE = 0xff171b21.toInt()
         const val COLOR_INPUT = 0xff151a20.toInt()
         const val COLOR_FLOATING = 0xff1e2329.toInt()
+        const val COLOR_UPDATE_SURFACE = 0xff211d13.toInt()
         const val COLOR_TEXT = 0xffdfe3ea.toInt()
         const val COLOR_MUTED = 0xff8891a8.toInt()
         const val COLOR_ACCENT = 0xffa78bfa.toInt()
@@ -1108,5 +1220,6 @@ class MainActivity : ComponentActivity() {
         const val COLOR_GREEN = 0xff4ade80.toInt()
         const val COLOR_YELLOW = 0xffffb224.toInt()
         const val COLOR_RED = 0xffff5a5a.toInt()
+        const val UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000L
     }
 }
