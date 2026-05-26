@@ -13,6 +13,7 @@ let normalWindowBounds = null;
 let tray = null;
 let isQuitting = false;
 let trayStatus = { mode: 'off', status: 'Off.' };
+let extensionBridge = { socket: null, reconnectTimer: null, stopped: false, reconnectDelayMs: 1000 };
 
 const fullWindow = {
   width: 1180,
@@ -78,6 +79,7 @@ const defaultConfig = {
   deviceName: 'Desktop voice client',
   inputDeviceId: '',
   outputDeviceId: '',
+  extensionBridgeEnabled: true,
   authSavedAt: '',
 };
 
@@ -476,6 +478,124 @@ function shouldStartCompact() {
   return Boolean(config.deviceId && config.deviceToken);
 }
 
+function extensionBridgeUrl(config) {
+  const url = new URL(`/api/devices/${encodeURIComponent(config.deviceId)}/extensions`, trimSlash(config.serverUrl));
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  url.searchParams.set('token', config.deviceToken);
+  url.searchParams.set('clientVersion', '1');
+  url.searchParams.set('protocolVersion', '1');
+  return url.toString();
+}
+
+function trimSlash(value) {
+  return String(value || '').replace(/\/+$/, '');
+}
+
+function desktopExtensionManifests() {
+  return [];
+}
+
+async function executeDesktopExtensionTool(toolName) {
+  throw new Error(`unknown desktop extension tool: ${toolName}`);
+}
+
+function stopExtensionBridge() {
+  extensionBridge.stopped = true;
+  if (extensionBridge.reconnectTimer) {
+    clearTimeout(extensionBridge.reconnectTimer);
+    extensionBridge.reconnectTimer = null;
+  }
+  if (extensionBridge.socket) {
+    try {
+      extensionBridge.socket.close(1000, 'desktop bridge stopped');
+    } catch {
+      // Closing the bridge is best-effort during app shutdown.
+    }
+    extensionBridge.socket = null;
+  }
+}
+
+function scheduleExtensionBridgeReconnect() {
+  if (extensionBridge.stopped || extensionBridge.reconnectTimer) return;
+  const delay = extensionBridge.reconnectDelayMs;
+  extensionBridge.reconnectDelayMs = Math.min(30_000, Math.round(delay * 1.8));
+  extensionBridge.reconnectTimer = setTimeout(() => {
+    extensionBridge.reconnectTimer = null;
+    startExtensionBridge();
+  }, delay);
+}
+
+function startExtensionBridge() {
+  const config = readConfig();
+  if (!config.extensionBridgeEnabled || !config.deviceId || !config.deviceToken) return;
+  const WebSocketCtor = globalThis.WebSocket;
+  if (typeof WebSocketCtor !== 'function') {
+    windowDebugLog('extensionBridge:unavailable', { reason: 'global WebSocket is not available in Electron main' });
+    return;
+  }
+  if (extensionBridge.socket && [0, 1].includes(extensionBridge.socket.readyState)) return;
+  extensionBridge.stopped = false;
+  let socket;
+  try {
+    socket = new WebSocketCtor(extensionBridgeUrl(config));
+  } catch (error) {
+    windowDebugLog('extensionBridge:connectFailed', { error: error?.message || String(error) });
+    scheduleExtensionBridgeReconnect();
+    return;
+  }
+  extensionBridge.socket = socket;
+  socket.addEventListener('open', () => {
+    extensionBridge.reconnectDelayMs = 1000;
+    socket.send(JSON.stringify({
+      type: 'extension_hello',
+      manifests: desktopExtensionManifests(),
+      sentAt: new Date().toISOString(),
+    }));
+    windowDebugLog('extensionBridge:open', { deviceId: config.deviceId ? `${config.deviceId.slice(0, 12)}...` : '' });
+  });
+  socket.addEventListener('message', async (event) => {
+    let message;
+    try {
+      message = JSON.parse(String(event.data));
+    } catch {
+      return;
+    }
+    if (message.type === 'server_ping') {
+      socket.send(JSON.stringify({ type: 'client_ping', sentAt: new Date().toISOString(), serverSentAt: message.sentAt }));
+      return;
+    }
+    if (message.type === 'extension_tool_request') {
+      const requestId = String(message.requestId || '');
+      const toolName = String(message.toolName || '');
+      try {
+        const result = await executeDesktopExtensionTool(toolName, message.args);
+        socket.send(JSON.stringify({ type: 'extension_tool_result', requestId, ok: true, result }));
+      } catch (error) {
+        socket.send(JSON.stringify({
+          type: 'extension_tool_result',
+          requestId,
+          ok: false,
+          error: error?.message || String(error),
+        }));
+      }
+    }
+  });
+  socket.addEventListener('close', (event) => {
+    if (extensionBridge.socket === socket) extensionBridge.socket = null;
+    windowDebugLog('extensionBridge:closed', { code: event.code, reason: event.reason });
+    if (!extensionBridge.stopped) scheduleExtensionBridgeReconnect();
+  });
+  socket.addEventListener('error', () => {
+    windowDebugLog('extensionBridge:error');
+  });
+}
+
+function restartExtensionBridge() {
+  stopExtensionBridge();
+  extensionBridge.stopped = false;
+  startExtensionBridge();
+}
+
 function windowFromEvent(event) {
   return BrowserWindow.fromWebContents(event.sender) || mainWindow;
 }
@@ -747,7 +867,11 @@ if (!gotSingleInstanceLock) {
 
   ipcMain.handle('config:read', () => readConfig());
   ipcMain.handle('pairing:takePending', () => pendingPairingPayloads.splice(0));
-  ipcMain.handle('config:write', (_event, config) => writeConfig(config));
+  ipcMain.handle('config:write', (_event, config) => {
+    const saved = writeConfig(config);
+    restartExtensionBridge();
+    return saved;
+  });
   ipcMain.handle('app:openExternal', (_event, url) => shell.openExternal(url));
   ipcMain.handle('clipboard:writeText', (_event, text) => {
     clipboard.writeText(String(text || ''));
@@ -783,6 +907,7 @@ if (!gotSingleInstanceLock) {
     if (launchPayload) queuePairingPayload(launchPayload);
     ensureTray();
     createWindow();
+    startExtensionBridge();
   });
 
   app.on('window-all-closed', () => {
@@ -795,6 +920,7 @@ if (!gotSingleInstanceLock) {
 
   app.on('before-quit', () => {
     isQuitting = true;
+    stopExtensionBridge();
     releaseVosk();
   });
 }

@@ -17,12 +17,19 @@ import {
 import { approvalCodeFromText } from './approval-code.js';
 import { parseVoiceApprovalSettings, voiceApprovalSettingsResponse } from './voice-approval-settings.js';
 import {
+  assistantAvailableToolSummaries,
   assistantSnapshot,
-  assistantToolSummaries,
   promptAssistantThread,
   resolveAssistantApproval,
   sanitizeArtifactPath,
+  setAssistantExternalToolExecutor,
 } from './assistant-parity.js';
+import {
+  cleanTargetKind,
+  extensionToolName,
+  parseAssistantExtensionManifest,
+} from './assistant-extensions.js';
+import { ExtensionBridgeRegistry, parseExtensionBridgeMessage } from './extension-bridge.js';
 import {
   createCodexAuthorizationFlow,
   exchangeCodexAuthorizationCode,
@@ -385,10 +392,26 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
   const app = Fastify({ logger: options.logger ?? true });
   const db = new VoiceStreamNextDb();
   const controlChannels = new ControlChannelRegistry();
+  const extensionBridges = new ExtensionBridgeRegistry();
   const assistantEventClients = new Set<{ res: any; userId: string }>();
   let assistantChangeSequence = 0;
   const clerkEnabled = Boolean(process.env.CLERK_SECRET_KEY?.trim());
   const port = parsePort(process.env.VOICE_STREAM_NEXT_API_PORT ?? process.env.PORT, 3299);
+
+  setAssistantExternalToolExecutor(async (input) => {
+    if (input.route?.targetKind === 'server') {
+      throw Object.assign(new Error(`${input.toolName} is configured for server execution, but no server-side extension runner is installed`), { statusCode: 501 });
+    }
+    return extensionBridges.executeTool({
+      userId: input.userId,
+      toolName: input.toolName,
+      args: input.args,
+      route: input.route,
+      threadId: input.thread.id,
+      runId: input.runId,
+      toolCallId: input.toolCallId,
+    });
+  });
 
   const writeAssistantSseEvent = (res: any, event: string, data: unknown) => {
     res.write(`event: ${event}\n`);
@@ -429,6 +452,9 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       writeAssistantSseEvent(client.res, 'assistant_speak', event);
     }
   };
+  app.addHook('onClose', async () => {
+    setAssistantExternalToolExecutor(null);
+  });
   const handleAssistantPromptEvent = (userId: string, threadId: string, event: any) => {
     if (event?.type === 'message' && event.message?.spokenText) {
       emitAssistantSpeak(userId, threadId, event.message as AssistantMessage);
@@ -813,7 +839,64 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       pairingSessions: db.listDevices(ctx.user.id).map((device) => db.pairingSessionForDevice(device.id)).filter(Boolean),
       clientStatuses: db.listClientStatuses(ctx.user.id),
       connectedDeviceIds: controlChannels.connectedDeviceIds().filter((deviceId) => Boolean(db.deviceForUser(ctx.user.id, deviceId))),
+      extensionBridgeDevices: extensionBridges.connectedDevices(ctx.user.id),
     })),
+  );
+
+  app.get('/api/assistant/extensions', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => ({
+      ok: true,
+      manifests: db.listAssistantExtensionManifests(ctx.user.id),
+      routes: db.listAssistantExtensionToolRoutes(ctx.user.id),
+      connectedDevices: extensionBridges.connectedDevices(ctx.user.id),
+    })),
+  );
+
+  app.post('/api/assistant/extensions/manifests', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const manifest = parseAssistantExtensionManifest(jsonBody(req).manifest ?? jsonBody(req));
+      const saved = db.upsertAssistantExtensionManifest(ctx.user.id, manifest);
+      for (const tool of manifest.tools) {
+        const toolName = extensionToolName(manifest.id, tool.name);
+        if (!db.assistantExtensionToolRoute(ctx.user.id, toolName)) {
+          db.upsertAssistantExtensionToolRoute(ctx.user.id, {
+            toolName,
+            enabled: false,
+            targetKind: tool.defaultTarget,
+            targetDeviceId: null,
+          });
+        }
+      }
+      emitAssistantChange('extension_manifest_updated');
+      return { ok: true, manifest: saved, snapshot: assistantSnapshot(db, ctx.user.id) };
+    }),
+  );
+
+  app.patch('/api/assistant/extensions/tools/:toolName/route', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const toolName = String((req.params as any).toolName ?? '');
+      const manifestTool = db.assistantExtensionToolManifest(ctx.user.id, toolName);
+      if (!manifestTool) throw Object.assign(new Error('unknown extension tool'), { statusCode: 404 });
+      const body = jsonBody(req);
+      const targetKind = cleanTargetKind(body.targetKind ?? body.target);
+      if (!manifestTool.tool.supportedTargets.includes(targetKind)) {
+        throw Object.assign(new Error(`${toolName} does not support ${targetKind} execution`), { statusCode: 400 });
+      }
+      const targetDeviceId = cleanText(body.targetDeviceId ?? body.deviceId) || null;
+      if (targetKind === 'device') {
+        if (!targetDeviceId) throw Object.assign(new Error('targetDeviceId is required for device execution'), { statusCode: 400 });
+        const device = db.deviceForUser(ctx.user.id, targetDeviceId);
+        if (!device || device.revokedAt) throw Object.assign(new Error('unknown target device'), { statusCode: 404 });
+      }
+      const route = db.upsertAssistantExtensionToolRoute(ctx.user.id, {
+        toolName,
+        enabled: body.enabled === undefined ? undefined : Boolean(body.enabled),
+        targetKind,
+        targetDeviceId,
+      });
+      emitAssistantChange('extension_route_updated');
+      return { ok: true, route, snapshot: assistantSnapshot(db, ctx.user.id) };
+    }),
   );
 
   app.post('/api/devices/:deviceId/revoke', async (req, reply) =>
@@ -822,6 +905,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       const device = db.revokeDevice(ctx.user.id, deviceId);
       if (!device) throw Object.assign(new Error('unknown device'), { statusCode: 404 });
       controlChannels.closeDevice(deviceId);
+      extensionBridges.closeDevice(deviceId);
       db.upsertClientStatus(ctx.user.id, deviceId, {
         mode: 'off',
         status: 'Device revoked',
@@ -843,6 +927,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       const rotated = db.rotateDeviceToken(ctx.user.id, deviceId);
       if (!rotated) throw Object.assign(new Error('unknown device'), { statusCode: 404 });
       controlChannels.closeDevice(deviceId, VoiceCloseCode.Revoked, 'token rotated');
+      extensionBridges.closeDevice(deviceId, VoiceCloseCode.Revoked, 'token rotated');
       const body = jsonBody(req);
       const includePayload = body.includePayload !== false;
       const deviceType = cleanText(body.deviceType, rotated.device.deviceType) || rotated.device.deviceType;
@@ -1081,6 +1166,95 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     });
   });
 
+  app.get('/api/devices/:deviceId/extensions', { websocket: true }, (socket, req) => {
+    const deviceId = String((req.params as any).deviceId ?? '');
+    const token = queryValue((req.query as any)?.token);
+    const clientVersion = parseClientVersion((req.query as any)?.clientVersion, parseClientVersion((req.query as any)?.protocolVersion, null));
+    const auth = verifyDeviceAuth(db, deviceId, token, clientVersion);
+    if (!auth.ok) {
+      socket.close(deviceAuthCloseCode(auth), deviceAuthFailureMessage(auth));
+      return;
+    }
+    const device = auth.device;
+    let registered = false;
+    socket.send(JSON.stringify({
+      type: 'extension_bridge_hello',
+      protocolVersion: VOICE_STREAM_PROTOCOL_VERSION,
+      minClientVersion: minClientVersion(),
+    }));
+    const heartbeat = setInterval(() => {
+      if ((socket as any).readyState === 1) {
+        socket.send(JSON.stringify({ type: 'server_ping', sentAt: new Date().toISOString() }));
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+    socket.on('message', (data) => {
+      try {
+        const parsed = parseExtensionBridgeMessage(String(data));
+        if (!parsed) {
+          socket.close(VoiceCloseCode.InvalidMessage, 'invalid extension bridge message');
+          return;
+        }
+        if (parsed.type === 'client_ping') {
+          socket.send(JSON.stringify({ type: 'server_pong', sentAt: new Date().toISOString(), clientSentAt: parsed.sentAt }));
+          return;
+        }
+        if (parsed.type === 'extension_hello') {
+          const manifests = parsed.manifests.map((manifest) => parseAssistantExtensionManifest(manifest));
+          for (const manifest of manifests) {
+            db.upsertAssistantExtensionManifest(device.userId, manifest);
+            for (const tool of manifest.tools) {
+              const toolName = extensionToolName(manifest.id, tool.name);
+              if (!db.assistantExtensionToolRoute(device.userId, toolName)) {
+                db.upsertAssistantExtensionToolRoute(device.userId, {
+                  toolName,
+                  enabled: false,
+                  targetKind: tool.defaultTarget,
+                  targetDeviceId: tool.defaultTarget === 'device' ? device.id : null,
+                });
+              }
+            }
+          }
+          extensionBridges.register(socket, {
+            userId: device.userId,
+            deviceId: device.id,
+            deviceType: device.deviceType,
+            displayName: device.displayName,
+            manifests,
+          });
+          registered = true;
+          db.upsertClientStatus(device.userId, device.id, {
+            mode: 'awake',
+            status: manifests.length > 0 ? 'Extension bridge connected' : 'Extension bridge connected without tools',
+            protocolVersion: VOICE_STREAM_PROTOCOL_VERSION,
+          });
+          emitAssistantChange('extension_bridge_connected');
+          socket.send(JSON.stringify({
+            type: 'extension_bridge_registered',
+            manifests: manifests.map((manifest) => manifest.id),
+            toolNames: manifests.flatMap((manifest) => manifest.tools.map((tool) => extensionToolName(manifest.id, tool.name))),
+          }));
+          return;
+        }
+        if (parsed.type === 'extension_tool_result') {
+          if (!registered) {
+            socket.close(VoiceCloseCode.InvalidMessage, 'extension bridge must send hello before results');
+            return;
+          }
+          extensionBridges.handleClientMessage(device.id, String(data));
+          return;
+        }
+        socket.close(VoiceCloseCode.InvalidMessage, 'unknown extension bridge message');
+      } catch (error: any) {
+        socket.close(VoiceCloseCode.InvalidMessage, error?.message ?? 'invalid extension bridge message');
+      }
+    });
+    socket.on('close', () => {
+      clearInterval(heartbeat);
+      extensionBridges.unregister(socket);
+      if (registered) emitAssistantChange('extension_bridge_disconnected');
+    });
+  });
+
   app.post('/api/voice/approval-codes', async (req, reply) =>
     {
       const body = jsonBody(req);
@@ -1300,9 +1474,9 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
   );
 
   app.get('/api/assistant/tools', async (req, reply) =>
-    withUser(req, reply, db, clerkEnabled, async () => ({
+    withUser(req, reply, db, clerkEnabled, async (ctx) => ({
       ok: true,
-      tools: assistantToolSummaries(),
+      tools: assistantAvailableToolSummaries(db, ctx.user.id),
     })),
   );
 

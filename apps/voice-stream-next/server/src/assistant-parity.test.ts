@@ -6,7 +6,9 @@ import {
   promptAssistantThread,
   resolveAssistantApproval,
   sanitizeArtifactPath,
+  setAssistantExternalToolExecutor,
 } from './assistant-parity.js';
+import { extensionToolName } from './assistant-extensions.js';
 import { VoiceStreamNextDb } from './db.js';
 
 function tempDb(name: string): VoiceStreamNextDb {
@@ -32,6 +34,7 @@ describe('assistant parity runtime', () => {
     delete process.env.VOICE_STREAM_NEXT_TEST_MODEL_TOOL_CALLS;
     delete process.env.OPENAI_API_KEY;
     delete process.env.VOICE_STREAM_NEXT_OPENAI_API_KEY;
+    setAssistantExternalToolExecutor(null);
   });
 
   test('writes assistant artifacts without approval', async () => {
@@ -101,6 +104,46 @@ describe('assistant parity runtime', () => {
     expect(updated?.thinkingLevel).toBe('high');
     expect(updated?.promptDeliveryMode).toBe('asap');
     expect(updated?.voiceEnabled).toBe(true);
+  });
+
+  test('exposes and executes configured extension tools', async () => {
+    const db = tempDb('assistant-extension-tools');
+    dbs.push(db);
+    const user = testUser(db);
+    const manifest = db.upsertAssistantExtensionManifest(user.id, {
+      id: 'test-extension',
+      name: 'Test Extension',
+      version: '0.1.0',
+      tools: [{
+        name: 'echo',
+        label: 'Echo',
+        description: 'Echo test input through an extension runner.',
+        inputSchema: {
+          type: 'object',
+          properties: { text: { type: 'string' } },
+          required: ['text'],
+          additionalProperties: false,
+        },
+        approval: 'never',
+        supportedTargets: ['server', 'device', 'any_device'],
+        defaultTarget: 'any_device',
+      }],
+    });
+    const toolName = extensionToolName(manifest.extensionId, 'echo');
+    db.upsertAssistantExtensionToolRoute(user.id, { toolName, enabled: true, targetKind: 'any_device' });
+    const thread = db.createThread(user.id, { title: 'Extensions', enabledTools: ['assistant_artifacts', toolName] });
+    process.env.VOICE_STREAM_NEXT_TEST_MODEL_TOOL_CALLS = JSON.stringify([
+      { name: toolName, arguments: { text: 'hello extension' } },
+    ]);
+    setAssistantExternalToolExecutor(async (input) => ({ ok: true, toolName: input.toolName, args: input.args, targetKind: input.route?.targetKind }));
+
+    const snapshot = await promptAssistantThread(db, user.id, thread.id, { prompt: 'Use the extension.' }, () => undefined);
+
+    expect(assistantSnapshot(db, user.id).availableTools.some((tool) => tool.name === toolName)).toBe(true);
+    expect(snapshot.threads[0]?.toolCalls.some((call) => call.toolName === toolName && call.status === 'completed')).toBe(true);
+    const result = JSON.parse(db.listToolCalls(user.id, thread.id)[0]!.resultJson || '{}');
+    expect(result.args.text).toBe('hello extension');
+    expect(result.targetKind).toBe('any_device');
   });
 
   test('executes model-requested artifact tool calls without slash commands', async () => {

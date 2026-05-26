@@ -6,6 +6,13 @@ import {
   VOICE_APPROVAL_SETTINGS_DEFAULT,
   type VoiceApprovalSettings,
 } from './voice-approval-settings.js';
+import {
+  cleanTargetKind,
+  extensionToolName,
+  parseAssistantExtensionManifest,
+  type AssistantExtensionManifest,
+  type AssistantExtensionToolRoute,
+} from './assistant-extensions.js';
 
 export type UserProfile = {
   id: string;
@@ -299,6 +306,16 @@ export type ClientStatusRecord = {
   appVersion: string | null;
   lastError: string | null;
   reportedAt: string;
+  updatedAt: string;
+};
+
+export type AssistantExtensionManifestRecord = {
+  userId: string;
+  extensionId: string;
+  name: string;
+  version: string;
+  description: string | null;
+  manifest: AssistantExtensionManifest;
   updatedAt: string;
 };
 
@@ -721,6 +738,40 @@ function rowClientStatus(row: any): ClientStatusRecord {
     reportedAt: String(row.reported_at),
     updatedAt: String(row.updated_at),
   };
+}
+
+function rowAssistantExtensionManifest(row: any): AssistantExtensionManifestRecord {
+  const manifest = parseAssistantExtensionManifest(safeJson(row.manifest_json, {}));
+  return {
+    userId: String(row.user_id),
+    extensionId: String(row.extension_id),
+    name: String(row.name ?? manifest.name),
+    version: String(row.version ?? manifest.version),
+    description: row.description == null ? null : String(row.description),
+    manifest,
+    updatedAt: String(row.updated_at),
+  };
+}
+
+function rowAssistantExtensionToolRoute(row: any): AssistantExtensionToolRoute {
+  return {
+    userId: String(row.user_id),
+    toolName: String(row.tool_name),
+    enabled: asBool(row.enabled),
+    targetKind: cleanTargetKind(row.target_kind),
+    targetDeviceId: row.target_device_id == null ? null : String(row.target_device_id),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+function safeJson(raw: unknown, fallback: unknown): unknown {
+  if (raw && typeof raw === 'object') return raw;
+  if (typeof raw !== 'string' || !raw.trim()) return fallback;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
 }
 
 type Migration = {
@@ -1506,6 +1557,131 @@ export class VoiceStreamNextDb {
         $userId: userId,
       });
     return this.ensureAssistantSettings(userId);
+  }
+
+  upsertAssistantExtensionManifest(userId: string, manifest: AssistantExtensionManifest): AssistantExtensionManifestRecord {
+    const at = nowIso();
+    this.db
+      .query(
+        `
+        INSERT INTO assistant_extension_manifests (
+          user_id,
+          extension_id,
+          name,
+          version,
+          description,
+          manifest_json,
+          updated_at
+        )
+        VALUES (
+          $userId,
+          $extensionId,
+          $name,
+          $version,
+          $description,
+          $manifestJson,
+          $updatedAt
+        )
+        ON CONFLICT(user_id, extension_id) DO UPDATE SET
+          name = excluded.name,
+          version = excluded.version,
+          description = excluded.description,
+          manifest_json = excluded.manifest_json,
+          updated_at = excluded.updated_at
+      `,
+      )
+      .run({
+        $userId: userId,
+        $extensionId: manifest.id,
+        $name: manifest.name,
+        $version: manifest.version,
+        $description: manifest.description ?? null,
+        $manifestJson: JSON.stringify(manifest),
+        $updatedAt: at,
+      });
+    return this.assistantExtensionManifest(userId, manifest.id)!;
+  }
+
+  assistantExtensionManifest(userId: string, extensionId: string): AssistantExtensionManifestRecord | null {
+    const row = this.db
+      .query('SELECT * FROM assistant_extension_manifests WHERE user_id = $userId AND extension_id = $extensionId')
+      .get({ $userId: userId, $extensionId: extensionId });
+    return row ? rowAssistantExtensionManifest(row) : null;
+  }
+
+  listAssistantExtensionManifests(userId: string): AssistantExtensionManifestRecord[] {
+    return this.db
+      .query('SELECT * FROM assistant_extension_manifests WHERE user_id = $userId ORDER BY name ASC, extension_id ASC')
+      .all({ $userId: userId })
+      .map(rowAssistantExtensionManifest);
+  }
+
+  assistantExtensionToolManifest(userId: string, toolName: string): { manifest: AssistantExtensionManifest; tool: AssistantExtensionManifest['tools'][number] } | null {
+    for (const record of this.listAssistantExtensionManifests(userId)) {
+      const tool = record.manifest.tools.find((item) => extensionToolName(record.manifest.id, item.name) === toolName);
+      if (tool) return { manifest: record.manifest, tool };
+    }
+    return null;
+  }
+
+  listAssistantExtensionToolRoutes(userId: string): AssistantExtensionToolRoute[] {
+    return this.db
+      .query('SELECT * FROM assistant_extension_tool_routes WHERE user_id = $userId ORDER BY tool_name ASC')
+      .all({ $userId: userId })
+      .map(rowAssistantExtensionToolRoute);
+  }
+
+  assistantExtensionToolRoute(userId: string, toolName: string): AssistantExtensionToolRoute | null {
+    const row = this.db
+      .query('SELECT * FROM assistant_extension_tool_routes WHERE user_id = $userId AND tool_name = $toolName')
+      .get({ $userId: userId, $toolName: toolName });
+    return row ? rowAssistantExtensionToolRoute(row) : null;
+  }
+
+  upsertAssistantExtensionToolRoute(
+    userId: string,
+    input: { toolName: string; enabled?: boolean; targetKind?: AssistantExtensionToolRoute['targetKind']; targetDeviceId?: string | null },
+  ): AssistantExtensionToolRoute {
+    const current = this.assistantExtensionToolRoute(userId, input.toolName);
+    const at = nowIso();
+    const enabled = input.enabled ?? current?.enabled ?? false;
+    const targetKind = input.targetKind ?? current?.targetKind ?? 'device';
+    const targetDeviceId = targetKind === 'device' ? input.targetDeviceId ?? current?.targetDeviceId ?? null : null;
+    this.db
+      .query(
+        `
+        INSERT INTO assistant_extension_tool_routes (
+          user_id,
+          tool_name,
+          enabled,
+          target_kind,
+          target_device_id,
+          updated_at
+        )
+        VALUES (
+          $userId,
+          $toolName,
+          $enabled,
+          $targetKind,
+          $targetDeviceId,
+          $updatedAt
+        )
+        ON CONFLICT(user_id, tool_name) DO UPDATE SET
+          enabled = excluded.enabled,
+          target_kind = excluded.target_kind,
+          target_device_id = excluded.target_device_id,
+          updated_at = excluded.updated_at
+      `,
+      )
+      .run({
+        $userId: userId,
+        $toolName: input.toolName,
+        $enabled: enabled ? 1 : 0,
+        $targetKind: targetKind,
+        $targetDeviceId: targetDeviceId,
+        $updatedAt: at,
+      });
+    return this.assistantExtensionToolRoute(userId, input.toolName)!;
   }
 
   codexConnection(userId: string): AssistantCodexConnectionRecord | null {
