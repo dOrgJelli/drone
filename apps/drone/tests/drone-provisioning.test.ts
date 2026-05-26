@@ -235,6 +235,63 @@ describe('drone provisioning controller', () => {
     });
   });
 
+  test('materializes seed chat config before post-create sync without startup prompts', async () => {
+    await withTempDroneDataDir('drone-provisioning-', async () => {
+      await updateRegistry((reg: any) => {
+        reg.pending = {
+          'drone-image-first': {
+            id: 'drone-image-first',
+            name: 'image-first',
+            runtime: 'host',
+            repoPath: '',
+            build: false,
+            createdAt: '2026-03-26T11:00:00.000Z',
+            updatedAt: '2026-03-26T11:00:00.000Z',
+            phase: 'starting',
+            message: 'Starting...',
+            seed: {
+              chatName: 'default',
+              agent: { kind: 'builtin', id: 'codex' },
+              model: 'gpt-5.4',
+            },
+          },
+        };
+      });
+
+      const harness = createControllerHarness();
+      harness.controller.enqueueProvisioning('drone-image-first');
+
+      await waitFor(async () => {
+        const reg: any = await loadRegistry();
+        return !reg?.pending?.['drone-image-first'] && Boolean(reg?.drones?.['drone-image-first']);
+      });
+
+      const reg: any = await loadRegistry();
+      expect(reg?.drones?.['drone-image-first']?.chats?.default).toMatchObject({
+        agent: { kind: 'builtin', id: 'codex' },
+        model: 'gpt-5.4',
+      });
+      expect(harness.syncTaskStateCalls).toHaveLength(1);
+      expect(harness.syncTaskStateCalls[0]?.droneEntry?.chats?.default).toMatchObject({
+        agent: { kind: 'builtin', id: 'codex' },
+        model: 'gpt-5.4',
+      });
+      expect(harness.ensureChatEntryCalls).toEqual([{ droneId: 'drone-image-first', chatName: 'default' }]);
+      expect(harness.setChatAgentConfigCalls).toEqual([
+        {
+          droneId: 'drone-image-first',
+          chatName: 'default',
+          agent: { kind: 'builtin', id: 'codex' },
+          setModel: true,
+          model: 'gpt-5.4',
+          setAgentSuggestionEnabled: true,
+          agentSuggestionEnabled: false,
+        },
+      ]);
+      expect(harness.enqueuePromptCalls).toHaveLength(0);
+    });
+  });
+
   test('uses the assistant suggestion default for cloned chat toggles', async () => {
     await withTempDroneDataDir('drone-provisioning-', async () => {
       await updateRegistry((reg: any) => {

@@ -7938,7 +7938,10 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
       }
       continue;
     }
-    if (state === 'failed' && agent.id !== 'codex' && agent.id !== 'pi') continue;
+    if (state === 'failed' && agent.id !== 'codex' && agent.id !== 'pi') {
+      const error = String(p?.error ?? '').trim().toLowerCase();
+      if (!error.includes('finished but no') || !error.includes('message was parsed')) continue;
+    }
 
     let jobResp: any = null;
     try {
@@ -8005,6 +8008,8 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
       continue;
     }
 
+    const jobKind = normalizeBuiltinAgentId(job?.kind) ?? agent.id;
+
     if (jobState === 'done') {
       const stdout = typeof job?.stdout === 'string' ? job.stdout : '';
       const stderr = typeof job?.stderr === 'string' ? job.stderr : '';
@@ -8014,14 +8019,14 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
         jobStartedAt: job?.startedAt,
         finishedAt,
       });
-      if (agent.id === 'codex') {
+      if (jobKind === 'codex') {
         const parsed = parseCodexJobTranscript(job);
         const threadId = parsed.threadId;
         const msg = parsed.message;
         const output = String(msg ?? '').trimEnd();
         if (!output) {
           const error = formatTranscriptJobFailure({
-            agentId: 'codex',
+            agentId: jobKind,
             stdoutRaw: stdout,
             stderrRaw: stderr,
             fallbackRaw: 'codex finished but no message was parsed',
@@ -8053,7 +8058,7 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
         continue;
       }
 
-      if (agent.id === 'pi') {
+      if (jobKind === 'pi') {
         const parsed = parsePiJobTranscript(job);
         if (parsed.sessionId && String(parsed.sessionId).trim() && String(entry?.piSessionId ?? '').trim() !== parsed.sessionId) {
           entry.piSessionId = parsed.sessionId;
@@ -8083,7 +8088,7 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
       }
 
       if (
-        agent.id === 'opencode' &&
+        jobKind === 'opencode' &&
         !(typeof entry?.openCodeSessionId === 'string' && String(entry.openCodeSessionId).trim())
       ) {
         // Best-effort: discover session id after first successful run, so future turns
@@ -8121,7 +8126,7 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
     }
 
     if (jobState === 'failed') {
-      if (agent.id === 'codex') {
+      if (jobKind === 'codex') {
         const stdout = String(job?.stdout ?? '');
         const stderr = String(job?.stderr ?? '');
         const parsed = parseCodexJobTranscript(job);
@@ -8156,7 +8161,7 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
           continue;
         }
       }
-      if (agent.id === 'pi') {
+      if (jobKind === 'pi') {
         const stdout = String(job?.stdout ?? '');
         const parsed = parsePiJobTranscript(job);
         const output = String(parsed.message ?? '').trimEnd();
@@ -8195,7 +8200,7 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
           ? Math.floor(job.exitCode)
           : null;
       let errText = formatTranscriptJobFailure({
-        agentId: agent.id,
+        agentId: jobKind,
         stdoutRaw: String(job?.stdout ?? ''),
         stderrRaw: String(job?.stderr ?? ''),
         fallbackRaw:
