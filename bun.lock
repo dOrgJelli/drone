@@ -1,5 +1,6 @@
 {
   "lockfileVersion": 1,
+  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "drone-monorepo",
@@ -50,6 +51,7 @@
         "@dnd-kit/core": "^6.3.1",
         "@dnd-kit/sortable": "^10.0.0",
         "@dnd-kit/utilities": "^3.2.2",
+        "@drone/assistant-markdown": "workspace:*",
         "@monaco-editor/react": "^4.7.0",
         "@xterm/addon-fit": "^0.11.0",
         "@xterm/addon-web-links": "^0.12.0",
@@ -145,6 +147,7 @@
       "dependencies": {
         "@clerk/clerk-react": "^5.61.3",
         "@clerk/fastify": "^3.1.30",
+        "@drone/assistant-markdown": "workspace:*",
         "@fastify/cors": "^11.2.0",
         "@fastify/static": "^9.1.3",
         "@fastify/websocket": "^11.2.0",
@@ -210,6 +213,19 @@
         "@types/node": "^24.3.0",
         "canvas": "^3.2.0",
         "vitest": "^3.2.4",
+      },
+    },
+    "packages/assistant-markdown": {
+      "name": "@drone/assistant-markdown",
+      "version": "0.1.0",
+      "dependencies": {
+        "react-markdown": "^10.1.0",
+        "remark-breaks": "^4.0.0",
+        "remark-gfm": "^4.0.1",
+      },
+      "peerDependencies": {
+        "react": "^18.3.1",
+        "react-dom": "^18.3.1",
       },
     },
     "packages/drone-sdk": {
@@ -409,6 +425,8 @@
     "@dnd-kit/sortable": ["@dnd-kit/sortable@10.0.0", "", { "dependencies": { "@dnd-kit/utilities": "^3.2.2", "tslib": "^2.0.0" }, "peerDependencies": { "@dnd-kit/core": "^6.3.0", "react": ">=16.8.0" } }, "sha512-+xqhmIIzvAYMGfBYYnbKuNicfSsk4RksY2XdmJhT+HAC01nix6fHCztU68jooFiMUB01Ky3F0FyOvhG/BZrWkg=="],
 
     "@dnd-kit/utilities": ["@dnd-kit/utilities@3.2.2", "", { "dependencies": { "tslib": "^2.0.0" }, "peerDependencies": { "react": ">=16.8.0" } }, "sha512-+MKAJEOfaBe5SmV6t34p80MMKhjvUz0vRrvVJbPT0WElzaOJ/1xs+D+KDv+tD/NE5ujfrChEcshd4fLn0wpiqg=="],
+
+    "@drone/assistant-markdown": ["@drone/assistant-markdown@workspace:packages/assistant-markdown"],
 
     "@electron/asar": ["@electron/asar@3.4.1", "", { "dependencies": { "commander": "^5.0.0", "glob": "^7.1.6", "minimatch": "^3.0.4" }, "bin": { "asar": "bin/asar.js" } }, "sha512-i4/rNPRS84t0vSRa2HorerGRXWyF4vThfHesw0dmcWHp+cspK743UanA0suA5Q5y8kzY2y6YKrvbIUn69BCAiA=="],
 
