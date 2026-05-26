@@ -87,8 +87,8 @@ import { cloneChatEntryForDroneClone, maybeBootstrapPromptFromTranscript } from 
 import {
   formatTranscriptJobFailure,
   hasKnownBuiltinTranscriptSession,
-  parseCodexJsonl,
-  parsePiJsonl,
+  parseCodexJobTranscript,
+  parsePiJobTranscript,
   readBuiltinTranscriptSessionId,
 } from './builtin-transcript-sessions';
 import {
@@ -8015,7 +8015,7 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
         finishedAt,
       });
       if (agent.id === 'codex') {
-        const parsed = parseCodexJsonl(stdout || '');
+        const parsed = parseCodexJobTranscript(job);
         const threadId = parsed.threadId;
         const msg = parsed.message;
         const output = String(msg ?? '').trimEnd();
@@ -8054,7 +8054,7 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
       }
 
       if (agent.id === 'pi') {
-        const parsed = parsePiJsonl(stdout || '');
+        const parsed = parsePiJobTranscript(job);
         if (parsed.sessionId && String(parsed.sessionId).trim() && String(entry?.piSessionId ?? '').trim() !== parsed.sessionId) {
           entry.piSessionId = parsed.sessionId;
           changed = true;
@@ -8124,7 +8124,7 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
       if (agent.id === 'codex') {
         const stdout = String(job?.stdout ?? '');
         const stderr = String(job?.stderr ?? '');
-        const parsed = parseCodexJsonl(stdout);
+        const parsed = parseCodexJobTranscript(job);
         const output = String(parsed.message ?? '').trimEnd();
         const finishedAt = typeof job?.finishedAt === 'string' ? job.finishedAt : nowIso();
         const promptAt = resolveTranscriptPromptAt({
@@ -8158,7 +8158,7 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
       }
       if (agent.id === 'pi') {
         const stdout = String(job?.stdout ?? '');
-        const parsed = parsePiJsonl(stdout);
+        const parsed = parsePiJobTranscript(job);
         const output = String(parsed.message ?? '').trimEnd();
         const finishedAt = typeof job?.finishedAt === 'string' ? job.finishedAt : nowIso();
         const promptAt = resolveTranscriptPromptAt({
