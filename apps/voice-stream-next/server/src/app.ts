@@ -1369,6 +1369,84 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     };
   });
 
+  app.get('/api/devices/:deviceId/assistant/thread', async (req, reply) => {
+    const deviceId = String((req.params as any).deviceId ?? '');
+    const query = (req.query ?? {}) as Record<string, unknown>;
+    const token = cleanText(req.headers['x-voice-device-token'] || query.token);
+    const clientVersion = parseClientVersion(req.headers['x-voice-client-version'], parseClientVersion(query.clientVersion, parseClientVersion(query.protocolVersion, null)));
+    const auth = verifyDeviceAuth(db, deviceId, token, clientVersion);
+    if (!auth.ok) {
+      reply.code(auth.reason === 'client_too_old' ? 426 : 401).send({
+        ok: false,
+        error: deviceAuthFailureMessage(auth),
+        reason: auth.reason,
+        minClientVersion: auth.reason === 'client_too_old' ? auth.minClientVersion : undefined,
+      });
+      return;
+    }
+    const thread = db.latestVoiceThreadForDeviceOrNull(auth.device.userId, auth.device.id);
+    if (!thread) {
+      return {
+        ok: true,
+        thread: null,
+        runningModel: null,
+        pendingApprovalCount: 0,
+        artifactsCount: 0,
+      };
+    }
+    const artifactsCount = db.listArtifacts(auth.device.userId, thread.id).length;
+    const activeRun = db.listRuns(auth.device.userId, thread.id, 8).find((run) => run.status === 'running' || run.status === 'waiting_for_approval');
+    return {
+      ok: true,
+      thread: {
+        ...thread,
+        artifactsCount,
+      },
+      runningModel: activeRun ? {
+        provider: activeRun.provider,
+        model: activeRun.model,
+        thinkingLevel: activeRun.thinkingLevel,
+        runId: activeRun.id,
+      } : null,
+      pendingApprovalCount: db.listApprovals(auth.device.userId, thread.id).filter((approval) => approval.status === 'pending').length,
+      artifactsCount,
+    };
+  });
+
+  app.get('/api/devices/:deviceId/assistant/thread/artifacts', async (req, reply) => {
+    const deviceId = String((req.params as any).deviceId ?? '');
+    const query = (req.query ?? {}) as Record<string, unknown>;
+    const token = cleanText(req.headers['x-voice-device-token'] || query.token);
+    const clientVersion = parseClientVersion(req.headers['x-voice-client-version'], parseClientVersion(query.clientVersion, parseClientVersion(query.protocolVersion, null)));
+    const auth = verifyDeviceAuth(db, deviceId, token, clientVersion);
+    if (!auth.ok) {
+      reply.code(auth.reason === 'client_too_old' ? 426 : 401).send({
+        ok: false,
+        error: deviceAuthFailureMessage(auth),
+        reason: auth.reason,
+        minClientVersion: auth.reason === 'client_too_old' ? auth.minClientVersion : undefined,
+      });
+      return;
+    }
+    const thread = db.latestVoiceThreadForDeviceOrNull(auth.device.userId, auth.device.id);
+    if (!thread) {
+      return {
+        ok: true,
+        thread: null,
+        artifacts: [],
+      };
+    }
+    const artifacts = db.listArtifacts(auth.device.userId, thread.id);
+    return {
+      ok: true,
+      thread: {
+        ...thread,
+        artifactsCount: artifacts.length,
+      },
+      artifacts,
+    };
+  });
+
   app.get('/api/devices/:deviceId/control', { websocket: true }, (socket, req) => {
     const deviceId = String((req.params as any).deviceId ?? '');
     const token = queryValue((req.query as any)?.token);
@@ -2120,13 +2198,37 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
             } else {
               let assistantError = '';
               let pendingStatus = '';
+              if ((socket as any).readyState === 1) {
+                socket.send(JSON.stringify({
+                  type: 'assistant_status',
+                  phase: 'thinking',
+                  status: 'Assistant is thinking.',
+                  threadId: session.assistantThreadId,
+                }));
+              }
               await promptAssistantThread(db, device.userId, session.assistantThreadId, { prompt: transcript }, (event) => {
                 handleAssistantPromptEvent(device.userId, session.assistantThreadId, event);
                 if ((event as any)?.type === 'queued') {
                   pendingStatus = 'Queued voice prompt.';
+                  if ((socket as any).readyState === 1) {
+                    socket.send(JSON.stringify({
+                      type: 'assistant_status',
+                      phase: 'queued',
+                      status: pendingStatus,
+                      threadId: session.assistantThreadId,
+                    }));
+                  }
                 }
                 if ((event as any)?.type === 'approval_pending') {
                   pendingStatus = 'Assistant is waiting for approval.';
+                  if ((socket as any).readyState === 1) {
+                    socket.send(JSON.stringify({
+                      type: 'assistant_status',
+                      phase: 'approval_pending',
+                      status: pendingStatus,
+                      threadId: session.assistantThreadId,
+                    }));
+                  }
                 }
                 if ((event as any)?.type === 'message' && (event as any).message?.role === 'assistant') {
                   const message = (event as any).message;

@@ -75,6 +75,105 @@ describe('assistant API parity', () => {
     expect(deleted.snapshot.threads.some((thread: any) => thread.id === normal.thread.id)).toBe(false);
   });
 
+  test('lets paired Android devices read their current voice thread files', async () => {
+    const user = db.upsertUser({
+      clerkUserId: 'clerk_android_files',
+      displayName: 'Android Files',
+      email: 'android-files@example.local',
+      admin: false,
+    });
+    const registered = db.registerDevice(user.id, { deviceType: 'android', displayName: 'Phone' });
+    const thread = db.latestVoiceThreadForDevice(user.id, registered.device.id);
+    db.upsertArtifact(user.id, thread.id, { path: 'notes/status.md', content: '# Status\n\nReady' });
+
+    const summary = await built.app.inject({
+      method: 'GET',
+      url: `/api/devices/${registered.device.id}/assistant/thread`,
+      headers: {
+        'x-voice-device-token': registered.token,
+        'x-voice-client-version': '12',
+      },
+    }).then((response) => response.json());
+    expect(summary.ok).toBe(true);
+    expect(summary.thread.id).toBe(thread.id);
+    expect(summary.artifactsCount).toBe(1);
+
+    const files = await built.app.inject({
+      method: 'GET',
+      url: `/api/devices/${registered.device.id}/assistant/thread/artifacts`,
+      headers: {
+        'x-voice-device-token': registered.token,
+        'x-voice-client-version': '12',
+      },
+    }).then((response) => response.json());
+    expect(files.ok).toBe(true);
+    expect(files.thread.id).toBe(thread.id);
+    expect(files.artifacts).toHaveLength(1);
+    expect(files.artifacts[0].path).toBe('notes/status.md');
+    expect(files.artifacts[0].content).toContain('Ready');
+  });
+
+  test('does not create a voice thread when Android reads files before any voice session', async () => {
+    const user = db.upsertUser({
+      clerkUserId: 'clerk_android_empty_files',
+      displayName: 'Android Empty Files',
+      email: 'android-empty-files@example.local',
+      admin: false,
+    });
+    const registered = db.registerDevice(user.id, { deviceType: 'android', displayName: 'Phone' });
+    expect(db.listThreads(user.id)).toHaveLength(0);
+
+    const summary = await built.app.inject({
+      method: 'GET',
+      url: `/api/devices/${registered.device.id}/assistant/thread`,
+      headers: {
+        'x-voice-device-token': registered.token,
+        'x-voice-client-version': '12',
+      },
+    });
+    expect(summary.statusCode).toBe(200);
+    const summaryBody = summary.json();
+    expect(summaryBody.thread).toBeNull();
+    expect(summaryBody.artifactsCount).toBe(0);
+    expect(db.listThreads(user.id)).toHaveLength(0);
+
+    const files = await built.app.inject({
+      method: 'GET',
+      url: `/api/devices/${registered.device.id}/assistant/thread/artifacts`,
+      headers: {
+        'x-voice-device-token': registered.token,
+        'x-voice-client-version': '12',
+      },
+    });
+    expect(files.statusCode).toBe(200);
+    const filesBody = files.json();
+    expect(filesBody.thread).toBeNull();
+    expect(filesBody.artifacts).toEqual([]);
+    expect(db.listThreads(user.id)).toHaveLength(0);
+  });
+
+  test('rejects Android assistant file reads with an invalid device token', async () => {
+    const user = db.upsertUser({
+      clerkUserId: 'clerk_android_bad_token',
+      displayName: 'Android Bad Token',
+      email: 'android-bad-token@example.local',
+      admin: false,
+    });
+    const registered = db.registerDevice(user.id, { deviceType: 'android', displayName: 'Phone' });
+
+    const response = await built.app.inject({
+      method: 'GET',
+      url: `/api/devices/${registered.device.id}/assistant/thread/artifacts`,
+      headers: {
+        'x-voice-device-token': 'wrong-token',
+        'x-voice-client-version': '12',
+      },
+    });
+    expect(response.statusCode).toBe(401);
+    expect(response.json().ok).toBe(false);
+    expect(db.listThreads(user.id)).toHaveLength(0);
+  });
+
   test('queues and cancels prompts through assistant routes', async () => {
     const created = await built.app.inject({
       method: 'POST',

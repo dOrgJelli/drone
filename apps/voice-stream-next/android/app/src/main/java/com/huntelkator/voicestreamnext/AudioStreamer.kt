@@ -239,6 +239,9 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
                             recording.set(false)
                             onStatus("Assistant replied.")
                         }
+                        "assistant_status" -> {
+                            onStatus(message.optString("status", "Assistant is thinking."))
+                        }
                         "transcript_result" -> {
                             recording.set(false)
                             onStatus(message.optString("status", "Transcript received."))

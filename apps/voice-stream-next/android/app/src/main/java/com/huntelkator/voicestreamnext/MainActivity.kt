@@ -14,7 +14,9 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.view.GestureDetector
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
@@ -35,6 +37,7 @@ import java.net.URI
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 import kotlin.concurrent.thread
 import kotlin.math.roundToInt
 
@@ -67,6 +70,19 @@ class MainActivity : ComponentActivity() {
     private lateinit var speechHistoryPlayButton: Button
     private lateinit var speechHistoryStopButton: Button
     private lateinit var speechHistoryNextButton: Button
+    private lateinit var assistantActivityText: TextView
+    private lateinit var filesButton: Button
+    private lateinit var filesBadgeText: TextView
+    private lateinit var filesPanel: View
+    private lateinit var filesTitleText: TextView
+    private lateinit var filesSubtitleText: TextView
+    private lateinit var filePathText: TextView
+    private lateinit var fileMetaText: TextView
+    private lateinit var fileContentText: TextView
+    private lateinit var filePrevButton: Button
+    private lateinit var fileNextButton: Button
+    private lateinit var fileExplorerButton: Button
+    private lateinit var fileRefreshButton: Button
 
     private val wakeController = WakeToggleController()
     private val approvalCodeRecognizer = ApprovalCodeRecognizer()
@@ -80,6 +96,10 @@ class MainActivity : ComponentActivity() {
     private var lastUpdateCheckAtMs = 0L
     private var speechHistoryEntries: List<SpeechHistoryEntry> = emptyList()
     private var speechHistoryIndex = -1
+    private var assistantThreadSummary: AssistantThreadSummary? = null
+    private var assistantArtifacts: List<AssistantArtifact> = emptyList()
+    private var selectedArtifactIndex = -1
+    @Volatile private var assistantFilesLoading = false
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -152,6 +172,7 @@ class MainActivity : ComponentActivity() {
         renderAuthState()
         if (api.pairedDeviceId().isNotBlank()) {
             refreshDashboard()
+            refreshAssistantThreadSummary()
         }
     }
 
@@ -175,6 +196,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         refreshSpeechHistory(selectLatest = false)
+        refreshAssistantThreadSummary()
         resyncServiceStatus()
     }
 
@@ -205,10 +227,7 @@ class MainActivity : ComponentActivity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
         ))
 
-        root.addView(label("Drone", 34f, COLOR_TEXT, true).apply {
-            gravity = Gravity.CENTER
-            setPadding(0, 2.dp(), 0, 0)
-        })
+        root.addView(buildHeader(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 54.dp()))
         updateBanner = buildUpdateBanner()
         root.addView(updateBanner, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
             bottomMargin = 6.dp()
@@ -269,6 +288,15 @@ class MainActivity : ComponentActivity() {
             setPadding(18.dp(), 8.dp(), 18.dp(), 0)
         }
         hero.addView(approvalText, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        assistantActivityText = label("", 13f, COLOR_YELLOW, true).apply {
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+            setPadding(14.dp(), 8.dp(), 14.dp(), 8.dp())
+            background = rounded(COLOR_UPDATE_SURFACE, 14.dp(), COLOR_YELLOW)
+        }
+        hero.addView(assistantActivityText, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = 10.dp()
+        })
         offButton = Button(this).apply {
             text = "Turn off"
             visibility = View.GONE
@@ -325,12 +353,147 @@ class MainActivity : ComponentActivity() {
             bottomMargin = 22.dp()
         })
 
+        filesPanel = buildFilesPanel().apply {
+            visibility = View.GONE
+        }
+        screen.addView(filesPanel, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        ))
+
         screen.setOnApplyWindowInsetsListener { _, insets ->
             positionSystemBars(insets.topSystemInset(), insets.bottomSystemInset())
             insets
         }
         setContentView(screen)
         screen.requestApplyInsets()
+    }
+
+    private fun buildHeader(): LinearLayout {
+        val title = label("Drone", 34f, COLOR_TEXT, true).apply {
+            gravity = Gravity.CENTER
+            setPadding(0, 2.dp(), 0, 0)
+        }
+        val filesButtonFrame = FrameLayout(this).apply {
+            filesButton = Button(this@MainActivity).apply {
+                text = "Files"
+                styleFloatingButton()
+                setCompoundDrawablesWithIntrinsicBounds(android.R.drawable.ic_menu_save, 0, 0, 0)
+                compoundDrawablePadding = 6.dp()
+                setOnClickListener { openFilesView() }
+            }
+            addView(filesButton, FrameLayout.LayoutParams(104.dp(), 44.dp(), Gravity.CENTER))
+            filesBadgeText = label("", 10f, COLOR_BUTTON_TEXT, true).apply {
+                gravity = Gravity.CENTER
+                visibility = View.GONE
+                background = rounded(COLOR_GREEN, 9.dp(), COLOR_GREEN)
+            }
+            addView(filesBadgeText, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, 18.dp(), Gravity.TOP or Gravity.END).apply {
+                topMargin = 1.dp()
+                rightMargin = 1.dp()
+            })
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(View(this@MainActivity), LinearLayout.LayoutParams(104.dp(), 1))
+            addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+            addView(filesButtonFrame, LinearLayout.LayoutParams(104.dp(), ViewGroup.LayoutParams.MATCH_PARENT))
+        }
+    }
+
+    private fun buildFilesPanel(): View {
+        val panelRoot = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(COLOR_BACKGROUND)
+            setPadding(18.dp(), 48.dp(), 18.dp(), 26.dp())
+        }
+
+        val closeButton = button("Back") { closeFilesView() }
+        fileExplorerButton = button("Explorer") { showFileExplorer() }
+        fileRefreshButton = button("Refresh") { refreshAssistantFiles(selectFirst = false) }
+
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(closeButton, LinearLayout.LayoutParams(82.dp(), 44.dp()))
+            val titleColumn = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                filesTitleText = label("Files", 22f, COLOR_TEXT, true)
+                filesSubtitleText = label("Current voice thread", 12f, COLOR_MUTED, false)
+                addView(filesTitleText)
+                addView(filesSubtitleText)
+            }
+            addView(titleColumn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                leftMargin = 10.dp()
+                rightMargin = 10.dp()
+            })
+            addView(fileExplorerButton, LinearLayout.LayoutParams(104.dp(), 44.dp()).apply { rightMargin = 8.dp() })
+            addView(fileRefreshButton, LinearLayout.LayoutParams(94.dp(), 44.dp()))
+        }
+        panelRoot.addView(header)
+
+        val fileCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = rounded(COLOR_SURFACE, 10.dp(), COLOR_STROKE)
+            setPadding(14.dp(), 14.dp(), 14.dp(), 14.dp())
+            filePathText = label("No file selected", 16f, COLOR_TEXT, true)
+            fileMetaText = label("", 11f, COLOR_MUTED, false).apply {
+                setPadding(0, 5.dp(), 0, 10.dp())
+            }
+            addView(filePathText)
+            addView(fileMetaText)
+        }
+        panelRoot.addView(fileCard, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = 16.dp()
+        })
+
+        val contentScroll = ScrollView(this).apply {
+            background = rounded(COLOR_INPUT, 8.dp(), COLOR_STROKE)
+            setPadding(12.dp(), 12.dp(), 12.dp(), 12.dp())
+            fileContentText = label("", 13f, COLOR_TEXT, false).apply {
+                typeface = Typeface.MONOSPACE
+                setLineSpacing(2.dp().toFloat(), 1f)
+            }
+            addView(fileContentText)
+        }
+        val gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onDown(event: MotionEvent): Boolean = true
+
+            override fun onFling(
+                event1: MotionEvent?,
+                event2: MotionEvent,
+                velocityX: Float,
+                velocityY: Float
+            ): Boolean {
+                val start = event1 ?: return false
+                val deltaX = event2.x - start.x
+                if (kotlin.math.abs(deltaX) < 70.dp() || kotlin.math.abs(velocityX) < kotlin.math.abs(velocityY)) return false
+                moveArtifact(if (deltaX < 0) 1 else -1)
+                return true
+            }
+        })
+        contentScroll.setOnTouchListener { _, event ->
+            gestureDetector.onTouchEvent(event)
+            false
+        }
+        panelRoot.addView(contentScroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f).apply {
+            topMargin = 12.dp()
+        })
+
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            filePrevButton = button("Previous") { moveArtifact(-1) }
+            fileNextButton = button("Next") { moveArtifact(1) }
+            addView(filePrevButton, LinearLayout.LayoutParams(0, 48.dp(), 1f).apply { rightMargin = 8.dp() })
+            addView(fileNextButton, LinearLayout.LayoutParams(0, 48.dp(), 1f))
+        }
+        panelRoot.addView(controls, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = 12.dp()
+        })
+
+        return panelRoot
     }
 
     private fun configureSystemBars() {
@@ -421,9 +584,180 @@ class MainActivity : ComponentActivity() {
         statusText.text = status
         statusText.setTextColor(if (mode == SessionMode.ERROR) COLOR_ACCENT else COLOR_MUTED)
         statusText.visibility = View.VISIBLE
+        renderAssistantActivity(status)
         primaryActionButton.stylePrimaryButton(mode)
         offButton.visibility = if (mode == SessionMode.OFF || mode == SessionMode.ERROR) View.GONE else View.VISIBLE
         if (mode == SessionMode.OFF) updateApprovalUi("")
+        if (status.contains("assistant replied", ignoreCase = true) ||
+            status.contains("artifact", ignoreCase = true) ||
+            status.contains("transcript patched", ignoreCase = true)
+        ) {
+            refreshAssistantThreadSummary()
+        }
+    }
+
+    private fun renderAssistantActivity(status: String) {
+        if (!::assistantActivityText.isInitialized) return
+        val lower = status.lowercase()
+        val text = when {
+            lower.contains("waiting for approval") -> "Waiting for approval"
+            lower.contains("queued voice prompt") || lower.contains("queued") -> "Queued"
+            lower.contains("thinking") -> "Assistant is thinking..."
+            else -> ""
+        }
+        if (text.isBlank()) {
+            assistantActivityText.visibility = View.GONE
+            assistantActivityText.text = ""
+        } else {
+            assistantActivityText.visibility = View.VISIBLE
+            assistantActivityText.text = text
+        }
+    }
+
+    private fun refreshAssistantThreadSummary() {
+        val connected = api.pairedDeviceId().isNotBlank() && api.pairedDeviceToken().isNotBlank()
+        if (!connected || assistantFilesLoading) return
+        thread(name = "VoiceStreamAssistantThreadSummary") {
+            runCatching { api.assistantThreadSummary() }
+                .onSuccess { summary ->
+                    runOnUiThread {
+                        assistantThreadSummary = summary
+                        renderFilesBadge(summary.artifactsCount)
+                        if (::filesPanel.isInitialized && filesPanel.visibility == View.VISIBLE) {
+                            renderFilesView()
+                        }
+                    }
+                }
+        }
+    }
+
+    private fun refreshAssistantFiles(selectFirst: Boolean) {
+        val connected = api.pairedDeviceId().isNotBlank() && api.pairedDeviceToken().isNotBlank()
+        if (!connected || assistantFilesLoading) return
+        assistantFilesLoading = true
+        runOnUiThread {
+            fileRefreshButton.isEnabled = false
+            if (assistantArtifacts.isEmpty()) {
+                fileContentText.text = "Loading files..."
+            }
+        }
+        thread(name = "VoiceStreamAssistantFiles") {
+            try {
+                val result = api.assistantFiles()
+                runOnUiThread {
+                    assistantThreadSummary = result.thread
+                    assistantArtifacts = result.artifacts
+                    selectedArtifactIndex = when {
+                        result.artifacts.isEmpty() -> -1
+                        selectFirst || selectedArtifactIndex !in result.artifacts.indices -> 0
+                        else -> selectedArtifactIndex
+                    }
+                    renderFilesBadge(result.thread.artifactsCount)
+                    renderFilesView()
+                }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    filePathText.text = "Could not load files"
+                    fileMetaText.text = ""
+                    fileContentText.text = error.message ?: "Request failed"
+                    filePrevButton.isEnabled = false
+                    fileNextButton.isEnabled = false
+                    fileExplorerButton.isEnabled = false
+                }
+            } finally {
+                assistantFilesLoading = false
+                runOnUiThread { fileRefreshButton.isEnabled = true }
+            }
+        }
+    }
+
+    private fun openFilesView() {
+        if (!::filesPanel.isInitialized) return
+        filesPanel.visibility = View.VISIBLE
+        settingsPanel.visibility = View.GONE
+        settingsButton.text = "Settings"
+        renderFilesView()
+        refreshAssistantFiles(selectFirst = assistantArtifacts.isEmpty())
+    }
+
+    private fun closeFilesView() {
+        if (::filesPanel.isInitialized) filesPanel.visibility = View.GONE
+    }
+
+    private fun moveArtifact(delta: Int) {
+        if (assistantArtifacts.isEmpty()) return
+        selectedArtifactIndex = (selectedArtifactIndex + delta).coerceIn(0, assistantArtifacts.lastIndex)
+        renderFilesView()
+    }
+
+    private fun showFileExplorer() {
+        if (assistantArtifacts.isEmpty()) return
+        val paths = assistantArtifacts.map { it.path.ifBlank { "Untitled" } }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Files")
+            .setItems(paths) { _, which ->
+                selectedArtifactIndex = which
+                renderFilesView()
+            }
+            .show()
+    }
+
+    private fun renderFilesBadge(count: Int = assistantThreadSummary?.artifactsCount ?: assistantArtifacts.size) {
+        if (!::filesBadgeText.isInitialized) return
+        if (count <= 0) {
+            filesBadgeText.visibility = View.GONE
+            filesBadgeText.text = ""
+            return
+        }
+        filesBadgeText.visibility = View.VISIBLE
+        filesBadgeText.text = if (count > 9) "9+" else count.toString()
+        filesBadgeText.setPadding(5.dp(), 0, 5.dp(), 0)
+    }
+
+    private fun renderFilesView() {
+        if (!::filePathText.isInitialized) return
+        val summary = assistantThreadSummary
+        val count = summary?.artifactsCount ?: assistantArtifacts.size
+        filesTitleText.text = "Files"
+        filesSubtitleText.text = if (summary == null) {
+            "Current voice thread"
+        } else if (summary.id.isBlank()) {
+            "No voice thread yet | 0 files"
+        } else {
+            "${summary.title.ifBlank { "Voice thread" }} | $count file${if (count == 1) "" else "s"}"
+        }
+
+        if (assistantFilesLoading && assistantArtifacts.isEmpty()) {
+            filePathText.text = "Loading files"
+            fileMetaText.text = ""
+            fileContentText.text = "Loading files..."
+            filePrevButton.isEnabled = false
+            fileNextButton.isEnabled = false
+            fileExplorerButton.isEnabled = false
+            return
+        }
+
+        val artifact = assistantArtifacts.getOrNull(selectedArtifactIndex)
+        if (artifact == null) {
+            filePathText.text = "No files yet"
+            fileMetaText.text = ""
+            fileContentText.text = if (summary?.id.isNullOrBlank()) {
+                "No voice thread yet. Start a voice request to create one."
+            } else {
+                "No files in this thread yet."
+            }
+            filePrevButton.isEnabled = false
+            fileNextButton.isEnabled = false
+            fileExplorerButton.isEnabled = false
+            return
+        }
+
+        filePathText.text = artifact.path.ifBlank { "Untitled" }
+        fileMetaText.text = "File ${selectedArtifactIndex + 1}/${assistantArtifacts.size} | ${formatArtifactSize(artifact.size)} | Updated ${artifact.updatedAt.take(16).replace('T', ' ')}"
+        fileContentText.text = artifact.content.ifBlank { "This file is empty." }
+        filePrevButton.isEnabled = selectedArtifactIndex > 0
+        fileNextButton.isEnabled = selectedArtifactIndex < assistantArtifacts.lastIndex
+        fileExplorerButton.isEnabled = true
     }
 
     private fun updateApprovalUi(approvalStatus: String) {
@@ -503,6 +837,15 @@ class MainActivity : ComponentActivity() {
         val text = entry.text?.takeIf { it.isNotBlank() } ?: entry.source?.takeIf { it.isNotBlank() }
         val size = if (entry.bytes > 0) " | ${entry.bytes / 1024} KB" else ""
         return if (text.isNullOrBlank()) "$time$size" else "$time | ${text.take(72)}$size"
+    }
+
+    private fun formatArtifactSize(bytes: Int): String {
+        if (bytes <= 0) return "0 B"
+        if (bytes < 1024) return "$bytes B"
+        val kb = bytes / 1024.0
+        if (kb < 1024) return "${if (kb >= 10) kb.toInt().toString() else String.format(Locale.US, "%.1f", kb)} KB"
+        val mb = kb / 1024.0
+        return "${if (mb >= 10) mb.toInt().toString() else String.format(Locale.US, "%.1f", mb)} MB"
     }
 
     private fun loadConfigIntoForm() {
@@ -989,11 +1332,17 @@ class MainActivity : ComponentActivity() {
         voicePanel.visibility = if (connected) View.VISIBLE else View.GONE
         settingsButton.visibility = if (connected) View.VISIBLE else View.GONE
         microphoneText.visibility = if (connected) View.VISIBLE else View.GONE
+        filesButton.visibility = if (connected) View.VISIBLE else View.GONE
+        filesBadgeText.visibility = if (connected && (assistantThreadSummary?.artifactsCount ?: assistantArtifacts.size) > 0) View.VISIBLE else View.GONE
         signOutButton.visibility = if (connected) View.VISIBLE else View.GONE
         if (!connected) {
             settingsPanel.visibility = View.GONE
             settingsButton.text = "Settings"
             renderUpdateBanner(null)
+            if (::filesPanel.isInitialized) filesPanel.visibility = View.GONE
+            assistantThreadSummary = null
+            assistantArtifacts = emptyList()
+            selectedArtifactIndex = -1
         }
         if (!connected) {
             updateSessionUi(SessionMode.OFF, "Sign in to connect this phone.")
@@ -1001,6 +1350,7 @@ class MainActivity : ComponentActivity() {
             updateSessionUi(SessionMode.OFF, "Ready.")
         }
         updatePairingMessage()
+        if (connected) refreshAssistantThreadSummary()
     }
 
     private fun updatePairingMessage() {
@@ -1249,6 +1599,7 @@ class MainActivity : ComponentActivity() {
         if (::microphoneText.isInitialized) microphoneText.updateFrameMargins(bottom = safeBottom)
         if (::settingsPanel.isInitialized) settingsPanel.updateFrameMargins(bottom = safeBottom + 74.dp())
         if (::root.isInitialized) root.setPadding(24.dp(), topInset + 28.dp(), 24.dp(), safeBottom + 94.dp())
+        if (::filesPanel.isInitialized) filesPanel.setPadding(18.dp(), topInset + 20.dp(), 18.dp(), safeBottom)
     }
 
     private fun View.updateFrameMargins(top: Int? = null, bottom: Int? = null) {
@@ -1304,7 +1655,7 @@ class MainActivity : ComponentActivity() {
                 return when {
                     lower.isBlank() || lower == "off" || lower.contains("sign in") || lower.contains("pair this device") -> OFF
                     lower.contains("failed") || lower.contains("error") || lower.contains("missing") -> ERROR
-                    lower.contains("waking") || lower.contains("starting") || lower.contains("reconnecting") -> LOADING
+                    lower.contains("waking") || lower.contains("starting") || lower.contains("reconnecting") || lower.contains("thinking") || lower.contains("queued") || lower.contains("waiting for approval") -> LOADING
                     lower.startsWith("sleep") || lower.startsWith("unlock") || lower.contains("sleeping") -> SLEEPING
                     lower.contains("waiting") || lower.contains("listening") || lower.contains("assistant replied") || lower.contains("transcript received") || lower.contains("audio received") -> AWAKE
                     else -> RECORDING
