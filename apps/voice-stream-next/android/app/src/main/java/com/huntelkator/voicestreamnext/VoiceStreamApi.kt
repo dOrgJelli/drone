@@ -9,6 +9,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.net.URI
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 data class ApiConfig(
@@ -133,6 +134,17 @@ class VoiceStreamApi(private val context: Context) {
             .getString(Constants.PREF_DEVICE_TOKEN, "").orEmpty()
     }
 
+    fun installationId(): String {
+        val prefs = context.getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
+        val existing = prefs.getString(Constants.PREF_INSTALLATION_ID, "").orEmpty()
+        if (existing.isNotBlank()) return existing
+        val next = "android_${UUID.randomUUID().toString().replace("-", "")}"
+        prefs.edit()
+            .putString(Constants.PREF_INSTALLATION_ID, next)
+            .apply()
+        return next
+    }
+
     fun savePairing(pairing: DevicePairing, deviceName: String) {
         context.getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE).edit()
             .putString(Constants.PREF_DEVICE_ID, pairing.deviceId)
@@ -160,6 +172,8 @@ class VoiceStreamApi(private val context: Context) {
             "/api/desktop-auth/requests",
             JSONObject()
                 .put("displayName", deviceName)
+                .put("deviceType", "android")
+                .put("installationId", installationId())
                 .put("protocolVersion", 1)
         )
         return BrowserAuthRequest(
@@ -195,15 +209,21 @@ class VoiceStreamApi(private val context: Context) {
         val builder = Request.Builder()
             .url(url)
             .header("x-voice-device-token", token)
+            .header("x-voice-installation-id", installationId())
             .header("x-voice-client-version", BuildConfig.VERSION_CODE.toString())
         client.newCall(builder.build()).execute().use { response ->
             val text = response.body.string()
             if (!response.isSuccessful) {
                 throw IOException(ApiJsonResponse.errorMessage(text, "HTTP ${response.code}"))
             }
-            return ApiJsonResponse.parseObject(text, "GET", "/api/devices/$deviceId/bootstrap")
+            val device = ApiJsonResponse.parseObject(text, "GET", "/api/devices/$deviceId/bootstrap")
                 .getJSONObject("device")
-                .optString("displayName")
+            val returnedDeviceId = device.optString("id")
+            val displayName = device.optString("displayName")
+            if (returnedDeviceId.isNotBlank() && returnedDeviceId != deviceId) {
+                savePairing(DevicePairing(returnedDeviceId, token), displayName.ifBlank { Constants.DEFAULT_DEVICE_NAME })
+            }
+            return displayName
         }
     }
 
@@ -231,6 +251,7 @@ class VoiceStreamApi(private val context: Context) {
             JSONObject()
                 .put("deviceType", "android")
                 .put("displayName", deviceName)
+                .put("installationId", installationId())
         )
         return DevicePairing(
             deviceId = json.getJSONObject("device").getString("id"),
@@ -261,6 +282,7 @@ class VoiceStreamApi(private val context: Context) {
             .put("clientVersion", BuildConfig.VERSION_CODE)
             .put("appVersion", BuildConfig.VERSION_NAME)
             .put("displayName", displayName)
+            .put("installationId", installationId())
 
         val builder = Request.Builder()
             .url(url)
@@ -284,16 +306,26 @@ class VoiceStreamApi(private val context: Context) {
     }
 
     fun createVoiceSession(deviceId: String, mode: String = Constants.STREAM_TARGET_ASSISTANT): String {
-        return request(
+        val json = request(
             "POST",
             "/api/voice/sessions",
             JSONObject()
                 .put("deviceId", deviceId)
                 .put("token", pairedDeviceToken())
+                .put("installationId", installationId())
                 .put("mode", mode)
                 .put("protocolVersion", 1)
                 .put("clientVersion", BuildConfig.VERSION_CODE)
         )
+        val device = json.optJSONObject("device")
+        val returnedDeviceId = device?.optString("id").orEmpty()
+        if (returnedDeviceId.isNotBlank() && returnedDeviceId != deviceId) {
+            savePairing(
+                DevicePairing(returnedDeviceId, pairedDeviceToken()),
+                device?.optString("displayName")?.takeIf { it.isNotBlank() } ?: Constants.DEFAULT_DEVICE_NAME
+            )
+        }
+        return json
             .getJSONObject("session")
             .getString("id")
     }
@@ -361,6 +393,7 @@ class VoiceStreamApi(private val context: Context) {
             .put("message", message)
             .put("protocolVersion", 1)
             .put("clientVersion", BuildConfig.VERSION_CODE)
+            .put("installationId", installationId())
         if (details != null) body.put("details", details)
         request("POST", "/api/logs", body)
     }
@@ -375,6 +408,7 @@ class VoiceStreamApi(private val context: Context) {
             .put("details", JSONObject().put("reason", reason).put("log", logText))
             .put("protocolVersion", 1)
             .put("clientVersion", BuildConfig.VERSION_CODE)
+            .put("installationId", installationId())
         if (deviceId != null) body.put("deviceId", deviceId)
         if (token != null) body.put("token", token)
         request("POST", "/api/logs", body)
@@ -392,6 +426,7 @@ class VoiceStreamApi(private val context: Context) {
                 .put("mode", mode)
                 .put("status", status)
                 .put("microphone", microphone)
+                .put("installationId", installationId())
                 .put("protocolVersion", 1)
                 .put("clientVersion", BuildConfig.VERSION_CODE)
                 .put("appVersion", BuildConfig.VERSION_NAME)

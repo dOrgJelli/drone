@@ -5,7 +5,7 @@ import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
 import { clerkPlugin } from '@clerk/fastify';
-import { VoiceStreamNextDb, type SpeechPlaybackTarget } from './db.js';
+import { VoiceStreamNextDb, type DeviceRecord, type SpeechPlaybackTarget } from './db.js';
 import { requireAdmin, resolveRequestUser, type AuthContext } from './auth.js';
 import { synthesizeSpeech, transcribePcm16 } from './assistant-runtime.js';
 import {
@@ -477,6 +477,15 @@ function verifyDeviceAuth(
   });
 }
 
+function resolveDeviceInstallation(
+  db: VoiceStreamNextDb,
+  device: DeviceRecord,
+  installationId: string | null,
+  token: string,
+): DeviceRecord {
+  return installationId ? db.assignDeviceInstallationId(device.userId, device.id, installationId, token) ?? device : device;
+}
+
 function cleanControlCommand(raw: unknown): ControlCommand {
   const value = cleanText(raw).toLowerCase();
   if (value === 'sleep' || value === 'off' || value === 'awake' || value === 'query_status') return value;
@@ -858,6 +867,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     const expiresAt = pairingExpiresAt();
     const claimed = db.claimAndroidSetupSession(setupId, secret, {
       displayName: cleanText(body.displayName, 'Android voice client') || 'Android voice client',
+      installationId: cleanText(body.installationId) || null,
       expiresAt,
     });
     if (!claimed.ok) {
@@ -1051,8 +1061,9 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       const body = jsonBody(req);
       const displayName = cleanText(body.displayName, 'Desktop voice client') || 'Desktop voice client';
       const installationId = cleanText(body.installationId) || null;
+      const deviceType = cleanText(body.deviceType, 'desktop') || 'desktop';
       const expiresAt = desktopAuthExpiresAt();
-      const { request, secret, deviceToken } = db.createDesktopAuthRequest({ displayName, expiresAt, installationId });
+      const { request, secret, deviceToken } = db.createDesktopAuthRequest({ displayName, expiresAt, installationId, deviceType });
       return {
         ok: true,
         requestId: request.id,
@@ -1129,7 +1140,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       const body = jsonBody(req);
       const deviceType = cleanText(body.deviceType, 'desktop') || 'desktop';
       const displayName = cleanText(body.displayName, deviceType) || deviceType;
-      const installationId = deviceType === 'desktop' ? cleanText(body.installationId) || null : null;
+      const installationId = cleanText(body.installationId) || null;
       const result = db.registerDevice(ctx.user.id, { deviceType, displayName, installationId });
       db.addLog(ctx.user.id, {
         deviceId: result.device.id,
@@ -1147,7 +1158,8 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       const body = jsonBody(req);
       const deviceType = cleanText(body.deviceType, 'android') || 'android';
       const displayName = cleanText(body.displayName, deviceType === 'desktop' ? 'Desktop voice client' : 'Android voice client');
-      const result = db.registerDevice(ctx.user.id, { deviceType, displayName });
+      const installationId = cleanText(body.installationId) || null;
+      const result = db.registerDevice(ctx.user.id, { deviceType, displayName, installationId });
       const expiresAt = pairingExpiresAt();
       const pairingSession = db.createPairingSession(ctx.user.id, result.device.id, expiresAt);
       const androidApk = readAndroidApkInfo(req);
@@ -1403,7 +1415,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       });
       return;
     }
-    const device = auth.device;
+    const device = resolveDeviceInstallation(db, auth.device, cleanText(body.installationId || req.headers['x-voice-installation-id']) || null, token);
     const status = db.upsertClientStatus(device.userId, device.id, {
       mode: cleanDeviceMode(body.mode),
       status: cleanText(body.status, 'No status') || 'No status',
@@ -1432,7 +1444,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       });
       return;
     }
-    const device = installationId ? db.assignDeviceInstallationId(auth.device.userId, auth.device.id, installationId) ?? auth.device : auth.device;
+    const device = resolveDeviceInstallation(db, auth.device, installationId, token);
     return {
       ok: true,
       device,
@@ -1522,14 +1534,15 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
   app.get('/api/devices/:deviceId/control', { websocket: true }, (socket, req) => {
     const deviceId = String((req.params as any).deviceId ?? '');
     const token = queryValue((req.query as any)?.token);
+    const installationId = cleanText((req.query as any)?.installationId) || null;
     const clientVersion = parseClientVersion((req.query as any)?.clientVersion, parseClientVersion((req.query as any)?.protocolVersion, null));
     const auth = verifyDeviceAuth(db, deviceId, token, clientVersion);
     if (!auth.ok) {
       socket.close(deviceAuthCloseCode(auth), deviceAuthFailureMessage(auth));
       return;
     }
-    const device = auth.device;
-    controlChannels.register(deviceId, socket);
+    const device = resolveDeviceInstallation(db, auth.device, installationId, token);
+    controlChannels.register(device.id, socket);
     db.addLog(device.userId, {
       deviceId: device.id,
       source: device.deviceType,
@@ -1581,7 +1594,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     });
     socket.on('close', (code: number, reason: Buffer) => {
       clearInterval(heartbeat);
-      controlChannels.unregister(deviceId, socket);
+      controlChannels.unregister(device.id, socket);
       db.addLog(device.userId, {
         deviceId: device.id,
         source: device.deviceType,
@@ -2189,8 +2202,9 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
         });
         return;
       }
-      const session = db.createVoiceSession(auth.device.userId, auth.device.id, mode);
-      return { ok: true, session };
+      const device = resolveDeviceInstallation(db, auth.device, cleanText(body.installationId || req.headers['x-voice-installation-id']) || null, token);
+      const session = db.createVoiceSession(device.userId, device.id, mode);
+      return { ok: true, session, device };
     }
     return withUser(req, reply, db, clerkEnabled, async (ctx) => {
       const device = db.deviceForUser(ctx.user.id, deviceId);
@@ -2205,6 +2219,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     const query = (req.query ?? {}) as Record<string, unknown>;
     const deviceId = queryValue(query.deviceId);
     const token = queryValue(query.token);
+    const installationId = cleanText(query.installationId) || null;
     const requestedSessionId = queryValue(query.sessionId);
     const streamMode = cleanVoiceStreamMode(queryValue(query.mode));
     const verifiedDevice = verifyDeviceAuth(db, deviceId, token, parseClientVersion(query.clientVersion, parseClientVersion(query.protocolVersion, null)));
@@ -2212,7 +2227,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       socket.close(deviceAuthCloseCode(verifiedDevice), deviceAuthFailureMessage(verifiedDevice));
       return;
     }
-    const device = verifiedDevice.device;
+    const device = resolveDeviceInstallation(db, verifiedDevice.device, installationId, token);
 
     let frames = 0;
     let bytes = 0;

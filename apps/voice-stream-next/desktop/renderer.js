@@ -407,6 +407,7 @@ async function reportClientStatus(mode, status) {
     method: 'POST',
     body: JSON.stringify({
       token: state.config.deviceToken,
+      installationId: state.config.installationId || '',
       mode,
       status,
       microphone: 'Desktop microphone',
@@ -422,6 +423,7 @@ function ensureControlSocket() {
   const url = new URL(`/api/devices/${encodeURIComponent(state.config.deviceId)}/control`, trimSlash(state.config.serverUrl));
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   url.searchParams.set('token', state.config.deviceToken);
+  if (state.config.installationId) url.searchParams.set('installationId', state.config.installationId);
   const socket = new WebSocket(url.toString());
   socket.onopen = () => {
     socket.send(JSON.stringify({
@@ -632,6 +634,13 @@ async function loadDashboard() {
           'x-voice-client-version': '1',
         },
       });
+      if (data.device?.id && data.device.id !== state.config.deviceId) {
+        applyConfig(await desktop.writeConfig({
+          ...state.config,
+          deviceId: data.device.id,
+          deviceName: data.device.displayName || state.config.deviceName,
+        }));
+      }
       state.dashboard = { devices: [data.device] };
       state.voiceSettings = data.settings;
       if (state.voiceSettings) {
@@ -1094,17 +1103,25 @@ async function ensureRecordingDevice() {
 async function createVoiceSession(target) {
   await ensureRecordingDevice();
   try {
-    return await api('/api/voice/sessions', {
+    const data = await api('/api/voice/sessions', {
       method: 'POST',
-      body: JSON.stringify({ deviceId: state.config.deviceId, token: state.config.deviceToken, mode: target, protocolVersion: 1 }),
+      body: JSON.stringify({ deviceId: state.config.deviceId, token: state.config.deviceToken, installationId: state.config.installationId || '', mode: target, protocolVersion: 1 }),
     });
+    if (data.device?.id && data.device.id !== state.config.deviceId) {
+      applyConfig(await desktop.writeConfig({
+        ...state.config,
+        deviceId: data.device.id,
+        deviceName: data.device.displayName || state.config.deviceName,
+      }));
+    }
+    return data;
   } catch (err) {
     if (!staleDeviceError(err)) throw err;
     await clearSavedDevice('Saved desktop pairing is stale. Re-pairing desktop.');
     await pairDevice();
     return api('/api/voice/sessions', {
       method: 'POST',
-      body: JSON.stringify({ deviceId: state.config.deviceId, token: state.config.deviceToken, mode: target, protocolVersion: 1 }),
+      body: JSON.stringify({ deviceId: state.config.deviceId, token: state.config.deviceToken, installationId: state.config.installationId || '', mode: target, protocolVersion: 1 }),
     });
   }
 }
@@ -1138,6 +1155,7 @@ async function startMic(target = 'assistant', options = {}) {
       body: JSON.stringify({
         deviceId: state.config.deviceId,
         token: state.config.deviceToken,
+        installationId: state.config.installationId || '',
         source: 'desktop',
         level: 'info',
         message: 'Desktop microphone capture started',
@@ -1200,6 +1218,7 @@ async function stopMic(nextMode = 'awake', options = {}) {
     body: JSON.stringify({
       deviceId: state.config.deviceId,
       token: state.config.deviceToken,
+      installationId: state.config.installationId || '',
       source: 'desktop',
       level: 'info',
       message: 'Desktop microphone capture stopped',
@@ -1215,6 +1234,7 @@ function openVoiceSocket(target) {
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   url.searchParams.set('deviceId', state.config.deviceId);
   url.searchParams.set('token', state.config.deviceToken);
+  if (state.config.installationId) url.searchParams.set('installationId', state.config.installationId);
   if (state.voiceSessionId) url.searchParams.set('sessionId', state.voiceSessionId);
   url.searchParams.set('mode', target);
   const socket = new WebSocket(url.toString());
@@ -1546,6 +1566,7 @@ async function logDesktopEvent(level, message, details) {
     body: JSON.stringify({
       deviceId: state.config.deviceId,
       token: state.config.deviceToken,
+      installationId: state.config.installationId || '',
       source: 'desktop',
       level,
       message,
