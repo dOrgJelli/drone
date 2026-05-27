@@ -57,14 +57,15 @@ export class ExtensionBridgeRegistry {
     this.registrations.set(socket, { ...registration, connectedAt: registration.connectedAt ?? new Date().toISOString() });
   }
 
-  unregister(socket: ExtensionBridgeSocket): void {
+  unregister(socket: ExtensionBridgeSocket): ExtensionBridgeRegistration | null {
     const registration = this.registrations.get(socket);
-    if (!registration) return;
+    if (!registration) return null;
     this.rejectPendingForSocket(socket, `extension runner disconnected: ${registration.displayName || registration.deviceId}`);
     const bucket = this.sockets.get(registration.deviceId);
     bucket?.delete(socket);
     if (bucket && bucket.size === 0) this.sockets.delete(registration.deviceId);
     this.registrations.delete(socket);
+    return registration;
   }
 
   connectedDevices(userId?: string): ExtensionBridgeConnection[] {
@@ -79,6 +80,15 @@ export class ExtensionBridgeRegistry {
       });
     }
     return rows;
+  }
+
+  hasConnectedExtension(userId: string, extensionId: string): boolean {
+    for (const [socket, registration] of this.registrations) {
+      if ((socket.readyState ?? 1) !== 1) continue;
+      if (registration.userId !== userId) continue;
+      if (registration.manifests.some((manifest) => manifest.id === extensionId)) return true;
+    }
+    return false;
   }
 
   closeDevice(deviceId: string, code = 4403, reason = 'device revoked'): void {

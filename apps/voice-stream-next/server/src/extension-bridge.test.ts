@@ -69,6 +69,7 @@ describe('extension bridge registry', () => {
     const registry = new ExtensionBridgeRegistry();
     const socket: ExtensionBridgeSocket = { readyState: 1, send() {} };
     registerSocket(registry, socket);
+    expect(registry.hasConnectedExtension('user-1', manifest.id)).toBe(true);
 
     const pending = registry.executeTool({
       userId: 'user-1',
@@ -76,8 +77,10 @@ describe('extension bridge registry', () => {
       args: {},
       route,
     });
-    registry.unregister(socket);
+    const registration = registry.unregister(socket);
 
+    expect(registration?.manifests[0]?.id).toBe(manifest.id);
+    expect(registry.hasConnectedExtension('user-1', manifest.id)).toBe(false);
     await expect(pending).rejects.toThrow('extension runner disconnected');
   });
 });

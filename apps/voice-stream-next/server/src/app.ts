@@ -398,6 +398,8 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
   const clerkEnabled = Boolean(process.env.CLERK_SECRET_KEY?.trim());
   const port = parsePort(process.env.VOICE_STREAM_NEXT_API_PORT ?? process.env.PORT, 3299);
 
+  db.clearAssistantExtensionManifests();
+
   setAssistantExternalToolExecutor(async (input) => {
     if (input.route?.targetKind === 'server') {
       throw Object.assign(new Error(`${input.toolName} is configured for server execution, but no server-side extension runner is installed`), { statusCode: 501 });
@@ -844,12 +846,16 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
   );
 
   app.get('/api/assistant/extensions', async (req, reply) =>
-    withUser(req, reply, db, clerkEnabled, async (ctx) => ({
-      ok: true,
-      manifests: db.listAssistantExtensionManifests(ctx.user.id),
-      routes: db.listAssistantExtensionToolRoutes(ctx.user.id),
-      connectedDevices: extensionBridges.connectedDevices(ctx.user.id),
-    })),
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const connectedDevices = extensionBridges.connectedDevices(ctx.user.id);
+      const connectedExtensionIds = new Set(connectedDevices.flatMap((device) => device.manifests.map((manifest) => manifest.id)));
+      return {
+        ok: true,
+        manifests: db.listAssistantExtensionManifests(ctx.user.id).filter((record) => connectedExtensionIds.has(record.extensionId)),
+        routes: db.listAssistantExtensionToolRoutes(ctx.user.id),
+        connectedDevices,
+      };
+    }),
   );
 
   app.patch('/api/assistant/extensions/tools/:toolName/route', async (req, reply) =>
@@ -1230,7 +1236,14 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     });
     socket.on('close', () => {
       clearInterval(heartbeat);
-      extensionBridges.unregister(socket);
+      const registration = extensionBridges.unregister(socket);
+      if (registration) {
+        for (const manifest of registration.manifests) {
+          if (!extensionBridges.hasConnectedExtension(registration.userId, manifest.id)) {
+            db.deleteAssistantExtensionManifest(registration.userId, manifest.id);
+          }
+        }
+      }
       if (registered) emitAssistantChange('extension_bridge_disconnected');
     });
   });

@@ -1616,6 +1616,16 @@ export class VoiceStreamNextDb {
       .map(rowAssistantExtensionManifest);
   }
 
+  deleteAssistantExtensionManifest(userId: string, extensionId: string): void {
+    this.db
+      .query('DELETE FROM assistant_extension_manifests WHERE user_id = $userId AND extension_id = $extensionId')
+      .run({ $userId: userId, $extensionId: extensionId });
+  }
+
+  clearAssistantExtensionManifests(): void {
+    this.db.query('DELETE FROM assistant_extension_manifests').run();
+  }
+
   assistantExtensionToolManifest(userId: string, toolName: string): { manifest: AssistantExtensionManifest; tool: AssistantExtensionManifest['tools'][number] } | null {
     for (const record of this.listAssistantExtensionManifests(userId)) {
       const tool = record.manifest.tools.find((item) => extensionToolName(record.manifest.id, item.name) === toolName);

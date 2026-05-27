@@ -658,6 +658,7 @@ async function loadDesktopExtensions(options = {}) {
         version: '0.0.0',
         tools: [],
       };
+      const existingToolNames = new Set(tools.keys());
       try {
         if (extensionIds.has(extensionConfig.id)) throw new Error(`duplicate extension id: ${extensionConfig.id}`);
         extensionIds.add(extensionConfig.id);
@@ -672,6 +673,9 @@ async function loadDesktopExtensions(options = {}) {
         manifests.push(manifest);
         statuses.push({ id: extensionConfig.id, name: extensionConfig.name, enabled: true, ok: true, toolCount: manifest.tools.length });
       } catch (error) {
+        for (const toolName of tools.keys()) {
+          if (!existingToolNames.has(toolName)) tools.delete(toolName);
+        }
         statuses.push({ id: extensionConfig.id, name: extensionConfig.name, enabled: true, ok: false, error: error?.message || String(error), toolCount: 0 });
         windowDebugLog('extension:loadFailed', { extensionId: extensionConfig.id, path: extensionConfig.path, error: error?.message || String(error) });
       }
