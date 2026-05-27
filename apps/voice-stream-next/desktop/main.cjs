@@ -21,6 +21,7 @@ const extensionHost = {
   manifests: [],
   tools: new Map(),
   statuses: [],
+  deactivators: [],
 };
 
 const fullWindow = {
@@ -559,6 +560,42 @@ function writeExtensionState(state) {
   fs.writeFileSync(extensionStatePath(), JSON.stringify(state, null, 2));
 }
 
+async function postAssistantThreadPromptFromExtension(extensionId, threadId, prompt, options = {}) {
+  const config = readConfig();
+  const cleanThreadId = String(threadId || '').trim();
+  const cleanPrompt = String(prompt || '').trim();
+  if (!config.deviceId || !config.deviceToken) throw new Error('desktop device is not paired with Voice Stream Next');
+  if (!cleanThreadId) throw new Error('threadId is required');
+  if (!cleanPrompt) throw new Error('prompt is required');
+  if (typeof fetch !== 'function') throw new Error('fetch is not available in this desktop runtime');
+
+  const url = new URL(`/api/devices/${encodeURIComponent(config.deviceId)}/assistant/threads/${encodeURIComponent(cleanThreadId)}/prompt`, trimSlash(config.serverUrl));
+  const body = {
+    token: config.deviceToken,
+    clientVersion: 1,
+    source: 'extension',
+    extensionId: String(extensionId || '').trim(),
+    prompt: cleanPrompt,
+    ...(options.provider ? { provider: String(options.provider) } : {}),
+    ...(options.model ? { model: String(options.model) } : {}),
+    ...(options.thinkingLevel ? { thinkingLevel: String(options.thinkingLevel) } : {}),
+  };
+  const response = await fetch(url.toString(), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = null;
+  }
+  if (!response.ok) throw new Error(String(data?.error || text || `assistant prompt failed with ${response.status}`));
+  return data;
+}
+
 function createExtensionApi(extensionConfig, manifest, tools) {
   return {
     id: extensionConfig.id,
@@ -593,6 +630,11 @@ function createExtensionApi(extensionConfig, manifest, tools) {
         fullName,
         execute: value.execute,
       });
+    },
+    assistant: {
+      async promptThread(threadId, prompt, options = {}) {
+        return postAssistantThreadPromptFromExtension(extensionConfig.id, threadId, prompt, options);
+      },
     },
     state: {
       async get(key, fallback = null) {
@@ -637,12 +679,24 @@ function cleanExtensionTargets(value) {
   return targets.length > 0 ? [...new Set(targets)] : ['device'];
 }
 
+async function deactivateDesktopExtensions() {
+  const deactivators = extensionHost.deactivators.splice(0);
+  for (const entry of deactivators) {
+    try {
+      await entry.deactivate();
+    } catch (error) {
+      windowDebugLog('extension:deactivateFailed', { extensionId: entry.extensionId, error: error?.message || String(error) });
+    }
+  }
+}
+
 async function loadDesktopExtensions(options = {}) {
   const configs = cleanExtensionConfigs();
   const configKey = extensionConfigKey(configs);
   if (!options.force && extensionHost.loaded && extensionHost.configKey === configKey) return extensionHost;
   if (extensionHost.loading) return extensionHost.loading;
   extensionHost.loading = (async () => {
+    await deactivateDesktopExtensions();
     const manifests = [];
     const tools = new Map();
     const statuses = [];
@@ -667,9 +721,13 @@ async function loadDesktopExtensions(options = {}) {
         delete require.cache[require.resolve(modulePath)];
         const extensionModule = require(modulePath);
         const activate = extensionModule?.activate || extensionModule?.default?.activate;
+        const deactivate = extensionModule?.deactivate || extensionModule?.default?.deactivate;
         if (typeof activate !== 'function') throw new Error('extension must export activate(api)');
         await activate(createExtensionApi(extensionConfig, manifest, tools));
         if (manifest.tools.length === 0) throw new Error('extension did not register any tools');
+        if (typeof deactivate === 'function') {
+          extensionHost.deactivators.push({ extensionId: extensionConfig.id, deactivate });
+        }
         manifests.push(manifest);
         statuses.push({ id: extensionConfig.id, name: extensionConfig.name, enabled: true, ok: true, toolCount: manifest.tools.length });
       } catch (error) {
@@ -1149,6 +1207,7 @@ if (!gotSingleInstanceLock) {
   app.on('before-quit', () => {
     isQuitting = true;
     stopExtensionBridge();
+    void deactivateDesktopExtensions();
     releaseVosk();
   });
 }
