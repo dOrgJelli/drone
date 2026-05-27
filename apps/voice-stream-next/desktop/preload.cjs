@@ -4,6 +4,8 @@ contextBridge.exposeInMainWorld('voiceStreamDesktop', {
   isDesktop: true,
   readConfig: () => ipcRenderer.invoke('config:read'),
   writeConfig: (config) => ipcRenderer.invoke('config:write', config),
+  reloadExtensions: () => ipcRenderer.invoke('extensions:reload'),
+  extensionStatus: () => ipcRenderer.invoke('extensions:status'),
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
   debugWindow: (message, details) => ipcRenderer.invoke('debug:window', message, details),
   writeClipboard: (text) => ipcRenderer.invoke('clipboard:writeText', text),

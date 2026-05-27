@@ -67,6 +67,18 @@
                   <select id="outputDeviceSelect" class="device-select-hidden" tabindex="-1" aria-hidden="true"></select>
                 </div>
               </div>
+              <div class="extensions-config-panel" aria-label="Local extensions">
+                <div class="extensions-config-header">
+                  <span class="device-picker-title">Extensions</span>
+                  <button id="reloadExtensionsButton" class="secondary mini-button" type="button">Reload</button>
+                </div>
+                <textarea id="extensionsConfigInput" spellcheck="false" placeholder='[{"id":"drone-hub","name":"Drone Hub","path":"/absolute/path/to/index.cjs","enabled":true}]'></textarea>
+                <p class="extensions-warning">Local extensions run code on this computer. Use absolute paths and only load files you trust.</p>
+                <div class="extensions-config-actions">
+                  <button id="saveExtensionsButton" class="secondary mini-button" type="button">Save extensions</button>
+                </div>
+                <div id="extensionsStatus" class="extensions-status muted">No local extensions configured.</div>
+              </div>
             </div>
           </div>
           <button id="compactButton" class="secondary window-button" type="button" aria-label="Minimize to voice controls">Minimize</button>

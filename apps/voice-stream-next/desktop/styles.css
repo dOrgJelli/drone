@@ -45,7 +45,7 @@ body.is-compact {
   background: #101216;
 }
 
-button, input, select {
+button, input, select, textarea {
   font: inherit;
 }
 
@@ -86,7 +86,7 @@ button.secondary:hover {
   color: var(--fg);
 }
 
-input, select {
+input, select, textarea {
   width: 100%;
   min-height: 38px;
   border: 1px solid var(--border);
@@ -95,6 +95,15 @@ input, select {
   color: var(--fg);
   padding: 8px 10px;
   outline: none;
+}
+
+textarea {
+  min-height: 118px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  text-transform: none;
 }
 
 select {
@@ -118,7 +127,7 @@ select option:disabled {
   color: var(--muted);
 }
 
-input:focus, select:focus {
+input:focus, select:focus, textarea:focus {
   border-color: rgba(167, 139, 250, .58);
   outline: 2px solid rgba(167, 139, 250, .16);
   outline-offset: 1px;
@@ -389,6 +398,52 @@ h2 {
 
 .settings-panel .voice-device-panel {
   width: 100%;
+}
+
+.extensions-config-panel {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+  text-align: left;
+}
+
+.extensions-config-header,
+.extensions-config-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mini-button {
+  min-height: 28px;
+  padding: 0 9px;
+  font-size: 10px;
+}
+
+.extensions-status {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.extensions-warning {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.extensions-status .ok {
+  color: var(--green);
+}
+
+.extensions-status .error {
+  color: var(--red);
 }
 
 .device-picker {
