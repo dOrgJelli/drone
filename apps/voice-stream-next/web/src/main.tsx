@@ -856,6 +856,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   const [toasts, setToasts] = React.useState<AppToast[]>([]);
   const [messageDraft, setMessageDraft] = React.useState('');
   const [threadTitleDraft, setThreadTitleDraft] = React.useState('');
+  const [threadDeleteCandidate, setThreadDeleteCandidate] = React.useState<AssistantThread | null>(null);
   const [codexConnectFlow, setCodexConnectFlow] = React.useState<{ state: string; authorizationUrl: string; redirectUri: string; expiresAt: string } | null>(null);
   const [codexCodeDraft, setCodexCodeDraft] = React.useState('');
   const [apiKeyDrafts, setApiKeyDrafts] = React.useState<Record<'openai' | 'exa', string>>({ openai: '', exa: '' });
@@ -1434,6 +1435,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
       setActiveThreadId(nextThreadId);
       const visibleThread = data.snapshot.threads.find((thread) => thread.id === nextThreadId) ?? null;
       setMessages(visibleThread?.messages ?? []);
+      setThreadDeleteCandidate(null);
       setNotice('Deleted assistant thread.');
       await loadDashboard();
     } catch (err: any) {
@@ -2318,28 +2320,48 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
             const messageCount = active ? messages.length : 0;
             const queuedCount = (thread as AssistantThreadView).queuedPrompts?.length ?? 0;
             return (
-              <button
+              <div
                 key={thread.id}
-                type="button"
-                className={cn(
-                  'grid min-h-[58px] w-full content-center gap-1 rounded border border-transparent bg-transparent py-1.5 pl-2 pr-8 text-left text-[var(--fg-secondary)] transition hover:border-[rgba(136,145,168,.24)] hover:bg-white/[.04] hover:text-[var(--fg)]',
-                  active && '!border-[rgba(136,145,168,.24)] !bg-white/[.04] !text-[var(--fg)]',
-                )}
-                onClick={() => {
-                  setActiveView('threads');
-                  setActiveThreadId(thread.id);
-                }}
+                className="group/thread relative min-h-[58px] w-full"
               >
-                <div className="flex min-w-0 items-center gap-[7px]">
-                  <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--muted-dim)]', active && '!bg-[var(--green)] shadow-[0_0_10px_rgba(74,222,128,.22)]')} />
-                  <strong className="min-w-0 truncate text-xs font-semibold">{thread.title || 'Untitled thread'}</strong>
-                </div>
-                <small className="min-w-0 truncate text-[10px] leading-tight text-[var(--muted)]">
-                  {thread.voiceEnabled || thread.source === 'voice' ? 'voice' : 'normal'} · {timeLabel(thread.updatedAt)}
-                  {messageCount ? ` · ${messageCount}` : ''}
-                  {queuedCount ? ` · ${queuedCount} queued` : ''}
-                </small>
-              </button>
+                <button
+                  type="button"
+                  className={cn(
+                    'grid min-h-[58px] w-full content-center gap-1 rounded border border-transparent bg-transparent py-1.5 pl-2 pr-10 text-left text-[var(--fg-secondary)] transition hover:border-[rgba(136,145,168,.24)] hover:bg-white/[.04] hover:text-[var(--fg)]',
+                    active && '!border-[rgba(136,145,168,.24)] !bg-white/[.04] !text-[var(--fg)]',
+                  )}
+                  onClick={() => {
+                    setActiveView('threads');
+                    setActiveThreadId(thread.id);
+                  }}
+                >
+                  <div className="flex min-w-0 items-center gap-[7px]">
+                    <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--muted-dim)]', active && '!bg-[var(--green)] shadow-[0_0_10px_rgba(74,222,128,.22)]')} />
+                    <strong className="min-w-0 truncate text-xs font-semibold">{thread.title || 'Untitled thread'}</strong>
+                  </div>
+                  <small className="min-w-0 truncate text-[10px] leading-tight text-[var(--muted)]">
+                    {thread.voiceEnabled || thread.source === 'voice' ? 'voice' : 'normal'} · {timeLabel(thread.updatedAt)}
+                    {messageCount ? ` · ${messageCount}` : ''}
+                    {queuedCount ? ` · ${queuedCount} queued` : ''}
+                  </small>
+                </button>
+                <button
+                  type="button"
+                  className="absolute right-1.5 top-1/2 grid h-7 w-7 -translate-y-1/2 place-items-center rounded border border-[rgba(248,113,113,.26)] bg-black/[.18] p-0 text-[#fca5a5] opacity-0 shadow-none transition hover:border-[rgba(248,113,113,.46)] hover:bg-[rgba(248,113,113,.10)] hover:text-[#fecaca] focus:opacity-100 focus:outline-none group-hover/thread:opacity-100 group-focus-within/thread:opacity-100 disabled:pointer-events-none disabled:opacity-40 max-[880px]:opacity-100"
+                  onClick={() => setThreadDeleteCandidate(thread)}
+                  disabled={busy}
+                  title={`Delete ${thread.title || 'thread'}`}
+                  aria-label={`Delete ${thread.title || 'thread'}`}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true" className={assistantIconSvgClass}>
+                    <path d="M3 6h18" />
+                    <path d="M8 6V4h8v2" />
+                    <path d="M6 6l1 15h10l1-15" />
+                    <path d="M10 10v7" />
+                    <path d="M14 10v7" />
+                  </svg>
+                </button>
+              </div>
             );
           })}
           {visibleThreads.length === 0 ? <div className={assistantEmptyClass}>No {threadFilter === 'all' ? 'assistant' : threadFilter} threads yet.</div> : null}
@@ -2578,6 +2600,14 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
         </header>
 
         <ToastStack toasts={toasts} onDismiss={dismissToast} />
+        {threadDeleteCandidate ? (
+          <ThreadDeleteConfirmModal
+            thread={threadDeleteCandidate}
+            busy={busy}
+            onCancel={() => setThreadDeleteCandidate(null)}
+            onConfirm={() => void deleteThread(threadDeleteCandidate.id)}
+          />
+        ) : null}
 
         {activeView === 'threads' && assistantToolsOpen && activeThread ? (
           <AssistantToolsPanel
@@ -4152,6 +4182,85 @@ function Metric({ label, value }: { label: string; value: React.ReactNode }) {
       <span>{label}</span>
       <strong>{value}</strong>
     </article>
+  );
+}
+
+function ThreadDeleteConfirmModal({
+  thread,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  thread: AssistantThread;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const title = thread.title?.trim() || 'Untitled thread';
+  const kind = thread.voiceEnabled || thread.source === 'voice' ? 'voice thread' : 'assistant thread';
+
+  React.useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !busy) onCancel();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [busy, onCancel]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 grid place-items-center bg-black/60 px-4 py-6 backdrop-blur-sm"
+      role="presentation"
+      onMouseDown={() => {
+        if (!busy) onCancel();
+      }}
+    >
+      <section
+        className="w-full max-w-sm rounded-lg border border-[rgba(248,113,113,.32)] bg-[var(--panel-alt)] p-4 text-[var(--fg)] shadow-[0_24px_80px_rgba(0,0,0,.42)]"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="delete-thread-title"
+        aria-describedby="delete-thread-description"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="mb-3 flex items-start gap-3">
+          <div className="grid h-9 w-9 shrink-0 place-items-center rounded border border-[rgba(248,113,113,.34)] bg-[rgba(248,113,113,.10)] text-[#fca5a5]" aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false" className="h-4 w-4 fill-none stroke-current stroke-2">
+              <path d="M3 6h18" />
+              <path d="M8 6V4h8v2" />
+              <path d="M6 6l1 15h10l1-15" />
+              <path d="M10 10v7" />
+              <path d="M14 10v7" />
+            </svg>
+          </div>
+          <div className="min-w-0">
+            <h2 id="delete-thread-title" className="m-0 text-[15px] font-bold leading-tight text-[var(--fg)]">Delete thread?</h2>
+            <p id="delete-thread-description" className="mt-1 text-xs leading-relaxed text-[var(--muted)]">
+              This will permanently delete the {kind} "{title}" and its messages.
+            </p>
+          </div>
+        </div>
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            className={assistantActionButtonClass}
+            onClick={onCancel}
+            disabled={busy}
+            autoFocus
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="inline-flex h-[30px] items-center justify-center rounded border border-[rgba(248,113,113,.46)] bg-[rgba(248,113,113,.12)] px-2.5 font-display text-[10px] font-semibold uppercase text-[#fecaca] transition hover:bg-[rgba(248,113,113,.18)] disabled:pointer-events-none disabled:opacity-50"
+            onClick={onConfirm}
+            disabled={busy}
+          >
+            {busy ? 'Deleting...' : 'Delete'}
+          </button>
+        </div>
+      </section>
+    </div>
   );
 }
 
