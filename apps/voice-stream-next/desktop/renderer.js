@@ -5,6 +5,8 @@ const MAX_PENDING_STREAM_BYTES = pcmBytesForMs(5000);
 const BASE_RECONNECT_DELAY_MS = 500;
 const MAX_RECONNECT_DELAY_MS = 10_000;
 const MAX_RECONNECT_EXPONENT = 4;
+// Keep the status command path available, but do not match spoken status phrases locally.
+const ENABLE_STATUS_WAKE_COMMAND = false;
 
 const preRollBuffer = new PcmCaptureBuffer(PRE_ROLL_MAX_BYTES);
 const pendingStreamBuffer = new PcmCaptureBuffer(MAX_PENDING_STREAM_BYTES);
@@ -104,6 +106,7 @@ function debugWindow(message, details = {}) {
     signedOutExpandInFlight: state.signedOutExpandInFlight,
     hasDeviceId: Boolean(state.config?.deviceId),
     hasDeviceToken: Boolean(state.config?.deviceToken),
+    installationId: state.config?.installationId || '',
   }).catch(() => undefined);
 }
 
@@ -410,6 +413,10 @@ function ensureControlSocket() {
       socket.send(JSON.stringify({ type: 'client_ping', sentAt: new Date().toISOString() }));
       return;
     }
+    if (message.type === 'speech_audio') {
+      playWavBase64(message.audioBase64);
+      return;
+    }
     if (message.type === 'server_command') {
       handleRemoteControlCommand(message, socket);
     }
@@ -593,6 +600,7 @@ async function loadDashboard() {
       const data = await api(`/api/devices/${encodeURIComponent(state.config.deviceId)}/bootstrap`, {
         headers: {
           'x-voice-device-token': state.config.deviceToken,
+          'x-voice-installation-id': state.config.installationId || '',
           'x-voice-client-version': '1',
         },
       });
@@ -722,7 +730,7 @@ async function pairDevice() {
   const config = readFormConfig();
   const data = await api('/api/devices', {
     method: 'POST',
-    body: JSON.stringify({ deviceType: 'desktop', displayName: config.deviceName }),
+    body: JSON.stringify({ deviceType: 'desktop', displayName: config.deviceName, installationId: config.installationId }),
   });
   applyConfig(await desktop.writeConfig({ ...config, deviceId: data.device.id, deviceToken: data.token }));
   ensureControlSocket();
@@ -742,7 +750,7 @@ async function signInWithBrowser() {
   }
   const data = await api('/api/desktop-auth/requests', {
     method: 'POST',
-    body: JSON.stringify({ displayName: saved.deviceName, protocolVersion: 1 }),
+    body: JSON.stringify({ displayName: saved.deviceName, protocolVersion: 1, installationId: saved.installationId }),
   });
   const authUrl = new URL(authBaseUrl);
   authUrl.searchParams.set('desktopAuthRequest', data.requestId);
@@ -1384,7 +1392,38 @@ async function copyText(text) {
   }
 }
 
-async function playWav(data) {
+const speechPlaybackQueue = [];
+let speechPlaybackActive = false;
+
+function playWav(data) {
+  speechPlaybackQueue.push(data);
+  void drainSpeechPlaybackQueue();
+}
+
+function playWavBase64(audioBase64) {
+  const clean = String(audioBase64 || '').trim();
+  if (!clean) return;
+  const binary = atob(clean);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  playWav(bytes.buffer);
+}
+
+async function drainSpeechPlaybackQueue() {
+  if (speechPlaybackActive) return;
+  speechPlaybackActive = true;
+  try {
+    while (speechPlaybackQueue.length > 0) {
+      await playWavNow(speechPlaybackQueue.shift());
+    }
+  } finally {
+    speechPlaybackActive = false;
+  }
+}
+
+async function playWavNow(data) {
   const url = URL.createObjectURL(new Blob([data], { type: 'audio/wav' }));
   const audio = new Audio(url);
   const outputDeviceId = state.config?.outputDeviceId || '';
@@ -1392,14 +1431,16 @@ async function playWav(data) {
     if (outputDeviceId && typeof audio.setSinkId === 'function') {
       await audio.setSinkId(outputDeviceId);
     }
-    await audio.play();
+    await new Promise((resolve) => {
+      const finish = () => resolve();
+      audio.addEventListener('ended', finish, { once: true });
+      audio.addEventListener('error', finish, { once: true });
+      audio.play().catch(finish);
+    });
   } catch (err) {
     showStatus(err?.message ? `Audio playback failed: ${err.message}` : 'Audio playback failed.');
   } finally {
-    const cleanup = () => URL.revokeObjectURL(url);
-    audio.addEventListener('ended', cleanup, { once: true });
-    audio.addEventListener('error', cleanup, { once: true });
-    window.setTimeout(cleanup, 60_000);
+    URL.revokeObjectURL(url);
   }
 }
 
@@ -1466,7 +1507,7 @@ function wakePhraseMatch(text) {
   if (words.some((word, index) => (word === 'hey' || word === 'hay') && (words[index + 1] === 'sebastian' || words[index + 1] === 'sebastien'))) return 'start';
   if (words.some((word, index) => word === 'patch' && words[index + 1] === 'me' && words[index + 2] === 'in')) return 'patch';
   if (words.some((word, index) => word === 'can' && words[index + 1] === 'you' && words[index + 2] === 'transcribe')) return 'clipboard';
-  if (words.includes('status') || compact === 'stateus' || compact === 'checkstatus') return 'status';
+  if (ENABLE_STATUS_WAKE_COMMAND && (words.includes('status') || compact === 'stateus' || compact === 'checkstatus')) return 'status';
   return null;
 }
 

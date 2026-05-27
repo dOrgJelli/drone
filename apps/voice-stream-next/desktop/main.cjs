@@ -1,5 +1,6 @@
 const { app, BrowserWindow, ipcMain, screen, shell, Menu, Tray, nativeImage, clipboard } = require('electron');
 const { fork } = require('node:child_process');
+const { randomUUID } = require('node:crypto');
 const fs = require('node:fs');
 const { createRequire } = require('node:module');
 const path = require('node:path');
@@ -37,6 +38,15 @@ const compactWindow = {
 };
 
 const sampleRate = 16_000;
+// Keep status grammar easy to restore, but do not detect spoken status commands locally.
+const enableStatusWakeCommand = false;
+const statusWakeGrammar = [
+  'status',
+  'state us',
+  'state is',
+  'status check',
+  'check status',
+];
 const wakeGrammar = [
   'hey sebastian',
   'hey sebastien',
@@ -53,11 +63,6 @@ const wakeGrammar = [
   'go',
   'to',
   'sleep',
-  'status',
-  'state us',
-  'state is',
-  'status check',
-  'check status',
   'approval',
   'code',
   'approval code',
@@ -73,6 +78,7 @@ const wakeGrammar = [
   'eight',
   'nine',
   '[unk]',
+  ...(enableStatusWakeCommand ? statusWakeGrammar : []),
 ];
 
 const defaultConfig = {
@@ -83,6 +89,7 @@ const defaultConfig = {
   devEmail: 'desktop@example.local',
   devName: 'Desktop Operator',
   devAdmin: false,
+  installationId: '',
   deviceId: '',
   deviceToken: '',
   deviceName: 'Desktop voice client',
@@ -110,18 +117,39 @@ function configPath() {
   return path.join(app.getPath('userData'), 'voice-stream-next-desktop.json');
 }
 
+function createInstallationId() {
+  return `desktop_${randomUUID().replace(/-/g, '')}`;
+}
+
+function normalizeConfig(nextConfig) {
+  const config = { ...defaultConfig, ...nextConfig };
+  if (!String(config.installationId || '').trim()) {
+    config.installationId = createInstallationId();
+  }
+  return config;
+}
+
+function persistConfig(config) {
+  fs.mkdirSync(path.dirname(configPath()), { recursive: true });
+  fs.writeFileSync(configPath(), JSON.stringify(config, null, 2));
+}
+
 function readConfig() {
   try {
-    return { ...defaultConfig, ...JSON.parse(fs.readFileSync(configPath(), 'utf8')) };
+    const parsed = JSON.parse(fs.readFileSync(configPath(), 'utf8'));
+    const config = normalizeConfig(parsed);
+    if (!parsed.installationId) persistConfig(config);
+    return config;
   } catch {
-    return { ...defaultConfig };
+    const config = normalizeConfig({});
+    persistConfig(config);
+    return config;
   }
 }
 
 function writeConfig(nextConfig) {
-  const config = { ...defaultConfig, ...nextConfig };
-  fs.mkdirSync(path.dirname(configPath()), { recursive: true });
-  fs.writeFileSync(configPath(), JSON.stringify(config, null, 2));
+  const config = normalizeConfig(nextConfig);
+  persistConfig(config);
   return config;
 }
 

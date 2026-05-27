@@ -1,13 +1,12 @@
-import * as React from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkBreaks from 'remark-breaks';
-import remarkGfm from 'remark-gfm';
+import { MarkdownMessage as SharedMarkdownMessage } from '@drone/assistant-markdown';
+import type { MarkdownFileReference } from '@drone/assistant-markdown';
+import type * as React from 'react';
 import { cn } from './cn.js';
 
-export function MarkdownMessage({ text, className = '' }: { text: string; className?: string }) {
-  return (
-    <div className={cn('assistant-markdown', className)}>
-      <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>{text}</ReactMarkdown>
-    </div>
-  );
+type MarkdownMessageProps = React.ComponentProps<typeof SharedMarkdownMessage>;
+
+export function MarkdownMessage({ className = '', ...props }: MarkdownMessageProps) {
+  return <SharedMarkdownMessage {...props} className={cn('assistant-markdown', className)} />;
 }
+
+export type { MarkdownFileReference };

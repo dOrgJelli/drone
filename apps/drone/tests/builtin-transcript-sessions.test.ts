@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import { formatTranscriptJobFailure, parseCodexJsonl } from '../src/hub/builtin-transcript-sessions';
+import {
+  formatTranscriptJobFailure,
+  parseBuiltinPromptJobTranscript,
+  parseCodexJobTranscript,
+  parseCodexJsonl,
+} from '../src/hub/builtin-transcript-sessions';
 
 describe('parseCodexJsonl', () => {
   test('parses legacy Codex agent_message items', () => {
@@ -49,6 +54,7 @@ describe('parseCodexJsonl', () => {
     ).toEqual({
       threadId: null,
       message: 'Final answer.',
+      terminalEvent: 'response.completed',
     });
   });
 
@@ -70,6 +76,7 @@ describe('parseCodexJsonl', () => {
     expect(parseCodexJsonl('{"type":"turn.completed","last_agent_message":"Completed turn answer."}')).toEqual({
       threadId: null,
       message: 'Completed turn answer.',
+      terminalEvent: 'turn.completed',
     });
   });
 
@@ -85,6 +92,61 @@ describe('parseCodexJsonl', () => {
       threadId: null,
       message: 'Output without role.',
     });
+  });
+});
+
+describe('prompt job transcript metadata', () => {
+  test('preserves the final Codex message even when persisted stdout is truncated earlier', () => {
+    const fullStdout = [
+      '{"type":"thread.started","thread_id":"019e1922-047b-74b1-bab8-0eaceadf4062"}',
+      '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"Interim status."}}',
+      '{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"Final report."}}',
+      '{"type":"turn.completed"}',
+    ].join('\n');
+    const transcript = parseBuiltinPromptJobTranscript('codex', fullStdout, {
+      stdoutBytes: 3_000_000,
+      stdoutTruncated: true,
+      parsedAt: '2026-05-25T21:50:23.410Z',
+    });
+
+    expect(transcript).toEqual({
+      kind: 'codex',
+      message: 'Final report.',
+      threadId: '019e1922-047b-74b1-bab8-0eaceadf4062',
+      terminalEvent: 'turn.completed',
+      stdoutBytes: 3_000_000,
+      stdoutTruncated: true,
+      parsedAt: '2026-05-25T21:50:23.410Z',
+    });
+
+    expect(
+      parseCodexJobTranscript({
+        stdout:
+          '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"Interim status."}}\n\n…(truncated)…',
+        transcript,
+      }),
+    ).toEqual({
+      threadId: '019e1922-047b-74b1-bab8-0eaceadf4062',
+      message: 'Final report.',
+      terminalEvent: 'turn.completed',
+    });
+  });
+
+  test('does not mark an intermediary Codex status message as terminal', () => {
+    const parsed = parseCodexJobTranscript({
+      state: 'failed',
+      stdout: [
+        '{"type":"thread.started","thread_id":"019e1922-047b-74b1-bab8-0eaceadf4062"}',
+        '{"type":"turn.started"}',
+        '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"I checked part A and now I am checking part B."}}',
+      ].join('\n'),
+    });
+
+    expect(parsed).toEqual({
+      threadId: '019e1922-047b-74b1-bab8-0eaceadf4062',
+      message: 'I checked part A and now I am checking part B.',
+    });
+    expect(parsed).not.toHaveProperty('terminalEvent');
   });
 });
 

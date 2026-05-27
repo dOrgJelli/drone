@@ -1,4 +1,5 @@
 import {
+  type AssistantApiKeyView,
   type AssistantApprovalRecord,
   type AssistantMessage,
   type AssistantQueuedPromptRecord,
@@ -15,6 +16,7 @@ import {
   type AssistantExtensionToolRoute,
 } from './assistant-extensions.js';
 import { refreshCodexAccessToken } from './codex-auth.js';
+import { fetchContent, searchWeb } from './web-search.js';
 
 export type AssistantProviderId = 'openai' | 'codex';
 
@@ -28,7 +30,7 @@ export type AssistantModelOption = {
 export type AssistantToolSummary = {
   name: string;
   label: string;
-  category: 'artifacts' | 'speech' | 'prompts' | 'settings' | 'extensions';
+  category: 'artifacts' | 'speech' | 'prompts' | 'settings' | 'web' | 'extensions';
   description: string;
   approval: 'never' | 'normal_threads' | 'always';
 };
@@ -42,6 +44,7 @@ export type AssistantSnapshot = {
   models: AssistantModelOption[];
   availableTools: AssistantToolSummary[];
   assistantSettings: AssistantSettingsRecord;
+  apiKeys: Record<'openai' | 'exa', AssistantApiKeyView>;
   codexConnection: { connected: boolean; accountId: string | null; expiresAt: string | null; updatedAt: string | null };
   runningModels: Record<string, { provider: string; model: string; thinkingLevel: string; runId: string }>;
 };
@@ -106,6 +109,20 @@ const ASSISTANT_TOOLS: AssistantToolSummary[] = [
     description: 'Change this thread reasoning level for future runs.',
     approval: 'never',
   },
+  {
+    name: 'web_search',
+    label: 'Web search',
+    category: 'web',
+    description: 'Search the web for current information and source URLs.',
+    approval: 'never',
+  },
+  {
+    name: 'fetch_content',
+    label: 'Fetch content',
+    category: 'web',
+    description: 'Fetch readable page content from a URL.',
+    approval: 'never',
+  },
 ];
 
 const MODEL_OPTIONS: AssistantModelOption[] = [
@@ -144,6 +161,7 @@ type OpenAiStreamResult = {
 };
 
 type CodexStreamResult = OpenAiStreamResult;
+type ProviderTimingLogger = (phase: string, details?: Record<string, unknown>, level?: 'info' | 'warn' | 'error') => void;
 
 export type AssistantExternalToolExecution = {
   db: VoiceStreamNextDb;
@@ -227,6 +245,7 @@ export function assistantSnapshot(db: VoiceStreamNextDb, userId: string, activeT
     models: MODEL_OPTIONS,
     availableTools: assistantAvailableToolSummaries(db, userId),
     assistantSettings: db.ensureAssistantSettings(userId),
+    apiKeys: db.assistantApiKeysView(userId),
     codexConnection: db.codexConnectionView(userId),
     runningModels,
   };
@@ -394,7 +413,8 @@ async function approvalContinuationText(
   const fallback = approvedAssistantText(approval.toolName, result);
   const run = approval.runId ? db.listRuns(userId, approval.threadId, 20).find((item) => item.id === approval.runId) : null;
   const provider = run?.provider ?? thread.provider;
-  if (provider !== 'openai' || !openAiApiKey()) return fallback;
+  const apiKey = provider === 'openai' ? db.assistantApiKey(userId, 'openai') : null;
+  if (provider !== 'openai' || !apiKey) return fallback;
 
   try {
     const settings = db.ensureAssistantSettings(userId);
@@ -421,6 +441,7 @@ async function approvalContinuationText(
       input: followup,
       tools: [],
       emit: () => undefined,
+      apiKey,
     });
     return final.text.trim() || fallback;
   } catch {
@@ -444,7 +465,7 @@ async function runModelDrivenTurn(
     thread.voiceEnabled ? settings.voiceSystemPrompt : settings.normalSystemPrompt,
     thread.systemPrompt ? `Thread system prompt:\n${thread.systemPrompt}` : '',
     enabledTools.length > 0
-      ? 'You may call the provided assistant tools when they help. Prefer tools for artifacts, spoken replies, prompt reads/updates, and thread settings instead of describing those actions.'
+      ? 'You may call the provided assistant tools when they help. Prefer tools for artifacts, spoken replies, web searches, fetched URL content, prompt reads/updates, and thread settings instead of describing those actions. Use web_search for current information, documentation, news, prices, or facts that may have changed. Use fetch_content when the user gives a direct URL to read, inspect, summarize, or analyze. Cite source URLs in the final answer.'
       : '',
   ].filter(Boolean).join('\n\n');
   const inputText = renderConversation(messages);
@@ -458,18 +479,23 @@ async function runModelDrivenTurn(
       role: 'assistant',
       content: finalText,
       contentJson: assistantContentJson(finalText, ''),
-      spokenText: thread.voiceEnabled ? finalText : null,
+      spokenText: null,
     });
     emit({ type: 'message', message: assistantMessage });
     finishRun(db, userId, threadId, run.id);
     return;
   }
 
-  if (modelConfig.provider === 'openai' && !openAiApiKey()) {
-    throw new Error('OpenAI API key is not configured. Add OPENAI_API_KEY or connect Codex for subscription-backed assistant runs.');
-  }
+  const openAiKey = modelConfig.provider === 'openai' ? db.assistantApiKey(userId, 'openai') : null;
+  if (modelConfig.provider === 'openai' && !openAiKey) throw new Error('OpenAI API key is not configured. Add your OpenAI key in assistant settings or connect Codex.');
 
   if (modelConfig.provider === 'openai') {
+    const initialTiming = createProviderTimingLogger(db, userId, threadId, run, {
+      provider: 'openai',
+      model: modelConfig.model,
+      thinkingLevel: modelConfig.thinkingLevel,
+      requestKind: 'initial',
+    });
     const first = await streamOpenAiResponse({
       model: modelConfig.model,
       thinkingLevel: modelConfig.thinkingLevel,
@@ -477,11 +503,19 @@ async function runModelDrivenTurn(
       input: inputText,
       tools: enabledTools,
       emit,
+      logTiming: initialTiming,
+      apiKey: openAiKey ?? '',
     });
     if (first.toolCalls.length > 0) {
       const completed = await executeModelToolCalls(db, userId, threadId, run, thread, first.toolCalls, emit);
       if (!completed) return;
       const followup = renderToolFollowup(inputText, completed);
+      const followupTiming = createProviderTimingLogger(db, userId, threadId, run, {
+        provider: 'openai',
+        model: modelConfig.model,
+        thinkingLevel: modelConfig.thinkingLevel,
+        requestKind: 'followup',
+      });
       const final = await streamOpenAiResponse({
         model: modelConfig.model,
         thinkingLevel: modelConfig.thinkingLevel,
@@ -489,13 +523,15 @@ async function runModelDrivenTurn(
         input: followup,
         tools: [],
         emit,
+        logTiming: followupTiming,
+        apiKey: openAiKey ?? '',
       });
       const finalText = final.text.trim() || completed.map((item) => approvedAssistantText(item.toolName, item.result)).join('\n') || 'Done.';
       const assistantMessage = db.addMessage(userId, threadId, {
         role: 'assistant',
         content: finalText,
         contentJson: assistantContentJson(finalText, final.thinking),
-        spokenText: thread.voiceEnabled ? finalText : null,
+        spokenText: null,
       });
       emit({ type: 'message', message: assistantMessage });
       finishRun(db, userId, threadId, run.id);
@@ -507,7 +543,7 @@ async function runModelDrivenTurn(
         role: 'assistant',
         content: replyText,
         contentJson: assistantContentJson(replyText, first.thinking),
-        spokenText: thread.voiceEnabled ? replyText : null,
+        spokenText: null,
       });
       emit({ type: 'message', message: assistantMessage });
       finishRun(db, userId, threadId, run.id);
@@ -517,6 +553,12 @@ async function runModelDrivenTurn(
   }
 
   if (modelConfig.provider === 'codex') {
+    const initialTiming = createProviderTimingLogger(db, userId, threadId, run, {
+      provider: 'codex',
+      model: modelConfig.model,
+      thinkingLevel: modelConfig.thinkingLevel,
+      requestKind: 'initial',
+    });
     const first = await streamCodexResponse(db, userId, {
       model: modelConfig.model,
       thinkingLevel: modelConfig.thinkingLevel,
@@ -524,11 +566,18 @@ async function runModelDrivenTurn(
       input: inputText,
       tools: enabledTools,
       emit,
+      logTiming: initialTiming,
     });
     if (first.toolCalls.length > 0) {
       const completed = await executeModelToolCalls(db, userId, threadId, run, thread, first.toolCalls, emit);
       if (!completed) return;
       const followup = renderToolFollowup(inputText, completed);
+      const followupTiming = createProviderTimingLogger(db, userId, threadId, run, {
+        provider: 'codex',
+        model: modelConfig.model,
+        thinkingLevel: modelConfig.thinkingLevel,
+        requestKind: 'followup',
+      });
       const final = await streamCodexResponse(db, userId, {
         model: modelConfig.model,
         thinkingLevel: modelConfig.thinkingLevel,
@@ -536,13 +585,14 @@ async function runModelDrivenTurn(
         input: followup,
         tools: [],
         emit,
+        logTiming: followupTiming,
       });
       const finalText = final.text.trim() || completed.map((item) => approvedAssistantText(item.toolName, item.result)).join('\n') || 'Done.';
       const assistantMessage = db.addMessage(userId, threadId, {
         role: 'assistant',
         content: finalText,
         contentJson: assistantContentJson(finalText, final.thinking),
-        spokenText: thread.voiceEnabled ? finalText : null,
+        spokenText: null,
       });
       emit({ type: 'message', message: assistantMessage });
       finishRun(db, userId, threadId, run.id);
@@ -554,7 +604,7 @@ async function runModelDrivenTurn(
         role: 'assistant',
         content: replyText,
         contentJson: assistantContentJson(replyText, first.thinking),
-        spokenText: thread.voiceEnabled ? replyText : null,
+        spokenText: null,
       });
       emit({ type: 'message', message: assistantMessage });
       finishRun(db, userId, threadId, run.id);
@@ -564,6 +614,36 @@ async function runModelDrivenTurn(
   }
 
   throw new Error(`Unsupported assistant provider: ${modelConfig.provider}`);
+}
+
+function createProviderTimingLogger(
+  db: VoiceStreamNextDb,
+  userId: string,
+  threadId: string,
+  run: AssistantRunRecord,
+  meta: { provider: string; model: string; thinkingLevel: string; requestKind: string },
+): ProviderTimingLogger {
+  const startedAt = Date.now();
+  let previousAt = startedAt;
+  return (phase, details = {}, level = 'info') => {
+    const now = Date.now();
+    const elapsedMs = now - startedAt;
+    const sincePreviousMs = now - previousAt;
+    previousAt = now;
+    db.addLog(userId, {
+      source: 'server',
+      level,
+      message: `Assistant provider ${phase}`,
+      detailsJson: JSON.stringify({
+        ...meta,
+        threadId,
+        runId: run.id,
+        elapsedMs,
+        sincePreviousMs,
+        ...details,
+      }),
+    });
+  };
 }
 
 function providerErrorMessage(error: any): string {
@@ -581,8 +661,15 @@ async function streamCodexResponse(
     input: string;
     tools: unknown[];
     emit: (event: PromptEvent) => void;
+    logTiming?: ProviderTimingLogger;
   },
 ): Promise<CodexStreamResult> {
+  input.logTiming?.('request_start', {
+    transport: 'sse',
+    inputChars: input.input.length,
+    instructionsChars: input.instructions.length,
+    toolCount: input.tools.length,
+  });
   const apiKey = await codexAccessToken(db, userId);
   const ai = await import('@mariozechner/pi-ai');
   const model = ai.getModel('openai-codex' as any, input.model as any) || ai.getModel('openai-codex' as any, 'gpt-5.5' as any);
@@ -603,14 +690,31 @@ async function streamCodexResponse(
   let thinking = '';
   const toolCalls: ModelToolCall[] = [];
   let finalMessage: any = null;
+  let firstEventLogged = false;
+  let firstTextLogged = false;
+  let firstThinkingLogged = false;
+  const logFirstEvent = (eventType: string) => {
+    if (firstEventLogged) return;
+    firstEventLogged = true;
+    input.logTiming?.('first_stream_event', { eventType });
+  };
   for await (const event of stream as AsyncIterable<any>) {
+    logFirstEvent(String(event?.type ?? 'unknown'));
     if (event.type === 'text_delta') {
       const delta = String(event.delta ?? '');
       text += delta;
+      if (delta && !firstTextLogged) {
+        firstTextLogged = true;
+        input.logTiming?.('first_text_delta', { chars: delta.length });
+      }
       if (delta) input.emit({ type: 'delta', delta });
     } else if (event.type === 'thinking_delta' || event.type === 'reasoning_delta') {
       const delta = String(event.delta ?? event.thinking ?? event.reasoning ?? '');
       thinking += delta;
+      if (delta && !firstThinkingLogged) {
+        firstThinkingLogged = true;
+        input.logTiming?.('first_thinking_delta', { chars: delta.length });
+      }
       if (delta) input.emit({ type: 'thinking_delta', delta });
     } else if (event.type === 'toolcall_end' && event.toolCall) {
       toolCalls.push({
@@ -619,18 +723,27 @@ async function streamCodexResponse(
         name: String(event.toolCall.name ?? ''),
         argumentsJson: JSON.stringify(event.toolCall.arguments ?? {}),
       });
+      input.logTiming?.('tool_call_received', { toolName: String(event.toolCall.name ?? '') });
     } else if (event.type === 'done') {
       finalMessage = event.message;
     } else if (event.type === 'error') {
       finalMessage = event.error;
+      input.logTiming?.('provider_error', { error: String(event.error?.errorMessage ?? 'Codex request failed') }, 'error');
       throw new Error(String(event.error?.errorMessage ?? 'Codex request failed'));
     }
   }
   if (finalMessage?.stopReason === 'error') {
+    input.logTiming?.('provider_error', { error: String(finalMessage.errorMessage ?? 'Codex request failed') }, 'error');
     throw new Error(String(finalMessage.errorMessage ?? 'Codex request failed'));
   }
   if (!text) text = textFromPiAssistantMessage(finalMessage);
   if (!thinking) thinking = thinkingFromPiAssistantMessage(finalMessage);
+  input.logTiming?.('request_done', {
+    textChars: text.length,
+    thinkingChars: thinking.length,
+    toolCallCount: toolCalls.length,
+    stopReason: String(finalMessage?.stopReason ?? ''),
+  });
   return {
     text,
     thinking,
@@ -677,8 +790,12 @@ function textFromPiAssistantMessage(message: any): string {
 function thinkingFromPiAssistantMessage(message: any): string {
   if (!message?.content || !Array.isArray(message.content)) return '';
   return message.content
-    .filter((part: any) => part?.type === 'thinking' && typeof part.thinking === 'string')
-    .map((part: any) => part.thinking)
+    .filter(
+      (part: any) =>
+        (part?.type === 'thinking' || part?.type === 'reasoning') &&
+        (typeof part.thinking === 'string' || typeof part.reasoning === 'string'),
+    )
+    .map((part: any) => String(part.thinking ?? part.reasoning ?? ''))
     .join('')
     .trim();
 }
@@ -752,6 +869,8 @@ async function streamOpenAiResponse(input: {
   input: string;
   tools: unknown[];
   emit: (event: PromptEvent) => void;
+  apiKey: string;
+  logTiming?: ProviderTimingLogger;
 }): Promise<OpenAiStreamResult> {
   const body: Record<string, unknown> = {
     model: input.model,
@@ -767,16 +886,24 @@ async function streamOpenAiResponse(input: {
   const reasoning = reasoningFor(input.thinkingLevel);
   if (reasoning) body.reasoning = reasoning;
 
+  input.logTiming?.('request_start', {
+    transport: 'sse',
+    inputChars: input.input.length,
+    instructionsChars: input.instructions.length,
+    toolCount: input.tools.length,
+  });
   const response = await fetch(OPENAI_RESPONSES_ENDPOINT, {
     method: 'POST',
     headers: {
-      authorization: `Bearer ${openAiApiKey()}`,
+      authorization: `Bearer ${input.apiKey}`,
       'content-type': 'application/json',
     },
     body: JSON.stringify(body),
   });
+  input.logTiming?.('response_headers', { status: response.status, ok: response.ok });
   if (!response.ok) {
     const text = await response.text();
+    input.logTiming?.('provider_error', { status: response.status, error: providerError(text, `OpenAI response failed: ${response.status}`) }, 'error');
     throw new Error(providerError(text, `OpenAI response failed: ${response.status}`));
   }
   if (!response.body) throw new Error('OpenAI response did not include a stream body');
@@ -787,6 +914,8 @@ async function streamOpenAiResponse(input: {
   let buffer = '';
   let text = '';
   let thinking = '';
+  let firstTextLogged = false;
+  let firstThinkingLogged = false;
 
   const handleEvent = (event: any) => {
     const type = String(event?.type ?? '');
@@ -794,6 +923,10 @@ async function streamOpenAiResponse(input: {
       const delta = String(event.delta ?? '');
       if (delta) {
         text += delta;
+        if (!firstTextLogged) {
+          firstTextLogged = true;
+          input.logTiming?.('first_text_delta', { eventType: type, chars: delta.length });
+        }
         input.emit({ type: 'delta', delta });
       }
       return;
@@ -802,6 +935,10 @@ async function streamOpenAiResponse(input: {
       const delta = String(event.delta ?? event.text ?? event.summary_text ?? '');
       if (delta) {
         thinking += delta;
+        if (!firstThinkingLogged) {
+          firstThinkingLogged = true;
+          input.logTiming?.('first_thinking_delta', { eventType: type, chars: delta.length });
+        }
         input.emit({ type: 'thinking_delta', delta });
       }
       return;
@@ -826,6 +963,7 @@ async function streamOpenAiResponse(input: {
     if (type === 'response.function_call_arguments.done' && event.item) {
       const call = modelToolCallFromItem(event.item);
       toolCallsByKey.set(toolCallKey(event.item, event.output_index), call);
+      input.logTiming?.('tool_call_received', { toolName: call.name });
       return;
     }
     if (type === 'response.completed' && event.response) {
@@ -837,6 +975,7 @@ async function streamOpenAiResponse(input: {
       }
     }
     if (type === 'error') {
+      input.logTiming?.('provider_error', { error: providerError(JSON.stringify(event), 'OpenAI streaming error') }, 'error');
       throw new Error(providerError(JSON.stringify(event), 'OpenAI streaming error'));
     }
   };
@@ -858,6 +997,11 @@ async function streamOpenAiResponse(input: {
   const data = sseData(buffer);
   if (data && data !== '[DONE]') handleEvent(JSON.parse(data));
 
+  input.logTiming?.('request_done', {
+    textChars: text.length,
+    thinkingChars: thinking.length,
+    toolCallCount: [...toolCallsByKey.values()].filter((call) => call.name).length,
+  });
   return {
     text,
     thinking,
@@ -872,10 +1016,6 @@ function assistantContentJson(text: string, thinking: string): string | null {
   if (cleanThinking) parts.push({ type: 'thinking', thinking: cleanThinking });
   if (cleanText) parts.push({ type: 'text', text: cleanText });
   return parts.length > 0 ? JSON.stringify(parts) : null;
-}
-
-function openAiApiKey(): string {
-  return process.env.OPENAI_API_KEY?.trim() || process.env.VOICE_STREAM_NEXT_OPENAI_API_KEY?.trim() || '';
 }
 
 function responseToolDefinitions(db: VoiceStreamNextDb, userId: string, thread: AssistantThread): unknown[] {
@@ -965,6 +1105,52 @@ function responseToolDefinitions(db: VoiceStreamNextDb, userId: string, thread: 
         },
         strict: true,
       });
+    }
+    if (toolName === 'web_search' && thread.capabilities.externalCalls) {
+      definitions.push({
+        type: 'function',
+        name: 'web_search',
+        description: 'Search the web for current information. Use for docs, news, prices, schedules, or facts that may have changed. Return answers with source URLs.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'Search query.' },
+            numResults: { type: 'number', description: 'Number of results to return. Defaults to 5, max 10.' },
+            recencyFilter: { type: 'string', enum: ['', 'day', 'week', 'month', 'year'], description: 'Optional recency filter. Use empty string for no filter.' },
+            domainFilter: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Optional domains to include, such as docs.example.com. Prefix with - to exclude a domain.',
+            },
+          },
+          required: ['query', 'numResults', 'recencyFilter', 'domainFilter'],
+          additionalProperties: false,
+        },
+        strict: true,
+      });
+    }
+    if (toolName === 'fetch_content' && thread.capabilities.externalCalls) {
+      definitions.push({
+        type: 'function',
+        name: 'fetch_content',
+        description: 'Fetch readable content from a direct http or https URL. Use when the user gives a URL to read, inspect, summarize, or analyze.',
+        parameters: {
+          type: 'object',
+          properties: {
+            url: { type: 'string', description: 'The http or https URL to fetch.' },
+            maxCharacters: { type: 'number', description: 'Maximum content characters to return. Defaults to 12000, max 30000.' },
+            livecrawl: {
+              type: 'string',
+              enum: ['', 'never', 'fallback', 'preferred', 'always'],
+              description: 'Optional Exa livecrawl mode. Use empty string for fallback.',
+            },
+          },
+          required: ['url', 'maxCharacters', 'livecrawl'],
+          additionalProperties: false,
+        },
+        strict: true,
+      });
+      continue;
     }
     if (!isBuiltInTool(toolName)) {
       const route = db.assistantExtensionToolRoute(userId, toolName);
@@ -1151,7 +1337,8 @@ async function executeCommand(
       runId: run.id,
       toolCallId: toolCall.id,
     });
-    db.updateToolCall(userId, toolCall.id, { status: 'completed', resultJson: JSON.stringify(result) });
+    const updatedToolCall = db.updateToolCall(userId, toolCall.id, { status: 'completed', resultJson: JSON.stringify(result) }) ?? toolCall;
+    emit({ type: 'tool_result', toolCall: updatedToolCall, result });
     const toolResult = db.addMessage(userId, threadId, {
       role: 'toolResult',
       toolName,
@@ -1233,6 +1420,23 @@ async function executeApprovedTool(
     const updated = db.updateThread(userId, thread.id, { thinkingLevel });
     return { ok: true, thinkingLevel: updated?.thinkingLevel ?? thinkingLevel };
   }
+  if (toolName === 'web_search') {
+    const apiKey = db.assistantApiKey(userId, 'exa') ?? '';
+    return await searchWeb({
+      query: String(parsed.query ?? ''),
+      numResults: parsed.numResults == null || parsed.numResults === '' ? undefined : Number(parsed.numResults),
+      recencyFilter: cleanRecencyFilter(parsed.recencyFilter),
+      domainFilter: Array.isArray(parsed.domainFilter) ? parsed.domainFilter.map((item) => String(item ?? '')) : [],
+    }, apiKey);
+  }
+  if (toolName === 'fetch_content') {
+    const apiKey = db.assistantApiKey(userId, 'exa') ?? '';
+    return await fetchContent({
+      url: String(parsed.url ?? ''),
+      maxCharacters: parsed.maxCharacters == null || parsed.maxCharacters === '' ? undefined : Number(parsed.maxCharacters),
+      livecrawl: cleanLivecrawl(parsed.livecrawl),
+    }, apiKey);
+  }
   const manifestTool = db.assistantExtensionToolManifest(userId, toolName);
   if (manifestTool) {
     const route = db.assistantExtensionToolRoute(userId, toolName);
@@ -1313,6 +1517,7 @@ function ensureCapability(thread: AssistantThread, toolName: string): void {
   const caps: AssistantThreadCapabilities = thread.capabilities;
   if (toolName === 'assistant_artifacts' && !caps.artifacts) throw Object.assign(new Error('artifact capability is disabled'), { statusCode: 403 });
   if (toolName === 'speak' && !caps.speech) throw Object.assign(new Error('speech capability is disabled'), { statusCode: 403 });
+  if ((toolName === 'web_search' || toolName === 'fetch_content') && !caps.externalCalls) throw Object.assign(new Error('external call capability is disabled'), { statusCode: 403 });
 }
 
 function approvalRequiredFor(db: VoiceStreamNextDb, userId: string, thread: AssistantThread, toolName: string): boolean {
@@ -1364,6 +1569,8 @@ function toolResultText(toolName: string, result: unknown): string {
     return 'Artifact tool completed.';
   }
   if (toolName === 'speak') return `Spoken reply prepared: ${String((result as any)?.text ?? '').slice(0, 120)}`;
+  if (toolName === 'web_search') return String((result as any)?.answer ?? 'Web search completed.');
+  if (toolName === 'fetch_content') return String((result as any)?.answer ?? 'Content fetch completed.');
   if (toolName === 'update_system_prompt') return 'Thread system prompt updated.';
   if (toolName === 'set_thinking_level') return `Thinking level set to ${(result as any)?.thinkingLevel ?? 'off'}.`;
   return 'Tool completed.';
@@ -1372,4 +1579,14 @@ function toolResultText(toolName: string, result: unknown): string {
 function approvedAssistantText(toolName: string, result: unknown): string {
   if (toolName === 'speak') return String((result as any)?.text ?? 'Spoken reply prepared.');
   return toolResultText(toolName, result);
+}
+
+function cleanRecencyFilter(raw: unknown): 'day' | 'week' | 'month' | 'year' | undefined {
+  const value = String(raw ?? '').trim().toLowerCase();
+  return value === 'day' || value === 'week' || value === 'month' || value === 'year' ? value : undefined;
+}
+
+function cleanLivecrawl(raw: unknown): 'never' | 'fallback' | 'preferred' | 'always' | undefined {
+  const value = String(raw ?? '').trim().toLowerCase();
+  return value === 'never' || value === 'fallback' || value === 'preferred' || value === 'always' ? value : undefined;
 }

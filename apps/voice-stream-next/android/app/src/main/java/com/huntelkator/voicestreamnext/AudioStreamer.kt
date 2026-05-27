@@ -222,6 +222,7 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
             Request.Builder().url(socketUrl).build(),
             object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
+                    ClientLog.i("AudioStreamer", "Voice websocket opened target=$currentTarget")
                     reconnectAttempt = 0
                     outgoingReady.set(true)
                     webSocket.send(JSONObject().put("type", "client_hello").put("protocolVersion", 1).put("client", "android").put("mode", currentTarget).toString())
@@ -237,6 +238,9 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
                         "assistant_result" -> {
                             recording.set(false)
                             onStatus("Assistant replied.")
+                        }
+                        "assistant_status" -> {
+                            onStatus(message.optString("status", "Assistant is thinking."))
                         }
                         "transcript_result" -> {
                             recording.set(false)
@@ -256,7 +260,7 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
                     if (!active.get()) return
                     val data = bytes.toByteArray()
                     if (data.isNotEmpty()) {
-                        AssistantAudioPlayer.playWav(data)
+                        AssistantAudioPlayer.playWav(context, data, onStatus)
                         onStatus("Assistant audio received.")
                     }
                 }
@@ -266,8 +270,15 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    ClientLog.w("AudioStreamer", "Voice websocket closed code=$code reason=${reason.ifBlank { "(none)" }} recording=${recording.get()} active=${active.get()}")
                     if (socket === webSocket) socket = null
                     outgoingReady.set(false)
+                    if (isTerminalCloseCode(code)) {
+                        recording.set(false)
+                        pendingStreamBuffer.clear()
+                        onStatus("Voice stream closed: ${reason.ifBlank { "code $code" }}")
+                        return
+                    }
                     if (active.get() && recording.get()) {
                         onStatus("Voice stream disconnected.")
                         scheduleReconnect()
@@ -277,6 +288,7 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    ClientLog.w("AudioStreamer", "Voice websocket failed responseCode=${response?.code ?: 0} message=${t.message ?: t.javaClass.simpleName}", t)
                     if (socket === webSocket) socket = null
                     outgoingReady.set(false)
                     if (!active.get() || !recording.get()) return
@@ -357,6 +369,7 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
         val attempt = reconnectAttempt.coerceAtMost(MAX_RECONNECT_EXPONENT)
         reconnectAttempt += 1
         val delayMs = minOf(MAX_RECONNECT_DELAY_MS, BASE_RECONNECT_DELAY_MS * (1L shl attempt))
+        ClientLog.i("AudioStreamer", "Scheduling voice websocket reconnect attempt=$reconnectAttempt delayMs=$delayMs")
         currentOnStatus?.invoke("Reconnecting voice stream in ${delayLabel(delayMs)}.")
         thread(name = "VoiceStreamNextReconnect") {
             try {
@@ -589,7 +602,11 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
             trimmed.startsWith("http://") -> "ws://${trimmed.removePrefix("http://")}"
             else -> trimmed
         }
-        return "$base/api/voice/stream?deviceId=${encode(deviceId)}&token=${encode(token)}&sessionId=${encode(sessionId)}&mode=${encode(target)}"
+        return "$base/api/voice/stream?deviceId=${encode(deviceId)}&token=${encode(token)}&sessionId=${encode(sessionId)}&mode=${encode(target)}&clientVersion=${BuildConfig.VERSION_CODE}&protocolVersion=1"
+    }
+
+    private fun isTerminalCloseCode(code: Int): Boolean {
+        return code == 4401 || code == 4403 || code == 4406 || code == 4408 || code == 4409 || code == 4410
     }
 
     private fun cleanTarget(target: String): String {

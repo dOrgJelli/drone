@@ -107,6 +107,28 @@ export function createDroneProvisioningController(deps: DroneProvisioningControl
     return removed;
   }
 
+  function materializeSeedChatConfigOnDroneEntry(droneEntry: any, seedRaw: any) {
+    if (!droneEntry || typeof droneEntry !== 'object' || !seedRaw || typeof seedRaw !== 'object') return;
+    const seedAgent = deps.parseSeedAgent(seedRaw?.agent);
+    const hasSeedModel = Object.prototype.hasOwnProperty.call(seedRaw, 'model');
+    if (!seedAgent && !hasSeedModel) return;
+
+    const chatName = deps.normalizeChatName(seedRaw?.chatName ?? 'default');
+    const seedModel = deps.normalizeChatModel(seedRaw?.model);
+    droneEntry.chats = droneEntry.chats && typeof droneEntry.chats === 'object' ? droneEntry.chats : {};
+    const entry =
+      droneEntry.chats[chatName] && typeof droneEntry.chats[chatName] === 'object'
+        ? droneEntry.chats[chatName]
+        : { createdAt: deps.nowIso() };
+    if (!(typeof entry.createdAt === 'string' && entry.createdAt.trim())) entry.createdAt = deps.nowIso();
+    if (seedAgent) entry.agent = seedAgent;
+    if (hasSeedModel) {
+      if (seedModel) entry.model = seedModel;
+      else delete entry.model;
+    }
+    droneEntry.chats[chatName] = entry;
+  }
+
   async function provisionDroneFromPending(name: string) {
     const regAny: any = await loadRegistry();
     const pending = regAny?.pending?.[name];
@@ -251,6 +273,7 @@ export function createDroneProvisioningController(deps: DroneProvisioningControl
             }
           }
         }
+        materializeSeedChatConfigOnDroneEntry(d, pendingLatest?.seed);
         regLatest.drones[found.key] = d;
       });
     } catch {

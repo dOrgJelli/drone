@@ -38,8 +38,36 @@ data class AndroidSetupRedeemResult(
     val apkUrl: String?,
     val pairingPayload: String?,
 )
+data class AndroidReleaseInfo(
+    val available: Boolean,
+    val versionCode: Long?,
+    val versionName: String?,
+    val apkUrl: String?,
+)
 data class DashboardSummary(val displayName: String, val threadCount: Int, val deviceCount: Int, val logCount: Int, val logs: List<String>)
 data class AssistantExchange(val userMessage: String, val assistantMessage: String)
+data class AssistantThreadSummary(
+    val id: String,
+    val title: String,
+    val status: String,
+    val error: String?,
+    val artifactsCount: Int,
+    val updatedAt: String
+)
+data class AssistantArtifact(
+    val id: String,
+    val threadId: String,
+    val path: String,
+    val content: String,
+    val size: Int,
+    val revision: String,
+    val createdAt: String,
+    val updatedAt: String
+)
+data class AssistantFilesResult(
+    val thread: AssistantThreadSummary,
+    val artifacts: List<AssistantArtifact>
+)
 data class VoiceApprovalSettings(
     val triggerPhrase: String = "approval code",
     val unlockCode: String = "1234",
@@ -169,11 +197,11 @@ class VoiceStreamApi(private val context: Context) {
             .header("x-voice-device-token", token)
             .header("x-voice-client-version", BuildConfig.VERSION_CODE.toString())
         client.newCall(builder.build()).execute().use { response ->
-            val text = response.body?.string().orEmpty()
+            val text = response.body.string()
             if (!response.isSuccessful) {
-                throw IOException(JSONObject(text.ifBlank { "{}" }).optString("error", "HTTP ${response.code}"))
+                throw IOException(ApiJsonResponse.errorMessage(text, "HTTP ${response.code}"))
             }
-            return JSONObject(text.ifBlank { "{}" })
+            return ApiJsonResponse.parseObject(text, "GET", "/api/devices/$deviceId/bootstrap")
                 .getJSONObject("device")
                 .optString("displayName")
         }
@@ -210,6 +238,16 @@ class VoiceStreamApi(private val context: Context) {
         )
     }
 
+    fun androidRelease(): AndroidReleaseInfo {
+        val android = request("GET", "/api/mobile/android").getJSONObject("android")
+        return AndroidReleaseInfo(
+            available = android.optBoolean("available", false),
+            versionCode = android.takeIf { it.has("versionCode") && !it.isNull("versionCode") }?.optLong("versionCode"),
+            versionName = android.optString("versionName").takeIf { it.isNotBlank() },
+            apkUrl = android.optString("downloadUrl").takeIf { it.isNotBlank() },
+        )
+    }
+
     fun redeemAndroidSetup(setupUrl: String): AndroidSetupRedeemResult {
         val uri = URI(setupUrl.trim())
         val serverUrl = "${uri.scheme}://${uri.host}${if (uri.port > 0) ":${uri.port}" else ""}".trimEnd('/')
@@ -229,11 +267,11 @@ class VoiceStreamApi(private val context: Context) {
             .header("content-type", "application/json")
             .post(body.toString().toRequestBody(JSON))
         client.newCall(builder.build()).execute().use { response ->
-            val text = response.body?.string().orEmpty()
+            val text = response.body.string()
             if (!response.isSuccessful) {
-                throw IOException(JSONObject(text.ifBlank { "{}" }).optString("error", "HTTP ${response.code}"))
+                throw IOException(ApiJsonResponse.errorMessage(text, "HTTP ${response.code}"))
             }
-            val json = JSONObject(text.ifBlank { "{}" })
+            val json = ApiJsonResponse.parseObject(text, "POST", path)
             val android = json.optJSONObject("android")
             val apkUrl = android?.optString("downloadUrl")?.takeIf { it.isNotBlank() }
             return AndroidSetupRedeemResult(
@@ -288,6 +326,27 @@ class VoiceStreamApi(private val context: Context) {
         return AssistantExchange(
             userMessage = messages.getJSONObject(0).optString("content"),
             assistantMessage = messages.getJSONObject(1).optString("content")
+        )
+    }
+
+    fun assistantThreadSummary(): AssistantThreadSummary {
+        val deviceId = pairedDeviceId()
+        if (deviceId.isBlank()) throw IOException("Pair this device before loading assistant files.")
+        val json = deviceRequest("GET", "/api/devices/$deviceId/assistant/thread")
+        val thread = json.optJSONObject("thread") ?: return emptyAssistantThread(json.optInt("artifactsCount", 0))
+        return parseAssistantThread(thread, json.optInt("artifactsCount", thread.optInt("artifactsCount", 0)))
+    }
+
+    fun assistantFiles(): AssistantFilesResult {
+        val deviceId = pairedDeviceId()
+        if (deviceId.isBlank()) throw IOException("Pair this device before loading assistant files.")
+        val json = deviceRequest("GET", "/api/devices/$deviceId/assistant/thread/artifacts")
+        val artifacts = json.optJSONArray("artifacts").orEmptyArtifacts()
+        val thread = json.optJSONObject("thread")?.let { parseAssistantThread(it, artifacts.size) }
+            ?: emptyAssistantThread(artifacts.size)
+        return AssistantFilesResult(
+            thread = thread,
+            artifacts = artifacts
         )
     }
 
@@ -362,12 +421,54 @@ class VoiceStreamApi(private val context: Context) {
             builder.method(method, body.toString().toRequestBody(JSON))
         }
         client.newCall(builder.build()).execute().use { response ->
-            val text = response.body?.string().orEmpty()
+            val text = response.body.string()
             if (!response.isSuccessful) {
-                throw IOException(JSONObject(text.ifBlank { "{}" }).optString("error", "HTTP ${response.code}"))
+                throw IOException(ApiJsonResponse.errorMessage(text, "HTTP ${response.code}"))
             }
-            return JSONObject(text.ifBlank { "{}" })
+            return ApiJsonResponse.parseObject(text, method, path)
         }
+    }
+
+    private fun deviceRequest(method: String, path: String): JSONObject {
+        val config = loadConfig()
+        val token = pairedDeviceToken()
+        if (token.isBlank()) throw IOException("Pair this device before loading assistant files.")
+        val url = "${config.serverUrl.trimEnd('/')}$path"
+        val builder = Request.Builder()
+            .url(url)
+            .header("content-type", "application/json")
+            .header("x-voice-device-token", token)
+            .header("x-voice-client-version", BuildConfig.VERSION_CODE.toString())
+        builder.method(method, null)
+        client.newCall(builder.build()).execute().use { response ->
+            val text = response.body.string()
+            if (!response.isSuccessful) {
+                throw IOException(ApiJsonResponse.errorMessage(text, "HTTP ${response.code}"))
+            }
+            return ApiJsonResponse.parseObject(text, method, path)
+        }
+    }
+
+    private fun parseAssistantThread(json: JSONObject, fallbackArtifactsCount: Int): AssistantThreadSummary {
+        return AssistantThreadSummary(
+            id = json.optString("id"),
+            title = json.optString("title", "Voice thread"),
+            status = json.optString("status", "idle"),
+            error = json.optString("error").takeIf { it.isNotBlank() },
+            artifactsCount = json.optInt("artifactsCount", fallbackArtifactsCount),
+            updatedAt = json.optString("updatedAt")
+        )
+    }
+
+    private fun emptyAssistantThread(artifactsCount: Int): AssistantThreadSummary {
+        return AssistantThreadSummary(
+            id = "",
+            title = "Voice thread",
+            status = "idle",
+            error = null,
+            artifactsCount = artifactsCount,
+            updatedAt = ""
+        )
     }
 
     private fun applyAuth(builder: Request.Builder, config: ApiConfig) {
@@ -390,7 +491,85 @@ class VoiceStreamApi(private val context: Context) {
         return next
     }
 
+    private fun JSONArray?.orEmptyArtifacts(): List<AssistantArtifact> {
+        if (this == null) return emptyList()
+        val next = mutableListOf<AssistantArtifact>()
+        for (index in 0 until length()) {
+            val item = optJSONObject(index) ?: continue
+            next += AssistantArtifact(
+                id = item.optString("id"),
+                threadId = item.optString("threadId"),
+                path = item.optString("path"),
+                content = item.optString("content"),
+                size = item.optInt("size"),
+                revision = item.optString("revision"),
+                createdAt = item.optString("createdAt"),
+                updatedAt = item.optString("updatedAt")
+            )
+        }
+        return next
+    }
+
     private companion object {
         val JSON = "application/json; charset=utf-8".toMediaType()
     }
+}
+
+object ApiJsonResponse {
+    fun parseObject(text: String, method: String, path: String): JSONObject {
+        val trimmed = text.trim()
+        if (trimmed.isBlank()) return JSONObject()
+        if (!trimmed.startsWith("{")) {
+            throw IOException("Expected JSON object from $method $path, got ${bodyType(trimmed)}: ${previewBody(trimmed)}")
+        }
+        return runCatching { JSONObject(trimmed) }
+            .getOrElse { error ->
+                throw IOException("Expected JSON object from $method $path, got malformed JSON: ${preview(trimmed)}", error)
+            }
+    }
+
+    fun errorMessage(text: String, fallback: String): String {
+        val trimmed = text.trim()
+        if (trimmed.isBlank()) return fallback
+        if (trimmed.startsWith("{")) {
+            val json = runCatching { JSONObject(trimmed) }.getOrNull()
+            if (json != null) {
+                return json.optString("error")
+                    .ifBlank { json.optString("message") }
+                    .ifBlank { fallback }
+            }
+        }
+        val textMessage = previewBody(trimmed)
+        return if (textMessage.isBlank()) fallback else textMessage
+    }
+
+    private fun bodyType(text: String): String = when (text.firstOrNull()) {
+        '"' -> "string"
+        '[' -> "array"
+        '<' -> "html"
+        't', 'f' -> "boolean"
+        'n' -> "null"
+        in '0'..'9', '-' -> "number"
+        else -> "text"
+    }
+
+    private fun previewBody(text: String): String {
+        val trimmed = text.trim()
+        if (trimmed.length >= 2 && trimmed.first() == '"' && trimmed.last() == '"') {
+            return trimmed.substring(1, trimmed.length - 1)
+                .replace("\\\"", "\"")
+                .replace("\\n", " ")
+                .replace("\\r", " ")
+                .replace("\\t", " ")
+                .let(::preview)
+        }
+        return preview(trimmed)
+    }
+
+    private fun preview(text: String): String {
+        val normalized = text.replace(Regex("\\s+"), " ").trim()
+        return normalized.take(MAX_PREVIEW_CHARS)
+    }
+
+    private const val MAX_PREVIEW_CHARS = 180
 }

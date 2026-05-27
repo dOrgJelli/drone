@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS assistant_threads (
   voice_enabled INTEGER NOT NULL DEFAULT 0,
   auto_approve INTEGER NOT NULL DEFAULT 0,
   system_prompt TEXT,
-  enabled_tools_json TEXT NOT NULL DEFAULT '["assistant_artifacts","speak","get_system_prompt","update_system_prompt","set_thinking_level"]',
+  enabled_tools_json TEXT NOT NULL DEFAULT '["assistant_artifacts","speak","get_system_prompt","update_system_prompt","set_thinking_level","web_search","fetch_content"]',
   capabilities_json TEXT NOT NULL DEFAULT '{"artifacts":true,"speech":true,"approvals":true,"externalCalls":true,"futureIntegrations":false}',
   prompt_delivery_mode TEXT NOT NULL DEFAULT 'queue',
   created_at TEXT NOT NULL,
@@ -178,6 +178,15 @@ CREATE TABLE IF NOT EXISTS assistant_settings (
   default_model TEXT NOT NULL,
   default_thinking_level TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS assistant_api_keys (
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL,
+  encrypted_key TEXT NOT NULL,
+  key_hint TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, provider)
 );
 
 CREATE TABLE IF NOT EXISTS assistant_codex_connections (

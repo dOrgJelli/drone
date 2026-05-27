@@ -2,6 +2,18 @@ import { randomUUID } from 'node:crypto';
 
 export type ControlCommand = 'sleep' | 'off' | 'awake' | 'query_status';
 
+export type SpeechAudioCommand = {
+  type: 'speech_audio';
+  id: string;
+  source: string;
+  text: string;
+  contentType: string;
+  audioBase64: string;
+  createdAt: string;
+  threadId?: string;
+  messageId?: string;
+};
+
 export type ControlSocket = {
   send: (data: string) => void;
   close?: (code?: number, reason?: string) => void;
@@ -120,6 +132,10 @@ export class ControlChannelRegistry {
       socket.close?.(code, reason);
     }
     this.sockets.delete(deviceId);
+  }
+
+  sendSpeechAudio(deviceId: string, payload: SpeechAudioCommand): boolean {
+    return this.broadcast(deviceId, JSON.stringify(payload));
   }
 
   private broadcast(deviceId: string, payload: string): boolean {

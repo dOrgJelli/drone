@@ -19,6 +19,7 @@ object Constants {
     const val ACTION_STOP_VOICE = "com.huntelkator.voicestreamnext.action.STOP_VOICE"
     const val ACTION_QUERY_STATUS = "com.huntelkator.voicestreamnext.action.QUERY_STATUS"
     const val ACTION_STATUS = "com.huntelkator.voicestreamnext.action.STATUS"
+    const val ACTION_SPEECH_HISTORY_CHANGED = "com.huntelkator.voicestreamnext.action.SPEECH_HISTORY_CHANGED"
 
     const val EXTRA_STATUS = "status"
     const val EXTRA_MODE = "mode"

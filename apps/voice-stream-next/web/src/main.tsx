@@ -32,11 +32,13 @@ import type {
   DesktopVoskStatus,
   DesktopVoskText,
   DeviceRecord,
+  SpeechPlaybackTarget,
   VoiceApprovalFormState,
   VoiceSettings,
 } from './dashboardTypes.js';
 import { timeLabel } from './time.js';
 import { TranscriptPanel } from './TranscriptPanel.js';
+import { AssistantFilesPanel, type ArtifactPanelMode } from './assistant/AssistantFilesPanel.js';
 import { AssistantSystemPromptModal, type AssistantSystemPromptKind, type AssistantSystemPromptMode } from './assistant/AssistantSystemPromptModal.js';
 import { cn } from './ui/cn.js';
 import { MarkdownMessage } from './ui/MarkdownMessage.js';
@@ -69,6 +71,7 @@ const assistantActionButtonClass =
   'inline-flex h-[30px] items-center justify-center rounded border border-[var(--border)] bg-white/[.035] px-2.5 font-display text-[10px] font-semibold uppercase text-[var(--fg-secondary)] transition hover:border-[rgba(136,145,168,.36)] hover:text-[var(--fg)] disabled:pointer-events-none disabled:opacity-50';
 const assistantFieldLabelClass = 'grid gap-1.5 text-[10px] font-extrabold uppercase leading-tight text-[var(--muted)]';
 const assistantRowClass = 'rounded-[7px] border border-[var(--border-subtle)] bg-white/[.025] text-[var(--fg-secondary)]';
+const ASSISTANT_MESSAGES_BOTTOM_THRESHOLD_PX = 1;
 
 function modelSelectionKey(selection: { provider: string; model: string; thinkingLevel: string }): string {
   return `${selection.provider}:${selection.model}:${selection.thinkingLevel}`;
@@ -130,6 +133,7 @@ type AssistantContentPart = {
   type: string;
   text?: string;
   thinking?: string;
+  reasoning?: string;
   name?: string;
   arguments?: unknown;
   args?: unknown;
@@ -141,6 +145,12 @@ type AssistantContentPart = {
 type AssistantRenderItem =
   | { type: 'message'; key: string; message: AssistantMessage }
   | { type: 'tool'; key: string; call?: AssistantToolCall; result?: AssistantMessage };
+
+type AppToast = {
+  id: string;
+  kind: 'notice' | 'error';
+  message: string;
+};
 
 const TOOL_LABELS: Record<string, string> = {
   assistant_artifacts: 'Assistant artifacts',
@@ -163,11 +173,19 @@ function messageParts(message: AssistantMessage | undefined): AssistantContentPa
   return [];
 }
 
+function isReasoningPart(part: AssistantContentPart): boolean {
+  return part.type === 'thinking' || part.type === 'reasoning';
+}
+
+function reasoningPartText(part: AssistantContentPart): string {
+  return String(part.thinking ?? part.reasoning ?? part.text ?? '');
+}
+
 function messageText(message: AssistantMessage | undefined): string {
   if (!message) return '';
   const textFromParts = messageParts(message)
-    .filter((part) => part.type === 'text' || part.type === 'thinking')
-    .map((part) => String(part.text ?? part.thinking ?? ''))
+    .filter((part) => part.type === 'text' || isReasoningPart(part))
+    .map((part) => part.type === 'text' ? String(part.text ?? '') : reasoningPartText(part))
     .join('');
   return (textFromParts || String(message.content ?? '')).trim();
 }
@@ -225,14 +243,48 @@ function renderItemsFromMessages(sourceMessages: AssistantMessage[]): AssistantR
   return items;
 }
 
-function speakAssistantText(text: string): void {
-  const clean = text.trim();
-  if (!clean || typeof window.speechSynthesis === 'undefined' || typeof window.SpeechSynthesisUtterance === 'undefined') return;
-  window.speechSynthesis.cancel();
-  const utterance = new window.SpeechSynthesisUtterance(clean);
-  utterance.rate = 1;
-  utterance.pitch = 1;
-  window.speechSynthesis.speak(utterance);
+const speechAudioQueue: Array<{ src: string; revoke?: () => void }> = [];
+let speechAudioPlaying = false;
+
+function queueSpeechAudio(audioBase64: string, contentType = 'audio/wav'): void {
+  const clean = audioBase64.trim();
+  if (!clean || typeof Audio === 'undefined') return;
+  speechAudioQueue.push({ src: `data:${contentType.trim() || 'audio/wav'};base64,${clean}` });
+  void drainSpeechAudioQueue();
+}
+
+function queueSpeechAudioBytes(data: BlobPart, contentType = 'audio/wav'): void {
+  if (typeof Audio === 'undefined') return;
+  const url = URL.createObjectURL(new Blob([data], { type: contentType }));
+  speechAudioQueue.push({ src: url, revoke: () => URL.revokeObjectURL(url) });
+  void drainSpeechAudioQueue();
+}
+
+async function drainSpeechAudioQueue(): Promise<void> {
+  if (speechAudioPlaying) return;
+  speechAudioPlaying = true;
+  try {
+    while (speechAudioQueue.length > 0) {
+      const item = speechAudioQueue.shift()!;
+      try {
+        await playSpeechAudio(item.src);
+      } finally {
+        item.revoke?.();
+      }
+    }
+  } finally {
+    speechAudioPlaying = false;
+  }
+}
+
+function playSpeechAudio(src: string): Promise<void> {
+  return new Promise((resolve) => {
+    const audio = new Audio(src);
+    const finish = () => resolve();
+    audio.addEventListener('ended', finish, { once: true });
+    audio.addEventListener('error', finish, { once: true });
+    audio.play().catch(finish);
+  });
 }
 
 function ReasoningBlock({ text, streaming = false }: { text: string; streaming?: boolean }) {
@@ -240,10 +292,10 @@ function ReasoningBlock({ text, streaming = false }: { text: string; streaming?:
   const trimmed = text.trim();
   if (!trimmed && !streaming) return null;
   return (
-    <div className="overflow-hidden rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.015)]">
+    <div className="mb-2 overflow-hidden rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.015)] last:mb-0">
       <button
         type="button"
-        className="flex w-full min-w-0 items-center gap-2 border-0 bg-transparent px-2 py-1.5 text-left text-[var(--muted-dim)]"
+        className="flex w-full min-w-0 items-center gap-2 border-0 bg-transparent px-2.5 py-1.5 text-left text-[var(--muted-dim)] hover:bg-[rgba(255,255,255,.035)]"
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
       >
@@ -251,18 +303,34 @@ function ReasoningBlock({ text, streaming = false }: { text: string; streaming?:
         {streaming ? <ThinkingPulseDots /> : null}
         <small className="ml-auto text-[10px] text-[var(--muted)]">{open ? 'Hide' : 'Show'}</small>
       </button>
-      {trimmed && open ? <div className="max-h-[min(70vh,28rem)] overflow-auto whitespace-pre-wrap border-t border-[var(--border-subtle)] p-2 text-[11px] leading-relaxed text-[var(--muted)]">{trimmed}</div> : null}
+      {trimmed ? (
+        open ? (
+          <div className="border-t border-[var(--border-subtle)] px-2.5 py-2">
+            <div className="max-h-[min(70vh,28rem)] overflow-auto whitespace-pre-wrap break-words text-[11px] leading-relaxed text-[var(--muted)]">
+              {trimmed}
+            </div>
+          </div>
+        ) : (
+          <div className="border-t border-[var(--border-subtle)] px-2.5 pb-2 pt-1">
+            <div className="max-h-[4.5em] overflow-hidden whitespace-pre-wrap break-words text-[11px] leading-relaxed text-[var(--muted-dim)]">
+              {trimmed}
+            </div>
+          </div>
+        )
+      ) : streaming ? (
+        <div className="border-t border-[var(--border-subtle)] px-2.5 py-2 text-[11px] text-[var(--muted-dim)]">...</div>
+      ) : null}
     </div>
   );
 }
 
 function AssistantMessageRow({ message, streaming = false }: { message: AssistantMessage; streaming?: boolean }) {
   const parts = messageParts(message);
-  const hasStructuredContent = parts.some((part) => part.type === 'text' || part.type === 'thinking');
+  const hasStructuredContent = parts.some((part) => part.type === 'text' || isReasoningPart(part));
   return (
     <article
       className={cn(
-        'w-full px-5 py-3 text-[13px] leading-relaxed',
+        'w-full px-3 py-2 text-[13px] leading-relaxed',
         message.role === 'user' && 'border-y border-[var(--border-subtle)] bg-[rgba(255,255,255,.025)] text-[var(--fg-secondary)]',
         message.role === 'assistant' && 'text-[var(--fg)]',
         message.role === 'system' && 'bg-[rgba(255,255,255,.018)] text-[var(--fg-secondary)]',
@@ -270,10 +338,10 @@ function AssistantMessageRow({ message, streaming = false }: { message: Assistan
         streaming && 'assistant-streaming-message',
       )}
     >
-      <div className="mb-1.5 font-display text-[10px] font-semibold uppercase tracking-normal text-[var(--muted-dim)]">{messageRoleLabel(message)}</div>
+      <div className="mb-1 font-display text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]">{messageRoleLabel(message)}</div>
       {hasStructuredContent ? (
         parts.map((part, index) => {
-          if (part.type === 'thinking') return <ReasoningBlock key={index} text={String(part.thinking ?? '')} streaming={streaming && index === parts.length - 1} />;
+          if (isReasoningPart(part)) return <ReasoningBlock key={index} text={reasoningPartText(part)} streaming={streaming && index === parts.length - 1} />;
           if (part.type === 'text') return <MarkdownMessage key={index} text={String(part.text ?? '')} />;
           return null;
         })
@@ -284,64 +352,89 @@ function AssistantMessageRow({ message, streaming = false }: { message: Assistan
   );
 }
 
-function ToolActivityMessage({ call, result }: { call?: AssistantToolCall; result?: AssistantMessage }) {
+function ToolDisclosure({
+  title,
+  status,
+  children,
+}: {
+  title: string;
+  status?: 'ok' | 'error';
+  children: React.ReactNode;
+}) {
   const [open, setOpen] = React.useState(false);
-  const resultText = messageText(result);
-  const title = toolLabel(call?.name || result?.toolName || undefined);
-  const status = result ? (result.isError ? 'error' : 'done') : 'pending';
   return (
-    <div
-      className={cn(
-        'mx-5 my-3 overflow-hidden rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.018)] text-[var(--fg-secondary)]',
-        status === 'error' && 'border-[rgba(248,113,113,.22)]',
-      )}
-    >
+    <div className={cn('rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)]', status === 'error' && 'border-[rgba(248,113,113,.22)]')}>
       <button
         type="button"
-        className="flex min-h-[38px] w-full min-w-0 items-center gap-2 border-0 bg-transparent px-3 py-2 text-left font-display text-[10px] font-semibold uppercase tracking-normal text-[var(--muted)] hover:bg-[rgba(255,255,255,.025)] hover:text-[var(--fg-secondary)]"
         onClick={() => setOpen((value) => !value)}
+        className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-[10px] font-semibold uppercase tracking-wide text-[var(--muted)] hover:bg-[rgba(255,255,255,.025)] hover:text-[var(--fg-secondary)]"
+        style={{ fontFamily: 'var(--display)' }}
+        aria-expanded={open}
       >
-        {result ? (
+        {status ? (
           <span
-            className={cn(
-              'inline-flex h-3 w-3 shrink-0 items-center justify-center rounded-full text-[#071015]',
-              result.isError ? 'bg-[#f87171]' : 'bg-[#4ade80]',
-            )}
+            className={`inline-flex h-3 w-3 flex-shrink-0 items-center justify-center rounded-full ${
+              status === 'error' ? 'bg-[var(--red)] text-[var(--bg)]' : 'bg-[var(--green)] text-[var(--bg)]'
+            }`}
           >
-            {result.isError ? <span className="h-1.5 w-1.5 rounded-full bg-current" /> : <ToolCheckIcon />}
+            {status === 'error' ? <span className="h-1.5 w-1.5 rounded-full bg-current" /> : <ToolCheckIcon className="h-2.5 w-2.5" />}
           </span>
         ) : null}
         <span className="min-w-0 flex-1 truncate">{title}</span>
       </button>
-      {open ? (
-        <div className="grid gap-2 border-t border-[var(--border-subtle)] px-3 py-2.5">
-          {call ? (
-            <div>
-              <div className="font-display text-[10px] font-bold uppercase tracking-normal text-[var(--muted-dim)]">Arguments</div>
-              <pre className="mt-1.5 max-h-32 overflow-auto whitespace-pre-wrap break-words rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.14)] p-2 font-mono text-[11px] leading-normal text-[var(--fg-secondary)]">{JSON.stringify(call.args ?? {}, null, 2)}</pre>
-            </div>
-          ) : null}
-          {result ? (
-            <div className={call ? 'border-t border-[var(--border-subtle)] pt-2' : ''}>
-              <div className="font-display text-[10px] font-bold uppercase tracking-normal text-[var(--muted-dim)]">Result</div>
-              {resultText ? (
-                <pre className="mt-1.5 max-h-32 overflow-auto whitespace-pre-wrap break-words rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.14)] p-2 font-mono text-[11px] leading-normal text-[var(--fg-secondary)]">{resultText}</pre>
-              ) : (
-                <div className="text-[11px] leading-normal text-[var(--muted-dim)]">No result payload.</div>
-              )}
-            </div>
-          ) : (
-            <div className={cn('text-[11px] leading-normal text-[var(--muted-dim)]', call && 'border-t border-[var(--border-subtle)] pt-2')}>Waiting for result...</div>
-          )}
-        </div>
-      ) : null}
+      {open ? <div className="border-t border-[var(--border-subtle)] px-2 py-1.5">{children}</div> : null}
     </div>
   );
 }
 
-function ToolCheckIcon() {
+function ToolPayloadDetails({ call, result }: { call?: AssistantToolCall; result?: AssistantMessage }) {
+  const resultText = result ? messageText(result) : '';
   return (
-    <svg className="h-2.5 w-2.5 shrink-0" width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <>
+      {call ? (
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+            Arguments
+          </div>
+          <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-words text-[10px] text-[var(--muted-dim)]">
+            {JSON.stringify(call.args, null, 2)}
+          </pre>
+        </div>
+      ) : null}
+      {result ? (
+        <div className={call ? 'mt-2 border-t border-[var(--border-subtle)] pt-2' : ''}>
+          <div className="text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]" style={{ fontFamily: 'var(--display)' }}>
+            Result
+          </div>
+          {resultText ? (
+            <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-words text-[11px] text-[var(--fg-secondary)]">{resultText}</pre>
+          ) : (
+            <div className="mt-1 text-[11px] text-[var(--muted-dim)]">No result payload.</div>
+          )}
+        </div>
+      ) : (
+        <div className={call ? 'mt-2 border-t border-[var(--border-subtle)] pt-2 text-[11px] text-[var(--muted-dim)]' : 'text-[11px] text-[var(--muted-dim)]'}>
+          Waiting for result...
+        </div>
+      )}
+    </>
+  );
+}
+
+function ToolActivityMessage({ call, result }: { call?: AssistantToolCall; result?: AssistantMessage }) {
+  const title = toolLabel(call?.name || result?.toolName || undefined);
+  return (
+    <div className="mx-3">
+      <ToolDisclosure title={title} status={result ? (result.isError ? 'error' : 'ok') : undefined}>
+        <ToolPayloadDetails call={call} result={result} />
+      </ToolDisclosure>
+    </div>
+  );
+}
+
+function ToolCheckIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M2 5.2l2 2 4-4.4" />
     </svg>
   );
@@ -359,8 +452,8 @@ function ThinkingPulseDots() {
 
 function AssistantThinkingRow() {
   return (
-    <div className="w-full px-5 py-3" role="status" aria-label="Assistant is thinking">
-      <div className="mb-1.5 font-display text-[10px] font-semibold uppercase tracking-normal text-[var(--muted-dim)]">Assistant</div>
+    <div className="w-full px-3 py-2" role="status" aria-label="Assistant is thinking">
+      <div className="mb-1 font-display text-[10px] font-semibold uppercase tracking-wide text-[var(--muted-dim)]">Assistant</div>
       <ThinkingPulseDots />
     </div>
   );
@@ -371,6 +464,7 @@ const ASSISTANT_TOOL_CATEGORY_LABELS: Record<string, string> = {
   speech: 'Speech',
   prompts: 'Prompts',
   settings: 'Settings',
+  web: 'Web',
   extensions: 'Extensions',
 };
 
@@ -683,6 +777,8 @@ type AssistantPromptEvent =
   | { type: 'delta'; delta: string }
   | { type: 'thinking_delta'; delta: string }
   | { type: 'message'; message: AssistantMessage }
+  | { type: 'tool_call'; [key: string]: unknown }
+  | { type: 'tool_result'; [key: string]: unknown }
   | { type: 'approval_pending'; snapshot: AssistantSnapshot }
   | { type: 'done'; snapshot: AssistantSnapshot }
   | { type: 'error'; error: string; snapshot?: AssistantSnapshot }
@@ -716,19 +812,6 @@ async function readAssistantEventStream(response: Response, handleEvent: (event:
   if (line) handleEvent(JSON.parse(line));
 }
 
-function formatArtifactSize(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
-  if (bytes < 1024) return `${bytes} B`;
-  const kb = bytes / 1024;
-  if (kb < 1024) return `${kb.toFixed(kb >= 10 ? 0 : 1)} KB`;
-  const mb = kb / 1024;
-  return `${mb.toFixed(mb >= 10 ? 0 : 1)} MB`;
-}
-
-function artifactFileName(path: string): string {
-  return path.split('/').filter(Boolean).pop() || path || 'Untitled';
-}
-
 function chooseDefaultArtifact(artifacts: AssistantArtifactRecord[], preferredPath?: string | null): AssistantArtifactRecord | null {
   return (
     artifacts.find((artifact) => artifact.path === preferredPath) ??
@@ -755,6 +838,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   const [artifactDirty, setArtifactDirty] = React.useState(false);
   const [artifactsLoading, setArtifactsLoading] = React.useState(false);
   const [artifactsError, setArtifactsError] = React.useState<string | null>(null);
+  const [artifactPanelMode, setArtifactPanelMode] = React.useState<ArtifactPanelMode>('view');
   const [assistantFilesOpen, setAssistantFilesOpen] = React.useState(false);
   const [assistantToolsOpen, setAssistantToolsOpen] = React.useState(false);
   const [systemPromptOpen, setSystemPromptOpen] = React.useState(false);
@@ -769,16 +853,18 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   const [systemPromptNotice, setSystemPromptNotice] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [busy, setBusy] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
-  const [notice, setNotice] = React.useState<string | null>(null);
+  const [toasts, setToasts] = React.useState<AppToast[]>([]);
   const [messageDraft, setMessageDraft] = React.useState('');
   const [threadTitleDraft, setThreadTitleDraft] = React.useState('');
   const [codexConnectFlow, setCodexConnectFlow] = React.useState<{ state: string; authorizationUrl: string; redirectUri: string; expiresAt: string } | null>(null);
   const [codexCodeDraft, setCodexCodeDraft] = React.useState('');
+  const [apiKeyDrafts, setApiKeyDrafts] = React.useState<Record<'openai' | 'exa', string>>({ openai: '', exa: '' });
   const [deviceName, setDeviceName] = React.useState('Android voice client');
   const [deviceType, setDeviceType] = React.useState('android');
   const [androidApkInfo, setAndroidApkInfo] = React.useState<AndroidApkInfo | null>(null);
   const [desktopAppInfo, setDesktopAppInfo] = React.useState<DesktopAppInfo | null>(null);
+  const [adminAndroidFile, setAdminAndroidFile] = React.useState<File | null>(null);
+  const [adminDesktopFile, setAdminDesktopFile] = React.useState<File | null>(null);
   const [assistantExtensions, setAssistantExtensions] = React.useState<AssistantExtensionsResponse | null>(null);
   const [androidSetupInfo, setAndroidSetupInfo] = React.useState<AndroidSetupInfo | null>(null);
   const [androidSetupQr, setAndroidSetupQr] = React.useState('');
@@ -789,20 +875,74 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   const [approvalSettings, setApprovalSettings] = React.useState<VoiceApprovalFormState>(VOICE_APPROVAL_SETTINGS_DEFAULT);
   const settingsHydratedRef = React.useRef(false);
   const assistantEventRefreshTimerRef = React.useRef<number | null>(null);
+  const messagesScrollRef = React.useRef<HTMLDivElement | null>(null);
+  const messagesStickToBottomRef = React.useRef(true);
+  const messageScrollSignatureRef = React.useRef('');
 
   const assistantThreads = assistantSnapshotData?.threads ?? dashboard?.threads ?? [];
   const activeThread =
     assistantThreads.find((thread) => thread.id === activeThreadId) ??
     assistantThreads[0] ??
     null;
+  const updateMessagesStickToBottom = React.useCallback((node: HTMLDivElement | null) => {
+    if (!node) return;
+    const gap = node.scrollHeight - node.scrollTop - node.clientHeight;
+    messagesStickToBottomRef.current = gap <= ASSISTANT_MESSAGES_BOTTOM_THRESHOLD_PX;
+  }, []);
+  const scrollMessagesToBottom = React.useCallback((options: { force?: boolean; retries?: number } = {}) => {
+    const { force = false, retries = 4 } = options;
+    if (force) messagesStickToBottomRef.current = true;
+    let triesRemaining = retries;
+    const attempt = () => {
+      window.requestAnimationFrame(() => {
+        const node = messagesScrollRef.current;
+        if (!node) {
+          if (triesRemaining > 0) {
+            triesRemaining -= 1;
+            attempt();
+          }
+          return;
+        }
+        if (!force && !messagesStickToBottomRef.current) return;
+        node.scrollTop = node.scrollHeight;
+        updateMessagesStickToBottom(node);
+        if (force) messagesStickToBottomRef.current = true;
+        const gap = node.scrollHeight - node.scrollTop - node.clientHeight;
+        if (gap > 1 && triesRemaining > 0) {
+          triesRemaining -= 1;
+          attempt();
+        }
+      });
+    };
+    attempt();
+  }, [updateMessagesStickToBottom]);
+  const dismissToast = React.useCallback((id: string) => {
+    setToasts((current) => current.filter((toast) => toast.id !== id));
+  }, []);
+  const pushToast = React.useCallback((kind: AppToast['kind'], message: string | null) => {
+    const clean = String(message ?? '').trim();
+    if (!clean) return;
+    const id = `${Date.now()}:${Math.random().toString(36).slice(2)}`;
+    setToasts((current) => [...current.slice(-3), { id, kind, message: clean }]);
+  }, []);
+  const setError = React.useCallback((message: string | null) => pushToast('error', message), [pushToast]);
+  const setNotice = React.useCallback((message: string | null) => pushToast('notice', message), [pushToast]);
+  React.useEffect(() => {
+    if (toasts.length === 0) return undefined;
+    const timers = toasts.map((toast) => window.setTimeout(() => dismissToast(toast.id), toast.kind === 'error' ? 7200 : 4200));
+    return () => {
+      timers.forEach((timer) => window.clearTimeout(timer));
+    };
+  }, [dismissToast, toasts]);
   React.useEffect(() => {
     setThreadTitleDraft(activeThread?.title ?? '');
   }, [activeThread?.id, activeThread?.title]);
-  const hydrateArtifactDraft = React.useCallback((artifact: AssistantArtifactRecord | null) => {
+  const hydrateArtifactDraft = React.useCallback((artifact: AssistantArtifactRecord | null, mode?: ArtifactPanelMode) => {
     setSelectedArtifact(artifact);
     setArtifactPathDraft(artifact?.path ?? '');
     setArtifactContentDraft(artifact?.content ?? '');
     setArtifactDirty(false);
+    setArtifactPanelMode(mode ?? (artifact ? 'view' : 'edit'));
   }, []);
   const activeInheritedSystemPrompt = React.useMemo(() => {
     const settings = assistantSnapshotData?.assistantSettings;
@@ -995,19 +1135,9 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
     source.onmessage = refresh;
     source.addEventListener('connected', refresh);
     source.addEventListener('assistant_change', refresh);
-    source.addEventListener('assistant_speak', (event) => {
-      try {
-        const data = JSON.parse((event as MessageEvent).data);
-        const text = String(data?.text ?? '').trim();
-        if (text) speakAssistantText(text);
-        refresh();
-      } catch {
-        // Ignore malformed assistant speech events.
-      }
-    });
     source.onerror = () => {
       if (closed) return;
-      source.close();
+      scheduleAssistantEventRefresh();
     };
     return () => {
       closed = true;
@@ -1016,6 +1146,34 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
         window.clearTimeout(assistantEventRefreshTimerRef.current);
         assistantEventRefreshTimerRef.current = null;
       }
+    };
+  }, [scheduleAssistantEventRefresh]);
+
+  React.useEffect(() => {
+    if (typeof window.EventSource === 'undefined') return undefined;
+    let closed = false;
+    const source = new window.EventSource('/api/speech/events');
+    source.addEventListener('connected', () => {
+      if (!closed) scheduleAssistantEventRefresh();
+    });
+    source.addEventListener('speech_audio', (event) => {
+      try {
+        const data = JSON.parse((event as MessageEvent).data);
+        const audioBase64 = String(data?.audioBase64 ?? '').trim();
+        const contentType = String(data?.contentType ?? 'audio/wav').trim() || 'audio/wav';
+        if (audioBase64) queueSpeechAudio(audioBase64, contentType);
+        scheduleAssistantEventRefresh();
+      } catch {
+        // Ignore malformed speech events.
+      }
+    });
+    source.onerror = () => {
+      if (closed) return;
+      scheduleAssistantEventRefresh();
+    };
+    return () => {
+      closed = true;
+      source.close();
     };
   }, [scheduleAssistantEventRefresh]);
 
@@ -1033,6 +1191,52 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
       window.removeEventListener('focus', refresh);
     };
   }, [activeThread?.id, loadMessages]);
+
+  React.useEffect(() => {
+    messageScrollSignatureRef.current = '';
+    scrollMessagesToBottom({ force: true });
+  }, [activeThread?.id, scrollMessagesToBottom]);
+
+  React.useEffect(() => {
+    if (assistantFilesOpen) return;
+    scrollMessagesToBottom();
+  }, [assistantFilesOpen, scrollMessagesToBottom]);
+
+  React.useEffect(() => {
+    const thread = activeThread as AssistantThreadView | null;
+    const pendingApprovalsForThread = (assistantSnapshotData?.pendingApprovals ?? []).filter(
+      (approval) => approval.threadId === activeThread?.id && approval.status === 'pending',
+    );
+    const signature = [
+      activeThread?.id ?? '',
+      activeThread?.status ?? '',
+      messages
+        .map((message) =>
+          [
+            message.id,
+            message.role,
+            message.content?.length ?? 0,
+            message.content ? message.content.slice(-80) : '',
+            message.contentJson?.length ?? 0,
+            message.contentJson ? message.contentJson.slice(-80) : '',
+            message.toolName ?? '',
+            message.toolCallId ?? '',
+            message.isError ? '1' : '0',
+          ].join(':'),
+        )
+        .join('|'),
+      streamingReply.length,
+      streamingReply.slice(-80),
+      streamingThinking.length,
+      streamingThinking.slice(-80),
+      (thread?.runs ?? []).map((run) => [run.id, run.status, run.startedAt, run.completedAt ?? '', run.cancelledAt ?? ''].join(':')).join('|'),
+      (thread?.queuedPrompts ?? []).map((prompt) => [prompt.id, prompt.createdAt, prompt.prompt?.length ?? 0].join(':')).join('|'),
+      pendingApprovalsForThread.map((approval) => [approval.id, approval.toolName, approval.createdAt].join(':')).join('|'),
+    ].join('\u0001');
+    if (signature === messageScrollSignatureRef.current) return;
+    messageScrollSignatureRef.current = signature;
+    scrollMessagesToBottom();
+  }, [activeThread, assistantSnapshotData?.pendingApprovals, messages, scrollMessagesToBottom, streamingReply, streamingThinking]);
 
   async function createThread(options: { voiceEnabled?: boolean } = {}) {
     setBusy(true);
@@ -1066,6 +1270,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
     setError(null);
     setStreamingReply('');
     setStreamingThinking('');
+    scrollMessagesToBottom({ force: true });
     try {
       const response = await client.stream(
         `/api/assistant/threads/${encodeURIComponent(activeThread.id)}/stream`,
@@ -1085,6 +1290,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
         throw new Error(data?.error ?? `${response.status} ${response.statusText}`);
       }
       setMessageDraft('');
+      scrollMessagesToBottom({ force: true });
       await readAssistantEventStream(response, (promptEvent) => {
         if (promptEvent.type === 'delta') {
           setStreamingReply((current) => `${current}${String(promptEvent.delta ?? '')}`);
@@ -1096,6 +1302,10 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
         }
         if (promptEvent.type === 'message' && promptEvent.message) {
           setMessages((current) => upsertMessage(current, promptEvent.message as AssistantMessage));
+          return;
+        }
+        if (promptEvent.type === 'tool_call' || promptEvent.type === 'tool_result') {
+          void loadMessages(activeThread.id);
           return;
         }
         if ((promptEvent.type === 'snapshot' || promptEvent.type === 'approval_pending' || promptEvent.type === 'queued' || promptEvent.type === 'done') && promptEvent.snapshot) {
@@ -1314,10 +1524,27 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   }
 
   function newArtifactDraft() {
-    hydrateArtifactDraft(null);
+    if (busy) return;
+    if (artifactDirty && !window.confirm('Discard unsaved changes and create a new file?')) return;
+    hydrateArtifactDraft(null, 'edit');
     setArtifactPathDraft('notes/new-artifact.md');
     setArtifactContentDraft('');
     setArtifactDirty(true);
+  }
+
+  function cancelArtifactEdit() {
+    if (selectedArtifact) {
+      hydrateArtifactDraft(selectedArtifact, 'view');
+      return;
+    }
+    const fallback = chooseDefaultArtifact(artifacts);
+    if (fallback) {
+      hydrateArtifactDraft(fallback, 'view');
+      return;
+    }
+    hydrateArtifactDraft(null, 'view');
+    setArtifactPathDraft('');
+    setArtifactContentDraft('');
   }
 
   async function saveArtifact() {
@@ -1351,7 +1578,8 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   }
 
   async function deleteArtifact() {
-    if (!activeThread || !artifactPathDraft.trim()) return;
+    if (!activeThread || !selectedArtifact) return;
+    const artifactPath = selectedArtifact.path;
     setBusy(true);
     setError(null);
     try {
@@ -1359,7 +1587,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
         `/api/assistant/threads/${encodeURIComponent(activeThread.id)}/artifacts/file`,
         {
           method: 'DELETE',
-          body: JSON.stringify({ path: artifactPathDraft.trim() }),
+          body: JSON.stringify({ path: artifactPath }),
         },
       );
       setArtifacts(data.artifacts);
@@ -1420,6 +1648,28 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
     }
   }
 
+  async function updateSpeechPlaybackTarget(target: SpeechPlaybackTarget) {
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await client.request<{ ok: true; settings: VoiceSettings; speechPlayback: DashboardData['speechPlayback'] }>(
+        '/api/settings/speech-playback',
+        {
+          method: 'PATCH',
+          body: JSON.stringify({ target }),
+        },
+      );
+      setDashboard((current) => current
+        ? { ...current, settings: data.settings, speechPlayback: data.speechPlayback }
+        : current);
+      setNotice('Saved speech playback target.');
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function updateAssistantSettings(patch: Partial<NonNullable<AssistantSnapshot['assistantSettings']>>) {
     setBusy(true);
     setError(null);
@@ -1433,6 +1683,43 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
       );
       setAssistantSnapshotData(data.snapshot);
       setNotice('Saved assistant settings.');
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveAssistantApiKey(provider: 'openai' | 'exa') {
+    const apiKey = apiKeyDrafts[provider].trim();
+    if (!apiKey) {
+      setError('API key is required.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await client.request<{ ok: true; snapshot: AssistantSnapshot }>(`/api/assistant/keys/${provider}`, {
+        method: 'POST',
+        body: JSON.stringify({ apiKey }),
+      });
+      setAssistantSnapshotData(data.snapshot);
+      setApiKeyDrafts((current) => ({ ...current, [provider]: '' }));
+      setNotice(`Saved ${provider === 'openai' ? 'OpenAI' : 'Exa'} key.`);
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteAssistantApiKey(provider: 'openai' | 'exa') {
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await client.request<{ ok: true; snapshot: AssistantSnapshot }>(`/api/assistant/keys/${provider}`, { method: 'DELETE' });
+      setAssistantSnapshotData(data.snapshot);
+      setNotice(`Deleted ${provider === 'openai' ? 'OpenAI' : 'Exa'} key.`);
     } catch (err: any) {
       setError(err?.message ?? String(err));
     } finally {
@@ -1669,6 +1956,184 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
     setNotice('Copied visible logs.');
   }
 
+  async function parseUploadResponse<T>(response: Response, path: string): Promise<T> {
+    const text = await response.text();
+    let data: any = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      throw new Error(`Expected JSON from ${path}`);
+    }
+    if (!response.ok) throw new Error(data?.error ?? `${response.status} ${response.statusText}`);
+    return data as T;
+  }
+
+  async function parseReleaseMetadataFile(file: File): Promise<Record<string, unknown>> {
+    let metadata: any = null;
+    try {
+      metadata = JSON.parse(await file.text());
+    } catch {
+      throw new Error(`${file.name} must be valid JSON.`);
+    }
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+      throw new Error(`${file.name} must be a JSON object.`);
+    }
+    return metadata;
+  }
+
+  function normalizeReleaseMetadata(raw: Record<string, unknown>, platform: 'android' | 'desktop'): Record<string, unknown> | null {
+    if (String(raw.platform ?? '').trim().toLowerCase() === platform) return raw;
+    if (platform !== 'android') return null;
+
+    const elements = Array.isArray(raw.elements) ? raw.elements : [];
+    const firstElement = elements.find((entry) => entry && typeof entry === 'object') as Record<string, unknown> | undefined;
+    const versionCode = Number(firstElement?.versionCode);
+    const versionName = String(firstElement?.versionName ?? '').trim();
+    const variant = String(raw.variantName ?? '').trim();
+    const outputFile = String(firstElement?.outputFile ?? '').trim();
+    if (!Number.isInteger(versionCode) || versionCode <= 0 || !versionName || !variant) return null;
+
+    return {
+      app: 'voice-stream-next',
+      platform: 'android',
+      variant,
+      versionCode,
+      versionName,
+      fileName: outputFile || 'voice-stream-next-android-latest.apk',
+      variantFileName: outputFile || undefined,
+      builtAt: new Date().toISOString(),
+    };
+  }
+
+  async function releaseFiles(files: File[], platform: 'android' | 'desktop'): Promise<{ artifact: File | null; metadata: Record<string, unknown> | null }> {
+    const metadataCandidates = [
+      ...files.filter((file) => /^latest\.json$/i.test(file.name)),
+      ...files.filter((file) => /\.json$/i.test(file.name) && !/^latest\.json$/i.test(file.name)),
+    ];
+    let metadata: Record<string, unknown> | null = null;
+    for (const candidate of metadataCandidates) {
+      const parsed = await parseReleaseMetadataFile(candidate);
+      const normalized = normalizeReleaseMetadata(parsed, platform);
+      if (normalized) {
+        metadata = normalized;
+        break;
+      }
+    }
+    const artifact = platform === 'android'
+      ? files.find((file) => /\.apk$/i.test(file.name)) ?? null
+      : files.find((file) => /\.(zip|dmg|exe|appimage|tar\.gz|tgz)$/i.test(file.name)) ?? null;
+    return { artifact, metadata };
+  }
+
+  function fileList(files: FileList | File[] | null | undefined): File[] {
+    return Array.from(files ?? []);
+  }
+
+  type DroppedEntry = {
+    isFile: boolean;
+    isDirectory: boolean;
+    file?: (success: (file: File) => void, failure?: (error: unknown) => void) => void;
+    createReader?: () => {
+      readEntries: (success: (entries: DroppedEntry[]) => void, failure?: (error: unknown) => void) => void;
+    };
+  };
+
+  async function filesFromEntry(entry: DroppedEntry): Promise<File[]> {
+    if (entry.isFile && entry.file) {
+      return new Promise((resolve, reject) => entry.file?.((file) => resolve([file]), reject));
+    }
+    if (!entry.isDirectory || !entry.createReader) return [];
+    const reader = entry.createReader();
+    const entries: DroppedEntry[] = [];
+    for (;;) {
+      const batch = await new Promise<DroppedEntry[]>((resolve, reject) => reader.readEntries(resolve, reject));
+      if (batch.length === 0) break;
+      entries.push(...batch);
+    }
+    const nested = await Promise.all(entries.map((child) => filesFromEntry(child)));
+    return nested.flat();
+  }
+
+  async function filesFromDrop(dataTransfer: DataTransfer): Promise<File[]> {
+    const itemEntries = Array.from(dataTransfer.items ?? [])
+      .map((item) => {
+        const getter = (item as DataTransferItem & { webkitGetAsEntry?: () => DroppedEntry | null }).webkitGetAsEntry;
+        return getter ? getter.call(item) : null;
+      })
+      .filter((entry): entry is DroppedEntry => Boolean(entry));
+    if (itemEntries.length === 0) return fileList(dataTransfer.files);
+    const nested = await Promise.all(itemEntries.map((entry) => filesFromEntry(entry)));
+    return nested.flat();
+  }
+
+  async function uploadAndroidReleaseFiles(files: File[]) {
+    const { artifact, metadata } = await releaseFiles(files, 'android');
+    if (!artifact || !metadata) {
+      setError('Drop or choose both the Android APK and latest.json or Gradle output-metadata.json.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      setAdminAndroidFile(artifact);
+      const path = '/api/admin/releases/android';
+      const response = await client.stream(path, {
+        method: 'PUT',
+        headers: {
+          'content-type': artifact.type || 'application/vnd.android.package-archive',
+          'x-voice-release-file-name': artifact.name,
+          'x-voice-release-metadata': JSON.stringify(metadata),
+        },
+        body: artifact,
+      });
+      const data = await parseUploadResponse<{ ok: true; android: AndroidApkInfo }>(response, path);
+      setAndroidApkInfo(data.android);
+      await refreshAndroidSetup();
+      await loadDashboard();
+      setNotice('Uploaded Android app release.');
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function uploadDesktopReleaseFiles(files: File[]) {
+    const { artifact, metadata } = await releaseFiles(files, 'desktop');
+    if (!artifact || !metadata) {
+      setError('Drop or choose both the desktop archive and a latest.json with platform "desktop".');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      setAdminDesktopFile(artifact);
+      const path = '/api/admin/releases/desktop';
+      const response = await client.stream(path, {
+        method: 'PUT',
+        headers: {
+          'content-type': artifact.type || 'application/octet-stream',
+          'x-voice-release-file-name': artifact.name,
+          'x-voice-release-metadata': JSON.stringify(metadata),
+        },
+        body: artifact,
+      });
+      const data = await parseUploadResponse<{ ok: true; desktop: DesktopAppInfo }>(response, path);
+      setDesktopAppInfo(data.desktop);
+      await loadDashboard();
+      setNotice('Uploaded desktop app release.');
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function droppedFiles(event: React.DragEvent<HTMLElement>): Promise<File[]> {
+    event.preventDefault();
+    return filesFromDrop(event.dataTransfer);
+  }
+
   function openThreadFromTranscript(threadId: string) {
     setActiveView('threads');
     setActiveThreadId(threadId);
@@ -1690,8 +2155,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
           <div className="identity">{identitySlot}</div>
         </header>
 
-        {error ? <div className="banner error">{error}</div> : null}
-        {notice ? <div className="banner notice">{notice}</div> : null}
+        <ToastStack toasts={toasts} onDismiss={dismissToast} />
 
         <DesktopVoicePanel client={client} onRefresh={loadDashboard} />
       </main>
@@ -1709,6 +2173,8 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   });
   const logs = dashboard?.logs ?? [];
   const transcripts = dashboard?.transcripts ?? [];
+  const speechPlayback = dashboard?.speechPlayback;
+  const speechPlaybackTarget = dashboard?.settings.speechPlaybackTarget ?? speechPlayback?.preferredTarget ?? 'auto';
   const pendingApprovals = assistantSnapshotData?.pendingApprovals ?? [];
   const activePendingApprovals = pendingApprovals.filter((approval) => approval.threadId === activeThread?.id && approval.status === 'pending');
   const activeRuns = (activeThread as AssistantThreadView | null)?.runs?.filter((run) => run.status === 'running' || run.status === 'waiting_for_approval') ?? [];
@@ -1793,6 +2259,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
     { id: 'devices', label: 'Devices', count: devices.length },
     { id: 'settings', label: 'Settings' },
     { id: 'activity', label: 'Activity', count: transcripts.length + logs.length },
+    ...(dashboard?.user.admin ? [{ id: 'admin' as const, label: 'Admin' }] : []),
   ];
 
   return (
@@ -2088,6 +2555,11 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                       <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" />
                       <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.2.34.6.6 1 .6h.6a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1.4Z" />
                     </svg>
+                  ) : item.id === 'admin' ? (
+                    <svg viewBox="0 0 24 24" aria-hidden="true" className={assistantIconSvgClass}>
+                      <path d="M12 3 5 6v5c0 4.5 3 8.5 7 10 4-1.5 7-5.5 7-10V6l-7-3Z" />
+                      <path d="M9 12l2 2 4-4" />
+                    </svg>
                   ) : (
                     <svg viewBox="0 0 24 24" aria-hidden="true" className={assistantIconSvgClass}>
                       <path d="M3 3v18h18" />
@@ -2103,8 +2575,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
           </div>
         </header>
 
-        {error ? <div className="banner error">{error}</div> : null}
-        {notice ? <div className="banner notice">{notice}</div> : null}
+        <ToastStack toasts={toasts} onDismiss={dismissToast} />
 
         {activeView === 'threads' && assistantToolsOpen && activeThread ? (
           <AssistantToolsPanel
@@ -2127,126 +2598,52 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
           {activeView === 'threads' ? (
             <section className="flex h-full min-h-0 flex-col">
               {activeThread?.error ? (
-                <div className="grid shrink-0 gap-1 border-b border-[rgba(248,113,113,.24)] bg-[rgba(248,113,113,.08)] px-5 py-3 text-[var(--fg-secondary)]">
+                <div className="grid shrink-0 gap-1 border-b border-[rgba(248,113,113,.24)] bg-[rgba(248,113,113,.08)] px-3 py-2 text-[var(--fg-secondary)]">
                   <strong className="text-[11px] text-[#fecaca]">Assistant error</strong>
                   <span className="break-words text-xs leading-relaxed">{activeThread.error}</span>
                 </div>
               ) : null}
 
               {assistantFilesOpen && activeThread ? (
-                <section className="flex min-h-0 flex-1 flex-col border-t border-[var(--border)] bg-[var(--panel-alt)] p-3">
-                  <div className="mb-2.5 flex shrink-0 items-start justify-between gap-3">
-                    <div>
-                      <span className={assistantKickerClass}>Files</span>
-                      <h2 className="m-0 mt-0.5 text-sm leading-tight text-[var(--fg)]">Assistant Files</h2>
-                      <small className="mt-1 block text-[11px] text-[var(--muted)]">{artifacts.length} file{artifacts.length === 1 ? '' : 's'} in this thread</small>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <button type="button" className={assistantActionButtonClass} onClick={newArtifactDraft} disabled={busy}>
-                        New
-                      </button>
-                      <button type="button" className={assistantActionButtonClass} onClick={() => void loadArtifacts(activeThread.id)} disabled={busy || artifactsLoading}>
-                        {artifactsLoading ? 'Refreshing...' : 'Refresh'}
-                      </button>
-                    </div>
-                  </div>
-                  {artifactsError ? <div className="mb-2 rounded border border-[rgba(248,113,113,.28)] bg-[rgba(248,113,113,.08)] p-2 text-xs text-[#fecaca]">{artifactsError}</div> : null}
-                  <div className="grid min-h-0 flex-1 grid-cols-[minmax(190px,.32fr)_minmax(0,1fr)] gap-2.5 max-[880px]:grid-cols-1">
-                    <div className="grid max-h-[260px] content-start gap-2 overflow-auto">
-                      {artifactsLoading && artifacts.length === 0 ? <div className={assistantEmptyClass}>Loading assistant files...</div> : null}
-                      {artifacts.map((artifact) => {
-                        const active = selectedArtifact?.path === artifact.path && !artifactDirty;
-                        return (
-                          <button
-                            key={artifact.id}
-                            type="button"
-                            className={cn(
-                              'grid min-h-[54px] gap-0.5 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.02)] px-2.5 py-2 text-left',
-                              active && '!border-[rgba(74,222,128,.28)] !bg-[rgba(74,222,128,.08)] !text-[var(--fg)]',
-                            )}
-                            onClick={() => hydrateArtifactDraft(artifact)}
-                          >
-                            <strong className="min-w-0 truncate text-[var(--fg-secondary)]">{artifactFileName(artifact.path)}</strong>
-                            <span className="min-w-0 truncate text-[11px] text-[var(--muted)]">{artifact.path}</span>
-                            <small className="text-[10px] text-[var(--muted)]">{formatArtifactSize(artifact.size)} · {timeLabel(artifact.updatedAt)}</small>
-                          </button>
-                        );
-                      })}
-                      {artifacts.length === 0 && !artifactsLoading ? <div className={assistantEmptyClass}>No assistant files yet.</div> : null}
-                    </div>
-                    <div className="grid min-w-0 gap-2.5">
-                      <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] gap-2 max-[880px]:grid-cols-1">
-                        <div className="grid min-w-0 gap-0.5 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.018)] px-2.5 py-2">
-                          <span className="font-display text-[9px] font-bold uppercase text-[var(--muted-dim)]">Path</span>
-                          <strong className="min-w-0 truncate text-[11px] text-[var(--fg-secondary)]">{artifactPathDraft.trim() || 'Draft file'}</strong>
-                        </div>
-                        <div className="grid min-w-0 gap-0.5 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.018)] px-2.5 py-2">
-                          <span className="font-display text-[9px] font-bold uppercase text-[var(--muted-dim)]">Size</span>
-                          <strong className="min-w-0 truncate text-[11px] text-[var(--fg-secondary)]">{formatArtifactSize(new Blob([artifactContentDraft]).size)}</strong>
-                        </div>
-                        <div className="grid min-w-0 gap-0.5 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.018)] px-2.5 py-2">
-                          <span className="font-display text-[9px] font-bold uppercase text-[var(--muted-dim)]">Revision</span>
-                          <strong className="min-w-0 truncate text-[11px] text-[var(--fg-secondary)]">{selectedArtifact?.revision ? selectedArtifact.revision.slice(0, 8) : 'Draft'}</strong>
-                        </div>
-                      </div>
-                      <label className="grid gap-1 text-[10px] font-bold uppercase text-[var(--muted)]">
-                        Path
-                        <input
-                          value={artifactPathDraft}
-                          onChange={(event) => {
-                            setArtifactPathDraft(event.target.value);
-                            setArtifactDirty(true);
-                          }}
-                          placeholder="notes/plan.md"
-                          disabled={busy}
-                        />
-                      </label>
-                      <div className="grid min-h-0 grid-cols-2 gap-2.5 max-[880px]:grid-cols-1">
-                        <section className="grid min-h-[260px] min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-1.5 overflow-auto rounded border border-[var(--border-subtle)] bg-[rgba(0,0,0,.12)] p-2.5">
-                          <div className="font-display text-[9px] font-bold uppercase text-[var(--muted-dim)]">Preview</div>
-                          {artifactContentDraft.trim() ? (
-                            <MarkdownMessage text={artifactContentDraft} />
-                          ) : (
-                            <div className={assistantEmptyClass}>Nothing to preview.</div>
-                          )}
-                        </section>
-                        <label className="grid min-h-[260px] min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-1.5 text-[10px] font-bold uppercase text-[var(--muted)]">
-                          Source
-                          <textarea
-                            value={artifactContentDraft}
-                            onChange={(event) => {
-                              setArtifactContentDraft(event.target.value);
-                              setArtifactDirty(true);
-                            }}
-                            placeholder="Artifact content..."
-                            disabled={busy}
-                            className="min-h-0 max-h-none resize-y font-mono text-[11px] leading-normal"
-                          />
-                        </label>
-                      </div>
-                      <div className="flex items-center justify-between gap-1.5 text-[10px] text-[var(--muted)]">
-                        <span>{artifactDirty ? 'Unsaved changes' : selectedArtifact ? `Updated ${timeLabel(selectedArtifact.updatedAt)}` : 'Draft'}</span>
-                        <div className="flex items-center gap-1.5">
-                          <button type="button" className={assistantActionButtonClass} onClick={() => void copyArtifact()} disabled={!artifactContentDraft || busy}>
-                            Copy
-                          </button>
-                          <button type="button" className={assistantActionButtonClass} onClick={downloadArtifact} disabled={!artifactPathDraft.trim() || busy}>
-                            Download
-                          </button>
-                          <button type="button" className={assistantActionButtonClass} onClick={() => void deleteArtifact()} disabled={!selectedArtifact || busy}>
-                            Delete
-                          </button>
-                          <button type="button" className={assistantActionButtonClass} onClick={() => void saveArtifact()} disabled={!artifactPathDraft.trim() || busy}>
-                            Save
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </section>
+                <AssistantFilesPanel
+                  artifacts={artifacts}
+                  artifactsLoading={artifactsLoading}
+                  artifactsError={artifactsError}
+                  selectedArtifact={selectedArtifact}
+                  artifactPathDraft={artifactPathDraft}
+                  artifactContentDraft={artifactContentDraft}
+                  artifactDirty={artifactDirty}
+                  panelMode={artifactPanelMode}
+                  busy={busy}
+                  onRefresh={() => void loadArtifacts(activeThread.id)}
+                  onNew={newArtifactDraft}
+                  onSelect={(artifact) => {
+                    if (busy) return;
+                    if (artifactDirty && !window.confirm('Discard unsaved changes and open this file?')) return;
+                    hydrateArtifactDraft(artifact, 'view');
+                  }}
+                  onPanelModeChange={setArtifactPanelMode}
+                  onPathChange={(path) => {
+                    setArtifactPathDraft(path);
+                    setArtifactDirty(true);
+                  }}
+                  onContentChange={(content) => {
+                    setArtifactContentDraft(content);
+                    setArtifactDirty(true);
+                  }}
+                  onCancelEdit={cancelArtifactEdit}
+                  onSave={() => void saveArtifact()}
+                  onDelete={() => void deleteArtifact()}
+                  onCopy={() => void copyArtifact()}
+                  onDownload={downloadArtifact}
+                />
               ) : (
                 <>
-                <div className="flex min-h-0 flex-1 flex-col gap-0 overflow-auto bg-[#151a20] py-4">
+                <div
+                  ref={messagesScrollRef}
+                  onScroll={(event) => updateMessagesStickToBottom(event.currentTarget)}
+                  className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto bg-[#151a20] py-3"
+                >
                   {assistantRenderItems.map((item) =>
                     item.type === 'message' ? (
                       <AssistantMessageRow key={item.key} message={item.message} streaming={item.message.id === streamingMessage?.id} />
@@ -2256,7 +2653,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                   )}
                   {showThinking ? <AssistantThinkingRow /> : null}
                   {queuedPrompts.length > 0 ? (
-                    <div className="mx-5 my-3 grid max-h-[220px] gap-1.5 overflow-auto">
+                    <div className="mx-3 grid max-h-[220px] gap-1.5 overflow-auto">
                       {queuedPrompts.map((queuedPrompt) => (
                         <article key={queuedPrompt.id} className="flex min-w-0 items-center justify-between gap-2.5 rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.018)] px-2.5 py-2">
                           <div className="min-w-0">
@@ -2276,7 +2673,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                     </div>
                   ) : null}
                   {activePendingApprovals.length > 0 ? (
-                    <div className="mx-5 my-3 grid gap-1.5">
+                    <div className="mx-3 grid gap-1.5">
                       {activePendingApprovals.map((approval) => {
                         const summary = approvalSummary(approval);
                         return (
@@ -2485,6 +2882,46 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
               <section className={assistantPanelClass}>
                 <div className={assistantPanelHeaderClass}>
                   <div>
+                    <span className={assistantKickerClass}>Assistant</span>
+                    <h2 className={assistantPanelTitleClass}>API Keys</h2>
+                  </div>
+                </div>
+                <div className="grid gap-2">
+                  {(['openai', 'exa'] as const).map((provider) => {
+                    const key = assistantSnapshotData?.apiKeys?.[provider];
+                    const label = provider === 'openai' ? 'OpenAI' : 'Exa';
+                    return (
+                      <div key={provider} className="grid grid-cols-[120px_minmax(180px,1fr)_auto_auto] items-center gap-2 rounded border border-[var(--border)] bg-white/[.02] p-2 max-[880px]:grid-cols-1">
+                        <div className="min-w-0">
+                          <strong className="block text-xs text-[var(--fg)]">{label}</strong>
+                          <small className="block truncate text-[11px] text-[var(--muted)]">{key?.hasKey ? key.keyHint : 'Not configured'}</small>
+                        </div>
+                        <input
+                          type="password"
+                          value={apiKeyDrafts[provider]}
+                          disabled={busy}
+                          placeholder={key?.hasKey ? 'Paste replacement key' : `Paste ${label} key`}
+                          onChange={(event) => {
+                            const value = event.currentTarget.value;
+                            setApiKeyDrafts((current) => ({ ...current, [provider]: value }));
+                          }}
+                          className="h-[30px] min-w-0"
+                        />
+                        <button type="button" className={assistantActionButtonClass} onClick={() => void saveAssistantApiKey(provider)} disabled={busy || !apiKeyDrafts[provider].trim()}>
+                          Save
+                        </button>
+                        <button type="button" className={assistantActionButtonClass} onClick={() => void deleteAssistantApiKey(provider)} disabled={busy || !key?.hasKey}>
+                          Delete
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+
+              <section className={assistantPanelClass}>
+                <div className={assistantPanelHeaderClass}>
+                  <div>
                     <span className={assistantKickerClass}>Fleet</span>
                     <h2 className={assistantPanelTitleClass}>Devices</h2>
                   </div>
@@ -2615,6 +3052,51 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
               <section className={assistantPanelClass}>
                 <div className={assistantPanelHeaderClass}>
                   <div>
+                    <span className={assistantKickerClass}>Speech</span>
+                    <h2 className={assistantPanelTitleClass}>Playback Target</h2>
+                  </div>
+                  <span className="text-[11px] text-[var(--muted)]">
+                    Active: {speechPlayback?.resolvedTarget ?? 'none'}
+                  </span>
+                </div>
+                <div className="grid gap-2">
+                  <div className="flex flex-wrap gap-1.5">
+                    {(['auto', 'web', 'desktop', 'android'] as SpeechPlaybackTarget[]).map((target) => (
+                      <button
+                        key={target}
+                        type="button"
+                        className={cn(
+                          assistantActionButtonClass,
+                          speechPlaybackTarget === target && 'border-[rgba(74,222,128,.28)] bg-[rgba(74,222,128,.08)] text-[var(--green)]',
+                        )}
+                        disabled={busy}
+                        onClick={() => void updateSpeechPlaybackTarget(target)}
+                      >
+                        {target}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {(['web', 'desktop', 'android'] as const).map((target) => (
+                      <span
+                        key={target}
+                        className={cn(
+                          'rounded border px-1.5 py-0.5 text-[10px] font-bold uppercase',
+                          speechPlayback?.connectedTargets.includes(target)
+                            ? 'border-[rgba(74,222,128,.22)] bg-[rgba(74,222,128,.08)] text-[var(--green)]'
+                            : 'border-[var(--border-subtle)] bg-white/[.02] text-[var(--muted)]',
+                        )}
+                      >
+                        {target}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </section>
+
+              <section className={assistantPanelClass}>
+                <div className={assistantPanelHeaderClass}>
+                  <div>
                     <span className={assistantKickerClass}>Settings</span>
                     <h2 className={assistantPanelTitleClass}>Voice Approval</h2>
                   </div>
@@ -2624,28 +3106,40 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                     Trigger phrase
                     <input
                       value={approvalSettings.triggerPhrase}
-                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, triggerPhrase: event.target.value }))}
+                      onChange={(event) => {
+                        const value = event.currentTarget.value;
+                        setApprovalSettings((prev) => ({ ...prev, triggerPhrase: value }));
+                      }}
                     />
                   </label>
                   <label className={assistantFieldLabelClass}>
                     Unlock
                     <input
                       value={approvalSettings.unlockCode}
-                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, unlockCode: codeValue(event.target.value) }))}
+                      onChange={(event) => {
+                        const value = codeValue(event.currentTarget.value);
+                        setApprovalSettings((prev) => ({ ...prev, unlockCode: value }));
+                      }}
                     />
                   </label>
                   <label className={assistantFieldLabelClass}>
                     Lock
                     <input
                       value={approvalSettings.lockCode}
-                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, lockCode: codeValue(event.target.value) }))}
+                      onChange={(event) => {
+                        const value = codeValue(event.currentTarget.value);
+                        setApprovalSettings((prev) => ({ ...prev, lockCode: value }));
+                      }}
                     />
                   </label>
                   <label className={assistantFieldLabelClass}>
                     Off
                     <input
                       value={approvalSettings.lockedOffCode}
-                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, lockedOffCode: codeValue(event.target.value) }))}
+                      onChange={(event) => {
+                        const value = codeValue(event.currentTarget.value);
+                        setApprovalSettings((prev) => ({ ...prev, lockedOffCode: value }));
+                      }}
                     />
                   </label>
                   <label className={assistantFieldLabelClass}>
@@ -2655,7 +3149,10 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                       min={1}
                       max={12}
                       value={approvalSettings.minDigits}
-                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, minDigits: Number(event.target.value) }))}
+                      onChange={(event) => {
+                        const value = Number(event.currentTarget.value);
+                        setApprovalSettings((prev) => ({ ...prev, minDigits: value }));
+                      }}
                     />
                   </label>
                   <label className={assistantFieldLabelClass}>
@@ -2665,7 +3162,10 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                       min={1}
                       max={12}
                       value={approvalSettings.maxDigits}
-                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, maxDigits: Number(event.target.value) }))}
+                      onChange={(event) => {
+                        const value = Number(event.currentTarget.value);
+                        setApprovalSettings((prev) => ({ ...prev, maxDigits: value }));
+                      }}
                     />
                   </label>
                   <label className={assistantFieldLabelClass}>
@@ -2675,7 +3175,10 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                       min={250}
                       max={3000}
                       value={approvalSettings.stableMs}
-                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, stableMs: Number(event.target.value) }))}
+                      onChange={(event) => {
+                        const value = Number(event.currentTarget.value);
+                        setApprovalSettings((prev) => ({ ...prev, stableMs: value }));
+                      }}
                     />
                   </label>
                   <label className={assistantFieldLabelClass}>
@@ -2685,7 +3188,10 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                       min={1000}
                       max={15000}
                       value={approvalSettings.collectTimeoutMs}
-                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, collectTimeoutMs: Number(event.target.value) }))}
+                      onChange={(event) => {
+                        const value = Number(event.currentTarget.value);
+                        setApprovalSettings((prev) => ({ ...prev, collectTimeoutMs: value }));
+                      }}
                     />
                   </label>
                   <label className={assistantFieldLabelClass}>
@@ -2695,7 +3201,10 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                       min={0}
                       max={15000}
                       value={approvalSettings.duplicateCooldownMs}
-                      onChange={(event) => setApprovalSettings((prev) => ({ ...prev, duplicateCooldownMs: Number(event.target.value) }))}
+                      onChange={(event) => {
+                        const value = Number(event.currentTarget.value);
+                        setApprovalSettings((prev) => ({ ...prev, duplicateCooldownMs: value }));
+                      }}
                     />
                   </label>
                   <label className={assistantFieldLabelClass}>
@@ -2705,9 +3214,10 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                       min={100}
                       max={1000}
                       value={approvalSettings.finalizeCheckIntervalMs}
-                      onChange={(event) =>
-                        setApprovalSettings((prev) => ({ ...prev, finalizeCheckIntervalMs: Number(event.target.value) }))
-                      }
+                      onChange={(event) => {
+                        const value = Number(event.currentTarget.value);
+                        setApprovalSettings((prev) => ({ ...prev, finalizeCheckIntervalMs: value }));
+                      }}
                     />
                   </label>
                   <button type="submit" className={cn(assistantActionButtonClass, 'w-fit')} disabled={busy}>
@@ -2775,6 +3285,108 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                 </section>
               ) : null}
             </section>
+          ) : null}
+
+          {activeView === 'admin' ? (
+            dashboard?.user.admin ? (
+              <section className="grid min-h-0 gap-3 overflow-auto p-3">
+                <section className={assistantPanelClass}>
+                  <div className={assistantPanelHeaderClass}>
+                    <div>
+                      <span className={assistantKickerClass}>Admin</span>
+                      <h2 className={assistantPanelTitleClass}>App Releases</h2>
+                    </div>
+                  </div>
+                  <div className="mb-3 grid gap-2 rounded border border-[var(--border-subtle)] bg-white/[.02] p-3">
+                    <span className={assistantKickerClass}>Current downloads</span>
+                    <AppDownloadLinks androidInfo={androidApkInfo} desktopInfo={desktopAppInfo} />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 max-[880px]:grid-cols-1">
+                    <section className="grid gap-2.5 rounded border border-[var(--border-subtle)] bg-white/[.02] p-3">
+                      <div>
+                        <span className={assistantKickerClass}>Desktop</span>
+                        <h3 className="m-0 mt-1 text-sm leading-tight text-[var(--fg)]">Upload desktop app</h3>
+                      </div>
+                      <label
+                        className={cn(
+                          'grid min-h-[132px] cursor-pointer place-items-center gap-2 rounded border border-dashed border-[var(--border)] bg-black/[.12] p-4 text-center transition hover:border-[rgba(167,139,250,.52)] hover:bg-white/[.035]',
+                          busy && 'pointer-events-none opacity-50',
+                        )}
+                        onDragOver={(event) => event.preventDefault()}
+                        onDrop={(event) => void droppedFiles(event).then((files) => uploadDesktopReleaseFiles(files))}
+                      >
+                        <input
+                          type="file"
+                          className="hidden"
+                          multiple
+                          accept=".tar.gz,.tgz,.zip,.dmg,.exe,.AppImage,.json,application/gzip,application/zip,application/json"
+                          onChange={(event) => void uploadDesktopReleaseFiles(fileList(event.currentTarget.files))}
+                        />
+                        <span className="font-display text-[10px] font-bold uppercase text-[var(--fg-secondary)]">{busy ? 'Uploading...' : 'Drop desktop build folder or archive + latest.json'}</span>
+                        <small className="max-w-full truncate text-[11px] text-[var(--muted)]">{adminDesktopFile ? `${adminDesktopFile.name} / ${formatBytes(adminDesktopFile.size)}` : 'Click to choose the archive and companion latest.json'}</small>
+                        <small className="text-[10px] text-[var(--muted-dim)]">Current: {appDownloadMeta(desktopAppInfo)}</small>
+                      </label>
+                    </section>
+
+                    <section className="grid gap-2.5 rounded border border-[var(--border-subtle)] bg-white/[.02] p-3">
+                      <div>
+                        <span className={assistantKickerClass}>Android</span>
+                        <h3 className="m-0 mt-1 text-sm leading-tight text-[var(--fg)]">Upload Android APK</h3>
+                      </div>
+                      <label
+                        className={cn(
+                          'grid min-h-[132px] cursor-pointer place-items-center gap-2 rounded border border-dashed border-[var(--border)] bg-black/[.12] p-4 text-center transition hover:border-[rgba(167,139,250,.52)] hover:bg-white/[.035]',
+                          busy && 'pointer-events-none opacity-50',
+                        )}
+                        onDragOver={(event) => event.preventDefault()}
+                        onDrop={(event) => void droppedFiles(event).then((files) => uploadAndroidReleaseFiles(files))}
+                      >
+                        <input
+                          type="file"
+                          className="hidden"
+                          multiple
+                          accept=".apk,.json,application/vnd.android.package-archive,application/json"
+                          onChange={(event) => void uploadAndroidReleaseFiles(fileList(event.currentTarget.files))}
+                        />
+                        <span className="font-display text-[10px] font-bold uppercase text-[var(--fg-secondary)]">{busy ? 'Uploading...' : 'Drop Android build folder or APK + metadata'}</span>
+                        <small className="max-w-full truncate text-[11px] text-[var(--muted)]">{adminAndroidFile ? `${adminAndroidFile.name} / ${formatBytes(adminAndroidFile.size)}` : 'Click to choose the APK and latest.json or output-metadata.json'}</small>
+                        <small className="text-[10px] text-[var(--muted-dim)]">Current: {appDownloadMeta(androidApkInfo)}</small>
+                      </label>
+                    </section>
+                  </div>
+                </section>
+
+                <section className={assistantPanelClass}>
+                  <div className={assistantPanelHeaderClass}>
+                    <div>
+                      <span className={assistantKickerClass}>Admin</span>
+                      <h2 className={assistantPanelTitleClass}>Device Monitor</h2>
+                    </div>
+                  </div>
+                  <div className="grid gap-2">
+                    {dashboard.adminDevices.map((device) => (
+                      <article key={device.id} className={cn(assistantRowClass, 'grid grid-cols-[minmax(0,1fr)_120px_140px_auto] items-center gap-2 p-2 max-[620px]:grid-cols-1')}>
+                        <strong className="min-w-0 text-xs text-[var(--fg)]">{device.displayName}</strong>
+                        <span className="text-xs text-[var(--muted)]">{device.deviceType}</span>
+                        <span className="text-xs text-[var(--muted)]">token {device.tokenHint}...</span>
+                        <time className="text-xs text-[var(--muted)]">{timeLabel(device.lastSeenAt)}</time>
+                      </article>
+                    ))}
+                    {dashboard.adminClientStatuses.map((status) => (
+                      <article key={`admin-status-${status.deviceId}`} className="grid grid-cols-[minmax(0,1fr)_120px_140px_auto] items-center gap-2 rounded-[7px] border border-[rgba(74,222,128,.18)] bg-[rgba(74,222,128,.06)] p-2 text-[var(--fg-secondary)] max-[620px]:grid-cols-1">
+                        <strong className="min-w-0 text-xs text-[var(--fg)]">{status.displayName}</strong>
+                        <span className="text-xs text-[var(--muted)]">{status.mode}</span>
+                        <span className="text-xs text-[var(--muted)]">{status.microphone || status.status}</span>
+                        <time className="text-xs text-[var(--muted)]">{timeLabel(status.updatedAt)}</time>
+                      </article>
+                    ))}
+                    {dashboard.adminDevices.length === 0 ? <div className={assistantEmptyClass}>No connected devices yet.</div> : null}
+                  </div>
+                </section>
+              </section>
+            ) : (
+              <div className={assistantEmptyClass}>Admin access required.</div>
+            )
           ) : null}
         </section>
       </section>
@@ -3003,6 +3615,12 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
         socket.send(JSON.stringify({ type: 'client_ping', sentAt: new Date().toISOString() }));
         return;
       }
+      if (message.type === 'speech_audio') {
+        const audioBase64 = String(message.audioBase64 ?? '').trim();
+        const contentType = String(message.contentType ?? 'audio/wav').trim() || 'audio/wav';
+        if (audioBase64) queueSpeechAudio(audioBase64, contentType);
+        return;
+      }
       if (message.type === 'server_command') {
         void handleRemoteControlCommand(message, socket);
       }
@@ -3103,8 +3721,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
         }
         return;
       }
-      const audio = new Audio(URL.createObjectURL(new Blob([event.data], { type: 'audio/wav' })));
-      void audio.play().catch(() => undefined);
+      queueSpeechAudioBytes(event.data, 'audio/wav');
     };
     source.connect(processor);
     processor.connect(context.destination);
@@ -3421,6 +4038,9 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
 type VoiceMode = 'off' | 'awake' | 'sleeping' | 'recording';
 type VoiceStreamTarget = 'assistant' | 'patch' | 'clipboard';
 
+// Keep the status command path available, but do not match spoken status phrases locally.
+const ENABLE_STATUS_WAKE_COMMAND = false;
+
 function wakePhraseMatch(text: string): 'start' | 'patch' | 'clipboard' | 'sleep' | 'status' | null {
   const words = text.toLowerCase().split(/[^a-z]+/).filter(Boolean);
   const compact = words.join('');
@@ -3428,7 +4048,7 @@ function wakePhraseMatch(text: string): 'start' | 'patch' | 'clipboard' | 'sleep
   if (words.some((word, index) => (word === 'hey' || word === 'hay') && (words[index + 1] === 'sebastian' || words[index + 1] === 'sebastien'))) return 'start';
   if (words.some((word, index) => word === 'patch' && words[index + 1] === 'me' && words[index + 2] === 'in')) return 'patch';
   if (words.includes('transcribe')) return 'clipboard';
-  if (words.includes('status') || compact === 'stateus' || compact === 'checkstatus') return 'status';
+  if (ENABLE_STATUS_WAKE_COMMAND && (words.includes('status') || compact === 'stateus' || compact === 'checkstatus')) return 'status';
   return null;
 }
 
@@ -3479,6 +4099,38 @@ function Metric({ label, value }: { label: string; value: React.ReactNode }) {
       <span>{label}</span>
       <strong>{value}</strong>
     </article>
+  );
+}
+
+function ToastStack({ toasts, onDismiss }: { toasts: AppToast[]; onDismiss: (id: string) => void }) {
+  if (toasts.length === 0) return null;
+  return (
+    <div className="toast-stack" role="status" aria-live="polite">
+      {toasts.map((toast) => (
+        <article key={toast.id} className={cn('app-toast', toast.kind === 'error' && 'is-error')}>
+          <div className="app-toast-icon" aria-hidden="true">
+            {toast.kind === 'error' ? (
+              <svg viewBox="0 0 24 24" focusable="false">
+                <path d="M12 8v5" />
+                <path d="M12 17h.01" />
+                <path d="M10.3 4.5 2.8 18a2 2 0 0 0 1.7 3h15a2 2 0 0 0 1.7-3L13.7 4.5a2 2 0 0 0-3.4 0Z" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 24 24" focusable="false">
+                <path d="M20 6 9 17l-5-5" />
+              </svg>
+            )}
+          </div>
+          <p>{toast.message}</p>
+          <button type="button" onClick={() => onDismiss(toast.id)} aria-label="Dismiss notification">
+            <svg viewBox="0 0 24 24" focusable="false">
+              <path d="M18 6 6 18" />
+              <path d="m6 6 12 12" />
+            </svg>
+          </button>
+        </article>
+      ))}
+    </div>
   );
 }
 

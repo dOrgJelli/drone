@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { Database } from 'bun:sqlite';
@@ -14,6 +15,8 @@ import {
   type AssistantExtensionToolRoute,
 } from './assistant-extensions.js';
 
+export type SpeechPlaybackTarget = 'auto' | 'web' | 'desktop' | 'android';
+
 export type UserProfile = {
   id: string;
   clerkUserId: string;
@@ -26,6 +29,7 @@ export type UserProfile = {
 };
 
 export type VoiceSettings = VoiceApprovalSettings & {
+  speechPlaybackTarget: SpeechPlaybackTarget;
   updatedAt: string;
 };
 
@@ -34,6 +38,7 @@ export type DeviceRecord = {
   userId: string;
   deviceType: string;
   displayName: string;
+  installationId: string | null;
   tokenHint: string;
   lastSeenAt: string;
   createdAt: string;
@@ -69,6 +74,7 @@ export type AndroidSetupClaimResult =
 export type DesktopAuthRequestRecord = {
   id: string;
   displayName: string;
+  installationId: string | null;
   expiresAt: string;
   claimedAt: string | null;
   userId: string | null;
@@ -234,6 +240,15 @@ export type AssistantSettingsRecord = {
   updatedAt: string;
 };
 
+export type AssistantApiKeyProvider = 'openai' | 'exa';
+
+export type AssistantApiKeyView = {
+  provider: AssistantApiKeyProvider;
+  hasKey: boolean;
+  keyHint: string | null;
+  updatedAt: string | null;
+};
+
 export type AssistantCodexConnectionRecord = {
   userId: string;
   accessToken: string;
@@ -342,6 +357,47 @@ function sha256(value: string): string {
   return new Bun.CryptoHasher('sha256').update(value).digest('hex');
 }
 
+function cleanAssistantApiKeyProvider(raw: unknown): AssistantApiKeyProvider {
+  const value = String(raw ?? '').trim().toLowerCase();
+  if (value === 'openai' || value === 'exa') return value;
+  throw Object.assign(new Error('unsupported assistant API key provider'), { statusCode: 400 });
+}
+
+function cleanApiKey(raw: unknown): string {
+  return String(raw ?? '').trim();
+}
+
+function apiKeyHint(apiKey: string): string {
+  const value = cleanApiKey(apiKey);
+  if (value.length <= 8) return `${value.slice(0, 2)}...${value.slice(-2)}`;
+  return `${value.slice(0, 4)}...${value.slice(-4)}`;
+}
+
+function assistantSecretKey(): Buffer {
+  const raw = process.env.VOICE_STREAM_NEXT_SECRETS_KEY?.trim();
+  if (!raw) {
+    throw Object.assign(new Error('VOICE_STREAM_NEXT_SECRETS_KEY is required to store assistant API keys.'), { statusCode: 500 });
+  }
+  if (/^[a-f0-9]{64}$/i.test(raw)) return Buffer.from(raw, 'hex');
+  return crypto.createHash('sha256').update(raw, 'utf8').digest();
+}
+
+function encryptAssistantSecret(value: string): string {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', assistantSecretKey(), iv);
+  const encrypted = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return ['v1', iv.toString('base64'), tag.toString('base64'), encrypted.toString('base64')].join(':');
+}
+
+function decryptAssistantSecret(value: string): string {
+  const [version, ivRaw, tagRaw, encryptedRaw] = String(value ?? '').split(':');
+  if (version !== 'v1' || !ivRaw || !tagRaw || !encryptedRaw) throw new Error('assistant API key is not readable');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', assistantSecretKey(), Buffer.from(ivRaw, 'base64'));
+  decipher.setAuthTag(Buffer.from(tagRaw, 'base64'));
+  return Buffer.concat([decipher.update(Buffer.from(encryptedRaw, 'base64')), decipher.final()]).toString('utf8');
+}
+
 function dataDir(): string {
   return path.resolve(
     process.env.VOICE_STREAM_NEXT_DATA_DIR?.trim() ||
@@ -362,6 +418,16 @@ function asBool(value: unknown): boolean {
   return value === 1 || value === true;
 }
 
+function cleanSpeechPlaybackTarget(raw: unknown): SpeechPlaybackTarget {
+  const value = String(raw ?? '').trim().toLowerCase();
+  return value === 'web' || value === 'desktop' || value === 'android' || value === 'auto' ? value : 'auto';
+}
+
+function cleanInstallationId(raw: unknown): string | null {
+  const value = String(raw ?? '').trim();
+  return value ? value.slice(0, 128) : null;
+}
+
 const ASSISTANT_DEFAULT_PROVIDER = 'openai';
 const ASSISTANT_DEFAULT_MODEL = 'gpt-5.5';
 const ASSISTANT_DEFAULT_THINKING_LEVEL = 'off';
@@ -371,6 +437,8 @@ const ASSISTANT_DEFAULT_ENABLED_TOOLS = [
   'get_system_prompt',
   'update_system_prompt',
   'set_thinking_level',
+  'web_search',
+  'fetch_content',
 ] as const;
 const ASSISTANT_DEFAULT_CAPABILITIES: AssistantThreadCapabilities = {
   artifacts: true,
@@ -442,6 +510,7 @@ function rowVoiceSettings(row: any): VoiceSettings {
     postPromptCommandSuppressionMs: Number(
       row.post_prompt_command_suppression_ms ?? VOICE_APPROVAL_SETTINGS_DEFAULT.postPromptCommandSuppressionMs,
     ),
+    speechPlaybackTarget: cleanSpeechPlaybackTarget(row.speech_playback_target),
     updatedAt: String(row.updated_at),
   };
 }
@@ -452,6 +521,7 @@ function rowDevice(row: any): DeviceRecord {
     userId: String(row.user_id),
     deviceType: String(row.device_type),
     displayName: String(row.display_name),
+    installationId: row.installation_id == null ? null : String(row.installation_id),
     tokenHint: String(row.token_hint ?? ''),
     lastSeenAt: String(row.last_seen_at),
     createdAt: String(row.created_at),
@@ -485,6 +555,7 @@ function rowDesktopAuthRequest(row: any): DesktopAuthRequestRecord {
   return {
     id: String(row.id),
     displayName: String(row.display_name),
+    installationId: row.installation_id == null ? null : String(row.installation_id),
     expiresAt: String(row.expires_at),
     claimedAt: row.claimed_at == null ? null : String(row.claimed_at),
     userId: row.user_id == null ? null : String(row.user_id),
@@ -1014,6 +1085,7 @@ export class VoiceStreamNextDb {
           duplicate_cooldown_ms,
           finalize_check_interval_ms,
           post_prompt_command_suppression_ms,
+          speech_playback_target,
           updated_at
         )
         VALUES (
@@ -1030,6 +1102,7 @@ export class VoiceStreamNextDb {
           $duplicateCooldownMs,
           $finalizeCheckIntervalMs,
           $postPromptCommandSuppressionMs,
+          $speechPlaybackTarget,
           $updatedAt
         )
       `,
@@ -1048,6 +1121,7 @@ export class VoiceStreamNextDb {
         $duplicateCooldownMs: defaults.duplicateCooldownMs,
         $finalizeCheckIntervalMs: defaults.finalizeCheckIntervalMs,
         $postPromptCommandSuppressionMs: defaults.postPromptCommandSuppressionMs,
+        $speechPlaybackTarget: 'auto',
         $updatedAt: at,
       });
     return this.ensureVoiceSettings(userId);
@@ -1100,6 +1174,26 @@ export class VoiceStreamNextDb {
         $duplicateCooldownMs: input.duplicateCooldownMs,
         $finalizeCheckIntervalMs: input.finalizeCheckIntervalMs,
         $postPromptCommandSuppressionMs: input.postPromptCommandSuppressionMs,
+        $updatedAt: at,
+        $userId: userId,
+      });
+    return this.ensureVoiceSettings(userId);
+  }
+
+  updateSpeechPlaybackTarget(userId: string, target: SpeechPlaybackTarget): VoiceSettings {
+    const at = nowIso();
+    this.ensureVoiceSettings(userId);
+    this.db
+      .query(
+        `
+        UPDATE voice_settings
+        SET speech_playback_target = $target,
+            updated_at = $updatedAt
+        WHERE user_id = $userId
+      `,
+      )
+      .run({
+        $target: cleanSpeechPlaybackTarget(target),
         $updatedAt: at,
         $userId: userId,
       });
@@ -1219,11 +1313,12 @@ export class VoiceStreamNextDb {
     };
   }
 
-  createDesktopAuthRequest(input: { displayName: string; expiresAt: string }): { request: DesktopAuthRequestRecord; secret: string; deviceToken: string } {
+  createDesktopAuthRequest(input: { displayName: string; expiresAt: string; installationId?: string | null }): { request: DesktopAuthRequestRecord; secret: string; deviceToken: string } {
     const at = nowIso();
     const id = newId('dauth');
     const secret = newSecret();
     const deviceToken = newSecret();
+    const installationId = cleanInstallationId(input.installationId);
     this.db
       .query(
         `
@@ -1237,9 +1332,10 @@ export class VoiceStreamNextDb {
           device_id,
           created_at,
           device_token_hash,
-          device_token_hint
+          device_token_hint,
+          installation_id
         )
-        VALUES ($id, $secretHash, $displayName, $expiresAt, NULL, NULL, NULL, $createdAt, $deviceTokenHash, $deviceTokenHint)
+        VALUES ($id, $secretHash, $displayName, $expiresAt, NULL, NULL, NULL, $createdAt, $deviceTokenHash, $deviceTokenHint, $installationId)
       `,
       )
       .run({
@@ -1250,6 +1346,7 @@ export class VoiceStreamNextDb {
         $createdAt: at,
         $deviceTokenHash: sha256(deviceToken),
         $deviceTokenHint: deviceToken.slice(0, 6),
+        $installationId: installationId,
       });
     const row = this.db.query('SELECT * FROM desktop_auth_requests WHERE id = $id').get({ $id: id });
     return { request: rowDesktopAuthRequest(row), secret, deviceToken };
@@ -1271,6 +1368,7 @@ export class VoiceStreamNextDb {
       displayName: request.displayName,
       tokenHash,
       tokenHint,
+      installationId: request.installationId,
     });
     const claimedAt = nowIso();
     this.db
@@ -1305,17 +1403,29 @@ export class VoiceStreamNextDb {
     return { ok: true, status: 'claimed', request, device: rowDevice(deviceRow) };
   }
 
-  registerDevice(userId: string, input: { deviceType: string; displayName: string }): { device: DeviceRecord; token: string } {
+  registerDevice(userId: string, input: { deviceType: string; displayName: string; installationId?: string | null }): { device: DeviceRecord; token: string } {
     const at = nowIso();
     const id = newId('dev');
     const token = newSecret();
     const tokenHash = sha256(token);
     const tokenHint = token.slice(0, 6);
+    const installationId = cleanInstallationId(input.installationId);
+    if (installationId) {
+      const existing = this.updateDeviceByInstallationId(userId, {
+        deviceType: input.deviceType,
+        displayName: input.displayName,
+        installationId,
+        tokenHash,
+        tokenHint,
+        lastSeenAt: at,
+      });
+      if (existing) return { device: existing, token };
+    }
     this.db
       .query(
         `
-        INSERT INTO devices (id, user_id, device_type, display_name, token_hash, token_hint, last_seen_at, created_at)
-        VALUES ($id, $userId, $deviceType, $displayName, $tokenHash, $tokenHint, $lastSeenAt, $createdAt)
+        INSERT INTO devices (id, user_id, device_type, display_name, installation_id, token_hash, token_hint, last_seen_at, created_at)
+        VALUES ($id, $userId, $deviceType, $displayName, $installationId, $tokenHash, $tokenHint, $lastSeenAt, $createdAt)
       `,
       )
       .run({
@@ -1323,6 +1433,7 @@ export class VoiceStreamNextDb {
         $userId: userId,
         $deviceType: input.deviceType,
         $displayName: input.displayName,
+        $installationId: installationId,
         $tokenHash: tokenHash,
         $tokenHint: tokenHint,
         $lastSeenAt: at,
@@ -1338,15 +1449,27 @@ export class VoiceStreamNextDb {
 
   registerDeviceWithTokenHash(
     userId: string,
-    input: { deviceType: string; displayName: string; tokenHash: string; tokenHint: string },
+    input: { deviceType: string; displayName: string; tokenHash: string; tokenHint: string; installationId?: string | null },
   ): DeviceRecord {
     const at = nowIso();
     const id = newId('dev');
+    const installationId = cleanInstallationId(input.installationId);
+    if (installationId) {
+      const existing = this.updateDeviceByInstallationId(userId, {
+        deviceType: input.deviceType,
+        displayName: input.displayName,
+        installationId,
+        tokenHash: input.tokenHash,
+        tokenHint: input.tokenHint,
+        lastSeenAt: at,
+      });
+      if (existing) return existing;
+    }
     this.db
       .query(
         `
-        INSERT INTO devices (id, user_id, device_type, display_name, token_hash, token_hint, last_seen_at, created_at)
-        VALUES ($id, $userId, $deviceType, $displayName, $tokenHash, $tokenHint, $lastSeenAt, $createdAt)
+        INSERT INTO devices (id, user_id, device_type, display_name, installation_id, token_hash, token_hint, last_seen_at, created_at)
+        VALUES ($id, $userId, $deviceType, $displayName, $installationId, $tokenHash, $tokenHint, $lastSeenAt, $createdAt)
       `,
       )
       .run({
@@ -1354,6 +1477,7 @@ export class VoiceStreamNextDb {
         $userId: userId,
         $deviceType: input.deviceType,
         $displayName: input.displayName,
+        $installationId: installationId,
         $tokenHash: input.tokenHash,
         $tokenHint: input.tokenHint,
         $lastSeenAt: at,
@@ -1366,7 +1490,59 @@ export class VoiceStreamNextDb {
     return rowDevice(row);
   }
 
+  private updateDeviceByInstallationId(
+    userId: string,
+    input: {
+      deviceType: string;
+      displayName: string;
+      installationId: string;
+      tokenHash: string;
+      tokenHint: string;
+      lastSeenAt: string;
+    },
+  ): DeviceRecord | null {
+    const row = this.db
+      .query(
+        `
+        SELECT * FROM devices
+        WHERE user_id = $userId
+          AND device_type = $deviceType
+          AND installation_id = $installationId
+        LIMIT 1
+      `,
+      )
+      .get({
+        $userId: userId,
+        $deviceType: input.deviceType,
+        $installationId: input.installationId,
+      });
+    if (!row) return null;
+
+    this.db
+      .query(
+        `
+        UPDATE devices
+        SET display_name = $displayName,
+            token_hash = $tokenHash,
+            token_hint = $tokenHint,
+            last_seen_at = $lastSeenAt,
+            revoked_at = NULL
+        WHERE id = $deviceId
+      `,
+      )
+      .run({
+        $displayName: input.displayName,
+        $tokenHash: input.tokenHash,
+        $tokenHint: input.tokenHint,
+        $lastSeenAt: input.lastSeenAt,
+        $deviceId: String((row as any).id),
+      });
+    const updated = this.db.query('SELECT * FROM devices WHERE id = $deviceId').get({ $deviceId: String((row as any).id) });
+    return updated ? rowDevice(updated) : null;
+  }
+
   listDevices(userId?: string, includeRevoked = false): DeviceRecord[] {
+    this.pruneExpiredUnclaimedPairingDevices();
     const rows = userId
       ? this.db
           .query(
@@ -1389,9 +1565,76 @@ export class VoiceStreamNextDb {
     return rows.map(rowDevice);
   }
 
+  pruneExpiredUnclaimedPairingDevices(at = nowIso()): number {
+    const update = this.db
+      .query(
+        `
+        UPDATE devices
+        SET revoked_at = $revokedAt
+        WHERE revoked_at IS NULL
+          AND id IN (
+            SELECT device_id
+            FROM pairing_sessions
+            WHERE claimed_at IS NULL
+              AND expires_at < $now
+          )
+      `,
+      )
+      .run({ $revokedAt: at, $now: at }) as { changes?: number };
+    this.db
+      .query(
+        `
+        DELETE FROM pairing_sessions
+        WHERE claimed_at IS NULL
+          AND expires_at < $now
+      `,
+      )
+      .run({ $now: at });
+    return Number(update.changes ?? 0);
+  }
+
   deviceForUser(userId: string, deviceId: string): DeviceRecord | null {
     const row = this.db.query('SELECT * FROM devices WHERE user_id = $userId AND id = $deviceId').get({ $userId: userId, $deviceId: deviceId });
     return row ? rowDevice(row) : null;
+  }
+
+  assignDeviceInstallationId(userId: string, deviceId: string, installationIdRaw: string | null | undefined): DeviceRecord | null {
+    const installationId = cleanInstallationId(installationIdRaw);
+    const device = this.deviceForUser(userId, deviceId);
+    if (!device || !installationId || device.installationId === installationId) return device;
+    if (device.installationId) return device;
+
+    const conflict = this.db
+      .query(
+        `
+        SELECT id FROM devices
+        WHERE user_id = $userId
+          AND device_type = $deviceType
+          AND installation_id = $installationId
+          AND id != $deviceId
+        LIMIT 1
+      `,
+      )
+      .get({
+        $userId: userId,
+        $deviceType: device.deviceType,
+        $installationId: installationId,
+        $deviceId: deviceId,
+      });
+    if (conflict) return device;
+
+    this.db
+      .query(
+        `
+        UPDATE devices
+        SET installation_id = $installationId
+        WHERE user_id = $userId
+          AND id = $deviceId
+          AND installation_id IS NULL
+      `,
+      )
+      .run({ $installationId: installationId, $userId: userId, $deviceId: deviceId });
+    return this.deviceForUser(userId, deviceId);
   }
 
   verifyDeviceToken(deviceId: string, token: string, options: { clientVersion?: number | null; minClientVersion?: number } = {}): DeviceAuthResult {
@@ -1557,6 +1800,71 @@ export class VoiceStreamNextDb {
         $userId: userId,
       });
     return this.ensureAssistantSettings(userId);
+  }
+
+  assistantApiKeyView(userId: string, providerRaw: unknown): AssistantApiKeyView {
+    const provider = cleanAssistantApiKeyProvider(providerRaw);
+    const row = this.db
+      .query('SELECT provider, key_hint, updated_at FROM assistant_api_keys WHERE user_id = $userId AND provider = $provider')
+      .get({ $userId: userId, $provider: provider }) as any;
+    return {
+      provider,
+      hasKey: Boolean(row),
+      keyHint: row ? String(row.key_hint ?? '') || null : null,
+      updatedAt: row ? String(row.updated_at ?? '') || null : null,
+    };
+  }
+
+  assistantApiKeysView(userId: string): Record<AssistantApiKeyProvider, AssistantApiKeyView> {
+    return {
+      openai: this.assistantApiKeyView(userId, 'openai'),
+      exa: this.assistantApiKeyView(userId, 'exa'),
+    };
+  }
+
+  assistantApiKey(userId: string, providerRaw: unknown): string | null {
+    const provider = cleanAssistantApiKeyProvider(providerRaw);
+    const row = this.db
+      .query('SELECT encrypted_key FROM assistant_api_keys WHERE user_id = $userId AND provider = $provider')
+      .get({ $userId: userId, $provider: provider }) as any;
+    if (!row) return null;
+    const apiKey = decryptAssistantSecret(String(row.encrypted_key ?? ''));
+    return cleanApiKey(apiKey) || null;
+  }
+
+  upsertAssistantApiKey(userId: string, providerRaw: unknown, apiKeyRaw: unknown): AssistantApiKeyView {
+    const provider = cleanAssistantApiKeyProvider(providerRaw);
+    const apiKey = cleanApiKey(apiKeyRaw);
+    if (!apiKey) throw Object.assign(new Error('API key is required.'), { statusCode: 400 });
+
+    const at = nowIso();
+    this.db
+      .query(
+        `
+        INSERT INTO assistant_api_keys (user_id, provider, encrypted_key, key_hint, updated_at)
+        VALUES ($userId, $provider, $encryptedKey, $keyHint, $updatedAt)
+        ON CONFLICT(user_id, provider) DO UPDATE SET
+          encrypted_key = excluded.encrypted_key,
+          key_hint = excluded.key_hint,
+          updated_at = excluded.updated_at
+      `,
+      )
+      .run({
+        $userId: userId,
+        $provider: provider,
+        $encryptedKey: encryptAssistantSecret(apiKey),
+        $keyHint: apiKeyHint(apiKey),
+        $updatedAt: at,
+      });
+    return this.assistantApiKeyView(userId, provider);
+  }
+
+  deleteAssistantApiKey(userId: string, providerRaw: unknown): boolean {
+    const provider = cleanAssistantApiKeyProvider(providerRaw);
+    const result = this.db
+      .query('DELETE FROM assistant_api_keys WHERE user_id = $userId AND provider = $provider')
+      .run({ $userId: userId, $provider: provider });
+    return Number(result.changes ?? 0) > 0;
   }
 
   upsertAssistantExtensionManifest(userId: string, manifest: AssistantExtensionManifest): AssistantExtensionManifestRecord {
@@ -1965,6 +2273,10 @@ export class VoiceStreamNextDb {
   }
 
   latestVoiceThreadForDevice(userId: string, deviceId: string): AssistantThread {
+    return this.latestVoiceThreadForDeviceOrNull(userId, deviceId) ?? this.createThread(userId, { deviceId, source: 'voice', title: 'Voice thread' });
+  }
+
+  latestVoiceThreadForDeviceOrNull(userId: string, deviceId: string): AssistantThread | null {
     const row = this.db
       .query(
         `
@@ -1975,7 +2287,7 @@ export class VoiceStreamNextDb {
       `,
       )
       .get({ $userId: userId, $deviceId: deviceId });
-    return row ? rowThread(row) : this.createThread(userId, { deviceId, source: 'voice', title: 'Voice thread' });
+    return row ? rowThread(row) : null;
   }
 
   addMessage(

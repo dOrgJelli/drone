@@ -21,7 +21,7 @@ object DiagnosticsUploader {
                 return@Thread
             }
             runCatching {
-                api.uploadDiagnostics(reason, bodyText.take(MAX_LOG_CHARS))
+                api.uploadDiagnostics(reason, bodyText.takeLast(MAX_LOG_CHARS))
                 ClientLog.i("Diagnostics", "Uploaded diagnostics reason=$reason")
             }.onFailure { error ->
                 ClientLog.w("Diagnostics", "Failed to upload diagnostics reason=$reason", error)

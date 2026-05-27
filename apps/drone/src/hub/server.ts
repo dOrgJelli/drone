@@ -87,8 +87,8 @@ import { cloneChatEntryForDroneClone, maybeBootstrapPromptFromTranscript } from 
 import {
   formatTranscriptJobFailure,
   hasKnownBuiltinTranscriptSession,
-  parseCodexJsonl,
-  parsePiJsonl,
+  parseCodexJobTranscript,
+  parsePiJobTranscript,
   readBuiltinTranscriptSessionId,
 } from './builtin-transcript-sessions';
 import {
@@ -250,6 +250,7 @@ import {
   resolveEffectiveVoiceTranscriptionSettings,
   resolveFilesystemSettingsResponse,
   resolveEffectiveProviderApiKeySettings,
+  resolveExaApiKeySettings,
   resolveGroqApiKeySettings,
   resolveVoiceStreamPairingPasswordSettings,
   resolveLlmSettingsResponse,
@@ -7939,7 +7940,10 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
       }
       continue;
     }
-    if (state === 'failed' && agent.id !== 'codex' && agent.id !== 'pi') continue;
+    if (state === 'failed' && agent.id !== 'codex' && agent.id !== 'pi') {
+      const error = String(p?.error ?? '').trim().toLowerCase();
+      if (!error.includes('finished but no') || !error.includes('message was parsed')) continue;
+    }
 
     let jobResp: any = null;
     try {
@@ -7984,8 +7988,11 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
       });
       if (staleState !== 'sent') continue;
 
-      // Auto-recover stale "running forever" prompt jobs by closing the prompt tmux session.
-      // This mirrors manual unstick behavior so users do not need to unstick routine stalls.
+      // A running prompt can legitimately exceed the enqueue timeout. Do not kill
+      // active agent work here; cancellation has to preserve an explicit cause.
+      if (jobState === 'running') continue;
+
+      // Auto-recover stale queued prompt jobs by closing any leftover prompt tmux session.
       const recovered = await recoverStalePromptJobSession({ droneId, droneEntry: d, promptId: id });
       if (recovered.jobState && recovered.job) {
         job = recovered.job;
@@ -8006,6 +8013,8 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
       continue;
     }
 
+    const jobKind = normalizeBuiltinAgentId(job?.kind) ?? agent.id;
+
     if (jobState === 'done') {
       const stdout = typeof job?.stdout === 'string' ? job.stdout : '';
       const stderr = typeof job?.stderr === 'string' ? job.stderr : '';
@@ -8015,14 +8024,14 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
         jobStartedAt: job?.startedAt,
         finishedAt,
       });
-      if (agent.id === 'codex') {
-        const parsed = parseCodexJsonl(stdout || '');
+      if (jobKind === 'codex') {
+        const parsed = parseCodexJobTranscript(job);
         const threadId = parsed.threadId;
         const msg = parsed.message;
         const output = String(msg ?? '').trimEnd();
         if (!output) {
           const error = formatTranscriptJobFailure({
-            agentId: 'codex',
+            agentId: jobKind,
             stdoutRaw: stdout,
             stderrRaw: stderr,
             fallbackRaw: 'codex finished but no message was parsed',
@@ -8054,8 +8063,8 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
         continue;
       }
 
-      if (agent.id === 'pi') {
-        const parsed = parsePiJsonl(stdout || '');
+      if (jobKind === 'pi') {
+        const parsed = parsePiJobTranscript(job);
         if (parsed.sessionId && String(parsed.sessionId).trim() && String(entry?.piSessionId ?? '').trim() !== parsed.sessionId) {
           entry.piSessionId = parsed.sessionId;
           changed = true;
@@ -8084,7 +8093,7 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
       }
 
       if (
-        agent.id === 'opencode' &&
+        jobKind === 'opencode' &&
         !(typeof entry?.openCodeSessionId === 'string' && String(entry.openCodeSessionId).trim())
       ) {
         // Best-effort: discover session id after first successful run, so future turns
@@ -8122,10 +8131,10 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
     }
 
     if (jobState === 'failed') {
-      if (agent.id === 'codex') {
+      if (jobKind === 'codex') {
         const stdout = String(job?.stdout ?? '');
         const stderr = String(job?.stderr ?? '');
-        const parsed = parseCodexJsonl(stdout);
+        const parsed = parseCodexJobTranscript(job);
         const output = String(parsed.message ?? '').trimEnd();
         const finishedAt = typeof job?.finishedAt === 'string' ? job.finishedAt : nowIso();
         const promptAt = resolveTranscriptPromptAt({
@@ -8133,9 +8142,11 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
           jobStartedAt: job?.startedAt,
           finishedAt,
         });
-        // Self-heal false failed states (daemon finalized too early) by trusting
-        // completed Codex output when it is present in the persisted job payload.
-        if (output) {
+        // Self-heal false failed states only when Codex emitted a terminal
+        // completion event. An in-flight status update is not a final answer.
+        const terminalEvent = String(parsed.terminalEvent ?? '').trim();
+        const hasCompletedTurn = terminalEvent === 'turn.completed' || terminalEvent === 'response.completed';
+        if (output && hasCompletedTurn) {
           if (parsed.threadId) {
             entry.codexThreadId = parsed.threadId;
             changed = true;
@@ -8157,9 +8168,9 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
           continue;
         }
       }
-      if (agent.id === 'pi') {
+      if (jobKind === 'pi') {
         const stdout = String(job?.stdout ?? '');
-        const parsed = parsePiJsonl(stdout);
+        const parsed = parsePiJobTranscript(job);
         const output = String(parsed.message ?? '').trimEnd();
         const finishedAt = typeof job?.finishedAt === 'string' ? job.finishedAt : nowIso();
         const promptAt = resolveTranscriptPromptAt({
@@ -8196,7 +8207,7 @@ async function reconcileChatFromDaemon(opts: { droneId: string; chatName: string
           ? Math.floor(job.exitCode)
           : null;
       let errText = formatTranscriptJobFailure({
-        agentId: agent.id,
+        agentId: jobKind,
         stdoutRaw: String(job?.stdout ?? ''),
         stderrRaw: String(job?.stderr ?? ''),
         fallbackRaw:
@@ -12238,13 +12249,25 @@ export async function startDroneHubApiServer(opts: {
         return;
       }
 
-      if (pathname === '/api/settings/openai' || pathname === '/api/settings/gemini' || pathname === '/api/settings/codex' || pathname === '/api/settings/groq') {
-        const provider = pathname.endsWith('/gemini') ? 'gemini' : pathname.endsWith('/codex') ? 'codex' : pathname.endsWith('/groq') ? 'groq' : 'openai';
+      if (pathname === '/api/settings/openai' || pathname === '/api/settings/gemini' || pathname === '/api/settings/codex' || pathname === '/api/settings/groq' || pathname === '/api/settings/exa') {
+        const provider = pathname.endsWith('/gemini')
+          ? 'gemini'
+          : pathname.endsWith('/codex')
+            ? 'codex'
+            : pathname.endsWith('/groq')
+              ? 'groq'
+              : pathname.endsWith('/exa')
+                ? 'exa'
+                : 'openai';
         if (method === 'GET') {
-          const resolved = provider === 'groq' ? await resolveGroqApiKeySettings() : await resolveEffectiveProviderApiKeySettings(provider);
+          const resolved = provider === 'groq'
+            ? await resolveGroqApiKeySettings()
+            : provider === 'exa'
+              ? await resolveExaApiKeySettings()
+              : await resolveEffectiveProviderApiKeySettings(provider as LlmProviderId);
           const revealApiKey = u.searchParams.get('reveal') === '1';
-          if (!resolved.apiKey && provider !== 'groq') {
-            await logProviderApiKeyResolution('warn', 'settings provider lookup resolved without API key', provider, {
+          if (!resolved.apiKey && provider !== 'groq' && provider !== 'exa') {
+            await logProviderApiKeyResolution('warn', 'settings provider lookup resolved without API key', provider as LlmProviderId, {
               pathname,
               method,
             });
@@ -12274,7 +12297,11 @@ export async function startDroneHubApiServer(opts: {
             return;
           }
           await upsertStoredProviderApiKey(provider as StoredApiKeyProviderId, apiKey);
-          const resolved = provider === 'groq' ? await resolveGroqApiKeySettings() : await resolveEffectiveProviderApiKeySettings(provider);
+          const resolved = provider === 'groq'
+            ? await resolveGroqApiKeySettings()
+            : provider === 'exa'
+              ? await resolveExaApiKeySettings()
+              : await resolveEffectiveProviderApiKeySettings(provider as LlmProviderId);
           if (provider === 'groq') notifyGroqApiKeySettingsChanged();
           json(res, 200, {
             ok: true,
@@ -12289,7 +12316,11 @@ export async function startDroneHubApiServer(opts: {
             return;
           }
           await clearStoredProviderApiKey(provider as StoredApiKeyProviderId);
-          const resolved = provider === 'groq' ? await resolveGroqApiKeySettings() : await resolveEffectiveProviderApiKeySettings(provider);
+          const resolved = provider === 'groq'
+            ? await resolveGroqApiKeySettings()
+            : provider === 'exa'
+              ? await resolveExaApiKeySettings()
+              : await resolveEffectiveProviderApiKeySettings(provider as LlmProviderId);
           if (provider === 'groq') notifyGroqApiKeySettingsChanged();
           json(res, 200, {
             ok: true,

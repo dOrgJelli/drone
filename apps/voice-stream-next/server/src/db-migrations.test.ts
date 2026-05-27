@@ -10,6 +10,11 @@ function tempDbPath(name: string): string {
 }
 
 const BASELINE_MIGRATION_VERSION = '20260525173842';
+const SPEECH_PLAYBACK_MIGRATION_VERSION = '20260525190000';
+const DEVICE_INSTALLATION_MIGRATION_VERSION = '20260526120000';
+const ASSISTANT_WEB_SEARCH_MIGRATION_VERSION = '20260526140000';
+const ASSISTANT_FETCH_CONTENT_MIGRATION_VERSION = '20260526141000';
+const ASSISTANT_API_KEYS_MIGRATION_VERSION = '20260526142000';
 
 function migrationRows(db: VoiceStreamNextDb): Array<{ version: string; name: string; checksum: string }> {
   return db.db
@@ -33,9 +38,19 @@ describe('database migrations', () => {
     const db = new VoiceStreamNextDb(tempDbPath('fresh-migration'));
     dbs.push(db);
 
-    expect(migrationRows(db).map((row) => row.version)).toEqual([BASELINE_MIGRATION_VERSION]);
+    expect(migrationRows(db).map((row) => row.version)).toEqual([
+      BASELINE_MIGRATION_VERSION,
+      SPEECH_PLAYBACK_MIGRATION_VERSION,
+      DEVICE_INSTALLATION_MIGRATION_VERSION,
+      ASSISTANT_WEB_SEARCH_MIGRATION_VERSION,
+      ASSISTANT_FETCH_CONTENT_MIGRATION_VERSION,
+      ASSISTANT_API_KEYS_MIGRATION_VERSION,
+    ]);
     expect(columnNames(db, 'devices')).toContain('revoked_at');
+    expect(columnNames(db, 'devices')).toContain('installation_id');
+    expect(columnNames(db, 'desktop_auth_requests')).toContain('installation_id');
     expect(columnNames(db, 'assistant_threads')).toContain('enabled_tools_json');
+    expect(columnNames(db, 'voice_settings')).toContain('speech_playback_target');
   });
 
   test('does not rerun already applied migrations', () => {
@@ -46,7 +61,7 @@ describe('database migrations', () => {
     const second = new VoiceStreamNextDb(filePath);
     dbs.push(second);
 
-    expect(migrationRows(second)).toHaveLength(1);
+    expect(migrationRows(second)).toHaveLength(6);
   });
 
   test('rejects changed migration checksums', () => {

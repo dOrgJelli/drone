@@ -1,11 +1,11 @@
 import path from 'node:path';
-import { createReadStream, existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
 import { clerkPlugin } from '@clerk/fastify';
-import { VoiceStreamNextDb, type AssistantMessage } from './db.js';
+import { VoiceStreamNextDb, type SpeechPlaybackTarget } from './db.js';
 import { requireAdmin, resolveRequestUser, type AuthContext } from './auth.js';
 import { synthesizeSpeech, transcribePcm16 } from './assistant-runtime.js';
 import {
@@ -46,7 +46,7 @@ import {
   type ControlCommand,
 } from './protocol.js';
 import { buildPairingPayload, buildUpdatePayload, minClientVersion, pairingExpiresAt, parseClientVersion } from './pairing.js';
-import { ControlChannelRegistry } from './control-channel.js';
+import { ControlChannelRegistry, type SpeechAudioCommand } from './control-channel.js';
 import type { DeviceAuthResult } from './db.js';
 
 type AppOptions = {
@@ -83,6 +83,11 @@ function parsePort(raw: unknown, fallback: number): number {
   return Number.isInteger(value) && value > 0 && value <= 65535 ? value : fallback;
 }
 
+function uploadLimitBytes(): number {
+  const raw = Number(process.env.VOICE_STREAM_NEXT_RELEASE_UPLOAD_LIMIT_BYTES ?? 1024 * 1024 * 1024);
+  return Number.isInteger(raw) && raw > 0 ? raw : 1024 * 1024 * 1024;
+}
+
 function jsonBody(req: FastifyRequest): any {
   return req.body && typeof req.body === 'object' ? (req.body as any) : {};
 }
@@ -99,6 +104,24 @@ function cleanCode(raw: unknown, label: string): string {
 
 function cleanVoiceStreamMode(raw: string): 'assistant' | 'patch' | 'clipboard' {
   return raw === 'patch' || raw === 'clipboard' ? raw : 'assistant';
+}
+
+function cleanSpeechPlaybackTarget(raw: unknown): SpeechPlaybackTarget {
+  const value = cleanText(raw, 'auto').toLowerCase();
+  return value === 'web' || value === 'desktop' || value === 'android' || value === 'auto' ? value : 'auto';
+}
+
+function speakTextFromResult(result: unknown): string {
+  if (!result || typeof result !== 'object') return '';
+  return cleanText((result as any).text);
+}
+
+function speakTextFromArgsJson(raw: unknown): string {
+  try {
+    return speakTextFromResult(JSON.parse(String(raw ?? '{}')));
+  } catch {
+    return '';
+  }
 }
 
 function cleanDeviceMode(raw: unknown): string {
@@ -138,6 +161,47 @@ function desktopAppDir(): string {
 
 function desktopAppDownloadPath(): string {
   return '/api/desktop/download';
+}
+
+function safeReleaseVariant(raw: unknown, fallback: string): string {
+  return cleanText(raw, fallback).toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || fallback;
+}
+
+function safeReleaseFileName(raw: unknown, fallback: string): string {
+  const baseName = path.basename(cleanText(raw, fallback) || fallback).replace(/[^a-zA-Z0-9._-]+/g, '-');
+  return baseName || fallback;
+}
+
+function headerValue(raw: unknown): string {
+  return String(Array.isArray(raw) ? raw[0] : raw ?? '').trim();
+}
+
+function releaseUploadMetadata(req: FastifyRequest, platform: 'android' | 'desktop'): Record<string, unknown> {
+  const raw = headerValue(req.headers['x-voice-release-metadata']);
+  if (!raw) throw Object.assign(new Error(`${platform} release metadata file is required`), { statusCode: 400 });
+  let metadata: any = null;
+  try {
+    metadata = JSON.parse(raw);
+  } catch {
+    throw Object.assign(new Error(`${platform} release metadata must be valid JSON`), { statusCode: 400 });
+  }
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    throw Object.assign(new Error(`${platform} release metadata must be a JSON object`), { statusCode: 400 });
+  }
+  if (cleanText(metadata.platform).toLowerCase() !== platform) {
+    throw Object.assign(new Error(`${platform} release metadata has the wrong platform`), { statusCode: 400 });
+  }
+  return metadata;
+}
+
+function requiredMetadataText(metadata: Record<string, unknown>, key: string, label: string): string {
+  const value = cleanText(metadata[key]);
+  if (!value) throw Object.assign(new Error(`${label} is required in release metadata`), { statusCode: 400 });
+  return value;
+}
+
+function releaseUploadFileName(req: FastifyRequest, fallback: string): string {
+  return safeReleaseFileName(req.headers['x-voice-release-file-name'], fallback);
 }
 
 function publicUrlForPath(req: FastifyRequest, urlPath: string): string {
@@ -188,6 +252,35 @@ function readAndroidApkInfo(req: FastifyRequest): AndroidApkInfo {
     downloadUrl,
     updatePayload: versionCode ? buildUpdatePayload({ versionCode, apkUrl: downloadUrl }) : null,
   };
+}
+
+function writeAndroidApkRelease(req: FastifyRequest, body: unknown): AndroidApkInfo {
+  const buffer = Buffer.isBuffer(body) ? body : Buffer.from(body instanceof Uint8Array ? body : []);
+  if (buffer.byteLength === 0) throw Object.assign(new Error('APK upload is empty'), { statusCode: 400 });
+  const releaseMetadata = releaseUploadMetadata(req, 'android');
+  const variant = safeReleaseVariant(requiredMetadataText(releaseMetadata, 'variant', 'Android variant'), 'manual');
+  const versionCode = parseClientVersion(releaseMetadata.versionCode, null);
+  if (versionCode == null) throw Object.assign(new Error('Android versionCode is required in release metadata'), { statusCode: 400 });
+  const versionName = requiredMetadataText(releaseMetadata, 'versionName', 'Android versionName');
+  const latestFileName = 'voice-stream-next-android-latest.apk';
+  const variantFileName = `voice-stream-next-android-${variant}.apk`;
+  const outputDir = androidApkDir();
+  mkdirSync(outputDir, { recursive: true });
+  writeFileSync(path.join(outputDir, variantFileName), buffer);
+  writeFileSync(path.join(outputDir, latestFileName), buffer);
+  const metadata = {
+    app: 'voice-stream-next',
+    platform: 'android',
+    variant,
+    versionCode,
+    versionName,
+    fileName: latestFileName,
+    variantFileName,
+    size: buffer.byteLength,
+    builtAt: cleanText(releaseMetadata.builtAt) || new Date().toISOString(),
+  };
+  writeFileSync(path.join(outputDir, 'latest.json'), `${JSON.stringify(metadata, null, 2)}\n`);
+  return readAndroidApkInfo(req);
 }
 
 function newestDesktopArtifact(dir: string): string | null {
@@ -242,13 +335,42 @@ function readDesktopAppInfo(req: FastifyRequest): DesktopAppInfo {
   };
 }
 
+function writeDesktopAppRelease(req: FastifyRequest, body: unknown): DesktopAppInfo {
+  const buffer = Buffer.isBuffer(body) ? body : Buffer.from(body instanceof Uint8Array ? body : []);
+  if (buffer.byteLength === 0) throw Object.assign(new Error('Desktop upload is empty'), { statusCode: 400 });
+  const releaseMetadata = releaseUploadMetadata(req, 'desktop');
+  const requestedFileName = releaseUploadFileName(req, safeReleaseFileName(releaseMetadata.fileName, 'voice-stream-next-desktop-latest.tar.gz'));
+  if (!/\.(zip|dmg|exe|appimage|tar\.gz|tgz)$/i.test(requestedFileName)) {
+    throw Object.assign(new Error('Desktop upload must be .zip, .dmg, .exe, .AppImage, .tgz, or .tar.gz'), { statusCode: 400 });
+  }
+  const extension = requestedFileName.match(/\.tar\.gz$/i) ? '.tar.gz' : path.extname(requestedFileName);
+  const variant = safeReleaseVariant(requiredMetadataText(releaseMetadata, 'variant', 'Desktop variant'), 'manual');
+  const latestFileName = `voice-stream-next-desktop-latest${extension}`;
+  const variantFileName = `voice-stream-next-desktop-${variant}${extension}`;
+  const outputDir = desktopAppDir();
+  mkdirSync(outputDir, { recursive: true });
+  writeFileSync(path.join(outputDir, variantFileName), buffer);
+  writeFileSync(path.join(outputDir, latestFileName), buffer);
+  const metadata = {
+    app: 'voice-stream-next',
+    platform: 'desktop',
+    variant,
+    fileName: latestFileName,
+    variantFileName,
+    size: buffer.byteLength,
+    builtAt: cleanText(releaseMetadata.builtAt) || new Date().toISOString(),
+  };
+  writeFileSync(path.join(outputDir, 'latest.json'), `${JSON.stringify(metadata, null, 2)}\n`);
+  return readDesktopAppInfo(req);
+}
+
 function desktopContentType(fileName: string): string {
   const lower = fileName.toLowerCase();
   if (lower.endsWith('.zip')) return 'application/zip';
   if (lower.endsWith('.dmg')) return 'application/x-apple-diskimage';
   if (lower.endsWith('.exe')) return 'application/vnd.microsoft.portable-executable';
   if (lower.endsWith('.appimage')) return 'application/octet-stream';
-  if (lower.endsWith('.tar.gz')) return 'application/gzip';
+  if (lower.endsWith('.tar.gz') || lower.endsWith('.tgz')) return 'application/gzip';
   return 'application/octet-stream';
 }
 
@@ -394,6 +516,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
   const controlChannels = new ControlChannelRegistry();
   const extensionBridges = new ExtensionBridgeRegistry();
   const assistantEventClients = new Set<{ res: any; userId: string }>();
+  const speechEventClients = new Set<{ id: string; res: any; userId: string; connectedAt: string }>();
   let assistantChangeSequence = 0;
   const clerkEnabled = Boolean(process.env.CLERK_SECRET_KEY?.trim());
   const port = parsePort(process.env.VOICE_STREAM_NEXT_API_PORT ?? process.env.PORT, 3299);
@@ -435,40 +558,177 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       writeAssistantSseEvent(client.res, 'assistant_change', event);
     }
   };
-  const emitAssistantSpeak = (userId: string, threadId: string, message: AssistantMessage) => {
-    const text = String(message.spokenText ?? '').trim();
-    if (!text) return;
-    const event = {
-      type: 'assistant_speak',
-      threadId,
-      messageId: message.id,
-      text,
-      at: new Date().toISOString(),
-    };
-    for (const client of [...assistantEventClients]) {
+
+  type SpeechSurface = 'web' | 'desktop' | 'android';
+  type SpeechDestination = {
+    surface: SpeechSurface;
+    deviceId?: string;
+    clientId?: string;
+    activityAt: string;
+  };
+  const speechQueues = new Map<string, Promise<void>>();
+
+  const latestSpeechClientForUser = (userId: string): SpeechDestination | null => {
+    let latest: SpeechDestination | null = null;
+    for (const client of [...speechEventClients]) {
       if (client.res.destroyed || client.res.writableEnded) {
-        assistantEventClients.delete(client);
+        speechEventClients.delete(client);
         continue;
       }
       if (client.userId !== userId) continue;
-      writeAssistantSseEvent(client.res, 'assistant_speak', event);
+      if (!latest || Date.parse(client.connectedAt) > Date.parse(latest.activityAt)) {
+        latest = { surface: 'web', clientId: client.id, activityAt: client.connectedAt };
+      }
+    }
+    return latest;
+  };
+
+  const connectedSpeechDestinations = (userId: string): SpeechDestination[] => {
+    const destinations: SpeechDestination[] = [];
+    const web = latestSpeechClientForUser(userId);
+    if (web) destinations.push(web);
+    const clientStatuses = new Map(db.listClientStatuses(userId).map((status) => [status.deviceId, status]));
+    for (const deviceId of controlChannels.connectedDeviceIds()) {
+      const device = db.deviceForUser(userId, deviceId);
+      if (!device || device.revokedAt) continue;
+      const surface = device.deviceType === 'android' ? 'android' : device.deviceType === 'desktop' ? 'desktop' : null;
+      if (!surface) continue;
+      const destination: SpeechDestination = { surface, deviceId, activityAt: clientStatuses.get(deviceId)?.updatedAt ?? device.lastSeenAt };
+      const existingIndex = destinations.findIndex((item) => item.surface === surface);
+      if (existingIndex < 0) {
+        destinations.push(destination);
+      } else if (Date.parse(destination.activityAt) >= Date.parse(destinations[existingIndex]!.activityAt)) {
+        destinations[existingIndex] = destination;
+      }
+    }
+    return destinations;
+  };
+
+  const selectSpeechDestination = (userId: string): SpeechDestination | null => {
+    const destinations = connectedSpeechDestinations(userId);
+    if (destinations.length === 0) return null;
+    if (destinations.length === 1) return destinations[0]!;
+    const preferred = db.ensureVoiceSettings(userId).speechPlaybackTarget;
+    if (preferred !== 'auto') {
+      const preferredDestination = destinations.find((destination) => destination.surface === preferred);
+      if (preferredDestination) return preferredDestination;
+    }
+    return destinations
+      .slice()
+      .sort((a, b) => Date.parse(b.activityAt) - Date.parse(a.activityAt))[0]!;
+  };
+
+  const speechPlaybackStatus = (userId: string) => {
+    const destinations = connectedSpeechDestinations(userId);
+    const selected = selectSpeechDestination(userId);
+    return {
+      preferredTarget: db.ensureVoiceSettings(userId).speechPlaybackTarget,
+      connectedTargets: destinations.map((destination) => destination.surface),
+      resolvedTarget: selected?.surface ?? null,
+    };
+  };
+
+  const sendSpeechToWeb = (clientId: string, payload: SpeechAudioCommand): boolean => {
+    const client = [...speechEventClients].find((item) => item.id === clientId);
+    if (!client || client.res.destroyed || client.res.writableEnded) {
+      if (client) speechEventClients.delete(client);
+      return false;
+    }
+    writeAssistantSseEvent(client.res, 'speech_audio', payload);
+    return true;
+  };
+
+  const emitSpeechAudio = async (
+    userId: string,
+    text: string,
+    metadata: { source: string; threadId?: string; messageId?: string },
+  ): Promise<void> => {
+    const clean = cleanText(text).slice(0, 4096);
+    if (!clean) return;
+    const destination = selectSpeechDestination(userId);
+    if (!destination) {
+      db.addLog(userId, {
+        source: 'speech',
+        level: 'warn',
+        message: 'Speech playback skipped: no connected playback target',
+        detailsJson: JSON.stringify({ source: metadata.source, chars: clean.length }),
+      });
+      return;
+    }
+    try {
+      const speech = await synthesizeSpeech(clean);
+      if (!speech.audio) {
+        db.addLog(userId, {
+          source: 'speech',
+          level: 'warn',
+          message: 'Speech playback skipped: TTS is not configured',
+          detailsJson: JSON.stringify({ source: metadata.source, target: destination.surface, chars: clean.length }),
+        });
+        return;
+      }
+      const payload: SpeechAudioCommand = {
+        type: 'speech_audio',
+        id: `speech_${crypto.randomUUID().replace(/-/g, '')}`,
+        source: metadata.source,
+        text: clean,
+        contentType: 'audio/wav',
+        audioBase64: Buffer.from(speech.audio).toString('base64'),
+        createdAt: new Date().toISOString(),
+        ...(metadata.threadId ? { threadId: metadata.threadId } : {}),
+        ...(metadata.messageId ? { messageId: metadata.messageId } : {}),
+      };
+      const delivered = destination.surface === 'web'
+        ? Boolean(destination.clientId && sendSpeechToWeb(destination.clientId, payload))
+        : Boolean(destination.deviceId && controlChannels.sendSpeechAudio(destination.deviceId, payload));
+      db.addLog(userId, {
+        deviceId: destination.deviceId ?? null,
+        source: 'speech',
+        level: delivered ? 'info' : 'warn',
+        message: delivered ? `Speech playback queued on ${destination.surface}` : `Speech playback failed for ${destination.surface}`,
+        detailsJson: JSON.stringify({ source: metadata.source, target: destination.surface, chars: clean.length, bytes: speech.audio.byteLength }),
+      });
+    } catch (error: any) {
+      db.addLog(userId, {
+        deviceId: destination.deviceId ?? null,
+        source: 'speech',
+        level: 'error',
+        message: 'Speech synthesis failed',
+        detailsJson: JSON.stringify({ source: metadata.source, target: destination.surface, error: error?.message ?? String(error) }),
+      });
     }
   };
+
+  const enqueueSpeechAudio = (
+    userId: string,
+    text: string,
+    metadata: { source: string; threadId?: string; messageId?: string },
+  ): void => {
+    const previous = speechQueues.get(userId) ?? Promise.resolve();
+    let next: Promise<void>;
+    next = previous
+      .catch(() => undefined)
+      .then(() => emitSpeechAudio(userId, text, metadata))
+      .finally(() => {
+        if (speechQueues.get(userId) === next) speechQueues.delete(userId);
+      });
+    speechQueues.set(userId, next);
+  };
+
+  const handleSpeakToolResult = (userId: string, threadId: string, event: any) => {
+    if (event?.type !== 'tool_result' || event.toolCall?.toolName !== 'speak') return;
+    const text = speakTextFromResult(event.result);
+    if (!text) return;
+    enqueueSpeechAudio(userId, text, { source: 'assistant', threadId, messageId: String(event.toolCall?.id ?? '') || undefined });
+  };
+
   app.addHook('onClose', async () => {
     setAssistantExternalToolExecutor(null);
   });
+
   const handleAssistantPromptEvent = (userId: string, threadId: string, event: any) => {
-    if (event?.type === 'message' && event.message?.spokenText) {
-      emitAssistantSpeak(userId, threadId, event.message as AssistantMessage);
-    }
+    handleSpeakToolResult(userId, threadId, event);
     if (['snapshot', 'message', 'queued', 'tool_call', 'tool_result', 'approval_pending', 'done', 'error'].includes(String(event?.type ?? ''))) {
       emitAssistantChange(`assistant_${String(event.type)}`, threadId);
-    }
-  };
-  const emitNewSpokenMessages = (userId: string, threadId: string, beforeIds: Set<string>) => {
-    for (const message of db.listMessages(userId, threadId)) {
-      if (!message.spokenText || beforeIds.has(message.id)) continue;
-      emitAssistantSpeak(userId, threadId, message);
     }
   };
 
@@ -477,6 +737,19 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     credentials: true,
   });
   await app.register(websocket);
+
+  app.addContentTypeParser(
+    [
+      'application/octet-stream',
+      'application/vnd.android.package-archive',
+      'application/gzip',
+      'application/zip',
+      'application/x-apple-diskimage',
+      'application/vnd.microsoft.portable-executable',
+    ],
+    { parseAs: 'buffer', bodyLimit: uploadLimitBytes() },
+    (_req, body, done) => done(null, body),
+  );
 
   if (clerkEnabled) {
     await app.register(clerkPlugin);
@@ -498,6 +771,34 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     ok: true,
     desktop: readDesktopAppInfo(req),
   }));
+
+  app.put('/api/admin/releases/android', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      requireAdmin(ctx);
+      const android = writeAndroidApkRelease(req, req.body);
+      db.addLog(ctx.user.id, {
+        source: 'admin',
+        level: 'info',
+        message: `Android release uploaded: ${android.fileName ?? 'latest APK'}`,
+        detailsJson: JSON.stringify({ variant: android.variant, versionCode: android.versionCode, size: android.size }),
+      });
+      return { ok: true, android };
+    }),
+  );
+
+  app.put('/api/admin/releases/desktop', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      requireAdmin(ctx);
+      const desktop = writeDesktopAppRelease(req, req.body);
+      db.addLog(ctx.user.id, {
+        source: 'admin',
+        level: 'info',
+        message: `Desktop release uploaded: ${desktop.fileName ?? 'latest app'}`,
+        detailsJson: JSON.stringify({ variant: desktop.variant, size: desktop.size }),
+      });
+      return { ok: true, desktop };
+    }),
+  );
 
   app.post('/api/mobile/android/setup', async (req, reply) =>
     withUser(req, reply, db, clerkEnabled, async (ctx) => {
@@ -653,12 +954,48 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     }
   });
 
+  app.get('/api/speech/events', async (req, reply) => {
+    try {
+      const ctx = await resolveRequestUser(req, db, clerkEnabled);
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-cache, no-transform',
+        connection: 'keep-alive',
+      });
+      (req.raw.socket as any).setTimeout?.(0);
+      const connectedAt = new Date().toISOString();
+      const client = {
+        id: `web_${crypto.randomUUID().replace(/-/g, '')}`,
+        res: reply.raw,
+        userId: ctx.user.id,
+        connectedAt,
+      };
+      speechEventClients.add(client);
+      writeAssistantSseEvent(reply.raw, 'connected', { ok: true, target: 'web', at: connectedAt });
+      const keepAlive = setInterval(() => {
+        if (reply.raw.destroyed || reply.raw.writableEnded) return;
+        reply.raw.write(': keepalive\n\n');
+      }, 25_000);
+      (keepAlive as any).unref?.();
+      const cleanup = () => {
+        clearInterval(keepAlive);
+        speechEventClients.delete(client);
+      };
+      req.raw.on('close', cleanup);
+      reply.raw.on('close', cleanup);
+    } catch (error: any) {
+      reply.code(Number(error?.statusCode ?? 401) || 401).send({ ok: false, error: error?.message ?? String(error) });
+    }
+  });
+
   app.get('/api/me', async (req, reply) =>
     withUser(req, reply, db, clerkEnabled, async (ctx) => ({
       ok: true,
       authMode: ctx.mode,
       user: ctx.user,
       settings: db.ensureVoiceSettings(ctx.user.id),
+      speechPlayback: speechPlaybackStatus(ctx.user.id),
     })),
   );
 
@@ -667,6 +1004,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       ok: true,
       authMode: ctx.mode,
       ...db.dashboard(ctx.user),
+      speechPlayback: speechPlaybackStatus(ctx.user.id),
     })),
   );
 
@@ -700,12 +1038,21 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     }),
   );
 
+  app.patch('/api/settings/speech-playback', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const body = jsonBody(req);
+      const settings = db.updateSpeechPlaybackTarget(ctx.user.id, cleanSpeechPlaybackTarget(body.target ?? body.speechPlaybackTarget));
+      return { ok: true, settings, speechPlayback: speechPlaybackStatus(ctx.user.id) };
+    }),
+  );
+
   app.post('/api/desktop-auth/requests', async (req, reply) => {
     try {
       const body = jsonBody(req);
       const displayName = cleanText(body.displayName, 'Desktop voice client') || 'Desktop voice client';
+      const installationId = cleanText(body.installationId) || null;
       const expiresAt = desktopAuthExpiresAt();
-      const { request, secret, deviceToken } = db.createDesktopAuthRequest({ displayName, expiresAt });
+      const { request, secret, deviceToken } = db.createDesktopAuthRequest({ displayName, expiresAt, installationId });
       return {
         ok: true,
         requestId: request.id,
@@ -782,7 +1129,8 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       const body = jsonBody(req);
       const deviceType = cleanText(body.deviceType, 'desktop') || 'desktop';
       const displayName = cleanText(body.displayName, deviceType) || deviceType;
-      const result = db.registerDevice(ctx.user.id, { deviceType, displayName });
+      const installationId = deviceType === 'desktop' ? cleanText(body.installationId) || null : null;
+      const result = db.registerDevice(ctx.user.id, { deviceType, displayName, installationId });
       db.addLog(ctx.user.id, {
         deviceId: result.device.id,
         source: deviceType,
@@ -1072,6 +1420,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     const deviceId = String((req.params as any).deviceId ?? '');
     const query = (req.query ?? {}) as Record<string, unknown>;
     const token = cleanText(req.headers['x-voice-device-token'] || query.token);
+    const installationId = cleanText(req.headers['x-voice-installation-id'] || query.installationId) || null;
     const clientVersion = parseClientVersion(req.headers['x-voice-client-version'], parseClientVersion(query.clientVersion, parseClientVersion(query.protocolVersion, null)));
     const auth = verifyDeviceAuth(db, deviceId, token, clientVersion);
     if (!auth.ok) {
@@ -1083,11 +1432,90 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       });
       return;
     }
+    const device = installationId ? db.assignDeviceInstallationId(auth.device.userId, auth.device.id, installationId) ?? auth.device : auth.device;
     return {
       ok: true,
-      device: auth.device,
+      device,
       settings: voiceApprovalSettingsResponse(db.ensureVoiceSettings(auth.device.userId)).settings,
       minClientVersion: minClientVersion(),
+    };
+  });
+
+  app.get('/api/devices/:deviceId/assistant/thread', async (req, reply) => {
+    const deviceId = String((req.params as any).deviceId ?? '');
+    const query = (req.query ?? {}) as Record<string, unknown>;
+    const token = cleanText(req.headers['x-voice-device-token'] || query.token);
+    const clientVersion = parseClientVersion(req.headers['x-voice-client-version'], parseClientVersion(query.clientVersion, parseClientVersion(query.protocolVersion, null)));
+    const auth = verifyDeviceAuth(db, deviceId, token, clientVersion);
+    if (!auth.ok) {
+      reply.code(auth.reason === 'client_too_old' ? 426 : 401).send({
+        ok: false,
+        error: deviceAuthFailureMessage(auth),
+        reason: auth.reason,
+        minClientVersion: auth.reason === 'client_too_old' ? auth.minClientVersion : undefined,
+      });
+      return;
+    }
+    const thread = db.latestVoiceThreadForDeviceOrNull(auth.device.userId, auth.device.id);
+    if (!thread) {
+      return {
+        ok: true,
+        thread: null,
+        runningModel: null,
+        pendingApprovalCount: 0,
+        artifactsCount: 0,
+      };
+    }
+    const artifactsCount = db.listArtifacts(auth.device.userId, thread.id).length;
+    const activeRun = db.listRuns(auth.device.userId, thread.id, 8).find((run) => run.status === 'running' || run.status === 'waiting_for_approval');
+    return {
+      ok: true,
+      thread: {
+        ...thread,
+        artifactsCount,
+      },
+      runningModel: activeRun ? {
+        provider: activeRun.provider,
+        model: activeRun.model,
+        thinkingLevel: activeRun.thinkingLevel,
+        runId: activeRun.id,
+      } : null,
+      pendingApprovalCount: db.listApprovals(auth.device.userId, thread.id).filter((approval) => approval.status === 'pending').length,
+      artifactsCount,
+    };
+  });
+
+  app.get('/api/devices/:deviceId/assistant/thread/artifacts', async (req, reply) => {
+    const deviceId = String((req.params as any).deviceId ?? '');
+    const query = (req.query ?? {}) as Record<string, unknown>;
+    const token = cleanText(req.headers['x-voice-device-token'] || query.token);
+    const clientVersion = parseClientVersion(req.headers['x-voice-client-version'], parseClientVersion(query.clientVersion, parseClientVersion(query.protocolVersion, null)));
+    const auth = verifyDeviceAuth(db, deviceId, token, clientVersion);
+    if (!auth.ok) {
+      reply.code(auth.reason === 'client_too_old' ? 426 : 401).send({
+        ok: false,
+        error: deviceAuthFailureMessage(auth),
+        reason: auth.reason,
+        minClientVersion: auth.reason === 'client_too_old' ? auth.minClientVersion : undefined,
+      });
+      return;
+    }
+    const thread = db.latestVoiceThreadForDeviceOrNull(auth.device.userId, auth.device.id);
+    if (!thread) {
+      return {
+        ok: true,
+        thread: null,
+        artifacts: [],
+      };
+    }
+    const artifacts = db.listArtifacts(auth.device.userId, thread.id);
+    return {
+      ok: true,
+      thread: {
+        ...thread,
+        artifactsCount: artifacts.length,
+      },
+      artifacts,
     };
   });
 
@@ -1102,6 +1530,16 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     }
     const device = auth.device;
     controlChannels.register(deviceId, socket);
+    db.addLog(device.userId, {
+      deviceId: device.id,
+      source: device.deviceType,
+      level: 'info',
+      message: 'Device control channel connected',
+      detailsJson: JSON.stringify({
+        clientVersion,
+        connectedDeviceIds: controlChannels.connectedDeviceIds().length,
+      }),
+    });
     socket.send(JSON.stringify({
       type: 'control_hello',
       protocolVersion: VOICE_STREAM_PROTOCOL_VERSION,
@@ -1141,13 +1579,19 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       }
       socket.close(VoiceCloseCode.InvalidMessage, 'unknown control message');
     });
-    socket.on('close', () => {
+    socket.on('close', (code: number, reason: Buffer) => {
       clearInterval(heartbeat);
       controlChannels.unregister(deviceId, socket);
-      db.upsertClientStatus(device.userId, device.id, {
-        mode: 'off',
-        status: 'Control channel closed',
-        protocolVersion: VOICE_STREAM_PROTOCOL_VERSION,
+      db.addLog(device.userId, {
+        deviceId: device.id,
+        source: device.deviceType,
+        level: 'warn',
+        message: 'Device control channel disconnected',
+        detailsJson: JSON.stringify({
+          code,
+          reason: reason?.toString() ?? '',
+          connectedDeviceIds: controlChannels.connectedDeviceIds().length,
+        }),
       });
     });
   });
@@ -1611,15 +2055,61 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     }),
   );
 
+  app.get('/api/assistant/keys', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => ({
+      ok: true,
+      keys: db.assistantApiKeysView(ctx.user.id),
+    })),
+  );
+
+  app.get('/api/assistant/keys/:provider', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const provider = (req.params as any)?.provider;
+      return {
+        ok: true,
+        key: db.assistantApiKeyView(ctx.user.id, provider),
+      };
+    }),
+  );
+
+  app.post('/api/assistant/keys/:provider', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const provider = (req.params as any)?.provider;
+      const body = jsonBody(req);
+      const key = db.upsertAssistantApiKey(ctx.user.id, provider, body.apiKey);
+      emitAssistantChange('assistant_api_key_updated');
+      return {
+        ok: true,
+        key,
+        keys: db.assistantApiKeysView(ctx.user.id),
+        snapshot: assistantSnapshot(db, ctx.user.id),
+      };
+    }),
+  );
+
+  app.delete('/api/assistant/keys/:provider', async (req, reply) =>
+    withUser(req, reply, db, clerkEnabled, async (ctx) => {
+      const provider = (req.params as any)?.provider;
+      const deleted = db.deleteAssistantApiKey(ctx.user.id, provider);
+      emitAssistantChange('assistant_api_key_deleted');
+      return {
+        ok: true,
+        deleted,
+        keys: db.assistantApiKeysView(ctx.user.id),
+        snapshot: assistantSnapshot(db, ctx.user.id),
+      };
+    }),
+  );
+
   app.post('/api/assistant/approvals/:approvalId/approve', async (req, reply) =>
     withUser(req, reply, db, clerkEnabled, async (ctx) => {
       const approvalId = String((req.params as any).approvalId ?? '');
       const pending = db.pendingApproval(ctx.user.id, approvalId);
-      const beforeSpokenIds = new Set(
-        pending ? db.listMessages(ctx.user.id, pending.threadId).filter((message) => message.spokenText).map((message) => message.id) : [],
-      );
+      const pendingSpeakText = pending?.toolName === 'speak' ? speakTextFromArgsJson(pending.argsJson) : '';
       const snapshot = await resolveAssistantApproval(db, ctx.user.id, approvalId, true, ctx.user.email || ctx.user.displayName || 'user');
-      if (pending) emitNewSpokenMessages(ctx.user.id, pending.threadId, beforeSpokenIds);
+      if (pendingSpeakText && pending) {
+        enqueueSpeechAudio(ctx.user.id, pendingSpeakText, { source: 'assistant', threadId: pending.threadId, messageId: pending.toolCallId });
+      }
       emitAssistantChange('approval_resolved', snapshot.activeThreadId ?? undefined);
       return { ok: true, snapshot };
     }),
@@ -1628,12 +2118,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
   app.post('/api/assistant/approvals/:approvalId/deny', async (req, reply) =>
     withUser(req, reply, db, clerkEnabled, async (ctx) => {
       const approvalId = String((req.params as any).approvalId ?? '');
-      const pending = db.pendingApproval(ctx.user.id, approvalId);
-      const beforeSpokenIds = new Set(
-        pending ? db.listMessages(ctx.user.id, pending.threadId).filter((message) => message.spokenText).map((message) => message.id) : [],
-      );
       const snapshot = await resolveAssistantApproval(db, ctx.user.id, approvalId, false, ctx.user.email || ctx.user.displayName || 'user');
-      if (pending) emitNewSpokenMessages(ctx.user.id, pending.threadId, beforeSpokenIds);
       emitAssistantChange('approval_resolved', snapshot.activeThreadId ?? undefined);
       return { ok: true, snapshot };
     }),
@@ -1683,18 +2168,6 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       const deleted = db.deleteArtifact(ctx.user.id, threadId, artifactPath);
       emitAssistantChange('artifact_deleted', threadId);
       return { ok: true, deleted, artifacts: db.listArtifacts(ctx.user.id, threadId), snapshot: assistantSnapshot(db, ctx.user.id, threadId) };
-    }),
-  );
-
-  app.post('/api/assistant/speech', async (req, reply) =>
-    withUser(req, reply, db, clerkEnabled, async () => {
-      const body = jsonBody(req);
-      const text = cleanText(body.text);
-      if (!text) throw Object.assign(new Error('text is required'), { statusCode: 400 });
-      const speech = await synthesizeSpeech(text);
-      if (!speech.audio) throw Object.assign(new Error('TTS is not configured'), { statusCode: 501 });
-      reply.header('content-type', 'audio/wav').send(Buffer.from(speech.audio));
-      return undefined;
     }),
   );
 
@@ -1925,21 +2398,45 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
             } else {
               let assistantError = '';
               let pendingStatus = '';
+              if ((socket as any).readyState === 1) {
+                socket.send(JSON.stringify({
+                  type: 'assistant_status',
+                  phase: 'thinking',
+                  status: 'Assistant is thinking.',
+                  threadId: session.assistantThreadId,
+                }));
+              }
               await promptAssistantThread(db, device.userId, session.assistantThreadId, { prompt: transcript }, (event) => {
                 handleAssistantPromptEvent(device.userId, session.assistantThreadId, event);
                 if ((event as any)?.type === 'queued') {
                   pendingStatus = 'Queued voice prompt.';
+                  if ((socket as any).readyState === 1) {
+                    socket.send(JSON.stringify({
+                      type: 'assistant_status',
+                      phase: 'queued',
+                      status: pendingStatus,
+                      threadId: session.assistantThreadId,
+                    }));
+                  }
                 }
                 if ((event as any)?.type === 'approval_pending') {
                   pendingStatus = 'Assistant is waiting for approval.';
+                  if ((socket as any).readyState === 1) {
+                    socket.send(JSON.stringify({
+                      type: 'assistant_status',
+                      phase: 'approval_pending',
+                      status: pendingStatus,
+                      threadId: session.assistantThreadId,
+                    }));
+                  }
                 }
                 if ((event as any)?.type === 'message' && (event as any).message?.role === 'assistant') {
-                  const message = (event as any).message as AssistantMessage;
+                  const message = (event as any).message;
                   if (message.isError) {
                     assistantError = String(message.content ?? 'Voice assistant failed.').trim();
                     return;
                   }
-                  assistantText = String(message.spokenText ?? message.content ?? '').trim();
+                  assistantText = String(message.content ?? '').trim();
                 }
                 if ((event as any)?.type === 'error') {
                   assistantError = String((event as any).error ?? 'Voice assistant failed.');
@@ -1959,12 +2456,6 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
               }
               if ((socket as any).readyState === 1) {
                 socket.send(JSON.stringify({ type: 'assistant_result', transcript, assistantText, runtime }));
-                if (assistantText) {
-                  const speech = await synthesizeSpeech(assistantText);
-                  if (speech.audio && (socket as any).readyState === 1) {
-                    socket.send(Buffer.from(speech.audio));
-                  }
-                }
               }
             }
           }

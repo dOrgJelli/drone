@@ -34,6 +34,8 @@ describe('device lifecycle', () => {
     db.createPairingSession(user.id, registered.device.id, expiredAt);
 
     expect(db.verifyDeviceToken(registered.device.id, registered.token).ok).toBe(false);
+    expect(db.listDevices(user.id).some((device) => device.id === registered.device.id)).toBe(false);
+    expect(db.deviceForUser(user.id, registered.device.id)?.revokedAt).toBeTruthy();
 
     const fresh = db.registerDevice(user.id, { deviceType: 'android', displayName: 'Phone 2' });
     const future = pairingExpiresAt();
@@ -64,6 +66,32 @@ describe('device lifecycle', () => {
     const revoked = db.revokeDevice(user.id, registered.device.id);
     expect(revoked?.revokedAt).toBeTruthy();
     expect(db.verifyDeviceToken(registered.device.id, rotated!.token).ok).toBe(false);
+  });
+
+  test('backfills installation ids for existing desktop pairings', () => {
+    const db = tempDb('installation-backfill');
+    dbs.push(db);
+    const user = db.upsertUser({
+      clerkUserId: 'clerk_installation',
+      displayName: 'Installation User',
+      email: 'installation@example.local',
+      admin: false,
+    });
+    const legacy = db.registerDevice(user.id, { deviceType: 'desktop', displayName: 'Desktop' });
+    expect(legacy.device.installationId).toBeNull();
+
+    const assigned = db.assignDeviceInstallationId(user.id, legacy.device.id, 'desktop_install_legacy');
+    expect(assigned?.id).toBe(legacy.device.id);
+    expect(assigned?.installationId).toBe('desktop_install_legacy');
+
+    const reused = db.registerDevice(user.id, {
+      deviceType: 'desktop',
+      displayName: 'Desktop Renamed',
+      installationId: 'desktop_install_legacy',
+    });
+    expect(reused.device.id).toBe(legacy.device.id);
+    expect(reused.device.displayName).toBe('Desktop Renamed');
+    expect(db.listDevices(user.id).filter((device) => device.installationId === 'desktop_install_legacy')).toHaveLength(1);
   });
 
   test('rejects clients below the configured minimum version', () => {
@@ -175,6 +203,12 @@ describe('voice session device validation', () => {
     process.env.VOICE_STREAM_NEXT_DATA_DIR = dataDir;
     const built = await buildApp({ logger: false });
     try {
+      built.db.upsertUser({
+        clerkUserId: 'dev_existing_release_admin',
+        displayName: 'Existing Admin',
+        email: 'existing-release-admin@example.local',
+        admin: true,
+      });
       const response = await built.app.inject({
         method: 'POST',
         url: '/api/voice/sessions',
@@ -204,7 +238,7 @@ describe('voice session device validation', () => {
         method: 'POST',
         url: '/api/desktop-auth/requests',
         headers: { 'content-type': 'application/json' },
-        payload: JSON.stringify({ displayName: 'Browser Desktop' }),
+        payload: JSON.stringify({ displayName: 'Browser Desktop', installationId: 'desktop_install_1' }),
       });
       expect(requestResponse.statusCode).toBe(200);
       const request = requestResponse.json();
@@ -254,6 +288,34 @@ describe('voice session device validation', () => {
       expect(bootstrapResponse.statusCode).toBe(200);
       expect(bootstrapResponse.json().device.id).toBe(claimed.device.id);
       expect(bootstrapResponse.json().settings.unlockCode).toBeTruthy();
+
+      const secondRequestResponse = await built.app.inject({
+        method: 'POST',
+        url: '/api/desktop-auth/requests',
+        headers: { 'content-type': 'application/json' },
+        payload: JSON.stringify({ displayName: 'Browser Desktop Renamed', installationId: 'desktop_install_1' }),
+      });
+      expect(secondRequestResponse.statusCode).toBe(200);
+      const secondRequest = secondRequestResponse.json();
+
+      const secondClaimResponse = await built.app.inject({
+        method: 'POST',
+        url: '/api/desktop-auth/claim',
+        headers: {
+          'content-type': 'application/json',
+          'x-voice-dev-user-email': 'browser-desktop@example.local',
+          'x-voice-dev-user-name': 'Browser Desktop User',
+          'x-voice-dev-admin': '0',
+        },
+        payload: JSON.stringify({ requestId: secondRequest.requestId, secret: secondRequest.secret }),
+      });
+      expect(secondClaimResponse.statusCode).toBe(200);
+      const secondClaimed = secondClaimResponse.json();
+      expect(secondClaimed.device.id).toBe(claimed.device.id);
+      expect(secondClaimed.device.displayName).toBe('Browser Desktop Renamed');
+      expect(built.db.listDevices().filter((device) => device.installationId === 'desktop_install_1')).toHaveLength(1);
+      expect(built.db.verifyDeviceToken(claimed.device.id, request.deviceToken).ok).toBe(false);
+      expect(built.db.verifyDeviceToken(claimed.device.id, secondRequest.deviceToken).ok).toBe(true);
     } finally {
       await built.app.close();
       built.db.db.close();
@@ -289,6 +351,123 @@ describe('desktop app downloads', () => {
 
       expect(metadata.json().desktop.fileName).toBe('voice-stream-next-desktop-latest.tar.gz');
       expect(metadata.json().desktop.size).toBe('desktop archive'.length);
+    } finally {
+      await built.app.close();
+      built.db.db.close();
+    }
+  });
+
+  test('lets admins upload Android and desktop release artifacts', async () => {
+    const dataDir = path.join(process.cwd(), 'server', 'data', 'tests', crypto.randomUUID());
+    process.env.VOICE_STREAM_NEXT_DATA_DIR = dataDir;
+    const built = await buildApp({ logger: false });
+    try {
+      const adminHeaders = {
+        'content-type': 'application/octet-stream',
+        'x-voice-dev-user-email': 'release-admin@example.local',
+        'x-voice-dev-user-name': 'Release Admin',
+        'x-voice-dev-admin': '1',
+      };
+      const androidResponse = await built.app.inject({
+        method: 'PUT',
+        url: '/api/admin/releases/android',
+        headers: {
+          ...adminHeaders,
+          'x-voice-release-file-name': 'voice-stream-next-android-release.apk',
+          'x-voice-release-metadata': JSON.stringify({
+            app: 'voice-stream-next',
+            platform: 'android',
+            variant: 'release',
+            versionCode: 77,
+            versionName: '1.2.3',
+            builtAt: '2026-05-25T00:00:00.000Z',
+          }),
+        },
+        payload: Buffer.from('apk bytes'),
+      });
+      expect(androidResponse.statusCode).toBe(200);
+      expect(androidResponse.json().android.available).toBe(true);
+      expect(androidResponse.json().android.versionCode).toBe(77);
+
+      const desktopResponse = await built.app.inject({
+        method: 'PUT',
+        url: '/api/admin/releases/desktop',
+        headers: {
+          ...adminHeaders,
+          'x-voice-release-file-name': 'VoiceStream-linux-x64.tar.gz',
+          'x-voice-release-metadata': JSON.stringify({
+            app: 'voice-stream-next',
+            platform: 'desktop',
+            variant: 'linux-x64',
+            fileName: 'VoiceStream-linux-x64.tar.gz',
+            builtAt: '2026-05-25T00:00:00.000Z',
+          }),
+        },
+        payload: Buffer.from('desktop bytes'),
+      });
+      expect(desktopResponse.statusCode).toBe(200);
+      expect(desktopResponse.json().desktop.available).toBe(true);
+      expect(desktopResponse.json().desktop.fileName).toBe('voice-stream-next-desktop-latest.tar.gz');
+
+      const androidMetadata = await built.app.inject({ method: 'GET', url: '/api/mobile/android' });
+      expect(androidMetadata.json().android.downloadUrl).toContain('/api/mobile/android/apk');
+      const desktopMetadata = await built.app.inject({ method: 'GET', url: '/api/desktop' });
+      expect(desktopMetadata.json().desktop.downloadUrl).toContain('/api/desktop/download');
+    } finally {
+      await built.app.close();
+      built.db.db.close();
+    }
+  });
+
+  test('rejects release uploads from non-admin users', async () => {
+    const dataDir = path.join(process.cwd(), 'server', 'data', 'tests', crypto.randomUUID());
+    process.env.VOICE_STREAM_NEXT_DATA_DIR = dataDir;
+    const built = await buildApp({ logger: false });
+    try {
+      built.db.upsertUser({
+        clerkUserId: 'dev_existing_release_admin',
+        displayName: 'Existing Admin',
+        email: 'existing-release-admin@example.local',
+        admin: true,
+      });
+      const response = await built.app.inject({
+        method: 'PUT',
+        url: '/api/admin/releases/android?variant=release',
+        headers: {
+          'content-type': 'application/octet-stream',
+          'x-voice-dev-user-email': 'release-user@example.local',
+          'x-voice-dev-user-name': 'Release User',
+          'x-voice-dev-admin': '0',
+        },
+        payload: Buffer.from('apk bytes'),
+      });
+      expect(response.statusCode).toBe(403);
+      expect(response.json().error).toBe('admin access required');
+    } finally {
+      await built.app.close();
+      built.db.db.close();
+    }
+  });
+
+  test('rejects admin release uploads without companion metadata', async () => {
+    const dataDir = path.join(process.cwd(), 'server', 'data', 'tests', crypto.randomUUID());
+    process.env.VOICE_STREAM_NEXT_DATA_DIR = dataDir;
+    const built = await buildApp({ logger: false });
+    try {
+      const response = await built.app.inject({
+        method: 'PUT',
+        url: '/api/admin/releases/android',
+        headers: {
+          'content-type': 'application/octet-stream',
+          'x-voice-dev-user-email': 'missing-metadata-admin@example.local',
+          'x-voice-dev-user-name': 'Missing Metadata Admin',
+          'x-voice-dev-admin': '1',
+          'x-voice-release-file-name': 'voice-stream-next-android-release.apk',
+        },
+        payload: Buffer.from('apk bytes'),
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json().error).toBe('android release metadata file is required');
     } finally {
       await built.app.close();
       built.db.db.close();

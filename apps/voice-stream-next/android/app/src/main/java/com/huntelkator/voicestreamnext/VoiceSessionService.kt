@@ -11,6 +11,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.util.Base64
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -37,6 +38,8 @@ class VoiceSessionService : Service() {
     @Volatile private var currentMicrophone = "Mic: phone"
     @Volatile private var lastApprovalStatus = ""
     @Volatile private var serviceActive = false
+    @Volatile private var controlReconnectAttempt = 0
+    @Volatile private var controlReconnectRunnable: Runnable? = null
 
     private val logUploadRunnable = object : Runnable {
         override fun run() {
@@ -249,16 +252,26 @@ class VoiceSessionService : Service() {
         })
     }
 
+    private fun broadcastSpeechHistoryChanged() {
+        sendBroadcast(Intent(Constants.ACTION_SPEECH_HISTORY_CHANGED).apply {
+            setPackage(packageName)
+        })
+    }
+
     private fun connectControlChannel() {
+        cancelControlReconnect()
         if (controlSocket != null) return
         val deviceId = api.pairedDeviceId()
         val token = api.pairedDeviceToken()
         if (deviceId.isBlank() || token.isBlank()) return
         val url = buildControlUrl(api.loadConfig().serverUrl, deviceId, token)
+        ClientLog.i("Service", "Opening control websocket")
         controlSocket = controlClient.newWebSocket(
             Request.Builder().url(url).build(),
             object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
+                    ClientLog.i("Service", "Control websocket opened")
+                    controlReconnectAttempt = 0
                     sendControlStatus(lastStatus, lastMode, currentMicrophone, lastApprovalStatus, webSocket)
                 }
 
@@ -271,25 +284,79 @@ class VoiceSessionService : Service() {
                                 .put("sentAt", java.time.Instant.now().toString())
                                 .toString()
                         )
+                        "speech_audio" -> {
+                            val audioBase64 = message.optString("audioBase64")
+                            if (audioBase64.isNotBlank()) {
+                                runCatching {
+                                    val audio = Base64.decode(audioBase64, Base64.DEFAULT)
+                                    SpeechHistoryStore.add(
+                                        context = applicationContext,
+                                        audio = audio,
+                                        text = message.optString("text").takeIf { it.isNotBlank() },
+                                        source = message.optString("source").takeIf { it.isNotBlank() },
+                                        contentType = message.optString("contentType", "audio/wav"),
+                                    )
+                                    broadcastSpeechHistoryChanged()
+                                    AssistantAudioPlayer.playWav(applicationContext, audio) { status ->
+                                        publishStatus(status, lastMode, currentMicrophone, lastApprovalStatus)
+                                    }
+                                    publishStatus("Assistant audio received.", lastMode, currentMicrophone, lastApprovalStatus)
+                                }.onFailure { error ->
+                                    ClientLog.w("Service", "Assistant audio decode failed", error)
+                                    publishStatus("Assistant audio failed: ${error.message ?: error.javaClass.simpleName}", Constants.MODE_ERROR, currentMicrophone, lastApprovalStatus)
+                                }
+                            }
+                        }
                         "server_command" -> handleRemoteControlCommand(webSocket, message)
                     }
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    ClientLog.w("Service", "Control websocket closed code=$code reason=${reason.ifBlank { "(none)" }} active=$serviceActive mode=$lastMode")
                     if (controlSocket === webSocket) controlSocket = null
+                    if (!isTerminalControlCloseCode(code)) scheduleControlReconnect("closed")
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    ClientLog.w("Service", "Control websocket failed responseCode=${response?.code ?: 0} message=${t.message ?: t.javaClass.simpleName}", t)
                     if (controlSocket === webSocket) controlSocket = null
+                    scheduleControlReconnect("failed")
                 }
             }
         )
     }
 
     private fun closeControlChannel() {
+        cancelControlReconnect()
         controlSocket?.close(1000, "service stopped")
         controlSocket = null
     }
+
+    private fun scheduleControlReconnect(reason: String) {
+        if (!shouldMaintainControlChannel()) return
+        if (controlReconnectRunnable != null) return
+        val attempt = controlReconnectAttempt.coerceAtMost(MAX_CONTROL_RECONNECT_EXPONENT)
+        controlReconnectAttempt += 1
+        val delayMs = minOf(MAX_CONTROL_RECONNECT_DELAY_MS, BASE_CONTROL_RECONNECT_DELAY_MS * (1L shl attempt))
+        ClientLog.i("Service", "Scheduling control websocket reconnect reason=$reason attempt=$controlReconnectAttempt delayMs=$delayMs")
+        val runnable = Runnable {
+            controlReconnectRunnable = null
+            if (shouldMaintainControlChannel()) {
+                connectControlChannel()
+            }
+        }
+        controlReconnectRunnable = runnable
+        mainHandler.postDelayed(runnable, delayMs)
+    }
+
+    private fun cancelControlReconnect() {
+        controlReconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+        controlReconnectRunnable = null
+    }
+
+    private fun shouldMaintainControlChannel(): Boolean = serviceActive && lastMode != Constants.MODE_OFF
+
+    private fun isTerminalControlCloseCode(code: Int): Boolean = code == 4401 || code == 4403 || code == 4406 || code == 4408
 
     private fun sendControlStatus(
         status: String,
@@ -354,7 +421,7 @@ class VoiceSessionService : Service() {
             trimmed.startsWith("http://") -> "ws://${trimmed.removePrefix("http://")}"
             else -> trimmed
         }
-        return "$base/api/devices/${encode(deviceId)}/control?token=${encode(token)}"
+        return "$base/api/devices/${encode(deviceId)}/control?token=${encode(token)}&clientVersion=${BuildConfig.VERSION_CODE}&protocolVersion=1"
     }
 
     private fun encode(value: String): String = URLEncoder.encode(value, Charsets.UTF_8.name())
@@ -364,7 +431,7 @@ class VoiceSessionService : Service() {
         return when {
             lower.contains("missing") || lower.contains("failed") || lower.contains("error") -> Constants.MODE_ERROR
             lower.contains("sleeping") || lower.startsWith("sleep") || lower.startsWith("unlock:") -> Constants.MODE_SLEEPING
-            lower.contains("waking") || lower.contains("starting") || lower.contains("reconnecting") -> Constants.MODE_LOADING
+            lower.contains("waking") || lower.contains("starting") || lower.contains("reconnecting") || lower.contains("thinking") || lower.contains("queued") || lower.contains("waiting for approval") -> Constants.MODE_LOADING
             lower.contains("assistant replied") || lower.contains("transcript received") || lower.contains("audio received") -> Constants.MODE_AWAKE
             lower.contains("waiting") || lower.contains("listening") || lower.contains("copied voice transcription") || lower.contains("no voice transcription") -> Constants.MODE_AWAKE
             lower.contains("closed") || lower == "off" -> Constants.MODE_OFF
@@ -402,5 +469,8 @@ class VoiceSessionService : Service() {
         const val NOTIFICATION_ID = 821
         const val LOG_UPLOAD_INTERVAL_MS = 60_000L
         const val APPROVAL_STATUS_MS = 4_000L
+        const val BASE_CONTROL_RECONNECT_DELAY_MS = 500L
+        const val MAX_CONTROL_RECONNECT_DELAY_MS = 10_000L
+        const val MAX_CONTROL_RECONNECT_EXPONENT = 5
     }
 }

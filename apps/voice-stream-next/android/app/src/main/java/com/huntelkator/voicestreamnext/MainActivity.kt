@@ -14,14 +14,16 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.view.GestureDetector
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
-import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -32,6 +34,10 @@ import androidx.core.content.ContextCompat
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import java.net.URI
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 import kotlin.concurrent.thread
 import kotlin.math.roundToInt
 
@@ -48,20 +54,52 @@ class MainActivity : ComponentActivity() {
     private lateinit var offButton: Button
     private lateinit var root: LinearLayout
     private lateinit var signedOutPanel: View
-    private lateinit var voicePanel: View
+    private lateinit var voicePanel: LinearLayout
     private lateinit var settingsPanel: View
     private lateinit var settingsButton: Button
     private lateinit var signInButton: Button
     private lateinit var signOutButton: Button
-    private lateinit var qrButton: ImageButton
+    private lateinit var updateBanner: LinearLayout
+    private lateinit var updateBannerTitle: TextView
+    private lateinit var updateBannerSubtitle: TextView
+    private lateinit var updateBannerButton: Button
+    private lateinit var speechHistoryPanel: LinearLayout
+    private lateinit var speechHistoryTitle: TextView
+    private lateinit var speechHistorySubtitle: TextView
+    private lateinit var speechHistoryPrevButton: Button
+    private lateinit var speechHistoryPlayButton: Button
+    private lateinit var speechHistoryStopButton: Button
+    private lateinit var speechHistoryNextButton: Button
+    private lateinit var assistantActivityText: TextView
+    private lateinit var filesButton: Button
+    private lateinit var filesBadgeText: TextView
+    private lateinit var filesPanel: View
+    private lateinit var filesTitleText: TextView
+    private lateinit var filesSubtitleText: TextView
+    private lateinit var filePathText: TextView
+    private lateinit var fileMetaText: TextView
+    private lateinit var fileContentText: TextView
+    private lateinit var filePrevButton: Button
+    private lateinit var fileNextButton: Button
+    private lateinit var fileExplorerButton: Button
+    private lateinit var fileRefreshButton: Button
 
     private val wakeController = WakeToggleController()
     private val approvalCodeRecognizer = ApprovalCodeRecognizer()
     @Volatile private var approvalSettings = VoiceApprovalSettings()
+    @Volatile private var updateCheckRunning = false
     private val cuePlayer = LocalCuePlayer()
     private var pendingStartAwake = false
     private var pendingStartTarget = Constants.STREAM_TARGET_ASSISTANT
     private var sessionMode = SessionMode.OFF
+    private var currentUpdateConfig: UpdateConfig? = null
+    private var lastUpdateCheckAtMs = 0L
+    private var speechHistoryEntries: List<SpeechHistoryEntry> = emptyList()
+    private var speechHistoryIndex = -1
+    private var assistantThreadSummary: AssistantThreadSummary? = null
+    private var assistantArtifacts: List<AssistantArtifact> = emptyList()
+    private var selectedArtifactIndex = -1
+    @Volatile private var assistantFilesLoading = false
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -79,6 +117,12 @@ class MainActivity : ComponentActivity() {
                 updateMicrophoneUi(microphone)
             }
             updateApprovalUi(approvalStatus)
+        }
+    }
+
+    private val speechHistoryReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            refreshSpeechHistory(selectLatest = true)
         }
     }
 
@@ -118,14 +162,17 @@ class MainActivity : ComponentActivity() {
         api = VoiceStreamApi(applicationContext)
         browserAuth = BrowserAuthCoordinator(api, browserAuthCallbacks())
         DiagnosticsUploader.upload(applicationContext, api, "activity-start", force = true)
-        window.statusBarColor = COLOR_BACKGROUND
-        window.navigationBarColor = COLOR_BACKGROUND
+        runCatching { configureSystemBars() }.onFailure { error ->
+            ClientLog.w("Activity", "System bar configuration failed", error)
+        }
         buildUi()
         loadConfigIntoForm()
         updateSessionUi(SessionMode.OFF, "Ready")
+        refreshSpeechHistory(selectLatest = true)
         renderAuthState()
         if (api.pairedDeviceId().isNotBlank()) {
             refreshDashboard()
+            refreshAssistantThreadSummary()
         }
     }
 
@@ -138,15 +185,24 @@ class MainActivity : ComponentActivity() {
             IntentFilter(Constants.ACTION_STATUS),
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
+        ContextCompat.registerReceiver(
+            this,
+            speechHistoryReceiver,
+            IntentFilter(Constants.ACTION_SPEECH_HISTORY_CHANGED),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
     }
 
     override fun onResume() {
         super.onResume()
+        refreshSpeechHistory(selectLatest = false)
+        refreshAssistantThreadSummary()
         resyncServiceStatus()
     }
 
     override fun onStop() {
         runCatching { unregisterReceiver(statusReceiver) }
+        runCatching { unregisterReceiver(speechHistoryReceiver) }
         super.onStop()
     }
 
@@ -164,34 +220,39 @@ class MainActivity : ComponentActivity() {
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(24.dp(), 48.dp(), 24.dp(), 196.dp())
+            setPadding(24.dp(), 48.dp(), 24.dp(), 132.dp())
         }
         screen.addView(root, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
         ))
 
-        root.addView(label("VoiceStream", 34f, COLOR_TEXT, true).apply { gravity = Gravity.CENTER })
-        root.addView(label("Android client", 13f, COLOR_ACCENT, true).apply {
-            gravity = Gravity.CENTER
-            setPadding(0, 2.dp(), 0, 18.dp())
+        root.addView(buildHeader(), LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 54.dp()))
+        updateBanner = buildUpdateBanner()
+        root.addView(updateBanner, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = 6.dp()
         })
 
         signedOutPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            background = rounded(COLOR_SURFACE, 18.dp(), COLOR_STROKE)
-            setPadding(18.dp(), 18.dp(), 18.dp(), 18.dp())
-            addView(label("Sign in to connect this phone", 20f, COLOR_TEXT, true).apply {
+            gravity = Gravity.CENTER
+            val card = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                background = rounded(COLOR_SURFACE, 12.dp(), COLOR_STROKE)
+                setPadding(18.dp(), 18.dp(), 18.dp(), 18.dp())
+            }
+            addView(card, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            card.addView(label("Sign in to connect this phone", 20f, COLOR_TEXT, true).apply {
                 gravity = Gravity.CENTER
             })
-            addView(label("Use the web dashboard sign-in flow, including social login, then return here.", 13f, COLOR_MUTED, false).apply {
+            card.addView(label("Use the web dashboard sign-in flow, including social login, then return here.", 13f, COLOR_MUTED, false).apply {
                 gravity = Gravity.CENTER
                 setPadding(0, 8.dp(), 0, 16.dp())
             })
             signInButton = button("Sign in") { signInWithBrowser() }
-            addView(signInButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 52.dp()))
-            addView(row(
+            card.addView(signInButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 52.dp()))
+            card.addView(row(
                 button("Scan QR") { startQrScan() },
                 button("Open web") { openWebDashboard() },
             ))
@@ -199,10 +260,10 @@ class MainActivity : ComponentActivity() {
                 gravity = Gravity.CENTER
                 setPadding(0, 14.dp(), 0, 0)
             }
-            addView(pairingMessageText)
+            card.addView(pairingMessageText)
         }
-        root.addView(signedOutPanel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-            topMargin = 24.dp()
+        root.addView(signedOutPanel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f).apply {
+            topMargin = 20.dp()
         })
 
         val hero = LinearLayout(this).apply {
@@ -216,70 +277,51 @@ class MainActivity : ComponentActivity() {
             stylePrimaryButton(SessionMode.OFF)
         }
         hero.addView(primaryActionButton, LinearLayout.LayoutParams(166.dp(), 166.dp()))
+        statusText = label("Ready", 15f, COLOR_MUTED, true).apply {
+            gravity = Gravity.CENTER
+            setPadding(18.dp(), 16.dp(), 18.dp(), 0)
+        }
+        hero.addView(statusText, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        approvalText = label("", 14f, COLOR_MUTED, true).apply {
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+            setPadding(18.dp(), 8.dp(), 18.dp(), 0)
+        }
+        hero.addView(approvalText, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        assistantActivityText = label("", 13f, COLOR_YELLOW, true).apply {
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+            setPadding(14.dp(), 8.dp(), 14.dp(), 8.dp())
+            background = rounded(COLOR_UPDATE_SURFACE, 14.dp(), COLOR_YELLOW)
+        }
+        hero.addView(assistantActivityText, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = 10.dp()
+        })
         offButton = Button(this).apply {
-            text = "Off"
+            text = "Turn off"
             visibility = View.GONE
             styleSecondaryButton()
             setOnClickListener { turnOff() }
         }
         hero.addView(offButton, LinearLayout.LayoutParams(148.dp(), 48.dp()).apply { topMargin = 18.dp() })
+        speechHistoryPanel = buildSpeechHistoryPanel()
+        hero.addView(speechHistoryPanel, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = 22.dp()
+        })
         root.addView(hero)
-
-        signOutButton = Button(this).apply {
-            text = "Sign out"
-            styleFloatingButton()
-            setOnClickListener { signOut() }
-        }
-        screen.addView(signOutButton, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            54.dp(),
-            Gravity.TOP or Gravity.END,
-        ).apply {
-            rightMargin = 18.dp()
-            topMargin = 44.dp()
-        })
-
-        statusText = label("Ready", 15f, COLOR_MUTED, true).apply {
-            gravity = Gravity.CENTER
-            setPadding(18.dp(), 10.dp(), 18.dp(), 10.dp())
-        }
-        screen.addView(statusText, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL,
-        ).apply {
-            leftMargin = 42.dp()
-            rightMargin = 42.dp()
-            bottomMargin = 132.dp()
-        })
-
-        approvalText = label("", 14f, COLOR_MUTED, true).apply {
-            gravity = Gravity.CENTER
-            visibility = View.GONE
-            setPadding(18.dp(), 8.dp(), 18.dp(), 8.dp())
-        }
-        screen.addView(approvalText, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL,
-        ).apply {
-            leftMargin = 42.dp()
-            rightMargin = 42.dp()
-            bottomMargin = 108.dp()
-        })
 
         microphoneText = label("Mic: phone", 12f, COLOR_MUTED, true).apply {
             gravity = Gravity.CENTER
-            setPadding(12.dp(), 8.dp(), 12.dp(), 8.dp())
-            background = rounded(COLOR_FLOATING, 16.dp(), COLOR_STROKE)
+            setPadding(14.dp(), 0, 14.dp(), 0)
+            background = rounded(COLOR_FLOATING, 12.dp(), COLOR_STROKE)
         }
         screen.addView(microphoneText, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
+            50.dp(),
             Gravity.BOTTOM or Gravity.END,
         ).apply {
             rightMargin = 18.dp()
-            bottomMargin = 92.dp()
+            bottomMargin = 22.dp()
         })
 
         settingsPanel = ScrollView(this).apply {
@@ -304,28 +346,20 @@ class MainActivity : ComponentActivity() {
         }
         screen.addView(settingsButton, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
-            54.dp(),
+            50.dp(),
             Gravity.BOTTOM or Gravity.START,
         ).apply {
             leftMargin = 18.dp()
             bottomMargin = 22.dp()
         })
 
-        qrButton = ImageButton(this).apply {
-            contentDescription = "Scan VoiceStream QR"
-            setImageResource(android.R.drawable.ic_menu_camera)
-            scaleType = android.widget.ImageView.ScaleType.CENTER
-            styleIconButton()
-            setOnClickListener { startQrScan() }
+        filesPanel = buildFilesPanel().apply {
+            visibility = View.GONE
         }
-        screen.addView(qrButton, FrameLayout.LayoutParams(
-            58.dp(),
-            58.dp(),
-            Gravity.BOTTOM or Gravity.END,
-        ).apply {
-            rightMargin = 18.dp()
-            bottomMargin = 20.dp()
-        })
+        screen.addView(filesPanel, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        ))
 
         screen.setOnApplyWindowInsetsListener { _, insets ->
             positionSystemBars(insets.topSystemInset(), insets.bottomSystemInset())
@@ -335,13 +369,160 @@ class MainActivity : ComponentActivity() {
         screen.requestApplyInsets()
     }
 
+    private fun buildHeader(): LinearLayout {
+        val title = label("Drone", 34f, COLOR_TEXT, true).apply {
+            gravity = Gravity.CENTER
+            setPadding(0, 2.dp(), 0, 0)
+        }
+        val filesButtonFrame = FrameLayout(this).apply {
+            filesButton = Button(this@MainActivity).apply {
+                text = "Files"
+                styleFloatingButton()
+                setCompoundDrawablesWithIntrinsicBounds(android.R.drawable.ic_menu_save, 0, 0, 0)
+                compoundDrawablePadding = 6.dp()
+                setOnClickListener { openFilesView() }
+            }
+            addView(filesButton, FrameLayout.LayoutParams(104.dp(), 44.dp(), Gravity.CENTER))
+            filesBadgeText = label("", 10f, COLOR_BUTTON_TEXT, true).apply {
+                gravity = Gravity.CENTER
+                visibility = View.GONE
+                background = rounded(COLOR_GREEN, 9.dp(), COLOR_GREEN)
+            }
+            addView(filesBadgeText, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, 18.dp(), Gravity.TOP or Gravity.END).apply {
+                topMargin = 1.dp()
+                rightMargin = 1.dp()
+            })
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(View(this@MainActivity), LinearLayout.LayoutParams(104.dp(), 1))
+            addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f))
+            addView(filesButtonFrame, LinearLayout.LayoutParams(104.dp(), ViewGroup.LayoutParams.MATCH_PARENT))
+        }
+    }
+
+    private fun buildFilesPanel(): View {
+        val panelRoot = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(COLOR_BACKGROUND)
+            setPadding(18.dp(), 48.dp(), 18.dp(), 26.dp())
+        }
+
+        val closeButton = button("Back") { closeFilesView() }
+        fileExplorerButton = button("Explorer") { showFileExplorer() }
+        fileRefreshButton = button("Refresh") { refreshAssistantFiles(selectFirst = false) }
+
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(closeButton, LinearLayout.LayoutParams(82.dp(), 44.dp()))
+            val titleColumn = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                filesTitleText = label("Files", 22f, COLOR_TEXT, true)
+                filesSubtitleText = label("Current voice thread", 12f, COLOR_MUTED, false)
+                addView(filesTitleText)
+                addView(filesSubtitleText)
+            }
+            addView(titleColumn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                leftMargin = 10.dp()
+                rightMargin = 10.dp()
+            })
+            addView(fileExplorerButton, LinearLayout.LayoutParams(104.dp(), 44.dp()).apply { rightMargin = 8.dp() })
+            addView(fileRefreshButton, LinearLayout.LayoutParams(94.dp(), 44.dp()))
+        }
+        panelRoot.addView(header)
+
+        val fileCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = rounded(COLOR_SURFACE, 10.dp(), COLOR_STROKE)
+            setPadding(14.dp(), 14.dp(), 14.dp(), 14.dp())
+            filePathText = label("No file selected", 16f, COLOR_TEXT, true)
+            fileMetaText = label("", 11f, COLOR_MUTED, false).apply {
+                setPadding(0, 5.dp(), 0, 10.dp())
+            }
+            addView(filePathText)
+            addView(fileMetaText)
+        }
+        panelRoot.addView(fileCard, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = 16.dp()
+        })
+
+        val contentScroll = ScrollView(this).apply {
+            background = rounded(COLOR_INPUT, 8.dp(), COLOR_STROKE)
+            setPadding(12.dp(), 12.dp(), 12.dp(), 12.dp())
+            fileContentText = label("", 13f, COLOR_TEXT, false).apply {
+                typeface = Typeface.MONOSPACE
+                setLineSpacing(2.dp().toFloat(), 1f)
+            }
+            addView(fileContentText)
+        }
+        val gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onDown(event: MotionEvent): Boolean = true
+
+            override fun onFling(
+                event1: MotionEvent?,
+                event2: MotionEvent,
+                velocityX: Float,
+                velocityY: Float
+            ): Boolean {
+                val start = event1 ?: return false
+                val deltaX = event2.x - start.x
+                if (kotlin.math.abs(deltaX) < 70.dp() || kotlin.math.abs(velocityX) < kotlin.math.abs(velocityY)) return false
+                moveArtifact(if (deltaX < 0) 1 else -1)
+                return true
+            }
+        })
+        contentScroll.setOnTouchListener { _, event ->
+            gestureDetector.onTouchEvent(event)
+            false
+        }
+        panelRoot.addView(contentScroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f).apply {
+            topMargin = 12.dp()
+        })
+
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            filePrevButton = button("Previous") { moveArtifact(-1) }
+            fileNextButton = button("Next") { moveArtifact(1) }
+            addView(filePrevButton, LinearLayout.LayoutParams(0, 48.dp(), 1f).apply { rightMargin = 8.dp() })
+            addView(fileNextButton, LinearLayout.LayoutParams(0, 48.dp(), 1f))
+        }
+        panelRoot.addView(controls, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = 12.dp()
+        })
+
+        return panelRoot
+    }
+
+    private fun configureSystemBars() {
+        window.statusBarColor = COLOR_SYSTEM_BAR
+        window.navigationBarColor = COLOR_BACKGROUND
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.insetsController?.setSystemBarsAppearance(
+                0,
+                WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
+                    WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            var flags = window.decorView.systemUiVisibility and View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR.inv()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                flags = flags and View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR.inv()
+            }
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = flags
+        }
+    }
+
     private fun buildSettingsContent(): LinearLayout {
         serverInput = field("Server URL")
         deviceNameInput = field("Device name")
 
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = rounded(COLOR_SURFACE, 18.dp(), COLOR_STROKE)
+            background = rounded(COLOR_SURFACE, 12.dp(), COLOR_STROKE)
             setPadding(16.dp(), 16.dp(), 16.dp(), 16.dp())
 
             addView(card("Connection").apply {
@@ -349,9 +530,12 @@ class MainActivity : ComponentActivity() {
                 addView(deviceNameInput)
                 addView(row(
                     button("Save") { saveConfigFromForm() },
-                    button("Sign in") { signInWithBrowser() },
                     button("Open web") { openWebDashboard() }
                 ))
+                signOutButton = button("Sign out") { signOut() }
+                addView(signOutButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 48.dp()).apply {
+                    topMargin = 10.dp()
+                })
             })
 
             addView(card("Pairing").apply {
@@ -359,6 +543,12 @@ class MainActivity : ComponentActivity() {
                     button("Scan QR") { startQrScan() },
                     button("Refresh") { refreshDashboard() }
                 ))
+                addView(button("Check update") { checkForAppUpdate(force = true, showNoUpdate = true) }, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    44.dp()
+                ).apply {
+                    topMargin = 8.dp()
+                })
                 addView(label("Scan a pairing or update QR from the web dashboard.", 12f, COLOR_MUTED, false).apply {
                     setPadding(0, 10.dp(), 0, 0)
                 })
@@ -393,10 +583,181 @@ class MainActivity : ComponentActivity() {
         sessionMode = mode
         statusText.text = status
         statusText.setTextColor(if (mode == SessionMode.ERROR) COLOR_ACCENT else COLOR_MUTED)
-        statusText.visibility = if (mode == SessionMode.OFF) View.GONE else View.VISIBLE
+        statusText.visibility = View.VISIBLE
+        renderAssistantActivity(status)
         primaryActionButton.stylePrimaryButton(mode)
         offButton.visibility = if (mode == SessionMode.OFF || mode == SessionMode.ERROR) View.GONE else View.VISIBLE
         if (mode == SessionMode.OFF) updateApprovalUi("")
+        if (status.contains("assistant replied", ignoreCase = true) ||
+            status.contains("artifact", ignoreCase = true) ||
+            status.contains("transcript patched", ignoreCase = true)
+        ) {
+            refreshAssistantThreadSummary()
+        }
+    }
+
+    private fun renderAssistantActivity(status: String) {
+        if (!::assistantActivityText.isInitialized) return
+        val lower = status.lowercase()
+        val text = when {
+            lower.contains("waiting for approval") -> "Waiting for approval"
+            lower.contains("queued voice prompt") || lower.contains("queued") -> "Queued"
+            lower.contains("thinking") -> "Assistant is thinking..."
+            else -> ""
+        }
+        if (text.isBlank()) {
+            assistantActivityText.visibility = View.GONE
+            assistantActivityText.text = ""
+        } else {
+            assistantActivityText.visibility = View.VISIBLE
+            assistantActivityText.text = text
+        }
+    }
+
+    private fun refreshAssistantThreadSummary() {
+        val connected = api.pairedDeviceId().isNotBlank() && api.pairedDeviceToken().isNotBlank()
+        if (!connected || assistantFilesLoading) return
+        thread(name = "VoiceStreamAssistantThreadSummary") {
+            runCatching { api.assistantThreadSummary() }
+                .onSuccess { summary ->
+                    runOnUiThread {
+                        assistantThreadSummary = summary
+                        renderFilesBadge(summary.artifactsCount)
+                        if (::filesPanel.isInitialized && filesPanel.visibility == View.VISIBLE) {
+                            renderFilesView()
+                        }
+                    }
+                }
+        }
+    }
+
+    private fun refreshAssistantFiles(selectFirst: Boolean) {
+        val connected = api.pairedDeviceId().isNotBlank() && api.pairedDeviceToken().isNotBlank()
+        if (!connected || assistantFilesLoading) return
+        assistantFilesLoading = true
+        runOnUiThread {
+            fileRefreshButton.isEnabled = false
+            if (assistantArtifacts.isEmpty()) {
+                fileContentText.text = "Loading files..."
+            }
+        }
+        thread(name = "VoiceStreamAssistantFiles") {
+            try {
+                val result = api.assistantFiles()
+                runOnUiThread {
+                    assistantThreadSummary = result.thread
+                    assistantArtifacts = result.artifacts
+                    selectedArtifactIndex = when {
+                        result.artifacts.isEmpty() -> -1
+                        selectFirst || selectedArtifactIndex !in result.artifacts.indices -> 0
+                        else -> selectedArtifactIndex
+                    }
+                    renderFilesBadge(result.thread.artifactsCount)
+                    renderFilesView()
+                }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    filePathText.text = "Could not load files"
+                    fileMetaText.text = ""
+                    fileContentText.text = error.message ?: "Request failed"
+                    filePrevButton.isEnabled = false
+                    fileNextButton.isEnabled = false
+                    fileExplorerButton.isEnabled = false
+                }
+            } finally {
+                assistantFilesLoading = false
+                runOnUiThread { fileRefreshButton.isEnabled = true }
+            }
+        }
+    }
+
+    private fun openFilesView() {
+        if (!::filesPanel.isInitialized) return
+        filesPanel.visibility = View.VISIBLE
+        settingsPanel.visibility = View.GONE
+        settingsButton.text = "Settings"
+        renderFilesView()
+        refreshAssistantFiles(selectFirst = assistantArtifacts.isEmpty())
+    }
+
+    private fun closeFilesView() {
+        if (::filesPanel.isInitialized) filesPanel.visibility = View.GONE
+    }
+
+    private fun moveArtifact(delta: Int) {
+        if (assistantArtifacts.isEmpty()) return
+        selectedArtifactIndex = (selectedArtifactIndex + delta).coerceIn(0, assistantArtifacts.lastIndex)
+        renderFilesView()
+    }
+
+    private fun showFileExplorer() {
+        if (assistantArtifacts.isEmpty()) return
+        val paths = assistantArtifacts.map { it.path.ifBlank { "Untitled" } }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Files")
+            .setItems(paths) { _, which ->
+                selectedArtifactIndex = which
+                renderFilesView()
+            }
+            .show()
+    }
+
+    private fun renderFilesBadge(count: Int = assistantThreadSummary?.artifactsCount ?: assistantArtifacts.size) {
+        if (!::filesBadgeText.isInitialized) return
+        if (count <= 0) {
+            filesBadgeText.visibility = View.GONE
+            filesBadgeText.text = ""
+            return
+        }
+        filesBadgeText.visibility = View.VISIBLE
+        filesBadgeText.text = if (count > 9) "9+" else count.toString()
+        filesBadgeText.setPadding(5.dp(), 0, 5.dp(), 0)
+    }
+
+    private fun renderFilesView() {
+        if (!::filePathText.isInitialized) return
+        val summary = assistantThreadSummary
+        val count = summary?.artifactsCount ?: assistantArtifacts.size
+        filesTitleText.text = "Files"
+        filesSubtitleText.text = if (summary == null) {
+            "Current voice thread"
+        } else if (summary.id.isBlank()) {
+            "No voice thread yet | 0 files"
+        } else {
+            "${summary.title.ifBlank { "Voice thread" }} | $count file${if (count == 1) "" else "s"}"
+        }
+
+        if (assistantFilesLoading && assistantArtifacts.isEmpty()) {
+            filePathText.text = "Loading files"
+            fileMetaText.text = ""
+            fileContentText.text = "Loading files..."
+            filePrevButton.isEnabled = false
+            fileNextButton.isEnabled = false
+            fileExplorerButton.isEnabled = false
+            return
+        }
+
+        val artifact = assistantArtifacts.getOrNull(selectedArtifactIndex)
+        if (artifact == null) {
+            filePathText.text = "No files yet"
+            fileMetaText.text = ""
+            fileContentText.text = if (summary?.id.isNullOrBlank()) {
+                "No voice thread yet. Start a voice request to create one."
+            } else {
+                "No files in this thread yet."
+            }
+            filePrevButton.isEnabled = false
+            fileNextButton.isEnabled = false
+            fileExplorerButton.isEnabled = false
+            return
+        }
+
+        filePathText.text = artifact.path.ifBlank { "Untitled" }
+        fileMetaText.text = "File ${selectedArtifactIndex + 1}/${assistantArtifacts.size} | ${formatArtifactSize(artifact.size)} | Updated ${artifact.updatedAt.take(16).replace('T', ' ')}"
+        fileContentText.text = artifact.content.ifBlank { "This file is empty." }
+        filePrevButton.isEnabled = selectedArtifactIndex > 0
+        fileNextButton.isEnabled = selectedArtifactIndex < assistantArtifacts.lastIndex
+        fileExplorerButton.isEnabled = true
     }
 
     private fun updateApprovalUi(approvalStatus: String) {
@@ -411,6 +772,80 @@ class MainActivity : ComponentActivity() {
 
     private fun updateMicrophoneUi(microphone: String) {
         microphoneText.text = microphone
+    }
+
+    private fun refreshSpeechHistory(selectLatest: Boolean = false) {
+        val currentId = speechHistoryEntries.getOrNull(speechHistoryIndex)?.id
+        speechHistoryEntries = SpeechHistoryStore.list(this)
+        speechHistoryIndex = when {
+            speechHistoryEntries.isEmpty() -> -1
+            selectLatest -> speechHistoryEntries.lastIndex
+            currentId != null -> speechHistoryEntries.indexOfFirst { it.id == currentId }.takeIf { it >= 0 } ?: speechHistoryEntries.lastIndex
+            speechHistoryIndex in speechHistoryEntries.indices -> speechHistoryIndex
+            else -> speechHistoryEntries.lastIndex
+        }
+        renderSpeechHistory()
+    }
+
+    private fun renderSpeechHistory() {
+        if (!::speechHistoryPanel.isInitialized) return
+        val entry = speechHistoryEntries.getOrNull(speechHistoryIndex)
+        val hasHistory = entry != null
+        speechHistoryTitle.text = if (hasHistory) {
+            "Speech ${speechHistoryIndex + 1}/${speechHistoryEntries.size}"
+        } else {
+            "Speech history"
+        }
+        speechHistorySubtitle.text = entry?.let { speechHistorySubtitle(it) } ?: "No saved speech yet."
+        speechHistoryPrevButton.isEnabled = speechHistoryIndex > 0
+        speechHistoryNextButton.isEnabled = speechHistoryIndex >= 0 && speechHistoryIndex < speechHistoryEntries.lastIndex
+        speechHistoryPlayButton.isEnabled = hasHistory
+        speechHistoryStopButton.isEnabled = hasHistory
+    }
+
+    private fun moveSpeechHistory(delta: Int) {
+        if (speechHistoryEntries.isEmpty()) return
+        speechHistoryIndex = (speechHistoryIndex + delta).coerceIn(0, speechHistoryEntries.lastIndex)
+        renderSpeechHistory()
+    }
+
+    private fun playSelectedSpeech() {
+        val entry = speechHistoryEntries.getOrNull(speechHistoryIndex) ?: return
+        thread(name = "VoiceStreamSpeechHistoryPlayback") {
+            val audio = SpeechHistoryStore.readAudio(applicationContext, entry)
+            if (audio == null) {
+                showStatus("Saved speech is unavailable.")
+                runOnUiThread { refreshSpeechHistory(selectLatest = false) }
+                return@thread
+            }
+            AssistantAudioPlayer.playWav(applicationContext, audio) { status ->
+                showStatus(status)
+            }
+            showStatus("Playing saved speech.")
+        }
+    }
+
+    private fun stopSpeechPlayback() {
+        AssistantAudioPlayer.stopAll()
+        showStatus("Assistant audio stopped.")
+    }
+
+    private fun speechHistorySubtitle(entry: SpeechHistoryEntry): String {
+        val time = runCatching {
+            SPEECH_TIME_FORMAT.format(Instant.parse(entry.createdAt).atZone(ZoneId.systemDefault()))
+        }.getOrDefault(entry.createdAt.take(16))
+        val text = entry.text?.takeIf { it.isNotBlank() } ?: entry.source?.takeIf { it.isNotBlank() }
+        val size = if (entry.bytes > 0) " | ${entry.bytes / 1024} KB" else ""
+        return if (text.isNullOrBlank()) "$time$size" else "$time | ${text.take(72)}$size"
+    }
+
+    private fun formatArtifactSize(bytes: Int): String {
+        if (bytes <= 0) return "0 B"
+        if (bytes < 1024) return "$bytes B"
+        val kb = bytes / 1024.0
+        if (kb < 1024) return "${if (kb >= 10) kb.toInt().toString() else String.format(Locale.US, "%.1f", kb)} KB"
+        val mb = kb / 1024.0
+        return "${if (mb >= 10) mb.toInt().toString() else String.format(Locale.US, "%.1f", mb)} MB"
     }
 
     private fun loadConfigIntoForm() {
@@ -456,6 +891,7 @@ class MainActivity : ComponentActivity() {
             showStatus("Paired ${pairing.deviceId.take(14)}.")
             updatePairingMessage()
             runOnUiThread { renderAuthState() }
+            checkForAppUpdate(force = true)
         }
     }
 
@@ -528,6 +964,7 @@ class MainActivity : ComponentActivity() {
         showPairingMessage("Paired ${config.deviceId.take(14)} from QR payload.")
         showStatus("Paired ${config.deviceId.take(14)} from QR payload.")
         renderAuthState()
+        checkForAppUpdate(force = true)
     }
 
     private fun isAndroidSetupUrl(payload: String): Boolean = runCatching {
@@ -560,6 +997,7 @@ class MainActivity : ComponentActivity() {
             showPairingMessage("Paired ${config.deviceId.take(14)} from setup QR.")
             showStatus("Paired ${config.deviceId.take(14)} from setup QR.")
             renderAuthState()
+            checkForAppUpdate(force = true)
         }
     }
 
@@ -567,8 +1005,10 @@ class MainActivity : ComponentActivity() {
         val currentVersionCode = currentVersionCode()
         if (currentVersionCode >= config.versionCode) {
             showPairingMessage("VoiceStream app is up to date.")
+            renderUpdateBanner(null)
             return
         }
+        renderUpdateBanner(config)
         showUpdateAvailable(config)
     }
 
@@ -605,6 +1045,61 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun checkForAppUpdate(force: Boolean = false, showNoUpdate: Boolean = false) {
+        val connected = api.pairedDeviceId().isNotBlank() && api.pairedDeviceToken().isNotBlank()
+        if (!connected) {
+            renderUpdateBanner(null)
+            if (showNoUpdate) showStatus("Sign in to check for app updates.")
+            return
+        }
+
+        val now = SystemClock.elapsedRealtime()
+        if (!force && now - lastUpdateCheckAtMs < UPDATE_CHECK_INTERVAL_MS) return
+        if (updateCheckRunning) return
+
+        lastUpdateCheckAtMs = now
+        updateCheckRunning = true
+        if (showNoUpdate) showStatus("Checking for app update.")
+
+        thread {
+            try {
+                val release = api.androidRelease()
+                val latestVersionCode = release.versionCode
+                if (release.available && latestVersionCode != null && latestVersionCode > currentVersionCode()) {
+                    runOnUiThread {
+                        renderUpdateBanner(UpdateConfig(latestVersionCode, release.apkUrl))
+                        if (showNoUpdate) showStatus("Update available.")
+                    }
+                } else {
+                    runOnUiThread {
+                        renderUpdateBanner(null)
+                        if (showNoUpdate) showStatus("VoiceStream app is up to date.")
+                    }
+                }
+            } catch (error: Exception) {
+                if (showNoUpdate) showStatus(error.message ?: "Update check failed")
+            } finally {
+                updateCheckRunning = false
+            }
+        }
+    }
+
+    private fun renderUpdateBanner(config: UpdateConfig?) {
+        runOnUiThread {
+            currentUpdateConfig = config
+            if (!::updateBanner.isInitialized) return@runOnUiThread
+            if (config == null) {
+                updateBanner.visibility = View.GONE
+                return@runOnUiThread
+            }
+
+            updateBannerTitle.text = "VoiceStream update available"
+            updateBannerSubtitle.text = "Installed: ${currentVersionCode()}. Latest: ${config.versionCode}."
+            updateBannerButton.isEnabled = !config.apkUrl.isNullOrBlank()
+            updateBanner.visibility = View.VISIBLE
+        }
+    }
+
     private fun ensureMicThenStart(target: String = Constants.STREAM_TARGET_ASSISTANT, playCue: Boolean = true) {
         pendingStartAwake = false
         pendingStartTarget = target
@@ -634,9 +1129,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun resyncServiceStatus() {
-        startService(Intent(this, VoiceSessionService::class.java).apply {
-            action = Constants.ACTION_QUERY_STATUS
-        })
+        runCatching {
+            startService(Intent(this, VoiceSessionService::class.java).apply {
+                action = Constants.ACTION_QUERY_STATUS
+            })
+        }.onFailure { error ->
+            ClientLog.w("Activity", "Service status query failed", error)
+        }
     }
 
     private fun startVoiceSession(target: String = Constants.STREAM_TARGET_ASSISTANT, playCue: Boolean = true) {
@@ -782,6 +1281,7 @@ class MainActivity : ComponentActivity() {
         api.clearPairing()
         updatePairingMessage()
         renderAuthState()
+        renderUpdateBanner(null)
         showStatus("Signed out.")
     }
 
@@ -810,6 +1310,8 @@ class MainActivity : ComponentActivity() {
                 loadConfigIntoForm()
                 renderAuthState()
                 showStatus("Signed in.")
+                refreshDashboard()
+                checkForAppUpdate(force = true)
             }
 
             override fun onAuthExpired() {
@@ -828,15 +1330,27 @@ class MainActivity : ComponentActivity() {
         val connected = api.pairedDeviceId().isNotBlank() && api.pairedDeviceToken().isNotBlank()
         signedOutPanel.visibility = if (connected) View.GONE else View.VISIBLE
         voicePanel.visibility = if (connected) View.VISIBLE else View.GONE
+        settingsButton.visibility = if (connected) View.VISIBLE else View.GONE
+        microphoneText.visibility = if (connected) View.VISIBLE else View.GONE
+        filesButton.visibility = if (connected) View.VISIBLE else View.GONE
+        filesBadgeText.visibility = if (connected && (assistantThreadSummary?.artifactsCount ?: assistantArtifacts.size) > 0) View.VISIBLE else View.GONE
         signOutButton.visibility = if (connected) View.VISIBLE else View.GONE
-        qrButton.visibility = if (connected) View.GONE else View.VISIBLE
-        settingsButton.visibility = View.VISIBLE
+        if (!connected) {
+            settingsPanel.visibility = View.GONE
+            settingsButton.text = "Settings"
+            renderUpdateBanner(null)
+            if (::filesPanel.isInitialized) filesPanel.visibility = View.GONE
+            assistantThreadSummary = null
+            assistantArtifacts = emptyList()
+            selectedArtifactIndex = -1
+        }
         if (!connected) {
             updateSessionUi(SessionMode.OFF, "Sign in to connect this phone.")
         } else if (sessionMode == SessionMode.OFF) {
             updateSessionUi(SessionMode.OFF, "Ready.")
         }
         updatePairingMessage()
+        if (connected) refreshAssistantThreadSummary()
     }
 
     private fun updatePairingMessage() {
@@ -849,18 +1363,21 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun currentVersionCode(): Long {
-        val packageInfo = packageManager.getPackageInfo(packageName, 0)
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            packageInfo.longVersionCode
-        } else {
-            @Suppress("DEPRECATION")
-            packageInfo.versionCode.toLong()
-        }
+        return runCatching {
+            val packageInfo = packageManager.getPackageInfo(packageName, 0)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                packageInfo.longVersionCode
+            } else {
+                @Suppress("DEPRECATION")
+                packageInfo.versionCode.toLong()
+            }
+        }.getOrDefault(BuildConfig.VERSION_CODE.toLong())
     }
 
     private fun currentVersionLabel(): String {
-        val packageInfo = packageManager.getPackageInfo(packageName, 0)
-        val versionName = packageInfo.versionName?.takeIf { it.isNotBlank() } ?: "unknown"
+        val versionName = runCatching {
+            packageManager.getPackageInfo(packageName, 0).versionName?.takeIf { it.isNotBlank() }
+        }.getOrNull() ?: BuildConfig.VERSION_NAME
         return "$versionName (versionCode ${currentVersionCode()})"
     }
 
@@ -888,7 +1405,7 @@ class MainActivity : ComponentActivity() {
 
     private fun card(title: String): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        background = rounded(COLOR_SURFACE, 8.dp(), COLOR_STROKE)
+        background = rounded(COLOR_FLOATING, 8.dp(), COLOR_STROKE)
         setPadding(16.dp(), 14.dp(), 16.dp(), 16.dp())
         val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         params.setMargins(0, 0, 0, 14.dp())
@@ -896,13 +1413,77 @@ class MainActivity : ComponentActivity() {
         addView(label(title, 18f, COLOR_TEXT, true))
     }
 
+    private fun buildSpeechHistoryPanel(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        background = rounded(COLOR_FLOATING, 8.dp(), COLOR_STROKE)
+        setPadding(14.dp(), 12.dp(), 14.dp(), 14.dp())
+
+        speechHistoryTitle = label("Speech history", 15f, COLOR_TEXT, true)
+        addView(speechHistoryTitle)
+
+        speechHistorySubtitle = label("No saved speech yet.", 12f, COLOR_MUTED, false).apply {
+            setPadding(0, 4.dp(), 0, 0)
+            maxLines = 2
+        }
+        addView(speechHistorySubtitle)
+
+        val controls = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 10.dp(), 0, 0)
+        }
+        speechHistoryPrevButton = historyButton("<") { moveSpeechHistory(-1) }
+        speechHistoryPlayButton = historyButton("Play") { playSelectedSpeech() }
+        speechHistoryStopButton = historyButton("Stop") { stopSpeechPlayback() }
+        speechHistoryNextButton = historyButton(">") { moveSpeechHistory(1) }
+
+        listOf(speechHistoryPrevButton, speechHistoryPlayButton, speechHistoryStopButton, speechHistoryNextButton).forEachIndexed { index, view ->
+            controls.addView(view, LinearLayout.LayoutParams(0, 42.dp(), if (index == 0 || index == 3) 0.8f else 1.2f).apply {
+                if (index < 3) rightMargin = 8.dp()
+            })
+        }
+        addView(controls)
+    }
+
+    private fun buildUpdateBanner(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        visibility = View.GONE
+        background = rounded(COLOR_UPDATE_SURFACE, 8.dp(), COLOR_YELLOW)
+        setPadding(14.dp(), 12.dp(), 12.dp(), 12.dp())
+
+        val textColumn = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            updateBannerTitle = label("", 15f, COLOR_TEXT, true)
+            updateBannerSubtitle = label("", 12f, COLOR_MUTED, false).apply {
+                setPadding(0, 3.dp(), 0, 0)
+            }
+            addView(updateBannerTitle)
+            addView(updateBannerSubtitle)
+        }
+        addView(textColumn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+        updateBannerButton = button("Download") {
+            openUpdateUrl(currentUpdateConfig?.apkUrl)
+        }
+        addView(updateBannerButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, 42.dp()).apply {
+            leftMargin = 12.dp()
+        })
+    }
+
+    private fun historyButton(textValue: String, onClick: () -> Unit): Button = button(textValue, onClick).apply {
+        textSize = 12f
+        background = rounded(COLOR_SURFACE, 6.dp(), COLOR_STROKE)
+        setTextColor(COLOR_TEXT)
+    }
+
     private fun row(vararg views: View): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
         setPadding(0, 8.dp(), 0, 0)
-        views.forEach { view ->
+        views.forEachIndexed { index, view ->
             addView(view, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                rightMargin = 8.dp()
+                if (index < views.lastIndex) rightMargin = 8.dp()
             })
         }
     }
@@ -943,16 +1524,16 @@ class MainActivity : ComponentActivity() {
     private fun Button.stylePrimaryButton(mode: SessionMode) {
         isAllCaps = false
         text = when (mode) {
-            SessionMode.OFF -> "Off\nStart voice"
-            SessionMode.SLEEPING -> "Sleeping\nWake"
-            SessionMode.LOADING -> "Working\nPlease wait"
-            SessionMode.AWAKE -> "Awake\nSleep"
-            SessionMode.RECORDING -> "Recording\nStop"
-            SessionMode.ERROR -> "Voice error\nRetry"
+            SessionMode.OFF -> "Start"
+            SessionMode.SLEEPING -> "Wake"
+            SessionMode.LOADING -> "Cancel"
+            SessionMode.AWAKE -> "Sleep"
+            SessionMode.RECORDING -> "Stop"
+            SessionMode.ERROR -> "Retry"
         }
         gravity = Gravity.CENTER
         setTextColor(COLOR_TEXT)
-        textSize = 18f
+        textSize = 22f
         typeface = Typeface.DEFAULT_BOLD
         background = actionBackground(mode)
         minHeight = 0
@@ -977,17 +1558,10 @@ class MainActivity : ComponentActivity() {
         typeface = Typeface.DEFAULT_BOLD
         isAllCaps = false
         setPadding(18.dp(), 0, 18.dp(), 0)
-        background = rounded(COLOR_FLOATING, 27.dp(), COLOR_STROKE)
+        background = rounded(COLOR_FLOATING, 12.dp(), COLOR_STROKE)
         minHeight = 0
         minimumHeight = 0
-        elevation = 8.dp().toFloat()
-    }
-
-    private fun ImageButton.styleIconButton() {
-        background = rounded(COLOR_FLOATING, 29.dp(), COLOR_STROKE)
-        setColorFilter(COLOR_TEXT)
-        elevation = 8.dp().toFloat()
-        setPadding(14.dp(), 14.dp(), 14.dp(), 14.dp())
+        elevation = 6.dp().toFloat()
     }
 
     private fun rounded(fill: Int, radius: Int, stroke: Int): GradientDrawable = GradientDrawable().apply {
@@ -1022,13 +1596,10 @@ class MainActivity : ComponentActivity() {
     private fun positionSystemBars(topInset: Int, bottomInset: Int) {
         val safeBottom = bottomInset + 26.dp()
         if (::settingsButton.isInitialized) settingsButton.updateFrameMargins(bottom = safeBottom)
-        if (::qrButton.isInitialized) qrButton.updateFrameMargins(bottom = safeBottom)
-        if (::microphoneText.isInitialized) microphoneText.updateFrameMargins(bottom = safeBottom + 70.dp())
-        if (::statusText.isInitialized) statusText.updateFrameMargins(bottom = safeBottom + 126.dp())
-        if (::approvalText.isInitialized) approvalText.updateFrameMargins(bottom = safeBottom + 102.dp())
+        if (::microphoneText.isInitialized) microphoneText.updateFrameMargins(bottom = safeBottom)
         if (::settingsPanel.isInitialized) settingsPanel.updateFrameMargins(bottom = safeBottom + 74.dp())
-        if (::signOutButton.isInitialized) signOutButton.updateFrameMargins(top = topInset + 12.dp())
-        if (::root.isInitialized) root.setPadding(24.dp(), topInset + 28.dp(), 24.dp(), safeBottom + 172.dp())
+        if (::root.isInitialized) root.setPadding(24.dp(), topInset + 28.dp(), 24.dp(), safeBottom + 94.dp())
+        if (::filesPanel.isInitialized) filesPanel.setPadding(18.dp(), topInset + 20.dp(), 18.dp(), safeBottom)
     }
 
     private fun View.updateFrameMargins(top: Int? = null, bottom: Int? = null) {
@@ -1084,7 +1655,7 @@ class MainActivity : ComponentActivity() {
                 return when {
                     lower.isBlank() || lower == "off" || lower.contains("sign in") || lower.contains("pair this device") -> OFF
                     lower.contains("failed") || lower.contains("error") || lower.contains("missing") -> ERROR
-                    lower.contains("waking") || lower.contains("starting") || lower.contains("reconnecting") -> LOADING
+                    lower.contains("waking") || lower.contains("starting") || lower.contains("reconnecting") || lower.contains("thinking") || lower.contains("queued") || lower.contains("waiting for approval") -> LOADING
                     lower.startsWith("sleep") || lower.startsWith("unlock") || lower.contains("sleeping") -> SLEEPING
                     lower.contains("waiting") || lower.contains("listening") || lower.contains("assistant replied") || lower.contains("transcript received") || lower.contains("audio received") -> AWAKE
                     else -> RECORDING
@@ -1098,6 +1669,7 @@ class MainActivity : ComponentActivity() {
         const val COLOR_SURFACE = 0xff171b21.toInt()
         const val COLOR_INPUT = 0xff151a20.toInt()
         const val COLOR_FLOATING = 0xff1e2329.toInt()
+        const val COLOR_UPDATE_SURFACE = 0xff20242a.toInt()
         const val COLOR_TEXT = 0xffdfe3ea.toInt()
         const val COLOR_MUTED = 0xff8891a8.toInt()
         const val COLOR_ACCENT = 0xffa78bfa.toInt()
@@ -1108,5 +1680,8 @@ class MainActivity : ComponentActivity() {
         const val COLOR_GREEN = 0xff4ade80.toInt()
         const val COLOR_YELLOW = 0xffffb224.toInt()
         const val COLOR_RED = 0xffff5a5a.toInt()
+        const val UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000L
+        const val COLOR_SYSTEM_BAR = 0xcc101216.toInt()
+        val SPEECH_TIME_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("MMM d HH:mm")
     }
 }

@@ -9,7 +9,16 @@ export type UserProfile = {
 };
 
 export type VoiceSettings = VoiceApprovalSettings & {
+  speechPlaybackTarget: SpeechPlaybackTarget;
   updatedAt: string;
+};
+
+export type SpeechPlaybackTarget = 'auto' | 'web' | 'desktop' | 'android';
+
+export type SpeechPlaybackStatus = {
+  preferredTarget: SpeechPlaybackTarget;
+  connectedTargets: Array<Exclude<SpeechPlaybackTarget, 'auto'>>;
+  resolvedTarget: Exclude<SpeechPlaybackTarget, 'auto'> | null;
 };
 
 export type VoiceApprovalFormState = VoiceApprovalSettings;
@@ -19,6 +28,7 @@ export type DeviceRecord = {
   userId: string;
   deviceType: string;
   displayName: string;
+  installationId: string | null;
   tokenHint: string;
   lastSeenAt: string;
   createdAt: string;
@@ -195,6 +205,13 @@ export type AssistantSettingsRecord = {
   updatedAt: string;
 };
 
+export type AssistantApiKeyView = {
+  provider: 'openai' | 'exa';
+  hasKey: boolean;
+  keyHint: string | null;
+  updatedAt: string | null;
+};
+
 export type AssistantToolSummary = {
   name: string;
   label: string;
@@ -291,6 +308,7 @@ export type AssistantSnapshot = {
   models: AssistantModelOption[];
   availableTools: AssistantToolSummary[];
   assistantSettings: AssistantSettingsRecord;
+  apiKeys: Record<'openai' | 'exa', AssistantApiKeyView>;
   codexConnection: AssistantCodexConnection;
   runningModels: Record<string, { provider: string; model: string; thinkingLevel: string; runId: string }>;
 };
@@ -339,6 +357,7 @@ export type DashboardData = {
   authMode: 'clerk' | 'dev';
   user: UserProfile;
   settings: VoiceSettings;
+  speechPlayback?: SpeechPlaybackStatus;
   assistantSettings?: AssistantSettingsRecord;
   threads: AssistantThread[];
   assistantApprovals?: AssistantApprovalRecord[];
@@ -365,7 +384,7 @@ export type DevUser = {
   admin: boolean;
 };
 
-export type DashboardView = 'threads' | 'devices' | 'settings' | 'activity';
+export type DashboardView = 'threads' | 'devices' | 'settings' | 'activity' | 'admin';
 
 export type DesktopVoskStatus = {
   available: boolean;
