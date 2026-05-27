@@ -1254,7 +1254,7 @@ function openVoiceSocket(target) {
       if (message.type === 'terminal_detected') {
         await handleTerminalDetected(message, socket, target);
       }
-      if (message.type === 'sleep') {
+      if (message.type === 'finish') {
         terminalMessageReceived = true;
         if (target === 'clipboard') {
           const transcriptText = message.transcriptText || '';
@@ -1268,6 +1268,24 @@ function openVoiceSocket(target) {
         }
         state.voicePostStopStatus = els.micStatus.textContent || state.voicePostStopStatus;
         state.voicePostStopMode = 'awake';
+        await finishMicFromServer();
+      }
+      if (message.type === 'sleep') {
+        terminalMessageReceived = true;
+        if (target === 'clipboard' && message.transcriptText) {
+          const transcriptText = message.transcriptText || '';
+          const copied = await copyText(transcriptText);
+          void logDesktopEvent(copied ? 'info' : 'warn', copied ? 'Clipboard transcription copied before sleep' : 'Clipboard transcription copy before sleep failed', {
+            chars: String(transcriptText || '').trim().length,
+          });
+        }
+        const settings = await loadVoiceSettings().catch(() => null);
+        const status = settings ? `Sleep: ${settings.unlockCode} awake, ${settings.lockedOffCode} off.` : 'Sleeping.';
+        if (state.mode !== 'sleeping') {
+          playLocalVoiceCue('sleep');
+        }
+        state.voicePostStopStatus = status;
+        state.voicePostStopMode = 'sleeping';
         await finishMicFromServer();
       }
       if (message.type === 'assistant_error') {
@@ -1323,16 +1341,28 @@ async function handleTerminalDetected(message, socket, target) {
   await cleanupLocalCapture();
   state.voiceOutgoingReady = false;
   pendingStreamBuffer.clear();
-  playLocalVoiceCue('stop_button');
   const commandType = String(message.commandType || '');
-  const status = commandType === 'abort'
+  let status = commandType === 'abort'
     ? 'Awake. Voice command cancelled.'
-    : target === 'clipboard'
-      ? 'Awake. Finishing clipboard transcription.'
-      : 'Awake. Finishing voice request.';
-  state.voicePostStopMode = 'awake';
+    : commandType === 'sleep'
+      ? 'Going to sleep.'
+      : target === 'clipboard'
+        ? 'Awake. Finishing clipboard transcription.'
+        : 'Awake. Finishing voice request.';
+  if (commandType === 'sleep') {
+    const settings = await loadVoiceSettings().catch(() => null);
+    status = settings ? `Sleep: ${settings.unlockCode} awake, ${settings.lockedOffCode} off.` : 'Sleeping.';
+    resetApprovalCollection();
+    playLocalVoiceCue('sleep');
+  } else {
+    playLocalVoiceCue('stop_button');
+  }
+  state.voicePostStopMode = commandType === 'sleep' ? 'sleeping' : 'awake';
   state.voicePostStopStatus = status;
-  setMode('awake', status);
+  setMode(commandType === 'sleep' ? 'sleeping' : 'awake', status);
+  if (commandType === 'sleep') {
+    startWakeListener();
+  }
   void logDesktopEvent('info', 'Desktop microphone capture stopped after terminal phrase', {
     commandType,
     phrase: message.phrase || '',
@@ -1373,6 +1403,7 @@ function completeStoppedVoice(nextMode = 'awake', status = '') {
     return;
   }
   if (nextMode === 'sleeping') {
+    resetApprovalCollection();
     setMode('sleeping', status || 'Sleeping.');
     startWakeListener();
     return;
@@ -1563,6 +1594,9 @@ async function enterAwake() {
 }
 
 async function enterSleep() {
+  if (state.mode === 'sleeping' && !state.voiceSocket && !state.stream) {
+    return;
+  }
   if (state.voiceSocket || state.stream) {
     await stopMic('sleeping', { cue: null, finalStatus: 'Sleeping.' });
     return;
@@ -1661,7 +1695,7 @@ async function startWakeAudioCapture() {
 
 function startWakeListener() {
   if (state.wakeStarting || state.wakeStream || state.recognition) {
-    showStatus('Awake. Listening for voice commands.');
+    showStatus(wakeListenerStatus());
     return;
   }
   if (desktop.startVosk && desktop.sendVoskFrame && desktop.onVoskText) {
@@ -1695,7 +1729,7 @@ async function startVoskWakeListener() {
 
     await startWakeAudioCapture();
     state.wakeUnsubscribe = unsubscribe;
-    showStatus('Awake. Listening with Vosk.');
+    showStatus(wakeListenerStatus('Awake. Listening with Vosk.'));
     return true;
   } catch (err) {
     stopVoskWakeListener();
@@ -1709,11 +1743,11 @@ async function startVoskWakeListener() {
 function startSpeechWakeListener() {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRecognition) {
-    showStatus('Awake. Wake phrase recognition is unavailable in this runtime.');
+    showStatus(state.mode === 'sleeping' ? sleepingStatusText() : 'Awake. Wake phrase recognition is unavailable in this runtime.');
     return;
   }
   if (state.recognition) {
-    showStatus('Awake. Listening for voice commands.');
+    showStatus(wakeListenerStatus());
     return;
   }
   state.wakeUsesVosk = false;
@@ -1742,11 +1776,19 @@ function startSpeechWakeListener() {
   state.recognition = recognition;
   try {
     recognition.start();
-    showStatus('Awake. Listening for voice commands.');
+    showStatus(wakeListenerStatus());
   } catch {
     state.recognition = null;
-    showStatus('Awake. Wake phrase recognition is unavailable in this runtime.');
+    showStatus(state.mode === 'sleeping' ? sleepingStatusText() : 'Awake. Wake phrase recognition is unavailable in this runtime.');
   }
+}
+
+function sleepingStatusText() {
+  return els.micStatus.textContent && state.mode === 'sleeping' ? els.micStatus.textContent : 'Sleeping.';
+}
+
+function wakeListenerStatus(awakeStatus = 'Awake. Listening for voice commands.') {
+  return state.mode === 'sleeping' ? sleepingStatusText() : awakeStatus;
 }
 
 function stopWakeListener() {

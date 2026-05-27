@@ -2240,14 +2240,22 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
           }
           db.upsertClientStatus(device.userId, device.id, {
             mode: 'transcribing',
-            status: command.type === 'abort' ? 'Voice command cancelled' : 'Voice command detected',
+            status: command.type === 'abort'
+              ? 'Voice command cancelled'
+              : command.type === 'sleep'
+                ? 'Voice sleep command detected'
+                : 'Voice finish command detected',
             protocolVersion: VOICE_STREAM_PROTOCOL_VERSION,
           });
           db.addLog(device.userId, {
             deviceId: device.id,
             source: device.deviceType,
             level: 'info',
-            message: command.type === 'abort' ? 'Voice stop command detected' : 'Voice finish command detected',
+            message: command.type === 'abort'
+              ? 'Voice stop command detected'
+              : command.type === 'sleep'
+                ? 'Voice sleep command detected'
+                : 'Voice finish command detected',
             detailsJson: JSON.stringify({
               phrase: command.phrase,
               transcriptChars: command.transcriptText.length,
@@ -2272,14 +2280,22 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
           }
           db.upsertClientStatus(device.userId, device.id, {
             mode: 'transcribing',
-            status: detection.type === 'abort' ? 'Voice stop phrase detected' : 'Voice finish phrase detected',
+            status: detection.type === 'abort'
+              ? 'Voice stop phrase detected'
+              : detection.type === 'sleep'
+                ? 'Voice sleep phrase detected'
+                : 'Voice finish phrase detected',
             protocolVersion: VOICE_STREAM_PROTOCOL_VERSION,
           });
           db.addLog(device.userId, {
             deviceId: device.id,
             source: device.deviceType,
             level: 'info',
-            message: detection.type === 'abort' ? 'Voice stop phrase detected' : 'Voice finish phrase detected',
+            message: detection.type === 'abort'
+              ? 'Voice stop phrase detected'
+              : detection.type === 'sleep'
+                ? 'Voice sleep phrase detected'
+                : 'Voice finish phrase detected',
             detailsJson: JSON.stringify({
               phrase: detection.phrase,
               partialTranscriptChars: detection.partialTranscriptText.length,
@@ -2388,7 +2404,9 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
           }
           if (streamMode === 'clipboard') {
             if ((socket as any).readyState === 1) {
-              socket.send(JSON.stringify({ type: 'sleep', mode: streamMode, transcriptText: transcript }));
+              if (terminalFinalize?.type !== 'finish') {
+                socket.send(JSON.stringify({ type: 'finish', mode: streamMode, transcriptText: transcript }));
+              }
             }
           } else {
             if (streamMode === 'patch') {
@@ -2462,8 +2480,8 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
           }
         } else if (terminalFinalize?.type === 'abort' && (socket as any).readyState === 1) {
           socket.send(JSON.stringify({ type: 'abort', mode: streamMode, transcriptText: '' }));
-        } else if (streamMode === 'clipboard' && (socket as any).readyState === 1) {
-          socket.send(JSON.stringify({ type: 'sleep', mode: streamMode, transcriptText: '' }));
+        } else if (!terminalFinalize && streamMode === 'clipboard' && (socket as any).readyState === 1) {
+          socket.send(JSON.stringify({ type: 'finish', mode: streamMode, transcriptText: '' }));
         }
       } catch (error: any) {
         db.addLog(device.userId, {
@@ -2480,8 +2498,8 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
         db.endVoiceSession(device.userId, session.id);
       }
       db.upsertClientStatus(device.userId, device.id, {
-        mode: 'awake',
-        status: 'Voice stream disconnected',
+        mode: terminalFinalize?.type === 'sleep' ? 'sleeping' : 'awake',
+        status: terminalFinalize?.type === 'sleep' ? 'Sleeping.' : 'Voice stream disconnected',
         protocolVersion: VOICE_STREAM_PROTOCOL_VERSION,
       });
       db.addLog(device.userId, {

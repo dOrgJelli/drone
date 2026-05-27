@@ -230,7 +230,8 @@ The current product uses similar behavior. Voice Stream Next should document the
 Initial command set:
 
 - wake phrase: `hey sebastian`
-- sleep phrase: `that's it`
+- finish phrase: `that's it`
+- sleep phrase: `go to sleep`
 - status phrase: `status`, `check status`, and close variants
 - approval trigger phrase: `approval code`
 - unlock code: `1234`

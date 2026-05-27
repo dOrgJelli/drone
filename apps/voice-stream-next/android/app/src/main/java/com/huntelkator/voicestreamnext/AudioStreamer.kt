@@ -130,6 +130,7 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
             onStatus?.invoke("Off")
             return false
         }
+        if (sleeping) return true
         sleeping = true
         resetApprovalCollection()
         cuePlayer.play(LocalCue.SLEEP)
@@ -247,6 +248,7 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
                             onStatus(message.optString("status", "Transcript received."))
                         }
                         "terminal_detected" -> handleServerTerminalDetected(message, onStatus)
+                        "finish" -> handleServerFinish(message, onStatus)
                         "sleep" -> handleServerSleep(message, onStatus)
                         "abort" -> handleServerAbort(onStatus)
                         "assistant_error" -> {
@@ -317,13 +319,27 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
         if (!recording.getAndSet(false)) return
         outgoingReady.set(false)
         pendingStreamBuffer.clear()
-        cuePlayer.play(LocalCue.STOP_BUTTON)
-        wakeDetector?.reset()
         val commandType = message.optString("commandType")
+        wakeDetector?.reset()
         val status = when {
-            commandType == "abort" -> "Awake: voice command cancelled"
-            currentTarget == Constants.STREAM_TARGET_CLIPBOARD -> "Awake: finishing clipboard transcription"
-            else -> "Awake: finishing voice request"
+            commandType == "abort" -> {
+                cuePlayer.play(LocalCue.STOP_BUTTON)
+                "Awake: voice command cancelled"
+            }
+            commandType == "sleep" -> {
+                sleeping = true
+                resetApprovalCollection()
+                cuePlayer.play(LocalCue.SLEEP)
+                sleepingStatus()
+            }
+            else -> {
+                cuePlayer.play(LocalCue.STOP_BUTTON)
+                if (currentTarget == Constants.STREAM_TARGET_CLIPBOARD) {
+                    "Awake: finishing clipboard transcription"
+                } else {
+                    "Awake: finishing voice request"
+                }
+            }
         }
         onStatus(status)
         ClientLog.i(
@@ -345,7 +361,7 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
         }
     }
 
-    private fun handleServerSleep(message: JSONObject, onStatus: (String) -> Unit) {
+    private fun handleServerFinish(message: JSONObject, onStatus: (String) -> Unit) {
         val copied = if (currentTarget == Constants.STREAM_TARGET_CLIPBOARD) {
             copyTranscriptToClipboard(message.optString("transcriptText"))
         } else {
@@ -354,13 +370,30 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
         recording.set(false)
         outgoingReady.set(false)
         pendingStreamBuffer.clear()
-        closeSocket("server sleep", sendEnd = false)
+        closeSocket("server finish", sendEnd = false)
         val status = if (currentTarget == Constants.STREAM_TARGET_CLIPBOARD) {
             if (copied) "Awake: copied voice transcription" else "Awake: no voice transcription detected"
         } else {
             "Awake: waiting for \"hey sebastian\""
         }
         onStatus(status)
+    }
+
+    private fun handleServerSleep(message: JSONObject, onStatus: (String) -> Unit) {
+        if (currentTarget == Constants.STREAM_TARGET_CLIPBOARD) {
+            copyTranscriptToClipboard(message.optString("transcriptText"))
+        }
+        recording.set(false)
+        outgoingReady.set(false)
+        pendingStreamBuffer.clear()
+        closeSocket("server sleep", sendEnd = false)
+        val wasSleeping = sleeping
+        sleeping = true
+        resetApprovalCollection()
+        if (!wasSleeping) {
+            cuePlayer.play(LocalCue.SLEEP)
+        }
+        onStatus(sleepingStatus())
     }
 
     private fun scheduleReconnect() {
@@ -468,6 +501,7 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
             }
             phrase.hasSleep -> {
                 wakeDetector?.reset()
+                if (sleeping) return
                 cuePlayer.play(LocalCue.SLEEP)
                 sleeping = true
                 if (recording.get()) {
