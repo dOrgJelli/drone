@@ -338,6 +338,7 @@ import { createDronePendingPromptStore, type PendingPrompt } from './drone-pendi
 import { createDroneProvisioningController } from './drone-provisioning';
 import {
   HubAssistantService,
+  summarizeAssistantChatIdle,
   type AssistantCreateChatResult,
   type AssistantCreateDroneResult,
   type AssistantDroneSummary,
@@ -11523,6 +11524,54 @@ export async function startDroneHubApiServer(opts: {
             desktopSession: process.env.DESKTOP_SESSION ?? null,
           },
         });
+        return;
+      }
+
+      if (pathname === '/api/chats/idle/status' && method === 'POST') {
+        let body: any = null;
+        try {
+          body = await readJsonBody(req);
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+          return;
+        }
+        const mode = String(body?.mode ?? 'all').trim().toLowerCase() === 'any' ? 'any' : 'all';
+        const rawTargets = Array.isArray(body?.targets) ? body.targets : [];
+        if (rawTargets.length === 0) {
+          json(res, 400, { ok: false, error: 'targets are required' });
+          return;
+        }
+        const targets: Array<{ droneId: string; chatName: string }> = [];
+        const seenTargets = new Set<string>();
+        for (const rawTarget of rawTargets.slice(0, 20)) {
+          const droneRef = String(rawTarget?.droneId ?? rawTarget?.drone ?? rawTarget?.id ?? '').trim();
+          if (!droneRef) {
+            json(res, 400, { ok: false, error: 'target drone is required' });
+            return;
+          }
+          const chatName = String(rawTarget?.chatName ?? rawTarget?.chat ?? 'default').trim() || 'default';
+          const resolved = await resolveDroneOrPendingForReadRef(droneRef);
+          if (!resolved) {
+            json(res, 404, { ok: false, error: `unknown drone: ${droneRef}` });
+            return;
+          }
+          const key = `${resolved.id}\u0000${chatName}`;
+          if (seenTargets.has(key)) continue;
+          seenTargets.add(key);
+          targets.push({ droneId: resolved.id, chatName });
+        }
+        if (targets.length === 0) {
+          json(res, 400, { ok: false, error: 'targets are required' });
+          return;
+        }
+        try {
+          const regAny: any = await loadRegistry();
+          const statuses = targets.map((target) => summarizeAssistantChatIdle(regAny, target, { requireChat: true }));
+          const matched = mode === 'any' ? statuses.some((status) => status.idle) : statuses.every((status) => status.idle);
+          json(res, 200, { ok: true, mode, matched, targets: statuses });
+        } catch (e: any) {
+          json(res, 400, { ok: false, error: e?.message ?? String(e) });
+        }
         return;
       }
 
