@@ -1284,6 +1284,38 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     },
   );
 
+  app.post('/api/devices/:deviceId/assistant/threads/:threadId/prompt', async (req, reply) => {
+    const body = jsonBody(req);
+    const deviceId = String((req.params as any).deviceId ?? '');
+    const threadId = String((req.params as any).threadId ?? '');
+    const token = cleanText(body.token || req.headers['x-voice-device-token']);
+    const auth = verifyDeviceAuth(db, deviceId, token, parseClientVersion(body.clientVersion, parseClientVersion(body.protocolVersion, null)));
+    if (!auth.ok) {
+      reply.code(auth.reason === 'client_too_old' ? 426 : 401).send({
+        ok: false,
+        error: deviceAuthFailureMessage(auth),
+        reason: auth.reason,
+        minClientVersion: auth.reason === 'client_too_old' ? auth.minClientVersion : undefined,
+      });
+      return;
+    }
+    if (!db.thread(auth.device.userId, threadId)) throw Object.assign(new Error('unknown thread'), { statusCode: 404 });
+    const prompt = cleanText(body.prompt ?? body.content);
+    if (!prompt) throw Object.assign(new Error('prompt is required'), { statusCode: 400 });
+    const events: unknown[] = [];
+    const snapshot = await promptAssistantThread(db, auth.device.userId, threadId, {
+      prompt,
+      provider: cleanText(body.provider) || undefined,
+      model: cleanText(body.model) || undefined,
+      thinkingLevel: cleanText(body.thinkingLevel) || undefined,
+    }, (event) => {
+      events.push(event);
+      handleAssistantPromptEvent(auth.device.userId, threadId, event);
+    });
+    emitAssistantChange('device_thread_prompted', threadId);
+    return { ok: true, events, snapshot };
+  });
+
   app.get('/api/assistant/threads', async (req, reply) =>
     withUser(req, reply, db, clerkEnabled, async (ctx) => {
       const query = (req.query ?? {}) as Record<string, unknown>;
