@@ -163,6 +163,7 @@
         "remark-gfm": "^4.0.1",
         "tailwindcss": "^3.4.13",
         "vite": "^5.4.7",
+        "ws": "^8.19.0",
       },
       "devDependencies": {
         "@electron/packager": "^18.4.4",

@@ -883,9 +883,16 @@ async function startExtensionBridge() {
   const config = readConfig();
   if (!config.extensionBridgeEnabled || !config.deviceId || !config.deviceToken) return;
   await loadDesktopExtensions();
-  const WebSocketCtor = globalThis.WebSocket;
+  let WebSocketCtor = globalThis.WebSocket;
   if (typeof WebSocketCtor !== 'function') {
-    windowDebugLog('extensionBridge:unavailable', { reason: 'global WebSocket is not available in Electron main' });
+    try {
+      WebSocketCtor = require('ws');
+    } catch {
+      WebSocketCtor = null;
+    }
+  }
+  if (typeof WebSocketCtor !== 'function') {
+    windowDebugLog('extensionBridge:unavailable', { reason: 'WebSocket is not available in Electron main' });
     return;
   }
   if (extensionBridge.socket && [0, 1].includes(extensionBridge.socket.readyState)) return;
