@@ -2049,6 +2049,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
         defaultProvider: body.defaultProvider === undefined ? undefined : cleanText(body.defaultProvider, 'openai'),
         defaultModel: body.defaultModel === undefined ? undefined : cleanText(body.defaultModel, 'gpt-5.5'),
         defaultThinkingLevel: body.defaultThinkingLevel === undefined ? undefined : cleanText(body.defaultThinkingLevel, 'off'),
+        defaultEnabledTools: Array.isArray(body.defaultEnabledTools) ? body.defaultEnabledTools.map((tool: unknown) => cleanText(tool)).filter(Boolean) : undefined,
       });
       emitAssistantChange('assistant_settings_updated');
       return { ok: true, settings, snapshot: assistantSnapshot(db, ctx.user.id) };
