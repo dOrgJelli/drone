@@ -6,6 +6,7 @@ import {
   promptAssistantThread,
   resolveAssistantApproval,
   sanitizeArtifactPath,
+  setAssistantExternalToolApprovalEvaluator,
   setAssistantExternalToolExecutor,
 } from './assistant-parity.js';
 import { extensionToolName } from './assistant-extensions.js';
@@ -36,6 +37,7 @@ describe('assistant parity runtime', () => {
     delete process.env.VOICE_STREAM_NEXT_SECRETS_KEY;
     delete process.env.OPENAI_API_KEY;
     delete process.env.VOICE_STREAM_NEXT_OPENAI_API_KEY;
+    setAssistantExternalToolApprovalEvaluator(null);
     setAssistantExternalToolExecutor(null);
     globalThis.fetch = originalFetch;
   });
@@ -158,6 +160,44 @@ describe('assistant parity runtime', () => {
     const result = JSON.parse(db.listToolCalls(user.id, thread.id)[0]!.resultJson || '{}');
     expect(result.args.text).toBe('hello extension');
     expect(result.targetKind).toBe('any_device');
+  });
+
+  test('uses dynamic extension approval before pausing a tool call', async () => {
+    const db = tempDb('assistant-extension-dynamic-approval');
+    dbs.push(db);
+    const user = testUser(db);
+    const manifest = db.upsertAssistantExtensionManifest(user.id, {
+      id: 'test-extension',
+      name: 'Test Extension',
+      version: '0.1.0',
+      tools: [{
+        name: 'send',
+        label: 'Send',
+        description: 'Send through an extension runner.',
+        inputSchema: {
+          type: 'object',
+          properties: { target: { type: 'string' } },
+          required: ['target'],
+          additionalProperties: false,
+        },
+        approval: 'dynamic',
+        supportedTargets: ['device', 'any_device'],
+        defaultTarget: 'any_device',
+      }],
+    });
+    const toolName = extensionToolName(manifest.extensionId, 'send');
+    db.upsertAssistantExtensionToolRoute(user.id, { toolName, enabled: true, targetKind: 'any_device' });
+    const thread = db.createThread(user.id, { title: 'Dynamic approvals', enabledTools: ['assistant_artifacts', toolName] });
+    process.env.VOICE_STREAM_NEXT_TEST_MODEL_TOOL_CALLS = JSON.stringify([
+      { name: toolName, arguments: { target: 'created-by-extension' } },
+    ]);
+    setAssistantExternalToolApprovalEvaluator(async () => false);
+    setAssistantExternalToolExecutor(async (input) => ({ ok: true, args: input.args }));
+
+    const snapshot = await promptAssistantThread(db, user.id, thread.id, { prompt: 'Use the extension.' }, () => undefined);
+
+    expect(snapshot.pendingApprovals).toHaveLength(0);
+    expect(db.listToolCalls(user.id, thread.id)[0]?.status).toBe('completed');
   });
 
   test('executes model-requested artifact tool calls without slash commands', async () => {

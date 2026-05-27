@@ -1,5 +1,5 @@
 export type AssistantExtensionTargetKind = 'server' | 'device' | 'any_device';
-export type AssistantExtensionApprovalPolicy = 'never' | 'normal_threads' | 'always';
+export type AssistantExtensionApprovalPolicy = 'never' | 'normal_threads' | 'always' | 'dynamic';
 
 export type AssistantExtensionToolSummary = {
   name: string;
@@ -120,7 +120,7 @@ function parseTarget(raw: unknown): AssistantExtensionTargetKind | null {
 
 function cleanApproval(raw: unknown): AssistantExtensionApprovalPolicy {
   const value = String(raw ?? '').trim();
-  if (value === 'never' || value === 'normal_threads' || value === 'always') return value;
+  if (value === 'never' || value === 'normal_threads' || value === 'always' || value === 'dynamic') return value;
   return 'always';
 }
 

@@ -11,6 +11,8 @@ const MAX_IDLE_FOR_MS = 60_000;
 const MAX_IDLE_POLL_INTERVAL_MS = 30_000;
 const MAX_IDLE_EXPIRES_IN_MS = 24 * 60 * 60 * 1000;
 const MAX_IDLE_TARGETS = 20;
+const CREATED_DRONES_STATE_KEY = 'createdDrones';
+const MAX_TRACKED_CREATED_DRONES = 500;
 
 const idleSubscriptions = new Map();
 let idleSubscriptionSequence = 0;
@@ -216,6 +218,54 @@ function droneSummary(drone) {
     cwd: cleanString(drone?.cwd) || null,
     status: cleanString(drone?.status) || null,
   };
+}
+
+function droneAliases(value) {
+  const aliases = [];
+  if (typeof value === 'string') {
+    const text = cleanString(value);
+    if (text) aliases.push(text);
+  } else if (value && typeof value === 'object') {
+    for (const item of [value.id, value.name]) {
+      const text = cleanString(item);
+      if (text) aliases.push(text);
+    }
+  }
+  return [...new Set(aliases)];
+}
+
+async function createdDroneRecords(api) {
+  const records = await api.state.get(CREATED_DRONES_STATE_KEY, []);
+  return Array.isArray(records) ? records.filter((record) => record && typeof record === 'object') : [];
+}
+
+async function rememberCreatedDrone(api, drone, sourceTool) {
+  const aliases = droneAliases(drone);
+  if (aliases.length === 0) return;
+  const now = new Date().toISOString();
+  const records = await createdDroneRecords(api);
+  const nextRecords = records.filter((record) => {
+    const recordAliases = Array.isArray(record.aliases) ? record.aliases.map((item) => cleanString(item)).filter(Boolean) : [];
+    return !recordAliases.some((alias) => aliases.includes(alias));
+  });
+  nextRecords.unshift({
+    id: cleanString(drone?.id) || aliases[0],
+    name: cleanString(drone?.name) || null,
+    aliases,
+    sourceTool,
+    createdAt: now,
+  });
+  await api.state.set(CREATED_DRONES_STATE_KEY, nextRecords.slice(0, MAX_TRACKED_CREATED_DRONES));
+}
+
+async function wasCreatedByExtension(api, drone) {
+  const aliases = droneAliases(drone);
+  if (aliases.length === 0) return false;
+  const records = await createdDroneRecords(api);
+  return records.some((record) => {
+    const recordAliases = Array.isArray(record.aliases) ? record.aliases.map((item) => cleanString(item)).filter(Boolean) : [];
+    return recordAliases.some((alias) => aliases.includes(alias));
+  });
 }
 
 function chatName(value) {
@@ -490,7 +540,7 @@ exports.activate = async function activate(api) {
     name: 'create_drone',
     label: 'Create drone',
     description: 'Create a new Drone Hub drone.',
-    approval: 'always',
+    approval: 'never',
     inputSchema: {
       type: 'object',
       properties: {
@@ -517,7 +567,9 @@ exports.activate = async function activate(api) {
       };
       if (!body.name) throw new Error('name is required');
       const response = await requestJson(connection(), '/api/drones', { method: 'POST', body: JSON.stringify(body) }, 30_000);
-      return { ok: true, drone: droneSummary({ ...body, ...response }) };
+      const drone = droneSummary({ ...body, ...response });
+      await rememberCreatedDrone(api, drone, 'create_drone');
+      return { ok: true, drone, createdByExtension: true };
     },
   });
 
@@ -525,7 +577,7 @@ exports.activate = async function activate(api) {
     name: 'clone_drone',
     label: 'Clone drone',
     description: 'Create a new drone cloned from an existing Drone Hub drone.',
-    approval: 'always',
+    approval: 'never',
     inputSchema: {
       type: 'object',
       properties: {
@@ -550,7 +602,9 @@ exports.activate = async function activate(api) {
         ...(cleanString(args.group) ? { group: cleanString(args.group) } : {}),
       };
       const response = await requestJson(connection(), '/api/drones', { method: 'POST', body: JSON.stringify(body) }, 30_000);
-      return { ok: true, drone: droneSummary({ ...body, ...response }) };
+      const drone = droneSummary({ ...body, ...response });
+      await rememberCreatedDrone(api, drone, 'clone_drone');
+      return { ok: true, drone, createdByExtension: true };
     },
   });
 
@@ -611,7 +665,7 @@ exports.activate = async function activate(api) {
     name: 'send_message',
     label: 'Send drone message',
     description: 'Send a message to a Drone Hub drone chat and return the queued run.',
-    approval: 'always',
+    approval: async (args) => !(await wasCreatedByExtension(api, args?.drone)),
     inputSchema: {
       type: 'object',
       properties: {
@@ -631,6 +685,7 @@ exports.activate = async function activate(api) {
       if (!drone) throw new Error('drone is required');
       if (!message) throw new Error('message is required');
       const hub = connection();
+      const createdByExtension = await wasCreatedByExtension(api, drone);
       if (args.createChat) {
         await requestJson(
           hub,
@@ -656,6 +711,7 @@ exports.activate = async function activate(api) {
         chat: cleanString(response?.chat, chat),
         runId: cleanString(response?.promptId || body.promptId),
         status: cleanString(response?.pendingState, 'queued'),
+        createdByExtension,
       };
     },
   });

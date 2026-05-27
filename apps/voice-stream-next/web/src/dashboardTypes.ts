@@ -218,7 +218,7 @@ export type AssistantToolSummary = {
   label: string;
   category: string;
   description: string;
-  approval: 'never' | 'normal_threads' | 'always';
+  approval: 'never' | 'normal_threads' | 'always' | 'dynamic';
 };
 
 export type AssistantExtensionTargetKind = 'server' | 'device' | 'any_device';
@@ -229,7 +229,7 @@ export type AssistantExtensionToolManifest = {
   description: string;
   category?: string;
   inputSchema: Record<string, unknown>;
-  approval?: 'never' | 'normal_threads' | 'always';
+  approval?: 'never' | 'normal_threads' | 'always' | 'dynamic';
   supportedTargets: AssistantExtensionTargetKind[];
   defaultTarget: AssistantExtensionTargetKind;
 };
