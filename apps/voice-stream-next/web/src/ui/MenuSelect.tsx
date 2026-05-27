@@ -27,6 +27,7 @@ type UiMenuSelectProps = {
   onValueChange: (next: string) => void;
   entries: UiMenuSelectEntry[];
   variant?: UiMenuSelectVariant;
+  placement?: 'above' | 'below';
   disabled?: boolean;
   title?: string;
   triggerClassName?: string;
@@ -62,6 +63,7 @@ export function UiMenuSelect({
   onValueChange,
   entries,
   variant = 'form',
+  placement = 'above',
   disabled = false,
   title,
   triggerClassName,
@@ -129,7 +131,8 @@ export function UiMenuSelect({
       {open ? (
         <div
           className={cn(
-            'absolute bottom-[calc(100%+6px)] left-0 z-[42] overflow-hidden rounded-md border border-[var(--border)] bg-[var(--panel)] shadow-[0_14px_42px_rgba(0,0,0,.34)]',
+            'absolute left-0 z-[42] overflow-hidden rounded-md border border-[var(--border)] bg-[var(--panel)] shadow-[0_14px_42px_rgba(0,0,0,.34)]',
+            placement === 'above' ? 'bottom-[calc(100%+6px)]' : 'top-[calc(100%+6px)]',
             panelClassName,
           )}
           role={role}

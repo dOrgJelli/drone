@@ -40,6 +40,19 @@ describe('assistant API parity', () => {
   });
 
   test('creates normal and voice threads, renames, and deletes through the API', async () => {
+    const settings = await built.app.inject({
+      method: 'PATCH',
+      url: '/api/assistant/settings',
+      headers: devHeaders,
+      payload: JSON.stringify({
+        defaultProvider: 'codex',
+        defaultModel: 'gpt-5.3-codex-spark',
+        defaultThinkingLevel: 'off',
+      }),
+    }).then((response) => response.json());
+    expect(settings.settings.defaultProvider).toBe('codex');
+    expect(settings.settings.defaultModel).toBe('gpt-5.3-codex-spark');
+
     const normal = await built.app.inject({
       method: 'POST',
       url: '/api/assistant/threads',
@@ -48,6 +61,8 @@ describe('assistant API parity', () => {
     }).then((response) => response.json());
     expect(normal.thread.source).toBe('web');
     expect(normal.thread.voiceEnabled).toBe(false);
+    expect(normal.thread.provider).toBe('codex');
+    expect(normal.thread.model).toBe('gpt-5.3-codex-spark');
 
     const voice = await built.app.inject({
       method: 'POST',
