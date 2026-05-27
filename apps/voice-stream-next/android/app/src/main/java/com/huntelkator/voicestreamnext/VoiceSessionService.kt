@@ -278,6 +278,7 @@ class VoiceSessionService : Service() {
                 override fun onMessage(webSocket: WebSocket, text: String) {
                     val message = runCatching { JSONObject(text) }.getOrNull() ?: return
                     when (message.optString("type")) {
+                        "control_hello" -> rememberReturnedDevice(message.optJSONObject("device"))
                         "server_ping" -> webSocket.send(
                             JSONObject()
                                 .put("type", "client_ping")
@@ -323,6 +324,16 @@ class VoiceSessionService : Service() {
                     scheduleControlReconnect("failed")
                 }
             }
+        )
+    }
+
+    private fun rememberReturnedDevice(device: JSONObject?) {
+        val returnedDeviceId = device?.optString("id").orEmpty()
+        val token = api.pairedDeviceToken()
+        if (returnedDeviceId.isBlank() || token.isBlank() || returnedDeviceId == api.pairedDeviceId()) return
+        api.savePairing(
+            DevicePairing(returnedDeviceId, token),
+            device?.optString("displayName")?.takeIf { it.isNotBlank() } ?: Constants.DEFAULT_DEVICE_NAME
         )
     }
 

@@ -418,7 +418,7 @@ class VoiceStreamApi(private val context: Context) {
         val deviceId = pairedDeviceId()
         val token = pairedDeviceToken()
         if (deviceId.isBlank() || token.isBlank()) return
-        request(
+        val json = request(
             "POST",
             "/api/devices/$deviceId/status",
             JSONObject()
@@ -433,6 +433,14 @@ class VoiceStreamApi(private val context: Context) {
                 .put("lastError", lastError ?: JSONObject.NULL)
                 .put("reportedAt", java.time.Instant.now().toString())
         )
+        val device = json.optJSONObject("device")
+        val returnedDeviceId = device?.optString("id").orEmpty()
+        if (returnedDeviceId.isNotBlank() && returnedDeviceId != deviceId) {
+            savePairing(
+                DevicePairing(returnedDeviceId, token),
+                device?.optString("displayName")?.takeIf { it.isNotBlank() } ?: Constants.DEFAULT_DEVICE_NAME
+            )
+        }
     }
 
     fun uploadApprovalCode(code: String, voiceSessionId: String? = null) {
