@@ -22,7 +22,7 @@ export function readDevUser(): DevUser {
 export function createDevClient(user: DevUser): ApiClient {
   const withHeaders = (init?: RequestInit): RequestInit => {
     const headers = new Headers(init?.headers);
-    headers.set('content-type', headers.get('content-type') || 'application/json');
+    if (init?.body != null && !headers.has('content-type')) headers.set('content-type', 'application/json');
     headers.set('x-voice-dev-user-email', user.email);
     headers.set('x-voice-dev-user-name', user.name);
     headers.set('x-voice-dev-admin', '0');
@@ -41,7 +41,7 @@ export function createDevClient(user: DevUser): ApiClient {
 export function createClerkClient(getToken: () => Promise<string | null>): ApiClient {
   const withHeaders = async (init?: RequestInit): Promise<RequestInit> => {
     const headers = new Headers(init?.headers);
-    headers.set('content-type', headers.get('content-type') || 'application/json');
+    if (init?.body != null && !headers.has('content-type')) headers.set('content-type', 'application/json');
     const token = await getToken();
     if (token) headers.set('authorization', `Bearer ${token}`);
     return { ...init, headers };
