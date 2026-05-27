@@ -88,7 +88,7 @@ describe('voice integration', () => {
     expect(dashboard.clientStatuses.some((entry: any) => entry.deviceId === registered.device.id && entry.status === 'Ready for commands')).toBe(true);
   });
 
-  test('auto-finishes patch streams when a sleep phrase is detected during recording', async () => {
+  test('auto-finishes patch streams when a finish phrase is detected during recording', async () => {
     process.env.VOICE_STREAM_NEXT_TEST_TRANSCRIPT = "Please capture this note, that's it.";
 
     const registered = await fetch(`${baseUrl}/api/devices`, {

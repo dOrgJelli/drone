@@ -3880,13 +3880,20 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
           } else if (message.type === 'transcript_result') {
             await finishVoiceFromServer(message.status || 'Transcript patched into chat.');
             void onRefresh();
-          } else if (message.type === 'sleep') {
+          } else if (message.type === 'finish') {
             let nextStatus = 'Awake. Waiting for voice command.';
             if (target === 'clipboard') {
               const copied = await copyText(message.transcriptText || '');
               nextStatus = copied ? 'Copied voice transcription.' : 'No voice transcription detected.';
             }
             await finishVoiceFromServer(nextStatus);
+            void onRefresh();
+          } else if (message.type === 'sleep') {
+            if (target === 'clipboard' && message.transcriptText) {
+              await copyText(message.transcriptText || '');
+            }
+            const settings = voiceSettings;
+            await finishVoiceFromServer(settings ? `Sleep: ${settings.unlockCode} awake, ${settings.lockedOffCode} off.` : 'Sleeping.', 'sleeping');
             void onRefresh();
           } else if (message.type === 'assistant_error') {
             await finishVoiceFromServer(message.error || 'Voice runtime failed.');
@@ -3918,22 +3925,23 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
     await refs.current.context?.close().catch(() => undefined);
     refs.current = {};
     setStreaming(false);
+    if (nextMode === 'sleeping') resetApprovalCollection();
     setMode(nextMode);
     setStatus('Voice stream stopped.');
     void reportDesktopStatus(nextMode, 'Voice stream stopped.');
     if (nextMode !== 'off') startWakeListener();
   }
 
-  async function finishVoiceFromServer(nextStatus: string) {
+  async function finishVoiceFromServer(nextStatus: string, nextMode: VoiceMode = 'awake') {
     refs.current.socket?.close();
     refs.current.processor?.disconnect();
     refs.current.stream?.getTracks().forEach((track) => track.stop());
     await refs.current.context?.close().catch(() => undefined);
     refs.current = {};
     setStreaming(false);
-    setMode('awake');
+    setMode(nextMode);
     setStatus(nextStatus);
-    void reportDesktopStatus('awake', nextStatus);
+    void reportDesktopStatus(nextMode, nextStatus);
     startWakeListener();
   }
 
@@ -3993,7 +4001,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
 
   function startWakeListener() {
     if (refs.current.wakeStarting || refs.current.wakeStream || refs.current.recognition) {
-      setStatus('Awake. Listening for voice commands.');
+      setStatus(wakeListenerStatus());
       return;
     }
     if (window.voiceStreamDesktop?.startVosk && window.voiceStreamDesktop.sendVoskFrame && window.voiceStreamDesktop.onVoskText) {
@@ -4038,7 +4046,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
       refs.current.wakeContext = context;
       refs.current.wakeProcessor = processor;
       refs.current.wakeUnsubscribe = unsubscribe;
-      setStatus('Awake. Listening with Vosk.');
+      setStatus(wakeListenerStatus('Awake. Listening with Vosk.'));
       return true;
     } catch (err: any) {
       stopVoskWakeListener();
@@ -4052,11 +4060,11 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
   function startSpeechWakeListener() {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      setStatus('Awake. Wake recognition is unavailable in this runtime.');
+      setStatus(modeRef.current === 'sleeping' ? sleepingStatusText() : 'Awake. Wake recognition is unavailable in this runtime.');
       return;
     }
     if (refs.current.recognition) {
-      setStatus('Awake. Listening for voice commands.');
+      setStatus(wakeListenerStatus());
       return;
     }
     const recognition = new SpeechRecognition();
@@ -4082,11 +4090,19 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
     refs.current.recognition = recognition;
     try {
       recognition.start();
-      setStatus('Awake. Listening for voice commands.');
+      setStatus(wakeListenerStatus());
     } catch {
       refs.current.recognition = undefined;
-      setStatus('Awake. Wake recognition is unavailable in this runtime.');
+      setStatus(modeRef.current === 'sleeping' ? sleepingStatusText() : 'Awake. Wake recognition is unavailable in this runtime.');
     }
+  }
+
+  function sleepingStatusText() {
+    return modeRef.current === 'sleeping' && status ? status : 'Sleeping.';
+  }
+
+  function wakeListenerStatus(awakeStatus = 'Awake. Listening for voice commands.') {
+    return modeRef.current === 'sleeping' ? sleepingStatusText() : awakeStatus;
   }
 
   function stopWakeListener() {

@@ -8,10 +8,18 @@ import {
 } from './streaming-transcription.js';
 
 describe('stripTranscriptCommands', () => {
-  test('detects sleep and abort terminal phrases', () => {
-    const sleep = stripTranscriptCommands("Please summarize the notes, that's it.");
+  test('detects finish, sleep, and abort terminal phrases', () => {
+    const finish = stripTranscriptCommands("Please summarize the notes, that's it.");
+    expect(finish.finishDetected).toBe(true);
+    expect(finish.finishPhrase).toBeTruthy();
+    expect(finish.sleepDetected).toBe(false);
+    expect(finish.abortDetected).toBe(false);
+    expect(finish.text).toBe('Please summarize the notes,');
+
+    const sleep = stripTranscriptCommands('Please summarize the notes, go to sleep.');
     expect(sleep.sleepDetected).toBe(true);
     expect(sleep.sleepPhrase).toBeTruthy();
+    expect(sleep.finishDetected).toBe(false);
     expect(sleep.abortDetected).toBe(false);
     expect(sleep.text).toBe('Please summarize the notes,');
 
@@ -19,6 +27,7 @@ describe('stripTranscriptCommands', () => {
     expect(abort.abortDetected).toBe(true);
     expect(abort.abortPhrase).toBeTruthy();
     expect(abort.sleepDetected).toBe(false);
+    expect(abort.finishDetected).toBe(false);
     expect(abort.text).toBe('Never mind, now.');
   });
 
@@ -31,6 +40,7 @@ describe('stripTranscriptCommands', () => {
   test('strips wake phrases without finishing the recording', () => {
     const wake = stripTranscriptCommands('Hey Sebastian, patch me in for the meeting.');
     expect(wake.wakeDetected).toBe(true);
+    expect(wake.finishDetected).toBe(false);
     expect(wake.sleepDetected).toBe(false);
     expect(wake.abortDetected).toBe(false);
     expect(wake.text).toBe('for the meeting.');
@@ -50,7 +60,7 @@ describe('hasTranscriptContent', () => {
 });
 
 describe('StreamingTranscriptionManager', () => {
-  test('auto-finishes on sleep phrase using test transcript hook', async () => {
+  test('auto-finishes on finish phrase using test transcript hook', async () => {
     const previous = process.env.VOICE_STREAM_NEXT_TEST_TRANSCRIPT;
     process.env.VOICE_STREAM_NEXT_TEST_TRANSCRIPT = "Please capture this note, that's it.";
     const config = buildStreamingTranscriptionConfigFromEnv(process.env);
@@ -82,11 +92,77 @@ describe('StreamingTranscriptionManager', () => {
     else process.env.VOICE_STREAM_NEXT_TEST_TRANSCRIPT = previous;
 
     expect(commands).toHaveLength(1);
-    expect(commands[0]?.type).toBe('sleep');
+    expect(commands[0]?.type).toBe('finish');
     expect(commands[0]?.transcriptText).toContain('Please capture this note');
     expect(detections).toHaveLength(1);
-    expect(detections[0]?.type).toBe('sleep');
+    expect(detections[0]?.type).toBe('finish');
     expect(detections[0]?.partialTranscriptText).toContain('Please capture this note');
+  });
+
+  test('auto-sleeps on go to sleep phrase using test transcript hook', async () => {
+    const previous = process.env.VOICE_STREAM_NEXT_TEST_TRANSCRIPT;
+    process.env.VOICE_STREAM_NEXT_TEST_TRANSCRIPT = 'Please capture this note, go to sleep.';
+    const config = buildStreamingTranscriptionConfigFromEnv(process.env);
+    const commands: Array<{ type: string; transcriptText: string }> = [];
+    const manager = new StreamingTranscriptionManager(config, (command) => {
+      commands.push({ type: command.type, transcriptText: command.transcriptText });
+    });
+
+    const speechChunk = speechLikeChunk();
+    const silenceChunk = silentChunk();
+    for (let index = 0; index < 8; index += 1) {
+      manager.appendPcm(speechChunk);
+    }
+    for (let index = 0; index < 12; index += 1) {
+      manager.appendPcm(silenceChunk);
+    }
+    manager.flushPending();
+
+    const startedAt = Date.now();
+    while (commands.length === 0 && Date.now() - startedAt < 5_000) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    manager.stop();
+
+    if (previous == null) delete process.env.VOICE_STREAM_NEXT_TEST_TRANSCRIPT;
+    else process.env.VOICE_STREAM_NEXT_TEST_TRANSCRIPT = previous;
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0]?.type).toBe('sleep');
+    expect(commands[0]?.transcriptText).toContain('Please capture this note');
+  });
+
+  test('auto-sleeps even when go to sleep has no transcript content', async () => {
+    const previous = process.env.VOICE_STREAM_NEXT_TEST_TRANSCRIPT;
+    process.env.VOICE_STREAM_NEXT_TEST_TRANSCRIPT = 'Go to sleep.';
+    const config = buildStreamingTranscriptionConfigFromEnv(process.env);
+    const commands: Array<{ type: string; transcriptText: string }> = [];
+    const manager = new StreamingTranscriptionManager(config, (command) => {
+      commands.push({ type: command.type, transcriptText: command.transcriptText });
+    });
+
+    const speechChunk = speechLikeChunk();
+    const silenceChunk = silentChunk();
+    for (let index = 0; index < 8; index += 1) {
+      manager.appendPcm(speechChunk);
+    }
+    for (let index = 0; index < 12; index += 1) {
+      manager.appendPcm(silenceChunk);
+    }
+    manager.flushPending();
+
+    const startedAt = Date.now();
+    while (commands.length === 0 && Date.now() - startedAt < 5_000) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    manager.stop();
+
+    if (previous == null) delete process.env.VOICE_STREAM_NEXT_TEST_TRANSCRIPT;
+    else process.env.VOICE_STREAM_NEXT_TEST_TRANSCRIPT = previous;
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0]?.type).toBe('sleep');
+    expect(commands[0]?.transcriptText).toBe('');
   });
 
   test('auto-aborts on stop phrase using test transcript hook', async () => {

@@ -1,6 +1,6 @@
 import { hasGroqSpeechRuntime, transcribePcm16 } from './assistant-runtime.js';
 
-export type TerminalCommandType = 'sleep' | 'abort';
+export type TerminalCommandType = 'finish' | 'sleep' | 'abort';
 
 export type TerminalCommand = {
   type: TerminalCommandType;
@@ -30,7 +30,7 @@ export type StreamingTranscriptionConfig = {
   silenceThreshold: number;
   sampleRateHz: number;
   channels: number;
-  ignoreEmptySleepCommands: boolean;
+  ignoreEmptyFinishCommands: boolean;
   finalTranscriptionMode: 'full-recording' | 'segments';
   maxSessionAudioBytes: number;
 };
@@ -71,7 +71,7 @@ export function buildStreamingTranscriptionConfigFromEnv(env: NodeJS.ProcessEnv 
     silenceThreshold: parsePositiveFloat(env.VOICE_STREAM_NEXT_TRANSCRIBE_SILENCE_THRESHOLD, 0.025),
     sampleRateHz: 16_000,
     channels: 1,
-    ignoreEmptySleepCommands: env.VOICE_STREAM_NEXT_IGNORE_EMPTY_SLEEP_COMMANDS === '1',
+    ignoreEmptyFinishCommands: env.VOICE_STREAM_NEXT_IGNORE_EMPTY_FINISH_COMMANDS === '1' || env.VOICE_STREAM_NEXT_IGNORE_EMPTY_SLEEP_COMMANDS === '1',
     finalTranscriptionMode: parseFinalTranscriptionMode(env.VOICE_STREAM_NEXT_FINAL_TRANSCRIPTION_MODE),
     maxSessionAudioBytes: parsePositiveInteger(env.VOICE_STREAM_NEXT_MAX_SESSION_AUDIO_BYTES, 80 * 1024 * 1024),
   };
@@ -174,9 +174,14 @@ export class StreamingTranscriptionManager {
       return;
     }
 
-    if (commandResult.sleepDetected) {
+    const terminalType: Extract<TerminalCommandType, 'finish' | 'sleep'> | null = commandResult.sleepDetected
+      ? 'sleep'
+      : commandResult.finishDetected
+        ? 'finish'
+        : null;
+    if (terminalType) {
       const fallbackTranscriptText = this.buildFullTranscriptText(commandResult.text);
-      if (this.config.ignoreEmptySleepCommands && !hasTranscriptContent(fallbackTranscriptText)) {
+      if (terminalType === 'finish' && this.config.ignoreEmptyFinishCommands && !hasTranscriptContent(fallbackTranscriptText)) {
         return;
       }
       const detectedAt = new Date().toISOString();
@@ -185,9 +190,12 @@ export class StreamingTranscriptionManager {
         this.clearSessionAudio();
       }
       this.enterTerminalCommandState({ clearContext: false });
+      const phrase = terminalType === 'sleep'
+        ? commandResult.sleepPhrase ?? 'go to sleep'
+        : commandResult.finishPhrase ?? "that's it";
       this.onDetection({
-        type: 'sleep',
-        phrase: commandResult.sleepPhrase ?? "that's it",
+        type: terminalType,
+        phrase,
         detectedAt,
         partialTranscriptText: fallbackTranscriptText,
         segmentSequence: segment.sequence,
@@ -200,8 +208,8 @@ export class StreamingTranscriptionManager {
           : fallbackTranscriptText;
       if (this.stopped) return;
       this.onCommand({
-        type: 'sleep',
-        phrase: commandResult.sleepPhrase ?? "that's it",
+        type: terminalType,
+        phrase,
         detectedAt,
         transcriptText,
       });
@@ -281,6 +289,8 @@ export class StreamingTranscriptionManager {
 export function stripTranscriptCommands(text: string): {
   text: string;
   wakeDetected: boolean;
+  finishDetected: boolean;
+  finishPhrase?: string;
   sleepDetected: boolean;
   sleepPhrase?: string;
   abortDetected: boolean;
@@ -288,6 +298,8 @@ export function stripTranscriptCommands(text: string): {
 } {
   let cleaned = text;
   let wakeDetected = false;
+  let finishDetected = false;
+  let finishPhrase: string | undefined;
   let sleepDetected = false;
   let sleepPhrase: string | undefined;
   let abortDetected = false;
@@ -310,6 +322,11 @@ export function stripTranscriptCommands(text: string): {
     return ' ';
   });
   cleaned = cleaned.replace(/\b(?:that's|thats|that\s+is)\s+it\b[\s,.:;!?-]*/gi, (match) => {
+    finishDetected = true;
+    finishPhrase = match.trim();
+    return ' ';
+  });
+  cleaned = cleaned.replace(/\bgo\s+to\s+sleep\b[\s,.:;!?-]*/gi, (match) => {
     sleepDetected = true;
     sleepPhrase = match.trim();
     return ' ';
@@ -328,6 +345,8 @@ export function stripTranscriptCommands(text: string): {
   return {
     text: normalizeTranscriptWhitespace(cleaned),
     wakeDetected,
+    finishDetected,
+    finishPhrase,
     sleepDetected,
     sleepPhrase,
     abortDetected,
