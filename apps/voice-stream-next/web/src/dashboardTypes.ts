@@ -202,6 +202,7 @@ export type AssistantSettingsRecord = {
   defaultProvider: string;
   defaultModel: string;
   defaultThinkingLevel: string;
+  defaultEnabledTools: string[];
   updatedAt: string;
 };
 

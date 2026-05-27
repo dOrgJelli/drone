@@ -109,6 +109,17 @@ describe('assistant parity runtime', () => {
     expect(updated?.voiceEnabled).toBe(true);
   });
 
+  test('uses assistant settings for new thread default tools', () => {
+    const db = tempDb('assistant-default-tools');
+    dbs.push(db);
+    const user = testUser(db);
+
+    db.updateAssistantSettings(user.id, { defaultEnabledTools: ['speak', 'web_search'] });
+    const thread = db.createThread(user.id, { title: 'Defaults' });
+
+    expect(thread.enabledTools).toEqual(['speak', 'web_search']);
+  });
+
   test('exposes and executes configured extension tools', async () => {
     const db = tempDb('assistant-extension-tools');
     dbs.push(db);

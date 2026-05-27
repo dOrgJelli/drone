@@ -237,6 +237,7 @@ export type AssistantSettingsRecord = {
   defaultProvider: string;
   defaultModel: string;
   defaultThinkingLevel: string;
+  defaultEnabledTools: string[];
   updatedAt: string;
 };
 
@@ -727,6 +728,7 @@ function rowAssistantSettings(row: any): AssistantSettingsRecord {
     defaultProvider: String(row.default_provider ?? ASSISTANT_DEFAULT_PROVIDER),
     defaultModel: String(row.default_model ?? ASSISTANT_DEFAULT_MODEL),
     defaultThinkingLevel: String(row.default_thinking_level ?? ASSISTANT_DEFAULT_THINKING_LEVEL),
+    defaultEnabledTools: parseJsonArray(row.default_enabled_tools_json, [...ASSISTANT_DEFAULT_ENABLED_TOOLS]),
     updatedAt: String(row.updated_at),
   };
 }
@@ -1746,6 +1748,7 @@ export class VoiceStreamNextDb {
           default_provider,
           default_model,
           default_thinking_level,
+          default_enabled_tools_json,
           updated_at
         )
         VALUES (
@@ -1755,6 +1758,7 @@ export class VoiceStreamNextDb {
           $defaultProvider,
           $defaultModel,
           $defaultThinkingLevel,
+          $defaultEnabledToolsJson,
           $updatedAt
         )
       `,
@@ -1766,6 +1770,7 @@ export class VoiceStreamNextDb {
         $defaultProvider: ASSISTANT_DEFAULT_PROVIDER,
         $defaultModel: ASSISTANT_DEFAULT_MODEL,
         $defaultThinkingLevel: ASSISTANT_DEFAULT_THINKING_LEVEL,
+        $defaultEnabledToolsJson: JSON.stringify([...ASSISTANT_DEFAULT_ENABLED_TOOLS]),
         $updatedAt: at,
       });
     return this.ensureAssistantSettings(userId);
@@ -1773,7 +1778,7 @@ export class VoiceStreamNextDb {
 
   updateAssistantSettings(
     userId: string,
-    input: Partial<Pick<AssistantSettingsRecord, 'normalSystemPrompt' | 'voiceSystemPrompt' | 'defaultProvider' | 'defaultModel' | 'defaultThinkingLevel'>>,
+    input: Partial<Pick<AssistantSettingsRecord, 'normalSystemPrompt' | 'voiceSystemPrompt' | 'defaultProvider' | 'defaultModel' | 'defaultThinkingLevel' | 'defaultEnabledTools'>>,
   ): AssistantSettingsRecord {
     const current = this.ensureAssistantSettings(userId);
     const at = nowIso();
@@ -1786,6 +1791,7 @@ export class VoiceStreamNextDb {
             default_provider = $defaultProvider,
             default_model = $defaultModel,
             default_thinking_level = $defaultThinkingLevel,
+            default_enabled_tools_json = $defaultEnabledToolsJson,
             updated_at = $updatedAt
         WHERE user_id = $userId
       `,
@@ -1796,6 +1802,7 @@ export class VoiceStreamNextDb {
         $defaultProvider: input.defaultProvider ?? current.defaultProvider,
         $defaultModel: input.defaultModel ?? current.defaultModel,
         $defaultThinkingLevel: input.defaultThinkingLevel ?? current.defaultThinkingLevel,
+        $defaultEnabledToolsJson: JSON.stringify(input.defaultEnabledTools ?? current.defaultEnabledTools),
         $updatedAt: at,
         $userId: userId,
       });
@@ -2192,7 +2199,7 @@ export class VoiceStreamNextDb {
         $thinkingLevel: input.thinkingLevel?.trim() || settings.defaultThinkingLevel,
         $voiceEnabled: voiceEnabled ? 1 : 0,
         $autoApprove: input.autoApprove ? 1 : 0,
-        $enabledToolsJson: JSON.stringify(input.enabledTools ?? [...ASSISTANT_DEFAULT_ENABLED_TOOLS]),
+        $enabledToolsJson: JSON.stringify(input.enabledTools ?? settings.defaultEnabledTools),
         $capabilitiesJson: JSON.stringify(input.capabilities ?? ASSISTANT_DEFAULT_CAPABILITIES),
         $promptDeliveryMode: input.promptDeliveryMode === 'asap' ? 'asap' : 'queue',
         $createdAt: at,

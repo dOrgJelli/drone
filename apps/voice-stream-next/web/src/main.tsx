@@ -2182,6 +2182,8 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   const enabledTools = new Set(activeThread?.enabledTools ?? []);
   const enabledToolNames = activeThread?.enabledTools ?? [];
   const availableTools = assistantSnapshotData?.availableTools ?? [];
+  const defaultEnabledTools = new Set(assistantSnapshotData?.assistantSettings.defaultEnabledTools ?? []);
+  const defaultEnabledToolNames = assistantSnapshotData?.assistantSettings.defaultEnabledTools ?? [];
   const autoApprove = Boolean(activeThread?.autoApprove);
   const codexConnection = assistantSnapshotData?.codexConnection ?? { connected: false, accountId: null, expiresAt: null, updatedAt: null };
   const activeProvider = activeThread?.provider ?? 'openai';
@@ -2965,7 +2967,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
           ) : null}
 
           {activeView === 'settings' ? (
-            <section className="grid min-h-0 gap-3 overflow-auto p-3">
+            <section className="grid h-full min-h-0 gap-3 overflow-y-auto p-3">
               <section className={assistantPanelClass}>
                 <div className={assistantPanelHeaderClass}>
                   <div>
@@ -3039,6 +3041,57 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                       </button>
                     </div>
                   ) : null}
+                </div>
+              </section>
+
+              <section className={assistantPanelClass}>
+                <div className={assistantPanelHeaderClass}>
+                  <div>
+                    <span className={assistantKickerClass}>Assistant</span>
+                    <h2 className={assistantPanelTitleClass}>Default Tools</h2>
+                  </div>
+                  <div className="flex flex-wrap justify-end gap-1.5">
+                    <button type="button" className={assistantActionButtonClass} disabled={busy} onClick={() => void updateAssistantSettings({ defaultEnabledTools: availableTools.map((tool) => tool.name) })}>
+                      Enable all
+                    </button>
+                    <button type="button" className={assistantActionButtonClass} disabled={busy} onClick={() => void updateAssistantSettings({ defaultEnabledTools: [] })}>
+                      Disable all
+                    </button>
+                  </div>
+                </div>
+                <div className="grid gap-2">
+                  <div className="text-[11px] text-[var(--muted)]">{defaultEnabledToolNames.length} / {availableTools.length} enabled for new chats.</div>
+                  <div className="grid max-h-[360px] gap-1 overflow-y-auto pr-1">
+                    {availableTools.map((tool) => {
+                      const checked = defaultEnabledTools.has(tool.name);
+                      return (
+                        <label
+                          key={tool.name}
+                          className={cn(
+                            'flex min-w-0 cursor-pointer items-start gap-2 rounded-[5px] border border-[var(--border-subtle)] bg-white/[.02] px-2 py-1.5',
+                            checked && 'border-[rgba(139,92,246,.55)] bg-[rgba(139,92,246,.12)]',
+                          )}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            disabled={busy}
+                            onChange={(event) => {
+                              const next = new Set(defaultEnabledTools);
+                              if (event.currentTarget.checked) next.add(tool.name);
+                              else next.delete(tool.name);
+                              void updateAssistantSettings({ defaultEnabledTools: [...next] });
+                            }}
+                            className="mt-0.5 h-3.5 w-3.5 accent-[var(--accent)]"
+                          />
+                          <span className="grid min-w-0 gap-px">
+                            <strong className="truncate text-xs text-[var(--fg)]">{tool.label}</strong>
+                            <small className="line-clamp-2 text-[11px] text-[var(--muted)]">{tool.description}</small>
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
                 </div>
               </section>
 
