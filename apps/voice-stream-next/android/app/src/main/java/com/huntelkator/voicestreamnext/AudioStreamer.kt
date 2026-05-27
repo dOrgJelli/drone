@@ -602,7 +602,7 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
             trimmed.startsWith("http://") -> "ws://${trimmed.removePrefix("http://")}"
             else -> trimmed
         }
-        return "$base/api/voice/stream?deviceId=${encode(deviceId)}&token=${encode(token)}&sessionId=${encode(sessionId)}&mode=${encode(target)}&clientVersion=${BuildConfig.VERSION_CODE}&protocolVersion=1"
+        return "$base/api/voice/stream?deviceId=${encode(deviceId)}&token=${encode(token)}&installationId=${encode(api.installationId())}&sessionId=${encode(sessionId)}&mode=${encode(target)}&clientVersion=${BuildConfig.VERSION_CODE}&protocolVersion=1"
     }
 
     private fun isTerminalCloseCode(code: Int): Boolean {

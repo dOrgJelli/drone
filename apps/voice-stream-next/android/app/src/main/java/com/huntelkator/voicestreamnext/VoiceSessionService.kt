@@ -421,7 +421,7 @@ class VoiceSessionService : Service() {
             trimmed.startsWith("http://") -> "ws://${trimmed.removePrefix("http://")}"
             else -> trimmed
         }
-        return "$base/api/devices/${encode(deviceId)}/control?token=${encode(token)}&clientVersion=${BuildConfig.VERSION_CODE}&protocolVersion=1"
+        return "$base/api/devices/${encode(deviceId)}/control?token=${encode(token)}&installationId=${encode(api.installationId())}&clientVersion=${BuildConfig.VERSION_CODE}&protocolVersion=1"
     }
 
     private fun encode(value: String): String = URLEncoder.encode(value, Charsets.UTF_8.name())

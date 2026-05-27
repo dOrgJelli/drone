@@ -74,6 +74,7 @@ export type AndroidSetupClaimResult =
 export type DesktopAuthRequestRecord = {
   id: string;
   displayName: string;
+  deviceType: string;
   installationId: string | null;
   expiresAt: string;
   claimedAt: string | null;
@@ -556,6 +557,7 @@ function rowDesktopAuthRequest(row: any): DesktopAuthRequestRecord {
   return {
     id: String(row.id),
     displayName: String(row.display_name),
+    deviceType: String(row.device_type ?? 'desktop'),
     installationId: row.installation_id == null ? null : String(row.installation_id),
     expiresAt: String(row.expires_at),
     claimedAt: row.claimed_at == null ? null : String(row.claimed_at),
@@ -1280,7 +1282,7 @@ export class VoiceStreamNextDb {
   claimAndroidSetupSession(
     setupId: string,
     secret: string,
-    input: { displayName: string; expiresAt: string },
+    input: { displayName: string; expiresAt: string; installationId?: string | null },
   ): AndroidSetupClaimResult {
     const checked = this.androidSetupSession(setupId, secret);
     if (!checked.ok) return checked;
@@ -1288,6 +1290,7 @@ export class VoiceStreamNextDb {
     const registered = this.registerDevice(checked.session.userId, {
       deviceType: 'android',
       displayName: input.displayName,
+      installationId: input.installationId,
     });
     const pairingSession = this.createPairingSession(checked.session.userId, registered.device.id, input.expiresAt);
     const claimedAt = nowIso();
@@ -1315,12 +1318,13 @@ export class VoiceStreamNextDb {
     };
   }
 
-  createDesktopAuthRequest(input: { displayName: string; expiresAt: string; installationId?: string | null }): { request: DesktopAuthRequestRecord; secret: string; deviceToken: string } {
+  createDesktopAuthRequest(input: { displayName: string; expiresAt: string; installationId?: string | null; deviceType?: string | null }): { request: DesktopAuthRequestRecord; secret: string; deviceToken: string } {
     const at = nowIso();
     const id = newId('dauth');
     const secret = newSecret();
     const deviceToken = newSecret();
     const installationId = cleanInstallationId(input.installationId);
+    const deviceType = String(input.deviceType ?? 'desktop').trim() || 'desktop';
     this.db
       .query(
         `
@@ -1335,9 +1339,10 @@ export class VoiceStreamNextDb {
           created_at,
           device_token_hash,
           device_token_hint,
+          device_type,
           installation_id
         )
-        VALUES ($id, $secretHash, $displayName, $expiresAt, NULL, NULL, NULL, $createdAt, $deviceTokenHash, $deviceTokenHint, $installationId)
+        VALUES ($id, $secretHash, $displayName, $expiresAt, NULL, NULL, NULL, $createdAt, $deviceTokenHash, $deviceTokenHint, $deviceType, $installationId)
       `,
       )
       .run({
@@ -1348,6 +1353,7 @@ export class VoiceStreamNextDb {
         $createdAt: at,
         $deviceTokenHash: sha256(deviceToken),
         $deviceTokenHint: deviceToken.slice(0, 6),
+        $deviceType: deviceType,
         $installationId: installationId,
       });
     const row = this.db.query('SELECT * FROM desktop_auth_requests WHERE id = $id').get({ $id: id });
@@ -1366,7 +1372,7 @@ export class VoiceStreamNextDb {
     if (!tokenHash || !tokenHint) return { ok: false, reason: 'invalid_secret' };
 
     const registered = this.registerDeviceWithTokenHash(userId, {
-      deviceType: 'desktop',
+      deviceType: request.deviceType,
       displayName: request.displayName,
       tokenHash,
       tokenHint,
@@ -1600,7 +1606,7 @@ export class VoiceStreamNextDb {
     return row ? rowDevice(row) : null;
   }
 
-  assignDeviceInstallationId(userId: string, deviceId: string, installationIdRaw: string | null | undefined): DeviceRecord | null {
+  assignDeviceInstallationId(userId: string, deviceId: string, installationIdRaw: string | null | undefined, token?: string): DeviceRecord | null {
     const installationId = cleanInstallationId(installationIdRaw);
     const device = this.deviceForUser(userId, deviceId);
     if (!device || !installationId || device.installationId === installationId) return device;
@@ -1623,7 +1629,44 @@ export class VoiceStreamNextDb {
         $installationId: installationId,
         $deviceId: deviceId,
       });
-    if (conflict) return device;
+    if (conflict) {
+      if (!token) return device;
+      const at = nowIso();
+      this.db
+        .query(
+          `
+          UPDATE devices
+          SET display_name = $displayName,
+              token_hash = $tokenHash,
+              token_hint = $tokenHint,
+              last_seen_at = $lastSeenAt,
+              revoked_at = NULL
+          WHERE user_id = $userId
+            AND id = $conflictDeviceId
+        `,
+        )
+        .run({
+          $displayName: device.displayName,
+          $tokenHash: sha256(token),
+          $tokenHint: token.slice(0, 6),
+          $lastSeenAt: at,
+          $userId: userId,
+          $conflictDeviceId: String((conflict as any).id),
+        });
+      this.db.query('DELETE FROM pairing_sessions WHERE device_id = $deviceId').run({ $deviceId: deviceId });
+      this.db
+        .query(
+          `
+          UPDATE devices
+          SET revoked_at = $revokedAt
+          WHERE user_id = $userId
+            AND id = $deviceId
+            AND revoked_at IS NULL
+        `,
+        )
+        .run({ $revokedAt: at, $userId: userId, $deviceId: deviceId });
+      return this.deviceForUser(userId, String((conflict as any).id));
+    }
 
     this.db
       .query(
@@ -3053,11 +3096,13 @@ export class VoiceStreamNextDb {
   }
 
   listClientStatuses(userId?: string): ClientStatusRecord[] {
+    const filters = ['devices.revoked_at IS NULL'];
+    if (userId) filters.push('client_status.user_id = $userId');
     const query = `
       SELECT client_status.*, devices.device_type, devices.display_name
       FROM client_status
       JOIN devices ON devices.id = client_status.device_id
-      ${userId ? 'WHERE client_status.user_id = $userId' : ''}
+      WHERE ${filters.join(' AND ')}
       ORDER BY client_status.updated_at DESC
     `;
     const rows = userId ? this.db.query(query).all({ $userId: userId }) : this.db.query(query).all();
