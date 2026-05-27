@@ -72,6 +72,10 @@
                   <span class="device-picker-title">Extensions</span>
                   <button id="reloadExtensionsButton" class="secondary mini-button" type="button">Reload</button>
                 </div>
+                <div id="extensionDropzone" class="extension-dropzone" tabindex="0" aria-label="Local extension file drop area">
+                  <button id="addExtensionFileButton" class="secondary mini-button" type="button">Add file</button>
+                  <span>Drop .cjs or .js file</span>
+                </div>
                 <textarea id="extensionsConfigInput" spellcheck="false" placeholder='[{"id":"drone-hub","name":"Drone Hub","path":"/absolute/path/to/index.cjs","enabled":true}]'></textarea>
                 <p class="extensions-warning">Local extensions run code on this computer. Use absolute paths and only load files you trust.</p>
                 <div class="extensions-config-actions">

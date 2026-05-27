@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('voiceStreamDesktop', {
   isDesktop: true,
@@ -6,6 +6,9 @@ contextBridge.exposeInMainWorld('voiceStreamDesktop', {
   writeConfig: (config) => ipcRenderer.invoke('config:write', config),
   reloadExtensions: () => ipcRenderer.invoke('extensions:reload'),
   extensionStatus: () => ipcRenderer.invoke('extensions:status'),
+  addExtensionFile: (filePath) => ipcRenderer.invoke('extensions:addFile', filePath),
+  chooseExtensionFile: () => ipcRenderer.invoke('extensions:chooseFile'),
+  pathForFile: (file) => webUtils?.getPathForFile?.(file) || '',
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
   debugWindow: (message, details) => ipcRenderer.invoke('debug:window', message, details),
   writeClipboard: (text) => ipcRenderer.invoke('clipboard:writeText', text),
