@@ -22,6 +22,7 @@ import {
   promptAssistantThread,
   resolveAssistantApproval,
   sanitizeArtifactPath,
+  setAssistantExternalToolApprovalEvaluator,
   setAssistantExternalToolExecutor,
 } from './assistant-parity.js';
 import {
@@ -544,6 +545,16 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       threadId: input.thread.id,
       runId: input.runId,
       toolCallId: input.toolCallId,
+    });
+  });
+  setAssistantExternalToolApprovalEvaluator(async (input) => {
+    if (input.route?.targetKind === 'server') return true;
+    return extensionBridges.evaluateApproval({
+      userId: input.userId,
+      toolName: input.toolName,
+      args: input.args,
+      route: input.route,
+      threadId: input.thread.id,
     });
   });
 
@@ -1678,7 +1689,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
           }));
           return;
         }
-        if (parsed.type === 'extension_tool_result') {
+        if (parsed.type === 'extension_tool_result' || parsed.type === 'extension_approval_result') {
           if (!registered) {
             socket.close(VoiceCloseCode.InvalidMessage, 'extension bridge must send hello before results');
             return;

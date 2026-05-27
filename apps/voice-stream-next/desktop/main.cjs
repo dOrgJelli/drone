@@ -639,12 +639,13 @@ function createExtensionApi(extensionConfig, manifest, tools) {
       if (typeof value.execute !== 'function') throw new Error(`extension ${extensionConfig.id}.${localName} is missing execute(args, context)`);
       const fullName = extensionToolName(extensionConfig.id, localName);
       if (tools.has(fullName)) throw new Error(`duplicate extension tool: ${fullName}`);
+      const approvalEvaluator = typeof value.approval === 'function' ? value.approval : null;
       const toolManifest = {
         name: localName,
         label: String(value.label || localName.replace(/_/g, ' ')).trim(),
         description: String(value.description || `${localName} extension tool`).trim(),
         inputSchema: normalizeExtensionInputSchema(value.inputSchema),
-        approval: cleanExtensionApproval(value.approval),
+        approval: approvalEvaluator ? 'dynamic' : cleanExtensionApproval(value.approval),
         supportedTargets: cleanExtensionTargets(value.supportedTargets || value.targets),
         defaultTarget: cleanExtensionTarget(value.defaultTarget, 'device'),
       };
@@ -657,6 +658,7 @@ function createExtensionApi(extensionConfig, manifest, tools) {
         name: localName,
         fullName,
         execute: value.execute,
+        approval: approvalEvaluator,
       });
     },
     assistant: {
@@ -693,7 +695,7 @@ function normalizeExtensionInputSchema(schema) {
 
 function cleanExtensionApproval(value) {
   const approval = String(value || '').trim();
-  return approval === 'never' || approval === 'normal_threads' || approval === 'always' ? approval : 'always';
+  return approval === 'never' || approval === 'normal_threads' || approval === 'always' || approval === 'dynamic' ? approval : 'always';
 }
 
 function cleanExtensionTarget(value, fallback = 'device') {
@@ -853,6 +855,31 @@ async function executeDesktopExtensionTool(toolName, args, context = {}) {
   });
 }
 
+function normalizeExtensionApprovalDecision(value) {
+  if (value === false || value === 'never') return false;
+  if (value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, 'approvalRequired')) {
+    return value.approvalRequired !== false;
+  }
+  if (value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, 'required')) {
+    return value.required !== false;
+  }
+  return true;
+}
+
+async function evaluateDesktopExtensionApproval(toolName, args, context = {}) {
+  const loaded = await loadDesktopExtensions();
+  const tool = loaded.tools.get(toolName);
+  if (!tool) throw new Error(`unknown desktop extension tool: ${toolName}`);
+  if (typeof tool.approval !== 'function') return true;
+  const decision = await tool.approval(args || {}, {
+    ...context,
+    toolName,
+    extensionId: tool.extensionId,
+    localToolName: tool.name,
+  });
+  return normalizeExtensionApprovalDecision(decision);
+}
+
 function stopExtensionBridge() {
   extensionBridge.stopped = true;
   if (extensionBridge.reconnectTimer) {
@@ -940,6 +967,24 @@ async function startExtensionBridge() {
       } catch (error) {
         socket.send(JSON.stringify({
           type: 'extension_tool_result',
+          requestId,
+          ok: false,
+          error: error?.message || String(error),
+        }));
+      }
+    }
+    if (message.type === 'extension_approval_request') {
+      const requestId = String(message.requestId || '');
+      const toolName = String(message.toolName || '');
+      try {
+        const approvalRequired = await evaluateDesktopExtensionApproval(toolName, message.args, {
+          requestId,
+          threadId: message.threadId || null,
+        });
+        socket.send(JSON.stringify({ type: 'extension_approval_result', requestId, ok: true, approvalRequired }));
+      } catch (error) {
+        socket.send(JSON.stringify({
+          type: 'extension_approval_result',
           requestId,
           ok: false,
           error: error?.message || String(error),

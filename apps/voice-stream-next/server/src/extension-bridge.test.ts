@@ -65,6 +65,56 @@ describe('extension bridge registry', () => {
     expect(result).toEqual({ args: { text: 'hello' } });
   });
 
+  test('handles an immediate extension approval result', async () => {
+    const registry = new ExtensionBridgeRegistry();
+    const socket: ExtensionBridgeSocket = {
+      readyState: 1,
+      send(data) {
+        const request = JSON.parse(data);
+        registry.handleClientMessage('device-1', JSON.stringify({
+          type: 'extension_approval_result',
+          requestId: request.requestId,
+          ok: true,
+          approvalRequired: request.args.target !== 'created-by-extension',
+        }));
+      },
+    };
+    registerSocket(registry, socket);
+
+    const approvalRequired = await registry.evaluateApproval({
+      userId: 'user-1',
+      toolName,
+      args: { target: 'created-by-extension' },
+      route,
+    });
+
+    expect(approvalRequired).toBe(false);
+  });
+
+  test('rejects unexpected response types instead of waiting for timeout', async () => {
+    const registry = new ExtensionBridgeRegistry();
+    const socket: ExtensionBridgeSocket = {
+      readyState: 1,
+      send(data) {
+        const request = JSON.parse(data);
+        registry.handleClientMessage('device-1', JSON.stringify({
+          type: 'extension_tool_result',
+          requestId: request.requestId,
+          ok: true,
+          result: {},
+        }));
+      },
+    };
+    registerSocket(registry, socket);
+
+    await expect(registry.evaluateApproval({
+      userId: 'user-1',
+      toolName,
+      args: {},
+      route,
+    })).rejects.toThrow('unexpected extension response type');
+  });
+
   test('rejects pending tool calls when a runner disconnects', async () => {
     const registry = new ExtensionBridgeRegistry();
     const socket: ExtensionBridgeSocket = { readyState: 1, send() {} };

@@ -35,6 +35,7 @@ type PendingExtensionToolCall = {
   requestId: string;
   userId: string;
   deviceId: string;
+  responseType: 'extension_tool_result' | 'extension_approval_result';
   socket: ExtensionBridgeSocket;
   resolve: (result: unknown) => void;
   reject: (error: Error) => void;
@@ -125,6 +126,7 @@ export class ExtensionBridgeRegistry {
         requestId,
         userId: input.userId,
         deviceId: target.registration.deviceId,
+        responseType: 'extension_tool_result',
         socket: target.socket,
         resolve,
         reject,
@@ -140,18 +142,62 @@ export class ExtensionBridgeRegistry {
     });
   }
 
+  evaluateApproval(input: ExtensionToolExecutionInput): Promise<boolean> {
+    const target = this.resolveTarget(input);
+    if (!target) {
+      throw Object.assign(new Error(`no connected extension runner for ${input.toolName}`), { statusCode: 409 });
+    }
+    const requestId = randomUUID();
+    const payload = JSON.stringify({
+      type: 'extension_approval_request',
+      requestId,
+      toolName: input.toolName,
+      args: input.args,
+      threadId: input.threadId,
+      sentAt: new Date().toISOString(),
+    });
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pending.delete(requestId);
+        reject(Object.assign(new Error(`extension approval check timed out: ${input.toolName}`), { statusCode: 504 }));
+      }, EXTENSION_TOOL_TIMEOUT_MS);
+      this.pending.set(requestId, {
+        requestId,
+        userId: input.userId,
+        deviceId: target.registration.deviceId,
+        responseType: 'extension_approval_result',
+        socket: target.socket,
+        resolve: (result) => resolve(Boolean((result as any)?.approvalRequired)),
+        reject,
+        timeout,
+      });
+      try {
+        target.socket.send(payload);
+      } catch (error) {
+        clearTimeout(timeout);
+        this.pending.delete(requestId);
+        reject(Object.assign(new Error(error instanceof Error ? error.message : String(error)), { statusCode: 502 }));
+      }
+    });
+  }
+
   handleClientMessage(deviceId: string, raw: unknown): boolean {
     const parsed = parseExtensionBridgeMessage(raw);
-    if (!parsed || parsed.type !== 'extension_tool_result') return false;
+    if (!parsed || (parsed.type !== 'extension_tool_result' && parsed.type !== 'extension_approval_result')) return false;
     const pending = this.pending.get(parsed.requestId);
     if (!pending || pending.deviceId !== deviceId) return true;
     clearTimeout(pending.timeout);
     this.pending.delete(parsed.requestId);
-    if (!parsed.ok) {
-      pending.reject(Object.assign(new Error(parsed.error || 'extension tool failed'), { statusCode: 502 }));
+    if (parsed.type !== pending.responseType) {
+      pending.reject(Object.assign(new Error(`unexpected extension response type: ${parsed.type}`), { statusCode: 502 }));
       return true;
     }
-    pending.resolve(parsed.result);
+    if (!parsed.ok) {
+      const fallback = parsed.type === 'extension_approval_result' ? 'extension approval check failed' : 'extension tool failed';
+      pending.reject(Object.assign(new Error(parsed.error || fallback), { statusCode: 502 }));
+      return true;
+    }
+    pending.resolve(parsed.type === 'extension_approval_result' ? { approvalRequired: parsed.approvalRequired } : parsed.result);
     return true;
   }
 
@@ -182,6 +228,7 @@ export function parseExtensionBridgeMessage(raw: unknown):
   | { type: 'extension_hello'; manifests: AssistantExtensionManifest[] }
   | { type: 'client_ping'; sentAt?: string }
   | { type: 'extension_tool_result'; requestId: string; ok: boolean; result?: unknown; error?: string }
+  | { type: 'extension_approval_result'; requestId: string; ok: boolean; approvalRequired?: boolean; error?: string }
   | null {
   if (typeof raw !== 'string') return null;
   let parsed: any;
@@ -209,6 +256,17 @@ export function parseExtensionBridgeMessage(raw: unknown):
       requestId,
       ok: parsed.ok !== false,
       result: parsed.result,
+      error: typeof parsed.error === 'string' ? parsed.error.slice(0, 1000) : undefined,
+    };
+  }
+  if (parsed.type === 'extension_approval_result') {
+    const requestId = typeof parsed.requestId === 'string' ? parsed.requestId : '';
+    if (!requestId) return null;
+    return {
+      type: 'extension_approval_result',
+      requestId,
+      ok: parsed.ok !== false,
+      approvalRequired: parsed.approvalRequired !== false,
       error: typeof parsed.error === 'string' ? parsed.error.slice(0, 1000) : undefined,
     };
   }

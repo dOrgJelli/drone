@@ -13,6 +13,7 @@ import {
 import {
   extensionToolDefinition,
   extensionToolSummary,
+  type AssistantExtensionApprovalPolicy,
   type AssistantExtensionToolRoute,
 } from './assistant-extensions.js';
 import { refreshCodexAccessToken } from './codex-auth.js';
@@ -32,7 +33,7 @@ export type AssistantToolSummary = {
   label: string;
   category: 'artifacts' | 'speech' | 'prompts' | 'settings' | 'web' | 'extensions';
   description: string;
-  approval: 'never' | 'normal_threads' | 'always';
+  approval: AssistantExtensionApprovalPolicy;
 };
 
 export type AssistantSnapshot = {
@@ -175,11 +176,17 @@ export type AssistantExternalToolExecution = {
 };
 
 export type AssistantExternalToolExecutor = (input: AssistantExternalToolExecution) => Promise<unknown>;
+export type AssistantExternalToolApprovalEvaluator = (input: Omit<AssistantExternalToolExecution, 'runId' | 'toolCallId'>) => Promise<boolean>;
 
 let externalToolExecutor: AssistantExternalToolExecutor | null = null;
+let externalToolApprovalEvaluator: AssistantExternalToolApprovalEvaluator | null = null;
 
 export function setAssistantExternalToolExecutor(executor: AssistantExternalToolExecutor | null): void {
   externalToolExecutor = executor;
+}
+
+export function setAssistantExternalToolApprovalEvaluator(evaluator: AssistantExternalToolApprovalEvaluator | null): void {
+  externalToolApprovalEvaluator = evaluator;
 }
 
 export function assistantToolSummaries(): AssistantToolSummary[] {
@@ -815,7 +822,7 @@ async function executeModelToolCalls(
     ensureToolEnabled(thread, toolName);
     ensureCapability(thread, toolName);
     const args = safeJson(call.argumentsJson);
-    const needsApproval = approvalRequiredFor(db, userId, thread, toolName);
+    const needsApproval = await approvalRequiredFor(db, userId, thread, toolName, args);
     const toolCall = db.createToolCall(userId, threadId, {
       runId: run.id,
       toolName,
@@ -1306,7 +1313,7 @@ async function executeCommand(
   ensureToolEnabled(thread, toolName);
   ensureCapability(thread, toolName);
   const args = argsForCommand(command);
-  const needsApproval = approvalRequiredFor(db, userId, thread, toolName);
+  const needsApproval = await approvalRequiredFor(db, userId, thread, toolName, args);
   const toolCall = db.createToolCall(userId, threadId, {
     runId: run.id,
     toolName,
@@ -1520,7 +1527,7 @@ function ensureCapability(thread: AssistantThread, toolName: string): void {
   if ((toolName === 'web_search' || toolName === 'fetch_content') && !caps.externalCalls) throw Object.assign(new Error('external call capability is disabled'), { statusCode: 403 });
 }
 
-function approvalRequiredFor(db: VoiceStreamNextDb, userId: string, thread: AssistantThread, toolName: string): boolean {
+async function approvalRequiredFor(db: VoiceStreamNextDb, userId: string, thread: AssistantThread, toolName: string, args: unknown): Promise<boolean> {
   if (thread.autoApprove) return false;
   if (!thread.capabilities.approvals) return false;
   const summary = ASSISTANT_TOOLS.find((tool) => tool.name === toolName);
@@ -1528,6 +1535,15 @@ function approvalRequiredFor(db: VoiceStreamNextDb, userId: string, thread: Assi
   const approval = summary?.approval ?? (extension ? extension.tool.approval ?? 'always' : 'never');
   if (approval === 'always') return true;
   if (approval === 'normal_threads') return !thread.voiceEnabled;
+  if (approval === 'dynamic') {
+    const route = db.assistantExtensionToolRoute(userId, toolName);
+    if (!route?.enabled || !externalToolApprovalEvaluator) return true;
+    try {
+      return await externalToolApprovalEvaluator({ db, userId, thread, toolName, args, route });
+    } catch {
+      return true;
+    }
+  }
   return false;
 }
 
