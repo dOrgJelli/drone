@@ -229,6 +229,7 @@ body.is-signed-in .auth-screen {
   align-items: center;
   justify-content: space-between;
   gap: 14px;
+  z-index: 40;
   padding: 12px 16px;
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg);
@@ -381,11 +382,12 @@ h2 {
 
 .settings-popover {
   position: relative;
+  z-index: 50;
 }
 
 .settings-panel {
   position: absolute;
-  z-index: 30;
+  z-index: 60;
   top: calc(100% + 8px);
   right: 0;
   width: 360px;
