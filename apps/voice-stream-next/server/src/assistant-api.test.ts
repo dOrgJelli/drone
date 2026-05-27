@@ -75,7 +75,7 @@ describe('assistant API parity', () => {
     expect(deleted.snapshot.threads.some((thread: any) => thread.id === normal.thread.id)).toBe(false);
   });
 
-  test('lets paired Android devices read their current voice thread files', async () => {
+  test('lets paired Android devices read the shared current voice thread files', async () => {
     const user = db.upsertUser({
       clerkUserId: 'clerk_android_files',
       displayName: 'Android Files',
@@ -83,7 +83,7 @@ describe('assistant API parity', () => {
       admin: false,
     });
     const registered = db.registerDevice(user.id, { deviceType: 'android', displayName: 'Phone' });
-    const thread = db.latestVoiceThreadForDevice(user.id, registered.device.id);
+    const thread = db.latestVoiceThread(user.id, registered.device.id);
     db.upsertArtifact(user.id, thread.id, { path: 'notes/status.md', content: '# Status\n\nReady' });
 
     const summary = await built.app.inject({
@@ -111,6 +111,37 @@ describe('assistant API parity', () => {
     expect(files.artifacts).toHaveLength(1);
     expect(files.artifacts[0].path).toBe('notes/status.md');
     expect(files.artifacts[0].content).toContain('Ready');
+  });
+
+  test('reuses the latest voice thread across different devices', async () => {
+    const user = db.upsertUser({
+      clerkUserId: 'clerk_shared_voice_thread',
+      displayName: 'Shared Voice Thread',
+      email: 'shared-voice-thread@example.local',
+      admin: false,
+    });
+    const phone = db.registerDevice(user.id, { deviceType: 'android', displayName: 'Phone' });
+    const desktop = db.registerDevice(user.id, { deviceType: 'desktop', displayName: 'Desktop' });
+
+    const phoneSession = db.createVoiceSession(user.id, phone.device.id, 'assistant');
+    const desktopSession = db.createVoiceSession(user.id, desktop.device.id, 'assistant');
+
+    expect(desktopSession.assistantThreadId).toBe(phoneSession.assistantThreadId);
+
+    db.upsertArtifact(user.id, phoneSession.assistantThreadId, { path: 'notes/shared.md', content: 'Shared across devices' });
+    const desktopFiles = await built.app.inject({
+      method: 'GET',
+      url: `/api/devices/${desktop.device.id}/assistant/thread/artifacts`,
+      headers: {
+        'x-voice-device-token': desktop.token,
+        'x-voice-client-version': '12',
+      },
+    }).then((response) => response.json());
+
+    expect(desktopFiles.ok).toBe(true);
+    expect(desktopFiles.thread.id).toBe(phoneSession.assistantThreadId);
+    expect(desktopFiles.artifacts).toHaveLength(1);
+    expect(desktopFiles.artifacts[0].content).toContain('Shared across devices');
   });
 
   test('does not create a voice thread when Android reads files before any voice session', async () => {

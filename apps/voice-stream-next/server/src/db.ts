@@ -2279,21 +2279,21 @@ export class VoiceStreamNextDb {
     return this.thread(userId, threadId);
   }
 
-  latestVoiceThreadForDevice(userId: string, deviceId: string): AssistantThread {
-    return this.latestVoiceThreadForDeviceOrNull(userId, deviceId) ?? this.createThread(userId, { deviceId, source: 'voice', title: 'Voice thread' });
+  latestVoiceThread(userId: string, sourceDeviceId: string): AssistantThread {
+    return this.latestVoiceThreadOrNull(userId) ?? this.createThread(userId, { deviceId: sourceDeviceId, source: 'voice', title: 'Voice thread' });
   }
 
-  latestVoiceThreadForDeviceOrNull(userId: string, deviceId: string): AssistantThread | null {
+  latestVoiceThreadOrNull(userId: string): AssistantThread | null {
     const row = this.db
       .query(
         `
         SELECT * FROM assistant_threads
-        WHERE user_id = $userId AND device_id = $deviceId AND source = 'voice'
+        WHERE user_id = $userId AND source = 'voice'
         ORDER BY updated_at DESC, created_at DESC
         LIMIT 1
       `,
       )
-      .get({ $userId: userId, $deviceId: deviceId });
+      .get({ $userId: userId });
     return row ? rowThread(row) : null;
   }
 
@@ -2903,7 +2903,7 @@ export class VoiceStreamNextDb {
   }
 
   createVoiceSession(userId: string, deviceId: string, mode = 'recording'): VoiceSession {
-    const thread = this.latestVoiceThreadForDevice(userId, deviceId);
+    const thread = this.latestVoiceThread(userId, deviceId);
     const id = newId('vsn');
     const at = nowIso();
     const cleanMode = mode.trim() || 'recording';

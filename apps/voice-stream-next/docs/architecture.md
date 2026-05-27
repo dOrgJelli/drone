@@ -142,7 +142,7 @@ Assistant responsibilities inside the backend:
 
 - store assistant threads and messages
 - receive final voice transcripts as assistant messages
-- reuse the latest voice thread for a device in v1
+- reuse the user's latest voice thread in v1
 - route assistant response text/audio back to voice clients
 - generate spoken assistant responses when speech output is requested
 - handle assistant approval requests
