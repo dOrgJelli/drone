@@ -16,6 +16,8 @@ let trayStatus = { mode: 'off', status: 'Off.' };
 let extensionBridge = { socket: null, reconnectTimer: null, stopped: false, reconnectDelayMs: 1000 };
 const extensionHost = {
   loading: null,
+  loaded: false,
+  configKey: '',
   manifests: [],
   tools: new Map(),
   statuses: [],
@@ -530,6 +532,16 @@ function cleanExtensionConfigs(config = readConfig()) {
     .filter(Boolean);
 }
 
+function extensionConfigKey(configs) {
+  return JSON.stringify(configs.map((item) => ({
+    id: item.id,
+    name: item.name,
+    path: item.path,
+    enabled: item.enabled,
+    config: item.config,
+  })));
+}
+
 function extensionStatePath() {
   return path.join(app.getPath('userData'), 'voice-stream-next-extension-state.json');
 }
@@ -561,6 +573,7 @@ function createExtensionApi(extensionConfig, manifest, tools) {
       if (!localName) throw new Error(`extension ${extensionConfig.id} registered a tool without a name`);
       if (typeof value.execute !== 'function') throw new Error(`extension ${extensionConfig.id}.${localName} is missing execute(args, context)`);
       const fullName = extensionToolName(extensionConfig.id, localName);
+      if (tools.has(fullName)) throw new Error(`duplicate extension tool: ${fullName}`);
       const toolManifest = {
         name: localName,
         label: String(value.label || localName.replace(/_/g, ' ')).trim(),
@@ -624,13 +637,17 @@ function cleanExtensionTargets(value) {
   return targets.length > 0 ? [...new Set(targets)] : ['device'];
 }
 
-async function loadDesktopExtensions() {
+async function loadDesktopExtensions(options = {}) {
+  const configs = cleanExtensionConfigs();
+  const configKey = extensionConfigKey(configs);
+  if (!options.force && extensionHost.loaded && extensionHost.configKey === configKey) return extensionHost;
   if (extensionHost.loading) return extensionHost.loading;
   extensionHost.loading = (async () => {
     const manifests = [];
     const tools = new Map();
     const statuses = [];
-    for (const extensionConfig of cleanExtensionConfigs()) {
+    const extensionIds = new Set();
+    for (const extensionConfig of configs) {
       if (!extensionConfig.enabled) {
         statuses.push({ id: extensionConfig.id, name: extensionConfig.name, enabled: false, ok: true, toolCount: 0 });
         continue;
@@ -642,7 +659,10 @@ async function loadDesktopExtensions() {
         tools: [],
       };
       try {
-        const modulePath = path.resolve(extensionConfig.path);
+        if (extensionIds.has(extensionConfig.id)) throw new Error(`duplicate extension id: ${extensionConfig.id}`);
+        extensionIds.add(extensionConfig.id);
+        if (!path.isAbsolute(extensionConfig.path)) throw new Error('extension path must be absolute');
+        const modulePath = extensionConfig.path;
         delete require.cache[require.resolve(modulePath)];
         const extensionModule = require(modulePath);
         const activate = extensionModule?.activate || extensionModule?.default?.activate;
@@ -659,10 +679,15 @@ async function loadDesktopExtensions() {
     extensionHost.manifests = manifests;
     extensionHost.tools = tools;
     extensionHost.statuses = statuses;
-    extensionHost.loading = null;
+    extensionHost.loaded = true;
+    extensionHost.configKey = configKey;
     return extensionHost;
   })();
-  return extensionHost.loading;
+  try {
+    return await extensionHost.loading;
+  } finally {
+    extensionHost.loading = null;
+  }
 }
 
 function desktopExtensionManifests() {
@@ -1061,8 +1086,9 @@ if (!gotSingleInstanceLock) {
     return saved;
   });
   ipcMain.handle('extensions:reload', async () => {
-    extensionHost.loading = null;
-    await loadDesktopExtensions();
+    extensionHost.loaded = false;
+    extensionHost.configKey = '';
+    await loadDesktopExtensions({ force: true });
     restartExtensionBridge();
     return { ok: true, statuses: extensionHost.statuses, manifests: extensionHost.manifests };
   });

@@ -852,26 +852,6 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     })),
   );
 
-  app.post('/api/assistant/extensions/manifests', async (req, reply) =>
-    withUser(req, reply, db, clerkEnabled, async (ctx) => {
-      const manifest = parseAssistantExtensionManifest(jsonBody(req).manifest ?? jsonBody(req));
-      const saved = db.upsertAssistantExtensionManifest(ctx.user.id, manifest);
-      for (const tool of manifest.tools) {
-        const toolName = extensionToolName(manifest.id, tool.name);
-        if (!db.assistantExtensionToolRoute(ctx.user.id, toolName)) {
-          db.upsertAssistantExtensionToolRoute(ctx.user.id, {
-            toolName,
-            enabled: false,
-            targetKind: tool.defaultTarget,
-            targetDeviceId: null,
-          });
-        }
-      }
-      emitAssistantChange('extension_manifest_updated');
-      return { ok: true, manifest: saved, snapshot: assistantSnapshot(db, ctx.user.id) };
-    }),
-  );
-
   app.patch('/api/assistant/extensions/tools/:toolName/route', async (req, reply) =>
     withUser(req, reply, db, clerkEnabled, async (ctx) => {
       const toolName = String((req.params as any).toolName ?? '');

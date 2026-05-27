@@ -35,6 +35,7 @@ type PendingExtensionToolCall = {
   requestId: string;
   userId: string;
   deviceId: string;
+  socket: ExtensionBridgeSocket;
   resolve: (result: unknown) => void;
   reject: (error: Error) => void;
   timeout: ReturnType<typeof setTimeout>;
@@ -59,6 +60,7 @@ export class ExtensionBridgeRegistry {
   unregister(socket: ExtensionBridgeSocket): void {
     const registration = this.registrations.get(socket);
     if (!registration) return;
+    this.rejectPendingForSocket(socket, `extension runner disconnected: ${registration.displayName || registration.deviceId}`);
     const bucket = this.sockets.get(registration.deviceId);
     bucket?.delete(socket);
     if (bucket && bucket.size === 0) this.sockets.delete(registration.deviceId);
@@ -82,7 +84,7 @@ export class ExtensionBridgeRegistry {
   closeDevice(deviceId: string, code = 4403, reason = 'device revoked'): void {
     const bucket = this.sockets.get(deviceId);
     if (!bucket) return;
-    for (const socket of bucket) {
+    for (const socket of [...bucket]) {
       socket.close?.(code, reason);
       this.unregister(socket);
     }
@@ -104,7 +106,6 @@ export class ExtensionBridgeRegistry {
       toolCallId: input.toolCallId,
       sentAt: new Date().toISOString(),
     });
-    target.socket.send(payload);
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(requestId);
@@ -114,10 +115,18 @@ export class ExtensionBridgeRegistry {
         requestId,
         userId: input.userId,
         deviceId: target.registration.deviceId,
+        socket: target.socket,
         resolve,
         reject,
         timeout,
       });
+      try {
+        target.socket.send(payload);
+      } catch (error) {
+        clearTimeout(timeout);
+        this.pending.delete(requestId);
+        reject(Object.assign(new Error(error instanceof Error ? error.message : String(error)), { statusCode: 502 }));
+      }
     });
   }
 
@@ -147,6 +156,15 @@ export class ExtensionBridgeRegistry {
       return { socket, registration };
     }
     return null;
+  }
+
+  private rejectPendingForSocket(socket: ExtensionBridgeSocket, message: string): void {
+    for (const [requestId, pending] of this.pending) {
+      if (pending.socket !== socket) continue;
+      clearTimeout(pending.timeout);
+      this.pending.delete(requestId);
+      pending.reject(Object.assign(new Error(message), { statusCode: 409 }));
+    }
   }
 }
 

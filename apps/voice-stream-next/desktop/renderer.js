@@ -182,6 +182,23 @@ function extensionConfigText(config = state.config) {
   return extensions.length > 0 ? JSON.stringify(extensions, null, 2) : '';
 }
 
+function isAbsoluteExtensionPath(value) {
+  return typeof value === 'string' && (/^\//.test(value.trim()) || /^[a-zA-Z]:[\\/]/.test(value.trim()));
+}
+
+function validateExtensionConfig(extensions) {
+  extensions.forEach((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`Extension ${index + 1} must be an object.`);
+    }
+    if (entry.enabled === false) return;
+    const name = String(entry.name || entry.id || `Extension ${index + 1}`);
+    if (!isAbsoluteExtensionPath(entry.path)) {
+      throw new Error(`${name} needs an absolute path.`);
+    }
+  });
+}
+
 function renderExtensionStatus(result) {
   if (!els.extensionsStatus) return;
   const statuses = Array.isArray(result?.statuses) ? result.statuses : [];
@@ -1779,6 +1796,7 @@ if (els.saveExtensionsButton) {
       const raw = els.extensionsConfigInput?.value.trim() || '';
       const extensions = raw ? JSON.parse(raw) : [];
       if (!Array.isArray(extensions)) throw new Error('Extensions config must be a JSON array.');
+      validateExtensionConfig(extensions);
       applyConfig(await desktop.writeConfig({ ...state.config, extensions }));
       await refreshExtensionStatus();
       showStatus('Saved local extensions.');

@@ -454,21 +454,6 @@ function AssistantToolsPanel({
   );
 }
 
-const sampleExtensionManifest = JSON.stringify({
-  id: 'drone-hub',
-  name: 'Drone Hub',
-  version: '0.1.0',
-  tools: [{
-    name: 'list_drones',
-    label: 'List drones',
-    description: 'List local Drone Hub drones from a connected device.',
-    approval: 'never',
-    supportedTargets: ['device', 'any_device'],
-    defaultTarget: 'device',
-    inputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
-  }],
-}, null, 2);
-
 function extensionToolName(extensionId: string, toolName: string): string {
   return `${safeExtensionToolSegment(extensionId).replace(/_/g, '-')}__${safeExtensionToolSegment(toolName)}`;
 }
@@ -496,18 +481,12 @@ function routeForTool(routes: AssistantExtensionToolRoute[], toolName: string, t
 function AssistantExtensionsPanel({
   data,
   devices,
-  manifestDraft,
   busy,
-  onManifestDraftChange,
-  onSaveManifest,
   onUpdateRoute,
 }: {
   data: AssistantExtensionsResponse | null;
   devices: DeviceRecord[];
-  manifestDraft: string;
   busy: boolean;
-  onManifestDraftChange: (value: string) => void;
-  onSaveManifest: () => void;
   onUpdateRoute: (toolName: string, route: Pick<AssistantExtensionToolRoute, 'enabled' | 'targetKind' | 'targetDeviceId'>) => void;
 }) {
   const connectedToolNames = React.useMemo(() => new Set((data?.connectedDevices ?? []).flatMap((device) => device.toolNames)), [data?.connectedDevices]);
@@ -548,9 +527,6 @@ function AssistantExtensionsPanel({
           <span className={assistantKickerClass}>Assistant</span>
           <h2 className={assistantPanelTitleClass}>Extensions</h2>
         </div>
-        <button type="button" className={assistantActionButtonClass} onClick={onSaveManifest} disabled={busy || !manifestDraft.trim()}>
-          Add manifest
-        </button>
       </div>
 
       <div className="grid gap-3 xl:grid-cols-[minmax(260px,.44fr)_minmax(0,1fr)]">
@@ -572,16 +548,6 @@ function AssistantExtensionsPanel({
             ))}
             {connectedDevices.length === 0 ? <div className={assistantEmptyClass}>No extension runner is connected.</div> : null}
           </div>
-
-          <label className={assistantFieldLabelClass}>
-            Manifest JSON
-            <textarea
-              value={manifestDraft}
-              placeholder={sampleExtensionManifest}
-              onChange={(event) => onManifestDraftChange(event.currentTarget.value)}
-              className="min-h-[220px] font-mono text-[11px] normal-case leading-relaxed"
-            />
-          </label>
         </div>
 
         <div className="grid content-start gap-2">
@@ -602,6 +568,7 @@ function AssistantExtensionsPanel({
                   const route = routeForTool(routes, toolName, tool);
                   const routeConnected = connectedFor(toolName, route);
                   const canUseDeviceTarget = activeDevices.length > 0;
+                  const canEnableRoute = route.targetKind !== 'server' && (route.targetKind !== 'device' || canUseDeviceTarget);
                   return (
                     <div key={toolName} className="grid gap-2 rounded border border-[var(--border-subtle)] bg-white/[.02] p-2">
                       <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2">
@@ -614,7 +581,7 @@ function AssistantExtensionsPanel({
                             className="h-3.5 w-3.5 accent-[var(--accent)]"
                             type="checkbox"
                             checked={route.enabled}
-                            disabled={busy || (route.targetKind === 'device' && !canUseDeviceTarget)}
+                            disabled={busy || !canEnableRoute}
                             onChange={(event) => updateRoute(toolName, tool, route, { enabled: event.currentTarget.checked })}
                           />
                           Enabled
@@ -627,7 +594,7 @@ function AssistantExtensionsPanel({
                           onChange={(event) => updateRoute(toolName, tool, route, { targetKind: event.currentTarget.value as AssistantExtensionTargetKind })}
                           className="h-[30px] text-xs"
                         >
-                          {tool.supportedTargets.includes('server') ? <option value="server">Server</option> : null}
+                          {tool.supportedTargets.includes('server') ? <option value="server" disabled>Server (not available)</option> : null}
                           {tool.supportedTargets.includes('any_device') ? <option value="any_device">Any device</option> : null}
                           {tool.supportedTargets.includes('device') ? <option value="device">Device</option> : null}
                         </select>
@@ -644,7 +611,7 @@ function AssistantExtensionsPanel({
                         </select>
                         <span className={cn('flex items-center gap-1.5 text-[10px] uppercase text-[var(--muted)]', route.enabled && routeConnected && 'text-[var(--green)]')}>
                           <span className={cn('h-2 w-2 rounded-full bg-[var(--muted)]', route.enabled && routeConnected && 'bg-[var(--green)]')} />
-                          {route.enabled ? (route.targetKind === 'server' ? 'Server route' : routeConnected ? 'Ready' : 'No runner') : 'Disabled'}
+                          {route.enabled ? (route.targetKind === 'server' ? 'Server not available' : routeConnected ? 'Ready' : 'No runner') : 'Disabled'}
                         </span>
                       </div>
                     </div>
@@ -813,7 +780,6 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   const [androidApkInfo, setAndroidApkInfo] = React.useState<AndroidApkInfo | null>(null);
   const [desktopAppInfo, setDesktopAppInfo] = React.useState<DesktopAppInfo | null>(null);
   const [assistantExtensions, setAssistantExtensions] = React.useState<AssistantExtensionsResponse | null>(null);
-  const [extensionManifestDraft, setExtensionManifestDraft] = React.useState('');
   const [androidSetupInfo, setAndroidSetupInfo] = React.useState<AndroidSetupInfo | null>(null);
   const [androidSetupQr, setAndroidSetupQr] = React.useState('');
   const [pairingText, setPairingText] = React.useState('');
@@ -1467,28 +1433,6 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
       );
       setAssistantSnapshotData(data.snapshot);
       setNotice('Saved assistant settings.');
-    } catch (err: any) {
-      setError(err?.message ?? String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function saveExtensionManifest() {
-    const raw = extensionManifestDraft.trim();
-    if (!raw) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const manifest = JSON.parse(raw);
-      const data = await client.request<{ ok: true; snapshot: AssistantSnapshot }>('/api/assistant/extensions/manifests', {
-        method: 'POST',
-        body: JSON.stringify({ manifest }),
-      });
-      setAssistantSnapshotData(data.snapshot);
-      setExtensionManifestDraft('');
-      await Promise.all([loadAssistantExtensions(), loadDashboard()]);
-      setNotice('Added extension manifest.');
     } catch (err: any) {
       setError(err?.message ?? String(err));
     } finally {
@@ -2664,10 +2608,7 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
               <AssistantExtensionsPanel
                 data={assistantExtensions}
                 devices={devices}
-                manifestDraft={extensionManifestDraft}
                 busy={busy}
-                onManifestDraftChange={setExtensionManifestDraft}
-                onSaveManifest={() => void saveExtensionManifest()}
                 onUpdateRoute={(toolName, route) => void updateExtensionToolRoute(toolName, route)}
               />
 
