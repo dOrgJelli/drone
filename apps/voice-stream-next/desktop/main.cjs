@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, screen, shell, Menu, Tray, nativeImage, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, shell, Menu, Tray, nativeImage, clipboard, dialog } = require('electron');
 const { fork } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
 const fs = require('node:fs');
@@ -707,6 +707,63 @@ function cleanExtensionTargets(value) {
   return targets.length > 0 ? [...new Set(targets)] : ['device'];
 }
 
+function titleFromExtensionId(id) {
+  return String(id || 'extension')
+    .split(/[-_]+/g)
+    .filter(Boolean)
+    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+    .join(' ') || 'Extension';
+}
+
+function extensionIdFromFilePath(filePath) {
+  const baseName = path.basename(String(filePath || ''), path.extname(String(filePath || '')));
+  return safeExtensionToolSegment(baseName.replace(/[-_]?extension$/i, '')).replace(/_/g, '-') || 'extension';
+}
+
+function assertLoadableExtensionPath(filePath) {
+  const rawPath = String(filePath || '').trim();
+  if (!rawPath) throw new Error('Extension file path is required.');
+  const resolved = path.resolve(rawPath);
+  const stat = fs.existsSync(resolved) ? fs.statSync(resolved) : null;
+  if (!stat?.isFile()) throw new Error('Extension file does not exist.');
+  const ext = path.extname(resolved).toLowerCase();
+  if (ext !== '.cjs' && ext !== '.js') throw new Error('Extension file must be a .cjs or .js file.');
+  return resolved;
+}
+
+async function reloadExtensionsAfterConfigSave(savedConfig) {
+  extensionHost.loaded = false;
+  extensionHost.configKey = '';
+  await loadDesktopExtensions({ force: true });
+  restartExtensionBridge();
+  return { ok: true, config: savedConfig, statuses: extensionHost.statuses, manifests: extensionHost.manifests };
+}
+
+async function addExtensionFileToConfig(filePath) {
+  const resolved = assertLoadableExtensionPath(filePath);
+  const config = readConfig();
+  const extensions = Array.isArray(config.extensions) ? [...config.extensions] : [];
+  const id = extensionIdFromFilePath(resolved);
+  const existingIndex = extensions.findIndex((entry) => String(entry?.id || '') === id);
+  const existing = existingIndex >= 0 && extensions[existingIndex] && typeof extensions[existingIndex] === 'object'
+    ? extensions[existingIndex]
+    : {};
+  const entry = {
+    id,
+    name: String(existing.name || titleFromExtensionId(id)).trim() || titleFromExtensionId(id),
+    path: resolved,
+    enabled: true,
+    config: existing.config && typeof existing.config === 'object' && !Array.isArray(existing.config) ? existing.config : {},
+  };
+  if (existingIndex >= 0) {
+    extensions[existingIndex] = entry;
+  } else {
+    extensions.push(entry);
+  }
+  const savedConfig = writeConfig({ ...config, extensions });
+  return { entry, ...(await reloadExtensionsAfterConfigSave(savedConfig)) };
+}
+
 async function deactivateDesktopExtensions() {
   const deactivators = extensionHost.deactivators.splice(0);
   for (const entry of deactivators) {
@@ -1185,6 +1242,20 @@ if (!gotSingleInstanceLock) {
   ipcMain.handle('extensions:status', async () => {
     await loadDesktopExtensions();
     return { ok: true, statuses: extensionHost.statuses, manifests: extensionHost.manifests };
+  });
+  ipcMain.handle('extensions:addFile', async (_event, filePath) => addExtensionFileToConfig(filePath));
+  ipcMain.handle('extensions:chooseFile', async (event) => {
+    const owner = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+    const result = await dialog.showOpenDialog(owner, {
+      title: 'Add local extension',
+      properties: ['openFile'],
+      filters: [
+        { name: 'Extension files', extensions: ['cjs', 'js'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    });
+    if (result.canceled || !result.filePaths[0]) return { ok: false, canceled: true };
+    return addExtensionFileToConfig(result.filePaths[0]);
   });
   ipcMain.handle('app:openExternal', (_event, url) => shell.openExternal(url));
   ipcMain.handle('clipboard:writeText', (_event, text) => {

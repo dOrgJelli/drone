@@ -88,6 +88,8 @@ const els = {
   settingsButton: document.querySelector('#settingsButton'),
   settingsPanel: document.querySelector('#settingsPanel'),
   extensionsConfigInput: document.querySelector('#extensionsConfigInput'),
+  addExtensionFileButton: document.querySelector('#addExtensionFileButton'),
+  extensionDropzone: document.querySelector('#extensionDropzone'),
   saveExtensionsButton: document.querySelector('#saveExtensionsButton'),
   reloadExtensionsButton: document.querySelector('#reloadExtensionsButton'),
   extensionsStatus: document.querySelector('#extensionsStatus'),
@@ -233,6 +235,32 @@ async function refreshExtensionStatus() {
       els.extensionsStatus.textContent = err?.message || 'Could not load extensions.';
     }
   }
+}
+
+function pathForFile(file) {
+  if (!file) return '';
+  if (desktop.pathForFile) return desktop.pathForFile(file);
+  return typeof file.path === 'string' ? file.path : '';
+}
+
+async function applyExtensionImport(result, successMessage) {
+  if (!result || result.canceled) return;
+  if (result.config) applyConfig(result.config);
+  renderExtensionStatus(result);
+  const entryName = result.entry?.name || result.entry?.id || 'extension';
+  showStatus(successMessage || `Added ${entryName}.`);
+}
+
+async function addExtensionFilePath(filePath) {
+  if (!desktop.addExtensionFile) throw new Error('Extension file import is not available.');
+  const result = await desktop.addExtensionFile(filePath);
+  await applyExtensionImport(result);
+}
+
+async function chooseExtensionFile() {
+  if (!desktop.chooseExtensionFile) throw new Error('Extension file picker is not available.');
+  const result = await desktop.chooseExtensionFile();
+  await applyExtensionImport(result);
 }
 
 function applyConfig(config) {
@@ -1829,6 +1857,46 @@ if (els.outputDeviceSelect) {
   els.outputDeviceSelect.addEventListener('change', () => {
     renderDevicePicker(els.outputDeviceSelect);
     void saveAudioDeviceSelection().catch((err) => showStatus(err?.message || 'Could not save output device.'));
+  });
+}
+if (els.addExtensionFileButton) {
+  els.addExtensionFileButton.addEventListener('click', () => {
+    void chooseExtensionFile().catch((err) => showStatus(err?.message || 'Could not add extension file.'));
+  });
+}
+if (els.extensionDropzone) {
+  for (const eventName of ['dragenter', 'dragover']) {
+    els.extensionDropzone.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      els.extensionDropzone.classList.add('is-dragging');
+    });
+  }
+  for (const eventName of ['dragleave', 'drop']) {
+    els.extensionDropzone.addEventListener(eventName, () => {
+      els.extensionDropzone.classList.remove('is-dragging');
+    });
+  }
+  els.extensionDropzone.addEventListener('drop', (event) => {
+    event.preventDefault();
+    const file = event.dataTransfer?.files?.[0];
+    const filePath = pathForFile(file);
+    if (!filePath) {
+      showStatus('Could not read dropped extension file path.');
+      return;
+    }
+    void addExtensionFilePath(filePath).catch((err) => showStatus(err?.message || 'Could not add extension file.'));
+  });
+  els.extensionDropzone.addEventListener('paste', (event) => {
+    const file = event.clipboardData?.files?.[0];
+    const filePath = pathForFile(file) || event.clipboardData?.getData('text/plain')?.trim();
+    if (!filePath) return;
+    event.preventDefault();
+    void addExtensionFilePath(filePath).catch((err) => showStatus(err?.message || 'Could not add extension file.'));
+  });
+  els.extensionDropzone.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    void chooseExtensionFile().catch((err) => showStatus(err?.message || 'Could not add extension file.'));
   });
 }
 if (els.saveExtensionsButton) {
