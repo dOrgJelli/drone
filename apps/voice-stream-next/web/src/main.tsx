@@ -87,6 +87,21 @@ function compactModelSelectionLabel(label: string): string {
   return label.replace(/^Codex\s+/, '').replace(/^GPT-/, '').replace(/\bMedium\b/, 'Med');
 }
 
+function modelMenuEntry(model: AssistantModelOption): UiMenuSelectEntry {
+  const key = modelSelectionKey({ provider: model.provider, model: model.id, thinkingLevel: model.thinkingLevel });
+  return {
+    value: key,
+    title: `${model.provider}/${model.id}${model.thinkingLevel !== 'off' ? ` ${model.thinkingLevel}` : ''}`,
+    searchText: `${model.provider} ${model.name} ${model.id} ${model.thinkingLevel}`,
+    label: (
+      <span className="flex w-full min-w-0 items-center justify-between gap-2.5">
+        <span className="min-w-0 truncate font-display text-[10px] font-bold uppercase">{compactModelSelectionLabel(model.name)}</span>
+        <small className="shrink-0 text-[10px] normal-case text-[var(--muted)]">{model.provider}{model.thinkingLevel !== 'off' ? ` · ${model.thinkingLevel}` : ''}</small>
+      </span>
+    ),
+  };
+}
+
 declare global {
   interface Window {
     voiceStreamDesktop?: {
@@ -2186,9 +2201,13 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   const defaultEnabledToolNames = assistantSnapshotData?.assistantSettings.defaultEnabledTools ?? [];
   const autoApprove = Boolean(activeThread?.autoApprove);
   const codexConnection = assistantSnapshotData?.codexConnection ?? { connected: false, accountId: null, expiresAt: null, updatedAt: null };
+  const assistantSettings = assistantSnapshotData?.assistantSettings ?? null;
   const activeProvider = activeThread?.provider ?? 'openai';
   const activeModel = activeThread?.model ?? 'gpt-5.5';
   const activeThinkingLevel = activeThread?.thinkingLevel ?? 'off';
+  const defaultProvider = assistantSettings?.defaultProvider ?? 'openai';
+  const defaultModel = assistantSettings?.defaultModel ?? 'gpt-5.5';
+  const defaultThinkingLevel = assistantSettings?.defaultThinkingLevel ?? 'off';
   const modelOptions = assistantSnapshotData?.models ?? [];
   const providerOptions = ASSISTANT_PROVIDERS.map((provider) => ({
     ...provider,
@@ -2209,22 +2228,28 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
           },
         ]
       : activeProviderModels;
-  const modelMenuEntries: UiMenuSelectEntry[] = displayedModelOptions.map((model) => {
-    const key = `${model.provider}:${model.id}:${model.thinkingLevel}`;
-    return {
-      value: key,
-      title: `${model.provider}/${model.id}${model.thinkingLevel !== 'off' ? ` ${model.thinkingLevel}` : ''}`,
-      searchText: `${model.provider} ${model.name} ${model.id} ${model.thinkingLevel}`,
-      label: (
-        <span className="flex w-full min-w-0 items-center justify-between gap-2.5">
-          <span className="min-w-0 truncate font-display text-[10px] font-bold uppercase">{compactModelSelectionLabel(model.name)}</span>
-          <small className="shrink-0 text-[10px] normal-case text-[var(--muted)]">{model.provider}{model.thinkingLevel !== 'off' ? ` · ${model.thinkingLevel}` : ''}</small>
-        </span>
-      ),
-    };
-  });
+  const modelMenuEntries: UiMenuSelectEntry[] = displayedModelOptions.map(modelMenuEntry);
   const selectedModelLabel = activeThread
     ? modelSelectionLabel({ provider: activeProvider, model: activeModel, thinkingLevel: activeThinkingLevel }, modelOptions)
+    : 'Model';
+  const defaultProviderModels = providerOptions.find((provider) => provider.id === defaultProvider)?.models ?? [];
+  const selectedDefaultModelKey = assistantSettings ? modelSelectionKey({ provider: defaultProvider, model: defaultModel, thinkingLevel: defaultThinkingLevel }) : '';
+  const displayedDefaultModelOptions = assistantSettings && defaultProviderModels.some((model) => modelSelectionKey({ provider: model.provider, model: model.id, thinkingLevel: model.thinkingLevel }) === selectedDefaultModelKey)
+    ? defaultProviderModels
+    : assistantSettings
+      ? [
+          ...defaultProviderModels,
+          {
+            provider: defaultProvider,
+            id: defaultModel,
+            name: defaultModel,
+            thinkingLevel: defaultThinkingLevel,
+          },
+        ]
+      : defaultProviderModels;
+  const defaultModelMenuEntries: UiMenuSelectEntry[] = displayedDefaultModelOptions.map(modelMenuEntry);
+  const selectedDefaultModelLabel = assistantSettings
+    ? modelSelectionLabel({ provider: defaultProvider, model: defaultModel, thinkingLevel: defaultThinkingLevel }, modelOptions)
     : 'Model';
   const providerAuthLabel = activeProvider === 'codex'
     ? codexConnection.connected
@@ -3041,6 +3066,75 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                       </button>
                     </div>
                   ) : null}
+                </div>
+              </section>
+
+              <section className={assistantPanelClass}>
+                <div className={assistantPanelHeaderClass}>
+                  <div>
+                    <span className={assistantKickerClass}>Assistant</span>
+                    <h2 className={assistantPanelTitleClass}>New Thread Model</h2>
+                  </div>
+                  <span className="max-w-[220px] truncate text-right text-[11px] text-[var(--muted)]">
+                    {assistantSettings ? `${defaultProvider}/${defaultModel}${defaultThinkingLevel !== 'off' ? ` · ${defaultThinkingLevel}` : ''}` : 'Loading'}
+                  </span>
+                </div>
+                <div className="grid gap-2.5">
+                  <div className="grid grid-cols-[minmax(160px,220px)_minmax(220px,1fr)] items-end gap-2.5 max-[760px]:grid-cols-1">
+                    <div className={assistantFieldLabelClass}>
+                      <span>Provider</span>
+                      <div className="inline-flex h-[30px] min-w-0 overflow-hidden rounded border border-[var(--border-subtle)] bg-[rgba(255,255,255,.025)]" role="group" aria-label="Default assistant provider">
+                        {providerOptions.map((provider) => {
+                          const selected = provider.id === defaultProvider;
+                          const disabled = busy || !assistantSettings || provider.models.length === 0;
+                          return (
+                            <button
+                              key={provider.id}
+                              type="button"
+                              disabled={disabled}
+                              aria-pressed={selected}
+                              title={provider.title}
+                              onClick={() => {
+                                const nextModel = provider.models[0];
+                                void updateAssistantSettings({
+                                  defaultProvider: provider.id,
+                                  ...(nextModel ? { defaultModel: nextModel.id, defaultThinkingLevel: nextModel.thinkingLevel } : {}),
+                                });
+                              }}
+                              className={cn(
+                                'h-full flex-1 rounded-none border-0 border-r border-[var(--border-subtle)] bg-transparent px-2.5 font-display text-[10px] font-bold uppercase text-[var(--muted)] last:border-r-0 disabled:cursor-not-allowed disabled:text-[var(--muted-dim)]',
+                                selected && '!bg-[rgba(74,222,128,.10)] !text-[var(--green)]',
+                              )}
+                            >
+                              {provider.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    <div className={assistantFieldLabelClass}>
+                      <span>Model</span>
+                      <UiMenuSelect
+                        value={selectedDefaultModelKey}
+                        entries={defaultModelMenuEntries}
+                        role="listbox"
+                        itemRole="option"
+                        title={selectedDefaultModelLabel}
+                        header="Default model"
+                        searchable
+                        searchPlaceholder="Search models"
+                        triggerLabel={compactModelSelectionLabel(selectedDefaultModelLabel)}
+                        triggerClassName="h-[30px]"
+                        placement="below"
+                        panelClassName="w-[260px]"
+                        disabled={busy || !assistantSettings || defaultModelMenuEntries.length === 0}
+                        onValueChange={(value) => {
+                          const [provider, nextModel, thinkingLevel] = value.split(':');
+                          void updateAssistantSettings({ defaultProvider: provider, defaultModel: nextModel, defaultThinkingLevel: thinkingLevel });
+                        }}
+                      />
+                    </div>
+                  </div>
                 </div>
               </section>
 

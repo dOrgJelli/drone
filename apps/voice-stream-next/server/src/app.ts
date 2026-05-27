@@ -1771,14 +1771,13 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     withUser(req, reply, db, clerkEnabled, async (ctx) => {
       const body = jsonBody(req);
       const source = cleanText(body.source) === 'voice' || Boolean(body.voiceEnabled) ? 'voice' : 'web';
-      const codexConnected = db.codexConnectionView(ctx.user.id).connected;
       const requestedProvider = cleanText(body.provider);
       const thread = db.createThread(ctx.user.id, {
         title: cleanText(body.title, 'Assistant thread') || 'Assistant thread',
         source,
         voiceEnabled: Boolean(body.voiceEnabled) || source === 'voice',
-        provider: requestedProvider || (codexConnected ? 'codex' : undefined),
-        model: cleanText(body.model) || (!requestedProvider && codexConnected ? 'gpt-5.5' : undefined),
+        provider: requestedProvider || undefined,
+        model: cleanText(body.model) || undefined,
         thinkingLevel: cleanText(body.thinkingLevel) || undefined,
         promptDeliveryMode: body.promptDeliveryMode === 'asap' ? 'asap' : 'queue',
       });
