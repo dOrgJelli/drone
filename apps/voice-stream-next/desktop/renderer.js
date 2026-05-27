@@ -296,6 +296,15 @@ function applyConfig(config) {
   }
 }
 
+async function rememberReturnedDevice(device) {
+  if (!device?.id || !state.config || device.id === state.config.deviceId) return;
+  applyConfig(await desktop.writeConfig({
+    ...state.config,
+    deviceId: device.id,
+    deviceName: device.displayName || state.config.deviceName,
+  }));
+}
+
 function headers() {
   const config = readFormConfig();
   const next = { 'content-type': 'application/json' };
@@ -403,7 +412,7 @@ async function reportClientStatus(mode, status) {
     return;
   }
   ensureControlSocket();
-  await api(`/api/devices/${encodeURIComponent(state.config.deviceId)}/status`, {
+  const data = await api(`/api/devices/${encodeURIComponent(state.config.deviceId)}/status`, {
     method: 'POST',
     body: JSON.stringify({
       token: state.config.deviceToken,
@@ -415,6 +424,7 @@ async function reportClientStatus(mode, status) {
       appVersion: 'electron-fallback',
     }),
   }).catch(() => undefined);
+  await rememberReturnedDevice(data?.device);
 }
 
 function ensureControlSocket() {
@@ -441,6 +451,10 @@ function ensureControlSocket() {
     const message = JSON.parse(event.data);
     if (message.type === 'server_ping') {
       socket.send(JSON.stringify({ type: 'client_ping', sentAt: new Date().toISOString() }));
+      return;
+    }
+    if (message.type === 'control_hello') {
+      void rememberReturnedDevice(message.device);
       return;
     }
     if (message.type === 'speech_audio') {

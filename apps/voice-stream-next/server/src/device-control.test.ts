@@ -279,6 +279,89 @@ describe('voice session device validation', () => {
     }
   });
 
+  test('normalizes public device registration types before reusing installation ids', async () => {
+    const dataDir = path.join(process.cwd(), 'server', 'data', 'tests', crypto.randomUUID());
+    process.env.VOICE_STREAM_NEXT_DATA_DIR = dataDir;
+    const built = await buildApp({ logger: false });
+    try {
+      const headers = {
+        'content-type': 'application/json',
+        'x-voice-dev-user-email': 'device-type-normalize@example.local',
+        'x-voice-dev-user-name': 'Device Type Normalize',
+        'x-voice-dev-admin': '0',
+      };
+      const first = await built.app.inject({
+        method: 'POST',
+        url: '/api/devices',
+        headers,
+        payload: JSON.stringify({ deviceType: 'Android', displayName: 'Phone', installationId: 'android_install_type_1' }),
+      }).then((response) => response.json());
+
+      const second = await built.app.inject({
+        method: 'POST',
+        url: '/api/devices',
+        headers,
+        payload: JSON.stringify({ deviceType: 'android', displayName: 'Phone Renamed', installationId: 'android_install_type_1' }),
+      }).then((response) => response.json());
+
+      expect(first.device.deviceType).toBe('android');
+      expect(second.device.id).toBe(first.device.id);
+      expect(second.device.displayName).toBe('Phone Renamed');
+      expect(built.db.listDevices().filter((device) => device.installationId === 'android_install_type_1')).toHaveLength(1);
+    } finally {
+      await built.app.close();
+      built.db.db.close();
+      delete process.env.VOICE_STREAM_NEXT_DATA_DIR;
+    }
+  });
+
+  test('status updates return the resolved device after installation merge', async () => {
+    const dataDir = path.join(process.cwd(), 'server', 'data', 'tests', crypto.randomUUID());
+    process.env.VOICE_STREAM_NEXT_DATA_DIR = dataDir;
+    const built = await buildApp({ logger: false });
+    try {
+      const user = built.db.upsertUser({
+        clerkUserId: 'dev_status_merge',
+        displayName: 'Status Merge User',
+        email: 'status-merge@example.local',
+        admin: false,
+      });
+      const existing = built.db.registerDevice(user.id, {
+        deviceType: 'android',
+        displayName: 'Existing Phone',
+        installationId: 'android_install_status_1',
+      });
+      const temporary = built.db.registerDevice(user.id, {
+        deviceType: 'android',
+        displayName: 'Temporary Phone',
+      });
+
+      const response = await built.app.inject({
+        method: 'POST',
+        url: `/api/devices/${encodeURIComponent(temporary.device.id)}/status`,
+        headers: { 'content-type': 'application/json' },
+        payload: JSON.stringify({
+          token: temporary.token,
+          installationId: 'android_install_status_1',
+          mode: 'awake',
+          status: 'Awake',
+          protocolVersion: 1,
+        }),
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.device.id).toBe(existing.device.id);
+      expect(body.status.deviceId).toBe(existing.device.id);
+      expect(built.db.deviceForUser(user.id, temporary.device.id)?.revokedAt).toBeTruthy();
+      expect(built.db.verifyDeviceToken(existing.device.id, temporary.token).ok).toBe(true);
+    } finally {
+      await built.app.close();
+      built.db.db.close();
+      delete process.env.VOICE_STREAM_NEXT_DATA_DIR;
+    }
+  });
+
   test('returns unknown device for stale desktop pairing', async () => {
     const dataDir = path.join(process.cwd(), 'server', 'data', 'tests', crypto.randomUUID());
     process.env.VOICE_STREAM_NEXT_DATA_DIR = dataDir;
