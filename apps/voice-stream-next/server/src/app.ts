@@ -1456,7 +1456,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       });
       return;
     }
-    const thread = db.latestVoiceThreadForDeviceOrNull(auth.device.userId, auth.device.id);
+    const thread = db.latestVoiceThreadOrNull(auth.device.userId);
     if (!thread) {
       return {
         ok: true,
@@ -1500,7 +1500,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       });
       return;
     }
-    const thread = db.latestVoiceThreadForDeviceOrNull(auth.device.userId, auth.device.id);
+    const thread = db.latestVoiceThreadOrNull(auth.device.userId);
     if (!thread) {
       return {
         ok: true,
