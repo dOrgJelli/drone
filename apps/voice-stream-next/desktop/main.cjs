@@ -13,6 +13,15 @@ let normalWindowBounds = null;
 let tray = null;
 let isQuitting = false;
 let trayStatus = { mode: 'off', status: 'Off.' };
+let extensionBridge = { socket: null, reconnectTimer: null, stopped: false, reconnectDelayMs: 1000 };
+const extensionHost = {
+  loading: null,
+  loaded: false,
+  configKey: '',
+  manifests: [],
+  tools: new Map(),
+  statuses: [],
+};
 
 const fullWindow = {
   width: 1180,
@@ -78,6 +87,8 @@ const defaultConfig = {
   deviceName: 'Desktop voice client',
   inputDeviceId: '',
   outputDeviceId: '',
+  extensionBridgeEnabled: true,
+  extensions: [],
   authSavedAt: '',
 };
 
@@ -476,6 +487,332 @@ function shouldStartCompact() {
   return Boolean(config.deviceId && config.deviceToken);
 }
 
+function extensionBridgeUrl(config) {
+  const url = new URL(`/api/devices/${encodeURIComponent(config.deviceId)}/extensions`, trimSlash(config.serverUrl));
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  url.searchParams.set('token', config.deviceToken);
+  url.searchParams.set('clientVersion', '1');
+  url.searchParams.set('protocolVersion', '1');
+  return url.toString();
+}
+
+function trimSlash(value) {
+  return String(value || '').replace(/\/+$/, '');
+}
+
+function extensionToolName(extensionId, toolName) {
+  return `${safeExtensionToolSegment(extensionId).replace(/_/g, '-')}__${safeExtensionToolSegment(toolName)}`;
+}
+
+function safeExtensionToolSegment(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 64);
+}
+
+function cleanExtensionConfigs(config = readConfig()) {
+  const entries = Array.isArray(config.extensions) ? config.extensions : [];
+  return entries
+    .map((entry, index) => {
+      const value = entry && typeof entry === 'object' ? entry : {};
+      const id = safeExtensionToolSegment(value.id || path.basename(String(value.path || `extension_${index}`), path.extname(String(value.path || '')))).replace(/_/g, '-');
+      const extensionPath = String(value.path || '').trim();
+      if (!id || !extensionPath) return null;
+      return {
+        id,
+        name: String(value.name || id).trim() || id,
+        path: extensionPath,
+        enabled: value.enabled !== false,
+        config: value.config && typeof value.config === 'object' && !Array.isArray(value.config) ? value.config : {},
+      };
+    })
+    .filter(Boolean);
+}
+
+function extensionConfigKey(configs) {
+  return JSON.stringify(configs.map((item) => ({
+    id: item.id,
+    name: item.name,
+    path: item.path,
+    enabled: item.enabled,
+    config: item.config,
+  })));
+}
+
+function extensionStatePath() {
+  return path.join(app.getPath('userData'), 'voice-stream-next-extension-state.json');
+}
+
+function readExtensionState() {
+  try {
+    return JSON.parse(fs.readFileSync(extensionStatePath(), 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function writeExtensionState(state) {
+  fs.mkdirSync(path.dirname(extensionStatePath()), { recursive: true });
+  fs.writeFileSync(extensionStatePath(), JSON.stringify(state, null, 2));
+}
+
+function createExtensionApi(extensionConfig, manifest, tools) {
+  return {
+    id: extensionConfig.id,
+    name: extensionConfig.name,
+    config: { ...extensionConfig.config },
+    log(message, details = {}) {
+      windowDebugLog('extension:log', { extensionId: extensionConfig.id, message: String(message || ''), details });
+    },
+    registerTool(tool) {
+      const value = tool && typeof tool === 'object' ? tool : {};
+      const localName = safeExtensionToolSegment(value.name);
+      if (!localName) throw new Error(`extension ${extensionConfig.id} registered a tool without a name`);
+      if (typeof value.execute !== 'function') throw new Error(`extension ${extensionConfig.id}.${localName} is missing execute(args, context)`);
+      const fullName = extensionToolName(extensionConfig.id, localName);
+      if (tools.has(fullName)) throw new Error(`duplicate extension tool: ${fullName}`);
+      const toolManifest = {
+        name: localName,
+        label: String(value.label || localName.replace(/_/g, ' ')).trim(),
+        description: String(value.description || `${localName} extension tool`).trim(),
+        inputSchema: normalizeExtensionInputSchema(value.inputSchema),
+        approval: cleanExtensionApproval(value.approval),
+        supportedTargets: cleanExtensionTargets(value.supportedTargets || value.targets),
+        defaultTarget: cleanExtensionTarget(value.defaultTarget, 'device'),
+      };
+      if (!toolManifest.supportedTargets.includes(toolManifest.defaultTarget)) {
+        toolManifest.defaultTarget = toolManifest.supportedTargets[0] || 'device';
+      }
+      manifest.tools.push(toolManifest);
+      tools.set(fullName, {
+        extensionId: extensionConfig.id,
+        name: localName,
+        fullName,
+        execute: value.execute,
+      });
+    },
+    state: {
+      async get(key, fallback = null) {
+        const state = readExtensionState();
+        const bucket = state[extensionConfig.id] && typeof state[extensionConfig.id] === 'object' ? state[extensionConfig.id] : {};
+        return Object.prototype.hasOwnProperty.call(bucket, key) ? bucket[key] : fallback;
+      },
+      async set(key, value) {
+        const state = readExtensionState();
+        const bucket = state[extensionConfig.id] && typeof state[extensionConfig.id] === 'object' ? state[extensionConfig.id] : {};
+        bucket[String(key)] = value;
+        state[extensionConfig.id] = bucket;
+        writeExtensionState(state);
+      },
+    },
+  };
+}
+
+function normalizeExtensionInputSchema(schema) {
+  const value = schema && typeof schema === 'object' && !Array.isArray(schema) ? schema : {};
+  return {
+    type: 'object',
+    properties: value.properties && typeof value.properties === 'object' && !Array.isArray(value.properties) ? value.properties : {},
+    required: Array.isArray(value.required) ? value.required.map((item) => String(item)).filter(Boolean) : [],
+    additionalProperties: value.additionalProperties === true,
+  };
+}
+
+function cleanExtensionApproval(value) {
+  const approval = String(value || '').trim();
+  return approval === 'never' || approval === 'normal_threads' || approval === 'always' ? approval : 'always';
+}
+
+function cleanExtensionTarget(value, fallback = 'device') {
+  const target = String(value || '').trim();
+  return target === 'server' || target === 'device' || target === 'any_device' ? target : fallback;
+}
+
+function cleanExtensionTargets(value) {
+  const values = Array.isArray(value) ? value : [value];
+  const targets = values.map((item) => cleanExtensionTarget(item, '')).filter(Boolean);
+  return targets.length > 0 ? [...new Set(targets)] : ['device'];
+}
+
+async function loadDesktopExtensions(options = {}) {
+  const configs = cleanExtensionConfigs();
+  const configKey = extensionConfigKey(configs);
+  if (!options.force && extensionHost.loaded && extensionHost.configKey === configKey) return extensionHost;
+  if (extensionHost.loading) return extensionHost.loading;
+  extensionHost.loading = (async () => {
+    const manifests = [];
+    const tools = new Map();
+    const statuses = [];
+    const extensionIds = new Set();
+    for (const extensionConfig of configs) {
+      if (!extensionConfig.enabled) {
+        statuses.push({ id: extensionConfig.id, name: extensionConfig.name, enabled: false, ok: true, toolCount: 0 });
+        continue;
+      }
+      const manifest = {
+        id: extensionConfig.id,
+        name: extensionConfig.name,
+        version: '0.0.0',
+        tools: [],
+      };
+      const existingToolNames = new Set(tools.keys());
+      try {
+        if (extensionIds.has(extensionConfig.id)) throw new Error(`duplicate extension id: ${extensionConfig.id}`);
+        extensionIds.add(extensionConfig.id);
+        if (!path.isAbsolute(extensionConfig.path)) throw new Error('extension path must be absolute');
+        const modulePath = extensionConfig.path;
+        delete require.cache[require.resolve(modulePath)];
+        const extensionModule = require(modulePath);
+        const activate = extensionModule?.activate || extensionModule?.default?.activate;
+        if (typeof activate !== 'function') throw new Error('extension must export activate(api)');
+        await activate(createExtensionApi(extensionConfig, manifest, tools));
+        if (manifest.tools.length === 0) throw new Error('extension did not register any tools');
+        manifests.push(manifest);
+        statuses.push({ id: extensionConfig.id, name: extensionConfig.name, enabled: true, ok: true, toolCount: manifest.tools.length });
+      } catch (error) {
+        for (const toolName of tools.keys()) {
+          if (!existingToolNames.has(toolName)) tools.delete(toolName);
+        }
+        statuses.push({ id: extensionConfig.id, name: extensionConfig.name, enabled: true, ok: false, error: error?.message || String(error), toolCount: 0 });
+        windowDebugLog('extension:loadFailed', { extensionId: extensionConfig.id, path: extensionConfig.path, error: error?.message || String(error) });
+      }
+    }
+    extensionHost.manifests = manifests;
+    extensionHost.tools = tools;
+    extensionHost.statuses = statuses;
+    extensionHost.loaded = true;
+    extensionHost.configKey = configKey;
+    return extensionHost;
+  })();
+  try {
+    return await extensionHost.loading;
+  } finally {
+    extensionHost.loading = null;
+  }
+}
+
+function desktopExtensionManifests() {
+  return extensionHost.manifests;
+}
+
+async function executeDesktopExtensionTool(toolName, args, context = {}) {
+  const loaded = await loadDesktopExtensions();
+  const tool = loaded.tools.get(toolName);
+  if (!tool) throw new Error(`unknown desktop extension tool: ${toolName}`);
+  return tool.execute(args || {}, {
+    ...context,
+    toolName,
+    extensionId: tool.extensionId,
+    localToolName: tool.name,
+  });
+}
+
+function stopExtensionBridge() {
+  extensionBridge.stopped = true;
+  if (extensionBridge.reconnectTimer) {
+    clearTimeout(extensionBridge.reconnectTimer);
+    extensionBridge.reconnectTimer = null;
+  }
+  if (extensionBridge.socket) {
+    try {
+      extensionBridge.socket.close(1000, 'desktop bridge stopped');
+    } catch {
+      // Closing the bridge is best-effort during app shutdown.
+    }
+    extensionBridge.socket = null;
+  }
+}
+
+function scheduleExtensionBridgeReconnect() {
+  if (extensionBridge.stopped || extensionBridge.reconnectTimer) return;
+  const delay = extensionBridge.reconnectDelayMs;
+  extensionBridge.reconnectDelayMs = Math.min(30_000, Math.round(delay * 1.8));
+  extensionBridge.reconnectTimer = setTimeout(() => {
+    extensionBridge.reconnectTimer = null;
+    void startExtensionBridge();
+  }, delay);
+}
+
+async function startExtensionBridge() {
+  const config = readConfig();
+  if (!config.extensionBridgeEnabled || !config.deviceId || !config.deviceToken) return;
+  await loadDesktopExtensions();
+  const WebSocketCtor = globalThis.WebSocket;
+  if (typeof WebSocketCtor !== 'function') {
+    windowDebugLog('extensionBridge:unavailable', { reason: 'global WebSocket is not available in Electron main' });
+    return;
+  }
+  if (extensionBridge.socket && [0, 1].includes(extensionBridge.socket.readyState)) return;
+  extensionBridge.stopped = false;
+  let socket;
+  try {
+    socket = new WebSocketCtor(extensionBridgeUrl(config));
+  } catch (error) {
+    windowDebugLog('extensionBridge:connectFailed', { error: error?.message || String(error) });
+    scheduleExtensionBridgeReconnect();
+    return;
+  }
+  extensionBridge.socket = socket;
+  socket.addEventListener('open', () => {
+    extensionBridge.reconnectDelayMs = 1000;
+    socket.send(JSON.stringify({
+      type: 'extension_hello',
+      manifests: desktopExtensionManifests(),
+      sentAt: new Date().toISOString(),
+    }));
+    windowDebugLog('extensionBridge:open', { deviceId: config.deviceId ? `${config.deviceId.slice(0, 12)}...` : '' });
+  });
+  socket.addEventListener('message', async (event) => {
+    let message;
+    try {
+      message = JSON.parse(String(event.data));
+    } catch {
+      return;
+    }
+    if (message.type === 'server_ping') {
+      socket.send(JSON.stringify({ type: 'client_ping', sentAt: new Date().toISOString(), serverSentAt: message.sentAt }));
+      return;
+    }
+    if (message.type === 'extension_tool_request') {
+      const requestId = String(message.requestId || '');
+      const toolName = String(message.toolName || '');
+      try {
+        const result = await executeDesktopExtensionTool(toolName, message.args, {
+          requestId,
+          threadId: message.threadId || null,
+          runId: message.runId || null,
+          toolCallId: message.toolCallId || null,
+        });
+        socket.send(JSON.stringify({ type: 'extension_tool_result', requestId, ok: true, result }));
+      } catch (error) {
+        socket.send(JSON.stringify({
+          type: 'extension_tool_result',
+          requestId,
+          ok: false,
+          error: error?.message || String(error),
+        }));
+      }
+    }
+  });
+  socket.addEventListener('close', (event) => {
+    if (extensionBridge.socket === socket) extensionBridge.socket = null;
+    windowDebugLog('extensionBridge:closed', { code: event.code, reason: event.reason });
+    if (!extensionBridge.stopped) scheduleExtensionBridgeReconnect();
+  });
+  socket.addEventListener('error', () => {
+    windowDebugLog('extensionBridge:error');
+  });
+}
+
+function restartExtensionBridge() {
+  stopExtensionBridge();
+  extensionBridge.stopped = false;
+  void startExtensionBridge();
+}
+
 function windowFromEvent(event) {
   return BrowserWindow.fromWebContents(event.sender) || mainWindow;
 }
@@ -747,7 +1084,22 @@ if (!gotSingleInstanceLock) {
 
   ipcMain.handle('config:read', () => readConfig());
   ipcMain.handle('pairing:takePending', () => pendingPairingPayloads.splice(0));
-  ipcMain.handle('config:write', (_event, config) => writeConfig(config));
+  ipcMain.handle('config:write', (_event, config) => {
+    const saved = writeConfig(config);
+    restartExtensionBridge();
+    return saved;
+  });
+  ipcMain.handle('extensions:reload', async () => {
+    extensionHost.loaded = false;
+    extensionHost.configKey = '';
+    await loadDesktopExtensions({ force: true });
+    restartExtensionBridge();
+    return { ok: true, statuses: extensionHost.statuses, manifests: extensionHost.manifests };
+  });
+  ipcMain.handle('extensions:status', async () => {
+    await loadDesktopExtensions();
+    return { ok: true, statuses: extensionHost.statuses, manifests: extensionHost.manifests };
+  });
   ipcMain.handle('app:openExternal', (_event, url) => shell.openExternal(url));
   ipcMain.handle('clipboard:writeText', (_event, text) => {
     clipboard.writeText(String(text || ''));
@@ -783,6 +1135,7 @@ if (!gotSingleInstanceLock) {
     if (launchPayload) queuePairingPayload(launchPayload);
     ensureTray();
     createWindow();
+    void startExtensionBridge();
   });
 
   app.on('window-all-closed', () => {
@@ -795,6 +1148,7 @@ if (!gotSingleInstanceLock) {
 
   app.on('before-quit', () => {
     isQuitting = true;
+    stopExtensionBridge();
     releaseVosk();
   });
 }

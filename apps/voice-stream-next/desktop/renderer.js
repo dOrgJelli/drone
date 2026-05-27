@@ -85,6 +85,10 @@ const els = {
   outputDeviceMenu: document.querySelector('#outputDeviceMenu'),
   settingsButton: document.querySelector('#settingsButton'),
   settingsPanel: document.querySelector('#settingsPanel'),
+  extensionsConfigInput: document.querySelector('#extensionsConfigInput'),
+  saveExtensionsButton: document.querySelector('#saveExtensionsButton'),
+  reloadExtensionsButton: document.querySelector('#reloadExtensionsButton'),
+  extensionsStatus: document.querySelector('#extensionsStatus'),
 };
 
 function trimSlash(value) {
@@ -173,12 +177,68 @@ function readFormConfig() {
   };
 }
 
+function extensionConfigText(config = state.config) {
+  const extensions = Array.isArray(config?.extensions) ? config.extensions : [];
+  return extensions.length > 0 ? JSON.stringify(extensions, null, 2) : '';
+}
+
+function isAbsoluteExtensionPath(value) {
+  return typeof value === 'string' && (/^\//.test(value.trim()) || /^[a-zA-Z]:[\\/]/.test(value.trim()));
+}
+
+function validateExtensionConfig(extensions) {
+  extensions.forEach((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`Extension ${index + 1} must be an object.`);
+    }
+    if (entry.enabled === false) return;
+    const name = String(entry.name || entry.id || `Extension ${index + 1}`);
+    if (!isAbsoluteExtensionPath(entry.path)) {
+      throw new Error(`${name} needs an absolute path.`);
+    }
+  });
+}
+
+function renderExtensionStatus(result) {
+  if (!els.extensionsStatus) return;
+  const statuses = Array.isArray(result?.statuses) ? result.statuses : [];
+  if (statuses.length === 0) {
+    els.extensionsStatus.className = 'extensions-status muted';
+    els.extensionsStatus.textContent = 'No local extensions configured.';
+    return;
+  }
+  els.extensionsStatus.className = 'extensions-status';
+  els.extensionsStatus.innerHTML = '';
+  for (const status of statuses) {
+    const row = document.createElement('div');
+    row.className = status.ok ? 'ok' : 'error';
+    const name = String(status.name || status.id || 'Extension');
+    row.textContent = status.ok
+      ? `${name}: ${status.enabled === false ? 'disabled' : `${status.toolCount || 0} tool(s)`}`
+      : `${name}: ${status.error || 'failed to load'}`;
+    els.extensionsStatus.appendChild(row);
+  }
+}
+
+async function refreshExtensionStatus() {
+  if (!desktop.extensionStatus) return;
+  try {
+    renderExtensionStatus(await desktop.extensionStatus());
+  } catch (err) {
+    if (els.extensionsStatus) {
+      els.extensionsStatus.className = 'extensions-status error';
+      els.extensionsStatus.textContent = err?.message || 'Could not load extensions.';
+    }
+  }
+}
+
 function applyConfig(config) {
   state.config = config;
   if (els.serverUrlInput) els.serverUrlInput.value = config.serverUrl;
   if (els.deviceNameInput) els.deviceNameInput.value = config.deviceName;
   if (els.inputDeviceSelect) els.inputDeviceSelect.value = config.inputDeviceId || '';
   if (els.outputDeviceSelect) els.outputDeviceSelect.value = config.outputDeviceId || '';
+  if (els.extensionsConfigInput) els.extensionsConfigInput.value = extensionConfigText(config);
   renderDevicePicker(els.inputDeviceSelect);
   renderDevicePicker(els.outputDeviceSelect);
   setPreferredOutputDevice(config.outputDeviceId);
@@ -1730,6 +1790,31 @@ if (els.outputDeviceSelect) {
     void saveAudioDeviceSelection().catch((err) => showStatus(err?.message || 'Could not save output device.'));
   });
 }
+if (els.saveExtensionsButton) {
+  els.saveExtensionsButton.addEventListener('click', async () => {
+    try {
+      const raw = els.extensionsConfigInput?.value.trim() || '';
+      const extensions = raw ? JSON.parse(raw) : [];
+      if (!Array.isArray(extensions)) throw new Error('Extensions config must be a JSON array.');
+      validateExtensionConfig(extensions);
+      applyConfig(await desktop.writeConfig({ ...state.config, extensions }));
+      await refreshExtensionStatus();
+      showStatus('Saved local extensions.');
+    } catch (err) {
+      showStatus(err?.message || 'Could not save local extensions.');
+    }
+  });
+}
+if (els.reloadExtensionsButton) {
+  els.reloadExtensionsButton.addEventListener('click', async () => {
+    try {
+      renderExtensionStatus(await desktop.reloadExtensions());
+      showStatus('Reloaded local extensions.');
+    } catch (err) {
+      showStatus(err?.message || 'Could not reload local extensions.');
+    }
+  });
+}
 document.addEventListener('click', (event) => {
   const target = event.target;
   if (!(target instanceof Element)) return;
@@ -1762,6 +1847,7 @@ if (desktop.windowState) {
 
 desktop.readConfig().then((config) => {
   applyConfig(config);
+  void refreshExtensionStatus();
   void refreshAudioDevicePickers();
   applyWindowState({ compact: state.compact });
   if (!config.deviceId || !config.deviceToken) {

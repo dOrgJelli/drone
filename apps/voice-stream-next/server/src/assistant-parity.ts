@@ -9,6 +9,11 @@ import {
   type AssistantToolCallRecord,
   type VoiceStreamNextDb,
 } from './db.js';
+import {
+  extensionToolDefinition,
+  extensionToolSummary,
+  type AssistantExtensionToolRoute,
+} from './assistant-extensions.js';
 import { refreshCodexAccessToken } from './codex-auth.js';
 
 export type AssistantProviderId = 'openai' | 'codex';
@@ -23,7 +28,7 @@ export type AssistantModelOption = {
 export type AssistantToolSummary = {
   name: string;
   label: string;
-  category: 'artifacts' | 'speech' | 'prompts' | 'settings';
+  category: 'artifacts' | 'speech' | 'prompts' | 'settings' | 'extensions';
   description: string;
   approval: 'never' | 'normal_threads' | 'always';
 };
@@ -140,8 +145,34 @@ type OpenAiStreamResult = {
 
 type CodexStreamResult = OpenAiStreamResult;
 
+export type AssistantExternalToolExecution = {
+  db: VoiceStreamNextDb;
+  userId: string;
+  thread: AssistantThread;
+  toolName: string;
+  args: unknown;
+  route: AssistantExtensionToolRoute | null;
+  runId?: string | null;
+  toolCallId?: string;
+};
+
+export type AssistantExternalToolExecutor = (input: AssistantExternalToolExecution) => Promise<unknown>;
+
+let externalToolExecutor: AssistantExternalToolExecutor | null = null;
+
+export function setAssistantExternalToolExecutor(executor: AssistantExternalToolExecutor | null): void {
+  externalToolExecutor = executor;
+}
+
 export function assistantToolSummaries(): AssistantToolSummary[] {
   return ASSISTANT_TOOLS;
+}
+
+export function assistantAvailableToolSummaries(db: VoiceStreamNextDb, userId: string): AssistantToolSummary[] {
+  const extensionTools = db.listAssistantExtensionManifests(userId).flatMap((record) =>
+    record.manifest.tools.map((tool) => extensionToolSummary(record.manifest, tool)),
+  );
+  return [...ASSISTANT_TOOLS, ...extensionTools];
 }
 
 export function assistantModelOptions(): AssistantModelOption[] {
@@ -194,7 +225,7 @@ export function assistantSnapshot(db: VoiceStreamNextDb, userId: string, activeT
     threads: threadViews,
     pendingApprovals: db.listApprovals(userId).filter((approval) => approval.status === 'pending').map(approvalView),
     models: MODEL_OPTIONS,
-    availableTools: ASSISTANT_TOOLS,
+    availableTools: assistantAvailableToolSummaries(db, userId),
     assistantSettings: db.ensureAssistantSettings(userId),
     codexConnection: db.codexConnectionView(userId),
     runningModels,
@@ -329,7 +360,10 @@ export async function resolveAssistantApproval(
   }
 
   const args = safeJson(pending.argsJson);
-  const result = executeApprovedTool(db, userId, thread, pending.toolName, args);
+  const result = await executeApprovedTool(db, userId, thread, pending.toolName, args, {
+    runId: pending.runId,
+    toolCallId: pending.toolCallId,
+  });
   db.resolveApproval(userId, approvalId, { approved: true, resolvedBy, result });
   db.updateToolCall(userId, pending.toolCallId, { status: 'completed', resultJson: JSON.stringify(result) });
   db.addMessage(userId, pending.threadId, {
@@ -405,7 +439,7 @@ async function runModelDrivenTurn(
 ): Promise<void> {
   const settings = db.ensureAssistantSettings(userId);
   const messages = db.listMessages(userId, threadId);
-  const enabledTools = responseToolDefinitions(thread);
+  const enabledTools = responseToolDefinitions(db, userId, thread);
   const instructions = [
     thread.voiceEnabled ? settings.voiceSystemPrompt : settings.normalSystemPrompt,
     thread.systemPrompt ? `Thread system prompt:\n${thread.systemPrompt}` : '',
@@ -664,7 +698,7 @@ async function executeModelToolCalls(
     ensureToolEnabled(thread, toolName);
     ensureCapability(thread, toolName);
     const args = safeJson(call.argumentsJson);
-    const needsApproval = approvalRequiredFor(thread, toolName);
+    const needsApproval = approvalRequiredFor(db, userId, thread, toolName);
     const toolCall = db.createToolCall(userId, threadId, {
       runId: run.id,
       toolName,
@@ -674,7 +708,7 @@ async function executeModelToolCalls(
     emit({ type: 'tool_call', toolCall, modelCallId: call.callId ?? call.id, args });
     const requestMessage = db.addMessage(userId, threadId, {
       role: 'assistant',
-      content: `Requested ${toolLabel(toolName)}.`,
+      content: `Requested ${toolLabel(toolName, db, userId)}.`,
       contentJson: JSON.stringify([{ type: 'modelToolCall', id: toolCall.id, modelCallId: call.callId ?? call.id, name: toolName, arguments: args }]),
     });
     emit({ type: 'message', message: requestMessage });
@@ -684,7 +718,7 @@ async function executeModelToolCalls(
         runId: run.id,
         toolCallId: toolCall.id,
         toolName,
-        label: toolLabel(toolName),
+        label: toolLabel(toolName, db, userId),
         args,
       });
       const snapshot = assistantSnapshot(db, userId, threadId);
@@ -692,7 +726,10 @@ async function executeModelToolCalls(
       return null;
     }
 
-    const result = executeApprovedTool(db, userId, thread, toolName, args);
+    const result = await executeApprovedTool(db, userId, thread, toolName, args, {
+      runId: run.id,
+      toolCallId: toolCall.id,
+    });
     const updatedToolCall = db.updateToolCall(userId, toolCall.id, { status: 'completed', resultJson: JSON.stringify(result) }) ?? toolCall;
     emit({ type: 'tool_result', toolCall: updatedToolCall, result });
     const toolResult = db.addMessage(userId, threadId, {
@@ -841,7 +878,7 @@ function openAiApiKey(): string {
   return process.env.OPENAI_API_KEY?.trim() || process.env.VOICE_STREAM_NEXT_OPENAI_API_KEY?.trim() || '';
 }
 
-function responseToolDefinitions(thread: AssistantThread): unknown[] {
+function responseToolDefinitions(db: VoiceStreamNextDb, userId: string, thread: AssistantThread): unknown[] {
   const definitions: unknown[] = [];
   for (const toolName of thread.enabledTools) {
     if (toolName === 'assistant_artifacts' && thread.capabilities.artifacts) {
@@ -929,6 +966,12 @@ function responseToolDefinitions(thread: AssistantThread): unknown[] {
         strict: true,
       });
     }
+    if (!isBuiltInTool(toolName)) {
+      const route = db.assistantExtensionToolRoute(userId, toolName);
+      const manifestTool = db.assistantExtensionToolManifest(userId, toolName);
+      if (!route?.enabled || !manifestTool) continue;
+      definitions.push(extensionToolDefinition(manifestTool.manifest, manifestTool.tool));
+    }
   }
   return definitions;
 }
@@ -974,6 +1017,10 @@ function normalizeModelToolName(raw: string): string {
   const name = raw.trim();
   if (name === 'artifact_write' || name === 'artifact_read' || name === 'artifact_delete') return 'assistant_artifacts';
   return name;
+}
+
+function isBuiltInTool(toolName: string): boolean {
+  return ASSISTANT_TOOLS.some((tool) => tool.name === toolName);
 }
 
 function reasoningFor(thinkingLevel: string): { effort: string } | null {
@@ -1073,7 +1120,7 @@ async function executeCommand(
   ensureToolEnabled(thread, toolName);
   ensureCapability(thread, toolName);
   const args = argsForCommand(command);
-  const needsApproval = approvalRequiredFor(thread, toolName);
+  const needsApproval = approvalRequiredFor(db, userId, thread, toolName);
   const toolCall = db.createToolCall(userId, threadId, {
     runId: run.id,
     toolName,
@@ -1082,7 +1129,7 @@ async function executeCommand(
   });
   db.addMessage(userId, threadId, {
     role: 'assistant',
-    content: `Requested ${toolLabel(toolName)}.`,
+    content: `Requested ${toolLabel(toolName, db, userId)}.`,
     contentJson: JSON.stringify([{ type: 'toolCall', id: toolCall.id, name: toolName, arguments: args }]),
   });
 
@@ -1091,7 +1138,7 @@ async function executeCommand(
       runId: run.id,
       toolCallId: toolCall.id,
       toolName,
-      label: toolLabel(toolName),
+      label: toolLabel(toolName, db, userId),
       args,
     });
     const snapshot = assistantSnapshot(db, userId, threadId);
@@ -1100,7 +1147,10 @@ async function executeCommand(
   }
 
   try {
-    const result = executeApprovedTool(db, userId, thread, toolName, args);
+    const result = await executeApprovedTool(db, userId, thread, toolName, args, {
+      runId: run.id,
+      toolCallId: toolCall.id,
+    });
     db.updateToolCall(userId, toolCall.id, { status: 'completed', resultJson: JSON.stringify(result) });
     const toolResult = db.addMessage(userId, threadId, {
       role: 'toolResult',
@@ -1145,7 +1195,14 @@ function argsForCommand(command: ParsedCommand): unknown {
   return {};
 }
 
-function executeApprovedTool(db: VoiceStreamNextDb, userId: string, thread: AssistantThread, toolName: string, args: unknown): unknown {
+async function executeApprovedTool(
+  db: VoiceStreamNextDb,
+  userId: string,
+  thread: AssistantThread,
+  toolName: string,
+  args: unknown,
+  context: { runId?: string | null; toolCallId?: string } = {},
+): Promise<unknown> {
   const parsed = args && typeof args === 'object' ? args as Record<string, unknown> : {};
   if (toolName === 'assistant_artifacts') return executeArtifactTool(db, userId, thread.id, parsed);
   if (toolName === 'speak') {
@@ -1175,6 +1232,22 @@ function executeApprovedTool(db: VoiceStreamNextDb, userId: string, thread: Assi
     const thinkingLevel = cleanThinkingLevel(parsed.thinkingLevel);
     const updated = db.updateThread(userId, thread.id, { thinkingLevel });
     return { ok: true, thinkingLevel: updated?.thinkingLevel ?? thinkingLevel };
+  }
+  const manifestTool = db.assistantExtensionToolManifest(userId, toolName);
+  if (manifestTool) {
+    const route = db.assistantExtensionToolRoute(userId, toolName);
+    if (!route?.enabled) throw Object.assign(new Error(`${toolLabel(toolName, db, userId)} is not configured`), { statusCode: 403 });
+    if (!externalToolExecutor) throw Object.assign(new Error('assistant extension executor is not configured'), { statusCode: 500 });
+    return externalToolExecutor({
+      db,
+      userId,
+      thread,
+      toolName,
+      args,
+      route,
+      runId: context.runId,
+      toolCallId: context.toolCallId,
+    });
   }
   throw Object.assign(new Error(`unknown assistant tool: ${toolName}`), { statusCode: 400 });
 }
@@ -1242,12 +1315,14 @@ function ensureCapability(thread: AssistantThread, toolName: string): void {
   if (toolName === 'speak' && !caps.speech) throw Object.assign(new Error('speech capability is disabled'), { statusCode: 403 });
 }
 
-function approvalRequiredFor(thread: AssistantThread, toolName: string): boolean {
+function approvalRequiredFor(db: VoiceStreamNextDb, userId: string, thread: AssistantThread, toolName: string): boolean {
   if (thread.autoApprove) return false;
   if (!thread.capabilities.approvals) return false;
   const summary = ASSISTANT_TOOLS.find((tool) => tool.name === toolName);
-  if (summary?.approval === 'always') return true;
-  if (summary?.approval === 'normal_threads') return !thread.voiceEnabled;
+  const extension = summary ? null : db.assistantExtensionToolManifest(userId, toolName);
+  const approval = summary?.approval ?? (extension ? extension.tool.approval ?? 'always' : 'never');
+  if (approval === 'always') return true;
+  if (approval === 'normal_threads') return !thread.voiceEnabled;
   return false;
 }
 
@@ -1270,8 +1345,14 @@ function safeJson(raw: string | null): unknown {
   }
 }
 
-function toolLabel(toolName: string): string {
-  return ASSISTANT_TOOLS.find((tool) => tool.name === toolName)?.label ?? toolName.replace(/_/g, ' ');
+function toolLabel(toolName: string, db?: VoiceStreamNextDb, userId?: string): string {
+  const builtIn = ASSISTANT_TOOLS.find((tool) => tool.name === toolName);
+  if (builtIn) return builtIn.label;
+  if (db && userId) {
+    const manifestTool = db.assistantExtensionToolManifest(userId, toolName);
+    if (manifestTool) return extensionToolSummary(manifestTool.manifest, manifestTool.tool).label;
+  }
+  return toolName.replace(/_/g, ' ');
 }
 
 function toolResultText(toolName: string, result: unknown): string {
