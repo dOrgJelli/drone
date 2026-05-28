@@ -143,6 +143,9 @@ function normalizeConfig(nextConfig) {
 }
 
 const modifierOnlyShortcutKeys = new Set(['shift', 'control', 'ctrl', 'alt', 'meta', 'os']);
+const supportedPunctuationShortcutKeys = new Set([
+  ')', '!', '@', '#', '$', '%', '^', '&', '*', '(', ':', ';', '=', '<', ',', '_', '-', '>', '.', '?', '/', '~', '`', '{', ']', '[', '|', '\\', '}', '"',
+]);
 
 function normalizeShortcutKey(raw) {
   const key = String(raw ?? '');
@@ -168,6 +171,7 @@ function sanitizeShortcutBinding(value, fallback = null) {
     ctrl: mod ? false : value.ctrl === true,
     meta: mod ? false : value.meta === true,
     alt: value.alt === true,
+    altGraph: value.altGraph === true,
     shift: value.shift === true,
   };
 }
@@ -183,6 +187,7 @@ function shortcutKeyLabel(key) {
   if (key === 'numsub') return 'Numpad -';
   if (key === 'nummult') return 'Numpad *';
   if (key === 'numdiv') return 'Numpad /';
+  if (key === 'numenter') return 'Numpad Enter';
   if (key === 'space') return 'Space';
   if (key === 'escape') return 'Esc';
   if (key === 'arrowup') return 'Up';
@@ -210,6 +215,7 @@ function formatShortcutBinding(binding) {
   if (binding.ctrl) parts.push('Ctrl');
   if (binding.meta) parts.push('Meta');
   if (binding.alt) parts.push('Alt');
+  if (binding.altGraph) parts.push('AltGr');
   if (binding.shift) parts.push('Shift');
   parts.push(shortcutKeyLabel(binding.key));
   return parts.join('+');
@@ -220,6 +226,7 @@ function shortcutKeyAccelerator(key) {
   if (/^[a-z]$/.test(key)) return key.toUpperCase();
   if (/^[0-9]$/.test(key)) return key;
   if (/^f(?:[1-9]|1[0-9]|2[0-4])$/.test(key)) return key.toUpperCase();
+  if (supportedPunctuationShortcutKeys.has(key)) return key;
   const map = {
     numdec: 'numdec',
     numadd: 'numadd',
@@ -255,9 +262,17 @@ function shortcutBindingToAccelerator(binding) {
   if (binding.ctrl) parts.push('Control');
   if (binding.meta) parts.push(process.platform === 'darwin' ? 'Command' : 'Super');
   if (binding.alt) parts.push('Alt');
+  if (binding.altGraph) parts.push('AltGr');
   if (binding.shift) parts.push('Shift');
   parts.push(key);
   return parts.join('+');
+}
+
+function unsupportedShortcutRegistrationError(binding) {
+  if (binding?.key === 'numenter') {
+    return 'Numpad Enter is not supported for background shortcuts by Electron yet. Choose another key.';
+  }
+  return 'This key cannot be registered as a background shortcut.';
 }
 
 function persistConfig(config) {
@@ -608,7 +623,7 @@ function registerTranscriptionShortcut() {
       registered: false,
       accelerator: '',
       label,
-      error: binding ? 'This key cannot be registered as a background shortcut.' : '',
+      error: binding ? unsupportedShortcutRegistrationError(binding) : '',
     };
     sendTranscriptionShortcutStatus();
     return transcriptionShortcutStatus;
@@ -628,15 +643,30 @@ function registerTranscriptionShortcut() {
 
 function triggerTranscriptionShortcut() {
   const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : createWindow();
+  const restoreWindowMode = win.isVisible() && !win.isMinimized()
+    ? (compactMode ? 'compact' : 'expanded')
+    : 'hidden';
+  const temporaryOverlay = restoreWindowMode !== 'compact';
   applyCompactMode(win);
   const send = () => {
-    if (!win.isDestroyed()) win.webContents.send('shortcut:transcription');
+    if (!win.isDestroyed()) win.webContents.send('shortcut:transcription', { temporaryOverlay, restoreWindowMode });
   };
   if (win.webContents.isLoading()) {
     win.webContents.once('did-finish-load', send);
   } else {
     send();
   }
+}
+
+function restoreTemporaryOverlay(win, restoreWindowMode) {
+  if (!win || win.isDestroyed()) return windowStatePayload();
+  if (!compactMode) return windowStatePayload();
+  if (restoreWindowMode === 'expanded') return applyExpandedMode(win);
+  if (restoreWindowMode === 'hidden') {
+    hideToTray(win);
+    return windowStatePayload();
+  }
+  return windowStatePayload();
 }
 
 function applyCompactMode(win) {
@@ -1511,6 +1541,7 @@ if (!gotSingleInstanceLock) {
     const win = windowFromEvent(event);
     hideToTray(win);
   });
+  ipcMain.handle('window:restoreTemporaryOverlay', (event, payload) => restoreTemporaryOverlay(windowFromEvent(event), payload?.restoreWindowMode));
   ipcMain.handle('tray:status', (_event, payload) => updateTrayStatus(payload?.mode, payload?.status));
   ipcMain.handle('shortcut:status', () => transcriptionShortcutStatus);
   ipcMain.handle('shortcut:resetTranscription', () => {
