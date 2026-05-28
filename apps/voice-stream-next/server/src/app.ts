@@ -93,6 +93,20 @@ function jsonBody(req: FastifyRequest): any {
   return req.body && typeof req.body === 'object' ? (req.body as any) : {};
 }
 
+function extensionDefaultTargetDeviceId(defaultTarget: string, deviceId: string): string | null {
+  return defaultTarget === 'device' ? deviceId : null;
+}
+
+function shouldEnableRegisteredExtensionRoute(
+  route: { enabled: boolean; targetKind: string; targetDeviceId: string | null },
+  defaultTarget: string,
+  defaultTargetDeviceId: string | null,
+): boolean {
+  if (route.enabled || defaultTarget === 'server') return false;
+  if (route.targetKind !== defaultTarget) return false;
+  return route.targetKind !== 'device' || route.targetDeviceId === defaultTargetDeviceId;
+}
+
 function cleanText(raw: unknown, fallback = ''): string {
   return String(raw ?? fallback).trim();
 }
@@ -1665,12 +1679,21 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
             db.upsertAssistantExtensionManifest(device.userId, manifest);
             for (const tool of manifest.tools) {
               const toolName = extensionToolName(manifest.id, tool.name);
-              if (!db.assistantExtensionToolRoute(device.userId, toolName)) {
+              const defaultTargetDeviceId = extensionDefaultTargetDeviceId(tool.defaultTarget, device.id);
+              const route = db.assistantExtensionToolRoute(device.userId, toolName);
+              if (!route) {
                 db.upsertAssistantExtensionToolRoute(device.userId, {
                   toolName,
                   enabled: tool.defaultTarget !== 'server',
                   targetKind: tool.defaultTarget,
-                  targetDeviceId: tool.defaultTarget === 'device' ? device.id : null,
+                  targetDeviceId: defaultTargetDeviceId,
+                });
+              } else if (shouldEnableRegisteredExtensionRoute(route, tool.defaultTarget, defaultTargetDeviceId)) {
+                db.upsertAssistantExtensionToolRoute(device.userId, {
+                  toolName,
+                  enabled: true,
+                  targetKind: route.targetKind,
+                  targetDeviceId: route.targetDeviceId,
                 });
               }
             }
