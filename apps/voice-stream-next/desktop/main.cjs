@@ -651,12 +651,12 @@ function registerTranscriptionShortcut() {
 }
 
 function triggerTranscriptionShortcut() {
-  const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : createWindow();
+  const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : createWindow({ compactShowInactive: true });
   const restoreWindowMode = win.isVisible() && !win.isMinimized()
     ? (compactMode ? 'compact' : 'expanded')
     : 'hidden';
   const temporaryOverlay = restoreWindowMode !== 'compact';
-  applyCompactMode(win);
+  applyCompactMode(win, { inactive: true });
   const send = () => {
     if (!win.isDestroyed()) win.webContents.send('shortcut:transcription', { temporaryOverlay, restoreWindowMode });
   };
@@ -678,7 +678,16 @@ function restoreTemporaryOverlay(win, restoreWindowMode) {
   return windowStatePayload();
 }
 
-function applyCompactMode(win) {
+function showWindow(win, options = {}) {
+  if (options.inactive && typeof win.showInactive === 'function') {
+    win.showInactive();
+    return;
+  }
+  if (win.isMinimized()) win.restore();
+  win.show();
+}
+
+function applyCompactMode(win, options = {}) {
   if (!win || win.isDestroyed()) return windowStatePayload();
   windowDebugLog('applyCompactMode:start', { snapshot: windowSnapshot(win) });
   if (!compactMode) normalWindowBounds = win.getBounds();
@@ -688,8 +697,7 @@ function applyCompactMode(win) {
   win.setAlwaysOnTop(true, 'floating');
   win.setSkipTaskbar(true);
   win.setBounds(compactBoundsForWindow(win));
-  if (win.isMinimized()) win.restore();
-  win.show();
+  showWindow(win, options);
   sendWindowState(win);
   windowDebugLog('applyCompactMode:end', { snapshot: windowSnapshot(win) });
   return windowStatePayload();
@@ -1332,7 +1340,7 @@ function hideToTray(win) {
   windowDebugLog('hideToTray', { snapshot: windowSnapshot(win) });
 }
 
-function createWindow() {
+function createWindow(options = {}) {
   const initialBounds = centeredFullBounds(null);
   windowDebugLog('createWindow:start', {
     initialBounds,
@@ -1373,7 +1381,7 @@ function createWindow() {
   win.once('ready-to-show', () => {
     windowDebugLog('ready-to-show', { snapshot: windowSnapshot(win), shouldStartCompact: shouldStartCompact() });
     if (shouldStartCompact()) {
-      applyCompactMode(win);
+      applyCompactMode(win, { inactive: options.compactShowInactive === true });
     } else {
       applySignedOutMode(win);
     }
