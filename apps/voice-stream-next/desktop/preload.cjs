@@ -18,6 +18,18 @@ contextBridge.exposeInMainWorld('voiceStreamDesktop', {
   signedOutWindow: () => ipcRenderer.invoke('window:signedOut'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
   setTrayStatus: (status) => ipcRenderer.invoke('tray:status', status),
+  shortcutStatus: () => ipcRenderer.invoke('shortcut:status'),
+  resetTranscriptionShortcut: () => ipcRenderer.invoke('shortcut:resetTranscription'),
+  onTranscriptionShortcut: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on('shortcut:transcription', listener);
+    return () => ipcRenderer.removeListener('shortcut:transcription', listener);
+  },
+  onShortcutStatus: (callback) => {
+    const listener = (_event, status) => callback(status);
+    ipcRenderer.on('shortcut:status', listener);
+    return () => ipcRenderer.removeListener('shortcut:status', listener);
+  },
   onWindowState: (callback) => {
     const listener = (_event, status) => callback(status);
     ipcRenderer.on('window:state', listener);
