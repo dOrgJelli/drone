@@ -433,8 +433,9 @@ export function createDroneProvisioningController(deps: DroneProvisioningControl
       }
     }
 
+    let startupQueuedPromptChats: string[] = [];
     if (startupQueuedPrompts.length > 0) {
-      const touchedChats = await updateRegistry((reg4Any: any) => {
+      startupQueuedPromptChats = await updateRegistry((reg4Any: any) => {
         const found = findDroneEntryByIdentity(reg4Any, pendingDroneId);
         if (!found) return [] as string[];
         const d: any = found.entry;
@@ -465,10 +466,6 @@ export function createDroneProvisioningController(deps: DroneProvisioningControl
         reg4Any.drones[found.key] = d;
         return Array.from(touched.values());
       });
-
-      for (const chatName of touchedChats) {
-        deps.enqueuePendingPromptPump(pendingDroneId, String(chatName));
-      }
     }
 
     try {
@@ -485,6 +482,10 @@ export function createDroneProvisioningController(deps: DroneProvisioningControl
         droneId: pendingDroneId,
         error: String(e?.message ?? String(e)),
       });
+    }
+
+    for (const chatName of startupQueuedPromptChats) {
+      deps.enqueuePendingPromptPump(pendingDroneId, String(chatName));
     }
 
     if (!seed) return;

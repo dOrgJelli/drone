@@ -31,6 +31,8 @@ function createControllerHarness(opts?: { agentSuggestionEnabledByDefault?: bool
   const syncSkillLibraryCalls: any[] = [];
   const syncSharedPathsCalls: any[] = [];
   const syncTaskStateCalls: any[] = [];
+  const pendingPromptPumpCalls: any[] = [];
+  const events: string[] = [];
 
   const controller = createDroneProvisioningController({
     NON_REPO_HOME_CWD: '/dvm-data/home',
@@ -45,7 +47,10 @@ function createControllerHarness(opts?: { agentSuggestionEnabledByDefault?: bool
       enqueuePromptCalls.push(opts);
       return { id: String(opts.id ?? 'generated'), pendingState: 'queued', blockedByAutomation: false };
     },
-    enqueuePendingPromptPump: () => {},
+    enqueuePendingPromptPump: (droneId, chatName) => {
+      pendingPromptPumpCalls.push({ droneId, chatName });
+      events.push(`pump:${droneId}:${chatName}`);
+    },
     hubLog: () => {},
     inferChatAgent: (entry: any) => entry?.agent ?? { kind: 'builtin', id: 'cursor' },
     isSafePromptId: (raw: string) => /^[A-Za-z0-9._-]+$/.test(String(raw ?? '').trim()),
@@ -86,15 +91,19 @@ function createControllerHarness(opts?: { agentSuggestionEnabledByDefault?: bool
     startupPromptToPendingPrompt: pendingStateHelpers.startupPromptToPendingPrompt,
     syncRepoAgentsInstructionsForDrone: async (opts) => {
       syncRepoAgentsCalls.push(opts);
+      events.push('sync:repo-agents');
     },
     syncSkillLibraryForDrone: async (opts) => {
       syncSkillLibraryCalls.push(opts);
+      events.push('sync:skills');
     },
     syncSharedPathsToDrone: async (opts) => {
       syncSharedPathsCalls.push(opts);
+      events.push('sync:shared-paths');
     },
     syncTaskStateSnapshotToDrone: async (droneId, droneEntry) => {
       syncTaskStateCalls.push({ droneId, droneEntry });
+      events.push('sync:task-state');
     },
   });
 
@@ -107,6 +116,8 @@ function createControllerHarness(opts?: { agentSuggestionEnabledByDefault?: bool
     syncSkillLibraryCalls,
     syncSharedPathsCalls,
     syncTaskStateCalls,
+    pendingPromptPumpCalls,
+    events,
   };
 }
 
@@ -232,6 +243,9 @@ describe('drone provisioning controller', () => {
         },
       ]);
       expect(harness.enqueuePromptCalls).toHaveLength(0);
+      expect(harness.pendingPromptPumpCalls).toEqual([{ droneId: 'drone-2', chatName: 'ops' }]);
+      expect(harness.events.indexOf('sync:repo-agents')).toBeGreaterThan(-1);
+      expect(harness.events.indexOf('pump:drone-2:ops')).toBeGreaterThan(harness.events.indexOf('sync:repo-agents'));
     });
   });
 
