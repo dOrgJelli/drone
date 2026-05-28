@@ -2239,6 +2239,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     const installationId = cleanText(query.installationId) || null;
     const requestedSessionId = queryValue(query.sessionId);
     const streamMode = cleanVoiceStreamMode(queryValue(query.mode));
+    const ignoreCommands = queryValue(query.ignoreCommands) === '1';
     const verifiedDevice = verifyDeviceAuth(db, deviceId, token, parseClientVersion(query.clientVersion, parseClientVersion(query.protocolVersion, null)));
     if (!verifiedDevice.ok) {
       socket.close(deviceAuthCloseCode(verifiedDevice), deviceAuthFailureMessage(verifiedDevice));
@@ -2254,8 +2255,9 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
     const chunks: Uint8Array[] = [];
     const startedAt = Date.now();
     const streamingEnabled = streamingTranscriptionEnabled();
+    const commandDetectionEnabled = streamingEnabled && !ignoreCommands;
     const transcriptionConfig = buildStreamingTranscriptionConfigFromEnv();
-    const streamingManager = streamingEnabled
+    const streamingManager = commandDetectionEnabled
       ? new StreamingTranscriptionManager(transcriptionConfig, (command) => {
           if (finalized || terminalFinalize) return;
           terminalFinalize = command;
@@ -2359,7 +2361,11 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       detailsJson: JSON.stringify({
         deviceId: device.id,
         streamingTranscriptionEnabled: streamingEnabled,
-        commandDetection: streamingEnabled ? 'enabled' : 'disabled: missing speech transcription runtime',
+        commandDetection: commandDetectionEnabled
+          ? 'enabled'
+          : ignoreCommands
+            ? 'disabled: shortcut transcription mode'
+            : 'disabled: missing speech transcription runtime',
       }),
     });
     db.upsertClientStatus(device.userId, device.id, {

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, screen, shell, Menu, Tray, nativeImage, clipboard, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, shell, Menu, Tray, nativeImage, clipboard, dialog, globalShortcut } = require('electron');
 const { fork } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
 const fs = require('node:fs');
@@ -16,6 +16,8 @@ let normalWindowBounds = null;
 let tray = null;
 let isQuitting = false;
 let trayStatus = { mode: 'off', status: 'Off.' };
+let transcriptionShortcutAccelerator = '';
+let transcriptionShortcutStatus = { registered: false, accelerator: '', label: 'Not set', error: '' };
 let extensionBridge = { socket: null, reconnectTimer: null, stopped: false, reconnectDelayMs: 1000 };
 const extensionHost = {
   loading: null,
@@ -44,6 +46,15 @@ const compactWindow = {
   width: 268,
   height: 72,
   margin: 18,
+};
+
+const defaultTranscriptionShortcut = {
+  key: 'space',
+  mod: true,
+  ctrl: false,
+  meta: false,
+  alt: false,
+  shift: true,
 };
 
 const sampleRate = 16_000;
@@ -104,6 +115,7 @@ const defaultConfig = {
   deviceName: 'Desktop voice client',
   inputDeviceId: '',
   outputDeviceId: '',
+  transcriptionShortcut: defaultTranscriptionShortcut,
   extensionBridgeEnabled: true,
   extensions: [],
   authSavedAt: '',
@@ -132,10 +144,129 @@ function createInstallationId() {
 
 function normalizeConfig(nextConfig) {
   const config = { ...defaultConfig, ...nextConfig };
+  config.transcriptionShortcut = sanitizeShortcutBinding(config.transcriptionShortcut, defaultTranscriptionShortcut);
   if (!String(config.installationId || '').trim()) {
     config.installationId = createInstallationId();
   }
   return config;
+}
+
+const modifierOnlyShortcutKeys = new Set(['shift', 'control', 'ctrl', 'alt', 'meta', 'os']);
+
+function normalizeShortcutKey(raw) {
+  const key = String(raw ?? '');
+  if (!key) return '';
+  if (key === ' ') return 'space';
+  const lower = key.trim().toLowerCase();
+  if (!lower) return '';
+  if (lower === 'spacebar') return 'space';
+  if (lower === 'esc') return 'escape';
+  if (lower === 'return') return 'enter';
+  return lower;
+}
+
+function sanitizeShortcutBinding(value, fallback = null) {
+  if (value === null) return null;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return cloneShortcutBinding(fallback);
+  const key = normalizeShortcutKey(value.key);
+  if (!key || modifierOnlyShortcutKeys.has(key)) return cloneShortcutBinding(fallback);
+  const mod = value.mod === true;
+  return {
+    key,
+    mod,
+    ctrl: mod ? false : value.ctrl === true,
+    meta: mod ? false : value.meta === true,
+    alt: value.alt === true,
+    shift: value.shift === true,
+  };
+}
+
+function cloneShortcutBinding(binding) {
+  return binding ? { ...binding } : null;
+}
+
+function shortcutKeyLabel(key) {
+  if (/^num[0-9]$/.test(key)) return `Numpad ${key.slice(3)}`;
+  if (key === 'numdec') return 'Numpad .';
+  if (key === 'numadd') return 'Numpad +';
+  if (key === 'numsub') return 'Numpad -';
+  if (key === 'nummult') return 'Numpad *';
+  if (key === 'numdiv') return 'Numpad /';
+  if (key === 'space') return 'Space';
+  if (key === 'escape') return 'Esc';
+  if (key === 'arrowup') return 'Up';
+  if (key === 'arrowdown') return 'Down';
+  if (key === 'arrowleft') return 'Left';
+  if (key === 'arrowright') return 'Right';
+  if (key === 'pageup') return 'Page Up';
+  if (key === 'pagedown') return 'Page Down';
+  if (key === 'capslock') return 'Caps Lock';
+  if (key === 'backspace') return 'Backspace';
+  if (key === 'delete') return 'Delete';
+  if (key === 'insert') return 'Insert';
+  if (key === 'home') return 'Home';
+  if (key === 'end') return 'End';
+  if (key === 'tab') return 'Tab';
+  if (key === 'enter') return 'Enter';
+  if (key.length === 1) return key.toUpperCase();
+  return key.charAt(0).toUpperCase() + key.slice(1);
+}
+
+function formatShortcutBinding(binding) {
+  if (!binding) return 'Not set';
+  const parts = [];
+  if (binding.mod) parts.push('Ctrl/Cmd');
+  if (binding.ctrl) parts.push('Ctrl');
+  if (binding.meta) parts.push('Meta');
+  if (binding.alt) parts.push('Alt');
+  if (binding.shift) parts.push('Shift');
+  parts.push(shortcutKeyLabel(binding.key));
+  return parts.join('+');
+}
+
+function shortcutKeyAccelerator(key) {
+  if (/^num[0-9]$/.test(key)) return key;
+  if (/^[a-z]$/.test(key)) return key.toUpperCase();
+  if (/^[0-9]$/.test(key)) return key;
+  if (/^f(?:[1-9]|1[0-9]|2[0-4])$/.test(key)) return key.toUpperCase();
+  const map = {
+    numdec: 'numdec',
+    numadd: 'numadd',
+    numsub: 'numsub',
+    nummult: 'nummult',
+    numdiv: 'numdiv',
+    space: 'Space',
+    tab: 'Tab',
+    enter: 'Return',
+    escape: 'Esc',
+    backspace: 'Backspace',
+    delete: 'Delete',
+    insert: 'Insert',
+    home: 'Home',
+    end: 'End',
+    pageup: 'PageUp',
+    pagedown: 'PageDown',
+    arrowup: 'Up',
+    arrowdown: 'Down',
+    arrowleft: 'Left',
+    arrowright: 'Right',
+    '+': 'Plus',
+  };
+  return map[key] || '';
+}
+
+function shortcutBindingToAccelerator(binding) {
+  if (!binding) return '';
+  const key = shortcutKeyAccelerator(binding.key);
+  if (!key) return '';
+  const parts = [];
+  if (binding.mod) parts.push('CommandOrControl');
+  if (binding.ctrl) parts.push('Control');
+  if (binding.meta) parts.push(process.platform === 'darwin' ? 'Command' : 'Super');
+  if (binding.alt) parts.push('Alt');
+  if (binding.shift) parts.push('Shift');
+  parts.push(key);
+  return parts.join('+');
 }
 
 function persistConfig(config) {
@@ -463,6 +594,58 @@ function windowStatePayload() {
 function sendWindowState(win) {
   if (!win || win.isDestroyed()) return;
   win.webContents.send('window:state', windowStatePayload());
+}
+
+function sendTranscriptionShortcutStatus(win = mainWindow) {
+  if (!win || win.isDestroyed()) return;
+  win.webContents.send('shortcut:status', transcriptionShortcutStatus);
+}
+
+function registerTranscriptionShortcut() {
+  if (!app.isReady()) return transcriptionShortcutStatus;
+  if (transcriptionShortcutAccelerator) {
+    globalShortcut.unregister(transcriptionShortcutAccelerator);
+    transcriptionShortcutAccelerator = '';
+  }
+
+  const config = readConfig();
+  const binding = sanitizeShortcutBinding(config.transcriptionShortcut, defaultTranscriptionShortcut);
+  const accelerator = shortcutBindingToAccelerator(binding);
+  const label = formatShortcutBinding(binding);
+  if (!binding || !accelerator) {
+    transcriptionShortcutStatus = {
+      registered: false,
+      accelerator: '',
+      label,
+      error: binding ? 'This key cannot be registered as a background shortcut.' : '',
+    };
+    sendTranscriptionShortcutStatus();
+    return transcriptionShortcutStatus;
+  }
+
+  const registered = globalShortcut.register(accelerator, triggerTranscriptionShortcut);
+  transcriptionShortcutAccelerator = registered ? accelerator : '';
+  transcriptionShortcutStatus = {
+    registered,
+    accelerator,
+    label,
+    error: registered ? '' : 'The operating system or another app is already using this shortcut.',
+  };
+  sendTranscriptionShortcutStatus();
+  return transcriptionShortcutStatus;
+}
+
+function triggerTranscriptionShortcut() {
+  const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : createWindow();
+  applyCompactMode(win);
+  const send = () => {
+    if (!win.isDestroyed()) win.webContents.send('shortcut:transcription');
+  };
+  if (win.webContents.isLoading()) {
+    win.webContents.once('did-finish-load', send);
+  } else {
+    send();
+  }
 }
 
 function applyCompactMode(win) {
@@ -1185,6 +1368,7 @@ function createWindow() {
   win.on('closed', () => {
     if (mainWindow === win) mainWindow = null;
   });
+  return win;
 }
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
@@ -1208,6 +1392,7 @@ if (!gotSingleInstanceLock) {
   ipcMain.handle('pairing:takePending', () => pendingPairingPayloads.splice(0));
   ipcMain.handle('config:write', (_event, config) => {
     const saved = writeConfig(config);
+    registerTranscriptionShortcut();
     restartExtensionBridge();
     return saved;
   });
@@ -1254,6 +1439,12 @@ if (!gotSingleInstanceLock) {
     hideToTray(win);
   });
   ipcMain.handle('tray:status', (_event, payload) => updateTrayStatus(payload?.mode, payload?.status));
+  ipcMain.handle('shortcut:status', () => transcriptionShortcutStatus);
+  ipcMain.handle('shortcut:resetTranscription', () => {
+    const config = writeConfig({ ...readConfig(), transcriptionShortcut: defaultTranscriptionShortcut });
+    registerTranscriptionShortcut();
+    return { ok: true, config, status: transcriptionShortcutStatus };
+  });
   ipcMain.handle('vosk:status', () => statusForVosk());
   ipcMain.handle('vosk:start', () => ensureVoskRecognizer());
   ipcMain.handle('vosk:stop', () => {
@@ -1272,6 +1463,7 @@ if (!gotSingleInstanceLock) {
     if (process.platform === 'darwin') app.dock?.setIcon(appIconImage(256));
     ensureTray();
     createWindow();
+    registerTranscriptionShortcut();
     void startExtensionBridge();
   });
 
@@ -1287,6 +1479,7 @@ if (!gotSingleInstanceLock) {
     isQuitting = true;
     stopExtensionBridge();
     void deactivateDesktopExtensions();
+    globalShortcut.unregisterAll();
     releaseVosk();
   });
 }

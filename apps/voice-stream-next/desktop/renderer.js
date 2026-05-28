@@ -7,6 +7,15 @@ const MAX_RECONNECT_DELAY_MS = 10_000;
 const MAX_RECONNECT_EXPONENT = 4;
 // Keep the status command path available, but do not match spoken status phrases locally.
 const ENABLE_STATUS_WAKE_COMMAND = false;
+const DEFAULT_TRANSCRIPTION_SHORTCUT = {
+  key: 'space',
+  mod: true,
+  ctrl: false,
+  meta: false,
+  alt: false,
+  shift: true,
+};
+const MODIFIER_ONLY_SHORTCUT_KEYS = new Set(['shift', 'control', 'ctrl', 'alt', 'meta', 'os']);
 
 const preRollBuffer = new PcmCaptureBuffer(PRE_ROLL_MAX_BYTES);
 const pendingStreamBuffer = new PcmCaptureBuffer(MAX_PENDING_STREAM_BYTES);
@@ -32,6 +41,7 @@ const state = {
   controlSocket: null,
   voiceSessionId: null,
   voiceTarget: 'assistant',
+  voiceSuppressCommands: false,
   mode: 'off',
   voiceSettings: null,
   recognition: null,
@@ -40,6 +50,9 @@ const state = {
   wakeProcessor: null,
   wakeUnsubscribe: null,
   wakeStarting: false,
+  capturingShortcut: false,
+  shortcutStatus: null,
+  lastTranscriptionShortcutAt: 0,
   lastRecognizedText: '',
   lastRecognizedAt: 0,
   approvalRecognizer: new ApprovalCodeRecognizer(),
@@ -87,6 +100,14 @@ const els = {
   outputDeviceMenu: document.querySelector('#outputDeviceMenu'),
   settingsButton: document.querySelector('#settingsButton'),
   settingsPanel: document.querySelector('#settingsPanel'),
+  audioSettingsTab: document.querySelector('#audioSettingsTab'),
+  shortcutsSettingsTab: document.querySelector('#shortcutsSettingsTab'),
+  audioSettingsPanel: document.querySelector('#audioSettingsPanel'),
+  shortcutsSettingsPanel: document.querySelector('#shortcutsSettingsPanel'),
+  transcriptionShortcutCapture: document.querySelector('#transcriptionShortcutCapture'),
+  transcriptionShortcutClear: document.querySelector('#transcriptionShortcutClear'),
+  transcriptionShortcutReset: document.querySelector('#transcriptionShortcutReset'),
+  transcriptionShortcutStatus: document.querySelector('#transcriptionShortcutStatus'),
   extensionsConfigInput: document.querySelector('#extensionsConfigInput'),
   addExtensionFileButton: document.querySelector('#addExtensionFileButton'),
   extensionDropzone: document.querySelector('#extensionDropzone'),
@@ -179,7 +200,127 @@ function readFormConfig() {
     deviceName: els.deviceNameInput?.value.trim() || state.config?.deviceName || 'Desktop voice client',
     inputDeviceId: els.inputDeviceSelect?.value ?? state.config?.inputDeviceId ?? '',
     outputDeviceId: els.outputDeviceSelect?.value ?? state.config?.outputDeviceId ?? '',
+    transcriptionShortcut: sanitizeShortcutBinding(state.config?.transcriptionShortcut, DEFAULT_TRANSCRIPTION_SHORTCUT),
   };
+}
+
+function normalizeShortcutKey(raw) {
+  const key = String(raw ?? '');
+  if (!key) return '';
+  if (key === ' ') return 'space';
+  const lower = key.trim().toLowerCase();
+  if (!lower) return '';
+  if (lower === 'spacebar') return 'space';
+  if (lower === 'esc') return 'escape';
+  if (lower === 'return') return 'enter';
+  return lower;
+}
+
+function cloneShortcutBinding(binding) {
+  return binding ? { ...binding } : null;
+}
+
+function sanitizeShortcutBinding(value, fallback = null) {
+  if (value === null) return null;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return cloneShortcutBinding(fallback);
+  const key = normalizeShortcutKey(value.key);
+  if (!key || MODIFIER_ONLY_SHORTCUT_KEYS.has(key)) return cloneShortcutBinding(fallback);
+  const mod = value.mod === true;
+  return {
+    key,
+    mod,
+    ctrl: mod ? false : value.ctrl === true,
+    meta: mod ? false : value.meta === true,
+    alt: value.alt === true,
+    shift: value.shift === true,
+  };
+}
+
+function numpadShortcutKeyFromCode(code) {
+  const value = String(code || '');
+  const digit = /^Numpad([0-9])$/.exec(value);
+  if (digit) return `num${digit[1]}`;
+  const map = {
+    NumpadDecimal: 'numdec',
+    NumpadAdd: 'numadd',
+    NumpadSubtract: 'numsub',
+    NumpadMultiply: 'nummult',
+    NumpadDivide: 'numdiv',
+  };
+  return map[value] || '';
+}
+
+function shortcutKeyFromKeyboardEvent(event) {
+  return numpadShortcutKeyFromCode(event.code) || normalizeShortcutKey(event.key);
+}
+
+function shortcutBindingFromKeyboardEvent(event) {
+  const key = shortcutKeyFromKeyboardEvent(event);
+  if (!key || MODIFIER_ONLY_SHORTCUT_KEYS.has(key)) return null;
+  const hasSinglePrimaryModifier = event.ctrlKey !== event.metaKey;
+  const usePortablePrimaryModifier = hasSinglePrimaryModifier;
+  return {
+    key,
+    mod: usePortablePrimaryModifier,
+    ctrl: usePortablePrimaryModifier ? false : event.ctrlKey,
+    meta: usePortablePrimaryModifier ? false : event.metaKey,
+    alt: event.altKey,
+    shift: event.shiftKey,
+  };
+}
+
+function isShortcutMatch(binding, event) {
+  if (!binding) return false;
+  const eventKey = shortcutKeyFromKeyboardEvent(event);
+  if (!eventKey || eventKey !== binding.key) return false;
+  if (binding.mod) {
+    if (!(event.ctrlKey || event.metaKey)) return false;
+  } else {
+    if (event.ctrlKey !== binding.ctrl) return false;
+    if (event.metaKey !== binding.meta) return false;
+  }
+  if (event.altKey !== binding.alt) return false;
+  if (event.shiftKey !== binding.shift) return false;
+  return true;
+}
+
+function shortcutKeyLabel(key) {
+  if (/^num[0-9]$/.test(key)) return `Numpad ${key.slice(3)}`;
+  if (key === 'numdec') return 'Numpad .';
+  if (key === 'numadd') return 'Numpad +';
+  if (key === 'numsub') return 'Numpad -';
+  if (key === 'nummult') return 'Numpad *';
+  if (key === 'numdiv') return 'Numpad /';
+  if (key === 'space') return 'Space';
+  if (key === 'escape') return 'Esc';
+  if (key === 'arrowup') return 'Up';
+  if (key === 'arrowdown') return 'Down';
+  if (key === 'arrowleft') return 'Left';
+  if (key === 'arrowright') return 'Right';
+  if (key === 'pageup') return 'Page Up';
+  if (key === 'pagedown') return 'Page Down';
+  if (key === 'capslock') return 'Caps Lock';
+  if (key === 'backspace') return 'Backspace';
+  if (key === 'delete') return 'Delete';
+  if (key === 'insert') return 'Insert';
+  if (key === 'home') return 'Home';
+  if (key === 'end') return 'End';
+  if (key === 'tab') return 'Tab';
+  if (key === 'enter') return 'Enter';
+  if (key.length === 1) return key.toUpperCase();
+  return key.charAt(0).toUpperCase() + key.slice(1);
+}
+
+function formatShortcutBinding(binding) {
+  if (!binding) return 'Not set';
+  const parts = [];
+  if (binding.mod) parts.push('Ctrl/Cmd');
+  if (binding.ctrl) parts.push('Ctrl');
+  if (binding.meta) parts.push('Meta');
+  if (binding.alt) parts.push('Alt');
+  if (binding.shift) parts.push('Shift');
+  parts.push(shortcutKeyLabel(binding.key));
+  return parts.join('+');
 }
 
 function extensionConfigText(config = state.config) {
@@ -264,16 +405,20 @@ async function chooseExtensionFile() {
 }
 
 function applyConfig(config) {
-  state.config = config;
+  state.config = {
+    ...config,
+    transcriptionShortcut: sanitizeShortcutBinding(config?.transcriptionShortcut, DEFAULT_TRANSCRIPTION_SHORTCUT),
+  };
   if (els.serverUrlInput) els.serverUrlInput.value = config.serverUrl;
   if (els.deviceNameInput) els.deviceNameInput.value = config.deviceName;
   if (els.inputDeviceSelect) els.inputDeviceSelect.value = config.inputDeviceId || '';
   if (els.outputDeviceSelect) els.outputDeviceSelect.value = config.outputDeviceId || '';
   if (els.extensionsConfigInput) els.extensionsConfigInput.value = extensionConfigText(config);
+  renderShortcutSettings();
   renderDevicePicker(els.inputDeviceSelect);
   renderDevicePicker(els.outputDeviceSelect);
-  setPreferredOutputDevice(config.outputDeviceId);
-  const connected = Boolean(config.deviceId && config.deviceToken);
+  setPreferredOutputDevice(state.config.outputDeviceId);
+  const connected = Boolean(state.config.deviceId && state.config.deviceToken);
   document.body.classList.toggle('is-signed-in', connected);
   document.body.classList.toggle('is-signed-out', !connected);
   document.body.classList.toggle('is-compact', connected && state.compact);
@@ -281,18 +426,63 @@ function applyConfig(config) {
   els.expandButton.hidden = !state.compact || !connected;
   debugWindow('renderer:applyConfig', {
     connected,
-    deviceId: config.deviceId ? `${config.deviceId.slice(0, 12)}...` : '',
-    hasDeviceToken: Boolean(config.deviceToken),
-    serverUrl: config.serverUrl,
+    deviceId: state.config.deviceId ? `${state.config.deviceId.slice(0, 12)}...` : '',
+    hasDeviceToken: Boolean(state.config.deviceToken),
+    serverUrl: state.config.serverUrl,
   });
   if (!connected) ensureSignedOutWindowExpanded();
-  updateConnection('idle', config.deviceId ? 'Desktop connected' : 'Ready', config.deviceId ? `${config.deviceName} · ${config.deviceId.slice(0, 12)}` : 'No device connected');
+  updateConnection('idle', state.config.deviceId ? 'Desktop connected' : 'Ready', state.config.deviceId ? `${state.config.deviceName} · ${state.config.deviceId.slice(0, 12)}` : 'No device connected');
   if (els.accountLabel) els.accountLabel.textContent = connected ? 'Connected' : 'Signed out';
-  if (els.accountDetail) els.accountDetail.textContent = connected ? config.deviceName : 'Sign in required';
+  if (els.accountDetail) els.accountDetail.textContent = connected ? state.config.deviceName : 'Sign in required';
   if (connected) {
     updateAuthStatus('ok', 'Desktop connected.');
   } else {
     updateAuthStatus('idle', 'Sign in with your browser to connect this desktop.');
+  }
+}
+
+function renderShortcutSettings() {
+  const binding = sanitizeShortcutBinding(state.config?.transcriptionShortcut, DEFAULT_TRANSCRIPTION_SHORTCUT);
+  if (els.transcriptionShortcutCapture && !state.capturingShortcut) {
+    els.transcriptionShortcutCapture.textContent = formatShortcutBinding(binding);
+  }
+  if (els.transcriptionShortcutClear) {
+    els.transcriptionShortcutClear.disabled = !binding;
+  }
+  renderShortcutStatus(state.shortcutStatus);
+}
+
+function renderShortcutStatus(status) {
+  if (!els.transcriptionShortcutStatus) return;
+  if (!status) {
+    els.transcriptionShortcutStatus.className = 'shortcut-status muted';
+    els.transcriptionShortcutStatus.textContent = 'Checking shortcut registration.';
+    return;
+  }
+  if (!state.config?.transcriptionShortcut) {
+    els.transcriptionShortcutStatus.className = 'shortcut-status muted';
+    els.transcriptionShortcutStatus.textContent = 'Background transcription shortcut is disabled.';
+    return;
+  }
+  if (status.registered) {
+    els.transcriptionShortcutStatus.className = 'shortcut-status ok';
+    els.transcriptionShortcutStatus.textContent = `Registered globally: ${status.label || formatShortcutBinding(state.config.transcriptionShortcut)}.`;
+    return;
+  }
+  els.transcriptionShortcutStatus.className = 'shortcut-status error';
+  els.transcriptionShortcutStatus.textContent = status.error || 'Shortcut could not be registered globally.';
+}
+
+async function saveTranscriptionShortcut(binding) {
+  if (!state.config) return;
+  const next = await desktop.writeConfig({
+    ...state.config,
+    transcriptionShortcut: sanitizeShortcutBinding(binding, null),
+  });
+  applyConfig(next);
+  if (desktop.shortcutStatus) {
+    state.shortcutStatus = await desktop.shortcutStatus().catch(() => state.shortcutStatus);
+    renderShortcutSettings();
   }
 }
 
@@ -458,6 +648,7 @@ function ensureControlSocket() {
       return;
     }
     if (message.type === 'speech_audio') {
+      if (state.voiceSuppressCommands && (state.mode === 'recording' || state.mode === 'transcribing')) return;
       playWavBase64(message.audioBase64);
       return;
     }
@@ -485,6 +676,10 @@ function handleRemoteControlCommand(message, socket) {
     if (command === 'query_status') {
       ack({ ok: true, mode: state.mode, status: els.micStatus.textContent || state.mode });
       void reportClientStatus(state.mode, els.micStatus.textContent || state.mode);
+      return;
+    }
+    if (state.voiceSuppressCommands && (state.mode === 'recording' || state.mode === 'transcribing')) {
+      ack({ ok: false, mode: state.mode, status: els.micStatus.textContent || state.mode, error: 'busy transcribing' });
       return;
     }
     if (command === 'sleep') {
@@ -934,13 +1129,38 @@ function closeSettingsPanel() {
   closeDeviceMenus();
 }
 
+function selectSettingsTab(tab) {
+  const shortcutsActive = tab === 'shortcuts';
+  els.audioSettingsTab?.classList.toggle('is-active', !shortcutsActive);
+  els.shortcutsSettingsTab?.classList.toggle('is-active', shortcutsActive);
+  els.audioSettingsTab?.setAttribute('aria-selected', String(!shortcutsActive));
+  els.shortcutsSettingsTab?.setAttribute('aria-selected', String(shortcutsActive));
+  if (els.audioSettingsPanel) {
+    els.audioSettingsPanel.hidden = shortcutsActive;
+    els.audioSettingsPanel.classList.toggle('is-active', !shortcutsActive);
+  }
+  if (els.shortcutsSettingsPanel) {
+    els.shortcutsSettingsPanel.hidden = !shortcutsActive;
+    els.shortcutsSettingsPanel.classList.toggle('is-active', shortcutsActive);
+  }
+  closeDeviceMenus();
+}
+
 function toggleSettingsPanel() {
   if (!els.settingsPanel || !els.settingsButton) return;
   const willOpen = els.settingsPanel.hidden;
   els.settingsPanel.hidden = !willOpen;
   els.settingsButton.setAttribute('aria-expanded', String(willOpen));
   if (willOpen) {
-    void refreshAudioDevicePickers();
+    if (!els.shortcutsSettingsTab?.classList.contains('is-active')) {
+      void refreshAudioDevicePickers();
+    }
+    if (desktop.shortcutStatus) {
+      void desktop.shortcutStatus().then((status) => {
+        state.shortcutStatus = status;
+        renderShortcutSettings();
+      }).catch(() => undefined);
+    }
   } else {
     closeDeviceMenus();
   }
@@ -1146,6 +1366,7 @@ async function startMic(target = 'assistant', options = {}) {
   try {
     state.voiceSessionId = session.session.id;
     state.voiceTarget = cleanVoiceTarget(target);
+    state.voiceSuppressCommands = options.ignoreCommands === true;
     resetVoiceStreamState();
     pendingStreamBuffer.pushAll(preRollBuffer.drain());
     if (options.cue) playLocalVoiceCue(options.cue);
@@ -1186,6 +1407,7 @@ async function startMic(target = 'assistant', options = {}) {
     state.processor = null;
     state.voiceSocket = null;
     state.voiceSessionId = null;
+    state.voiceSuppressCommands = false;
     resetVoiceStreamState();
     if (state.mode !== 'off') startWakeListener();
     throw err;
@@ -1250,6 +1472,7 @@ function openVoiceSocket(target) {
   url.searchParams.set('token', state.config.deviceToken);
   if (state.config.installationId) url.searchParams.set('installationId', state.config.installationId);
   if (state.voiceSessionId) url.searchParams.set('sessionId', state.voiceSessionId);
+  if (state.voiceSuppressCommands) url.searchParams.set('ignoreCommands', '1');
   url.searchParams.set('mode', target);
   const socket = new WebSocket(url.toString());
   let terminalMessageReceived = false;
@@ -1296,6 +1519,7 @@ function openVoiceSocket(target) {
           void logDesktopEvent(copied ? 'info' : 'warn', copied ? 'Clipboard transcription copied' : 'Clipboard transcription copy failed', {
             chars: String(transcriptText || '').trim().length,
           });
+          if (copied) playLocalVoiceCue('clipboard_transcription_success');
           showStatus(copied ? 'Copied voice transcription.' : 'No voice transcription detected.');
         } else {
           showStatus('Awake. Waiting for voice command.');
@@ -1419,9 +1643,10 @@ async function finishMicFromServer() {
 function completeStoppedVoice(nextMode = 'awake', status = '') {
   clearVoiceFinalizeTimer();
   const socket = state.voiceSocket;
-  state.voiceSocket = null;
-  state.voiceSessionId = null;
-  resetVoiceStreamState();
+    state.voiceSocket = null;
+    state.voiceSessionId = null;
+    state.voiceSuppressCommands = false;
+    resetVoiceStreamState();
   if (socket && socket.readyState === WebSocket.OPEN) {
     try {
       socket.close(1000, 'client finalized');
@@ -1874,6 +2099,29 @@ async function togglePrimaryVoice() {
   await enterAwake();
 }
 
+async function toggleTranscriptionShortcut() {
+  const now = Date.now();
+  if (now - state.lastTranscriptionShortcutAt < 300) return;
+  state.lastTranscriptionShortcutAt = now;
+  if (!state.config?.deviceId || !state.config?.deviceToken) {
+    showStatus('Connect this desktop before recording transcription.');
+    return;
+  }
+  if (state.mode === 'transcribing') {
+    showStatus('Voice transcription is already running.');
+    return;
+  }
+  if (state.mode === 'recording') {
+    if (state.voiceTarget !== 'clipboard') {
+      showStatus('Assistant voice is already recording.');
+      return;
+    }
+    await stopMic('awake', { cue: 'stop_button', finalStatus: 'Transcribing voice recording.' });
+    return;
+  }
+  await startMic('clipboard', { cue: 'clipboard_recording_start', ignoreCommands: true });
+}
+
 if (els.saveButton) {
   els.saveButton.addEventListener('click', async () => {
     applyConfig(await desktop.writeConfig(authSessionFields(readFormConfig())));
@@ -1921,6 +2169,78 @@ if (els.outputDeviceButton) {
 }
 if (els.settingsButton) {
   els.settingsButton.addEventListener('click', () => toggleSettingsPanel());
+}
+if (els.audioSettingsTab) {
+  els.audioSettingsTab.addEventListener('click', () => {
+    selectSettingsTab('audio');
+    void refreshAudioDevicePickers();
+  });
+}
+if (els.shortcutsSettingsTab) {
+  els.shortcutsSettingsTab.addEventListener('click', () => {
+    selectSettingsTab('shortcuts');
+    if (desktop.shortcutStatus) {
+      void desktop.shortcutStatus().then((status) => {
+        state.shortcutStatus = status;
+        renderShortcutSettings();
+      }).catch(() => undefined);
+    }
+  });
+}
+if (els.transcriptionShortcutCapture) {
+  els.transcriptionShortcutCapture.addEventListener('click', () => {
+    state.capturingShortcut = true;
+    els.transcriptionShortcutCapture.classList.add('is-capturing');
+    els.transcriptionShortcutCapture.textContent = 'Press keys...';
+    els.transcriptionShortcutCapture.focus();
+  });
+  els.transcriptionShortcutCapture.addEventListener('blur', () => {
+    state.capturingShortcut = false;
+    els.transcriptionShortcutCapture.classList.remove('is-capturing');
+    renderShortcutSettings();
+  });
+  els.transcriptionShortcutCapture.addEventListener('keydown', (event) => {
+    if (!state.capturingShortcut) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.key === 'Escape') {
+      state.capturingShortcut = false;
+      els.transcriptionShortcutCapture.classList.remove('is-capturing');
+      renderShortcutSettings();
+      return;
+    }
+    if (event.key === 'Backspace' || event.key === 'Delete') {
+      state.capturingShortcut = false;
+      els.transcriptionShortcutCapture.classList.remove('is-capturing');
+      void saveTranscriptionShortcut(null).catch((err) => showStatus(err?.message || 'Could not save shortcut.'));
+      return;
+    }
+    const next = shortcutBindingFromKeyboardEvent(event);
+    if (!next) return;
+    state.capturingShortcut = false;
+    els.transcriptionShortcutCapture.classList.remove('is-capturing');
+    void saveTranscriptionShortcut(next).catch((err) => showStatus(err?.message || 'Could not save shortcut.'));
+  });
+}
+if (els.transcriptionShortcutClear) {
+  els.transcriptionShortcutClear.addEventListener('click', () => {
+    void saveTranscriptionShortcut(null).catch((err) => showStatus(err?.message || 'Could not clear shortcut.'));
+  });
+}
+if (els.transcriptionShortcutReset) {
+  els.transcriptionShortcutReset.addEventListener('click', () => {
+    if (!desktop.resetTranscriptionShortcut) {
+      void saveTranscriptionShortcut(DEFAULT_TRANSCRIPTION_SHORTCUT).catch((err) => showStatus(err?.message || 'Could not reset shortcut.'));
+      return;
+    }
+    void desktop.resetTranscriptionShortcut()
+      .then((result) => {
+        if (result?.config) applyConfig(result.config);
+        state.shortcutStatus = result?.status || state.shortcutStatus;
+        renderShortcutSettings();
+      })
+      .catch((err) => showStatus(err?.message || 'Could not reset shortcut.'));
+  });
 }
 if (els.inputDeviceSelect) {
   els.inputDeviceSelect.addEventListener('change', () => {
@@ -2009,7 +2329,18 @@ document.addEventListener('click', (event) => {
   closeDeviceMenus();
 });
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') closeSettingsPanel();
+  if (event.key === 'Escape') {
+    closeSettingsPanel();
+    return;
+  }
+  if (event.repeat || state.capturingShortcut) return;
+  const target = event.target;
+  const editable = target instanceof HTMLElement &&
+    (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
+  if (editable) return;
+  if (!isShortcutMatch(state.config?.transcriptionShortcut, event)) return;
+  event.preventDefault();
+  void toggleTranscriptionShortcut().catch((err) => showStatus(err?.message || 'Could not toggle transcription.'));
 });
 if (navigator.mediaDevices?.addEventListener) {
   navigator.mediaDevices.addEventListener('devicechange', () => {
@@ -2027,6 +2358,19 @@ if (desktop.onWindowState) {
   desktop.onWindowState(applyWindowState);
 }
 
+if (desktop.onTranscriptionShortcut) {
+  desktop.onTranscriptionShortcut(() => {
+    void toggleTranscriptionShortcut().catch((err) => showStatus(err?.message || 'Could not toggle transcription.'));
+  });
+}
+
+if (desktop.onShortcutStatus) {
+  desktop.onShortcutStatus((status) => {
+    state.shortcutStatus = status;
+    renderShortcutSettings();
+  });
+}
+
 if (desktop.windowState) {
   desktop.windowState().then(applyWindowState).catch(() => applyWindowState({ compact: true }));
 }
@@ -2035,6 +2379,12 @@ desktop.readConfig().then((config) => {
   applyConfig(config);
   void refreshExtensionStatus();
   void refreshAudioDevicePickers();
+  if (desktop.shortcutStatus) {
+    void desktop.shortcutStatus().then((status) => {
+      state.shortcutStatus = status;
+      renderShortcutSettings();
+    }).catch(() => undefined);
+  }
   applyWindowState({ compact: state.compact });
   if (!config.deviceId || !config.deviceToken) {
     updateVoiceButtons();
