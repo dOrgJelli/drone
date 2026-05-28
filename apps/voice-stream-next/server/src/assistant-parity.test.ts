@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import path from 'node:path';
 
 import {
+  assistantProviderSessionId,
   assistantSnapshot,
   promptAssistantThread,
   resolveAssistantApproval,
@@ -40,6 +41,16 @@ describe('assistant parity runtime', () => {
     setAssistantExternalToolApprovalEvaluator(null);
     setAssistantExternalToolExecutor(null);
     globalThis.fetch = originalFetch;
+  });
+
+  test('uses provider session ids that fit prompt cache key limits', () => {
+    const sessionId = assistantProviderSessionId(
+      'usr_7685a53fc3a6461b9257b775ad0db9b6',
+      'thr_d25719c89846407d8888a0bce6dd1539',
+    );
+
+    expect(sessionId.length).toBeLessThanOrEqual(64);
+    expect(sessionId).not.toContain('thr_d25719c89846407d8888a0bce6dd1539');
   });
 
   test('writes assistant artifacts without approval', async () => {
@@ -160,6 +171,8 @@ describe('assistant parity runtime', () => {
     const result = JSON.parse(db.listToolCalls(user.id, thread.id)[0]!.resultJson || '{}');
     expect(result.args.text).toBe('hello extension');
     expect(result.targetKind).toBe('any_device');
+    const toolResult = db.listMessages(user.id, thread.id).find((message) => message.role === 'toolResult' && message.toolName === toolName);
+    expect(toolResult?.content).toContain('hello extension');
   });
 
   test('includes extension tools in provider instructions and timing logs', async () => {

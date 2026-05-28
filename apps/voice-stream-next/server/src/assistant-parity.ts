@@ -492,7 +492,7 @@ async function runModelDrivenTurn(
       tools: buildAgentTools(context),
       messages: messagesToAgentMessages(db, userId, threadId, agentModel),
     },
-    sessionId: `vsn-${userId}-${threadId}`,
+    sessionId: assistantProviderSessionId(userId, threadId),
     transport: modelConfig.provider === 'codex' ? 'sse' : 'auto',
     toolExecution: 'sequential',
     getApiKey: async (provider: string) => {
@@ -554,6 +554,25 @@ function makeAgentRunContext(input: Omit<AgentRunContext, 'toolCallsByModelId' |
     approvalPendingModelIds: new Set(),
     persistedToolResultModelIds: new Set(),
   };
+}
+
+export function assistantProviderSessionId(userId: string, threadId: string): string {
+  const userPart = userId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 16) || 'user';
+  const threadPart = threadId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 16) || 'thread';
+  return `vsn-${userPart}-${threadPart}-${shortStableHash(`${userId}:${threadId}`)}`;
+}
+
+function shortStableHash(value: string): string {
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let i = 0; i < value.length; i += 1) {
+    const ch = value.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return `${(h2 >>> 0).toString(36)}${(h1 >>> 0).toString(36)}`;
 }
 
 function resolveAgentModel(provider: string, modelId: string): Model<any> {
@@ -763,7 +782,7 @@ async function executeAgentTool(
     });
     context.db.updateToolCall(context.userId, toolCall.id, { status: 'completed', resultJson: JSON.stringify(result) });
     return {
-      content: [{ type: 'text', text: toolResultText(toolName, result) }],
+      content: [{ type: 'text', text: modelVisibleToolResultText(toolName, result) }],
       details: { localToolCallId: toolCall.id, result },
       terminate: context.approvalPendingModelIds.size > 0,
     };
@@ -1474,9 +1493,23 @@ function toolResultText(toolName: string, result: unknown): string {
   return 'Tool completed.';
 }
 
+function modelVisibleToolResultText(toolName: string, result: unknown): string {
+  const json = safeStringify(result);
+  if (!json) return toolResultText(toolName, result);
+  return `${toolResultText(toolName, result)}\n\nResult JSON:\n${json}`;
+}
+
 function approvedAssistantText(toolName: string, result: unknown): string {
   if (toolName === 'speak') return String((result as any)?.text ?? 'Spoken reply prepared.');
   return toolResultText(toolName, result);
+}
+
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value ?? '');
+  }
 }
 
 function cleanRecencyFilter(raw: unknown): 'day' | 'week' | 'month' | 'year' | undefined {

@@ -39,6 +39,7 @@ import {
 	formatThrownValue,
 } from "../utils/diagnostics.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
+import { shortHash } from "../utils/hash.js";
 import { headersToRecord } from "../utils/headers.js";
 import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.js";
 import { buildBaseOptions } from "./simple-options.js";
@@ -51,6 +52,7 @@ const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const JWT_CLAIM_PATH = "https://api.openai.com/auth" as const;
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
+const PROMPT_CACHE_KEY_MAX_LENGTH = 64;
 const CODEX_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 const WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE = 1009;
 
@@ -356,7 +358,7 @@ function buildRequestBody(
 		input: messages,
 		text: { verbosity: options?.textVerbosity || "low" },
 		include: ["reasoning.encrypted_content"],
-		prompt_cache_key: options?.sessionId,
+		prompt_cache_key: codexPromptCacheKey(options?.sessionId),
 		tool_choice: "auto",
 		parallel_tool_calls: true,
 	};
@@ -387,6 +389,12 @@ function buildRequestBody(
 	}
 
 	return body;
+}
+
+export function codexPromptCacheKey(sessionId: string | undefined): string | undefined {
+	if (!sessionId) return undefined;
+	if (sessionId.length <= PROMPT_CACHE_KEY_MAX_LENGTH) return sessionId;
+	return `sid-${shortHash(sessionId)}`;
 }
 
 function getServiceTierCostMultiplier(
