@@ -310,6 +310,23 @@ h2 {
   padding: 0 10px;
 }
 
+.icon-button {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  padding: 0;
+}
+
+.icon-button svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .status-account-block {
   display: grid;
   grid-template-columns: 12px minmax(170px, 250px) auto;
@@ -422,6 +439,44 @@ h2 {
   -webkit-app-region: no-drag;
 }
 
+.settings-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin-bottom: 12px;
+  padding: 3px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, .025);
+}
+
+.settings-tab {
+  min-height: 30px;
+  padding: 0 10px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.settings-tab:hover,
+.settings-tab.is-active {
+  border-color: var(--border);
+  background: var(--panel-raised);
+  color: var(--fg);
+  transform: none;
+}
+
+.settings-tab-panel {
+  display: none;
+}
+
+.settings-tab-panel.is-active {
+  display: block;
+}
+
 .settings-panel .voice-device-panel {
   width: 100%;
 }
@@ -493,6 +548,54 @@ h2 {
 }
 
 .extensions-status .error {
+  color: var(--red);
+}
+
+.shortcut-panel {
+  display: grid;
+  gap: 12px;
+  text-align: left;
+}
+
+.shortcut-help,
+.shortcut-status {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.shortcut-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.shortcut-capture {
+  min-width: 0;
+  min-height: 38px;
+  overflow: hidden;
+  border-color: var(--border);
+  background: #151a20;
+  color: var(--fg-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shortcut-capture.is-capturing {
+  border-color: var(--accent-muted);
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.shortcut-status.ok {
+  color: var(--green);
+}
+
+.shortcut-status.error {
   color: var(--red);
 }
 
