@@ -471,6 +471,7 @@ async function runModelDrivenTurn(
   const instructions = [
     thread.voiceEnabled ? settings.voiceSystemPrompt : settings.normalSystemPrompt,
     thread.systemPrompt ? `Thread system prompt:\n${thread.systemPrompt}` : '',
+    toolCatalogInstruction(db, userId, enabledTools),
     enabledTools.length > 0
       ? 'You may call the provided assistant tools when they help. Prefer tools for artifacts, spoken replies, web searches, fetched URL content, prompt reads/updates, and thread settings instead of describing those actions. Use web_search for current information, documentation, news, prices, or facts that may have changed. Use fetch_content when the user gives a direct URL to read, inspect, summarize, or analyze. Cite source URLs in the final answer.'
       : '',
@@ -676,6 +677,7 @@ async function streamCodexResponse(
     inputChars: input.input.length,
     instructionsChars: input.instructions.length,
     toolCount: input.tools.length,
+    toolNames: responseToolNames(input.tools),
   });
   const apiKey = await codexAccessToken(db, userId);
   const ai = await import('@mariozechner/pi-ai');
@@ -898,6 +900,7 @@ async function streamOpenAiResponse(input: {
     inputChars: input.input.length,
     instructionsChars: input.instructions.length,
     toolCount: input.tools.length,
+    toolNames: responseToolNames(input.tools),
   });
   const response = await fetch(OPENAI_RESPONSES_ENDPOINT, {
     method: 'POST',
@@ -1023,6 +1026,19 @@ function assistantContentJson(text: string, thinking: string): string | null {
   if (cleanThinking) parts.push({ type: 'thinking', thinking: cleanThinking });
   if (cleanText) parts.push({ type: 'text', text: cleanText });
   return parts.length > 0 ? JSON.stringify(parts) : null;
+}
+
+function responseToolNames(tools: unknown[]): string[] {
+  return tools.map((tool: any) => String(tool?.name ?? '').trim()).filter(Boolean);
+}
+
+function toolCatalogInstruction(db: VoiceStreamNextDb, userId: string, tools: unknown[]): string {
+  const names = new Set(responseToolNames(tools));
+  if (names.size === 0) return '';
+  const summaries = assistantAvailableToolSummaries(db, userId).filter((tool) => names.has(tool.name));
+  if (summaries.length === 0) return '';
+  const lines = summaries.map((tool) => `- ${tool.label} (${tool.name}): ${tool.description}`);
+  return ['Available assistant tools this turn:', ...lines].join('\n');
 }
 
 function responseToolDefinitions(db: VoiceStreamNextDb, userId: string, thread: AssistantThread): unknown[] {

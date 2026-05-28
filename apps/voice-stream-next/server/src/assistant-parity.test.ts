@@ -162,6 +162,61 @@ describe('assistant parity runtime', () => {
     expect(result.targetKind).toBe('any_device');
   });
 
+  test('includes extension tools in provider instructions and timing logs', async () => {
+    const db = tempDb('assistant-extension-tool-catalog');
+    dbs.push(db);
+    const user = testUser(db);
+    process.env.VOICE_STREAM_NEXT_SECRETS_KEY = 'test-secret';
+    db.upsertAssistantApiKey(user.id, 'openai', 'openai-test-key');
+    const manifest = db.upsertAssistantExtensionManifest(user.id, {
+      id: 'drone-hub',
+      name: 'Drone Hub',
+      version: '0.1.0',
+      tools: [{
+        name: 'list_drones',
+        label: 'List drones',
+        description: 'List local Drone Hub drones.',
+        inputSchema: {
+          type: 'object',
+          properties: {},
+          required: [],
+          additionalProperties: false,
+        },
+        approval: 'never',
+        supportedTargets: ['device', 'any_device'],
+        defaultTarget: 'any_device',
+      }],
+    });
+    const toolName = extensionToolName(manifest.extensionId, 'list_drones');
+    db.upsertAssistantExtensionToolRoute(user.id, { toolName, enabled: true, targetKind: 'any_device' });
+    const thread = db.createThread(user.id, {
+      title: 'Tool catalog',
+      provider: 'openai',
+      model: 'gpt-5.2',
+      enabledTools: [toolName],
+    });
+    let requestBody: any = null;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      requestBody = JSON.parse(String(init?.body ?? '{}'));
+      const body = [
+        'data: {"type":"response.output_text.delta","delta":"Ready."}',
+        'data: {"type":"response.completed","response":{"output_text":"Ready.","output":[]}}',
+        'data: [DONE]',
+        '',
+      ].join('\n\n');
+      return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    }) as any;
+
+    await promptAssistantThread(db, user.id, thread.id, { prompt: 'What tools do you have?' }, () => undefined);
+
+    expect(requestBody?.instructions).toContain('Available assistant tools this turn:');
+    expect(requestBody?.instructions).toContain('List drones');
+    expect(requestBody?.instructions).toContain(toolName);
+    expect(requestBody?.tools?.some((tool: any) => tool.name === toolName)).toBe(true);
+    const requestStartLog = db.listLogs(user.id, 20).find((log) => log.message === 'Assistant provider request_start');
+    expect(requestStartLog?.detailsJson).toContain(toolName);
+  });
+
   test('uses dynamic extension approval before pausing a tool call', async () => {
     const db = tempDb('assistant-extension-dynamic-approval');
     dbs.push(db);
