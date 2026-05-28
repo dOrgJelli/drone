@@ -48,9 +48,9 @@ Voice Stream Next should not import implementation code from `apps/voice-stream`
 ## Development
 
 ```bash
-bun run voice-stream-next
-bun run voice-stream-next:desktop
-bun run voice-stream-next:apk
+bun run vsn
+bun run vsn:desktop
+bun run vsn:apk
 ```
 
 The server defaults to `http://127.0.0.1:3299`, the web dashboard defaults to `http://127.0.0.1:5185`, and the Android emulator defaults to `http://10.0.2.2:3299`.

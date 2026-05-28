@@ -103,6 +103,12 @@ bun run drone -- --help
 # voice-stream server
 bun run voice-stream
 
+# Voice Stream Next backend + web dashboard
+bun run vsn
+
+# Voice Stream Next desktop client
+bun run vsn:desktop
+
 # voice-stream Android debug APK
 ANDROID_HOME=/path/to/android-sdk bun run voice-stream:apk
 

@@ -52,6 +52,7 @@ function runPackager() {
     '--overwrite',
     `--extra-resource=${modelPath}`,
     `--extra-resource=${vendorNodeModules}`,
+    '--icon=assets/app-icon.png',
     '--protocol=voicestream',
     '--protocol-name=VoiceStream',
     "--ignore=^/(android|docs|gradle|release|server|web|dist|\\.desktop-vendor)(/|$)",
@@ -68,6 +69,60 @@ function runPackager() {
   }
 }
 
+function latestPackagedDir() {
+  const releaseRoot = path.join(appDir, 'release', 'desktop');
+  const packagedDir = fs
+    .readdirSync(releaseRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith('VoiceStream-'))
+    .map((entry) => path.join(releaseRoot, entry.name))
+    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
+  if (!packagedDir) {
+    throw new Error(`No packaged desktop app was found in ${releaseRoot}`);
+  }
+  return packagedDir;
+}
+
+function writeLinuxDesktopInstaller() {
+  if (process.platform !== 'linux') return;
+  const packagedDir = latestPackagedDir();
+  const installerPath = path.join(packagedDir, 'install-linux-desktop-entry.sh');
+  const script = [
+    '#!/usr/bin/env sh',
+    'set -eu',
+    'APP_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)',
+    'DATA_HOME=${XDG_DATA_HOME:-"$HOME/.local/share"}',
+    'APPLICATIONS_DIR="$DATA_HOME/applications"',
+    'ICON_DIR_256="$DATA_HOME/icons/hicolor/256x256/apps"',
+    'ICON_DIR_512="$DATA_HOME/icons/hicolor/512x512/apps"',
+    'ICON_DIR_1024="$DATA_HOME/icons/hicolor/1024x1024/apps"',
+    'DESKTOP_FILE="$APPLICATIONS_DIR/voicestream.desktop"',
+    'mkdir -p "$APPLICATIONS_DIR" "$ICON_DIR_256" "$ICON_DIR_512" "$ICON_DIR_1024"',
+    'cp "$APP_DIR/resources/app/assets/app-icon-256.png" "$ICON_DIR_256/voicestream.png"',
+    'cp "$APP_DIR/resources/app/assets/app-icon-512.png" "$ICON_DIR_512/voicestream.png"',
+    'cp "$APP_DIR/resources/app/assets/app-icon.png" "$ICON_DIR_1024/voicestream.png"',
+    'rm -f "$APPLICATIONS_DIR/VoiceStream.desktop"',
+    'cat > "$DESKTOP_FILE" <<EOF',
+    '[Desktop Entry]',
+    'Name=VoiceStream',
+    'Comment=VoiceStream desktop voice client',
+    'Exec="$APP_DIR/VoiceStream" %U',
+    'Icon=$ICON_DIR_512/voicestream.png',
+    'Terminal=false',
+    'Type=Application',
+    'Categories=Utility;',
+    'StartupWMClass=VoiceStream',
+    'MimeType=x-scheme-handler/voicestream;',
+    'EOF',
+    'chmod +x "$DESKTOP_FILE"',
+    'command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$APPLICATIONS_DIR" >/dev/null 2>&1 || true',
+    'command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q "$DATA_HOME/icons/hicolor" >/dev/null 2>&1 || true',
+    'echo "Installed VoiceStream launcher at $DESKTOP_FILE"',
+    '',
+  ].join('\n');
+  fs.writeFileSync(installerPath, script);
+  fs.chmodSync(installerPath, 0o755);
+}
+
 function voiceStreamDataDir() {
   const configured = process.env.VOICE_STREAM_NEXT_DATA_DIR?.trim();
   return configured ? path.resolve(configured) : path.join(appDir, 'server', 'data');
@@ -78,15 +133,7 @@ function jsonString(value) {
 }
 
 function publishDesktopDownload() {
-  const releaseRoot = path.join(appDir, 'release', 'desktop');
-  const packagedDir = fs
-    .readdirSync(releaseRoot, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && entry.name.startsWith('VoiceStream-'))
-    .map((entry) => path.join(releaseRoot, entry.name))
-    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
-  if (!packagedDir) {
-    throw new Error(`No packaged desktop app was found in ${releaseRoot}`);
-  }
+  const packagedDir = latestPackagedDir();
 
   const outputDir = path.join(voiceStreamDataDir(), 'desktop');
   const variant = `${process.platform}-${process.arch}`;
@@ -127,6 +174,7 @@ fs.mkdirSync(vendorNodeModules, { recursive: true });
 try {
   copyRuntimePackage('vosk');
   runPackager();
+  writeLinuxDesktopInstaller();
   publishDesktopDownload();
 } finally {
   fs.rmSync(vendorDir, { recursive: true, force: true });

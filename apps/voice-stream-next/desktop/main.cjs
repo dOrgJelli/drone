@@ -4,9 +4,11 @@ const { randomUUID } = require('node:crypto');
 const fs = require('node:fs');
 const { createRequire } = require('node:module');
 const path = require('node:path');
-const zlib = require('node:zlib');
 
+const APP_NAME = 'VoiceStream';
+const LINUX_DESKTOP_FILE_NAME = 'voicestream.desktop';
 const PROTOCOL = 'voicestream';
+const APP_ICON_PATH = path.join(__dirname, '..', 'assets', 'app-icon.png');
 const pendingPairingPayloads = [];
 let mainWindow = null;
 let compactMode = true;
@@ -24,6 +26,13 @@ const extensionHost = {
   statuses: [],
   deactivators: [],
 };
+
+app.setName(APP_NAME);
+if (process.platform === 'linux') {
+  app.commandLine.appendSwitch('class', APP_NAME);
+  app.setDesktopName(LINUX_DESKTOP_FILE_NAME);
+}
+if (process.platform === 'win32') app.setAppUserModelId('com.huntelkator.voicestream');
 
 const fullWindow = {
   width: 1180,
@@ -1012,26 +1021,6 @@ function windowFromEvent(event) {
   return BrowserWindow.fromWebContents(event.sender) || mainWindow;
 }
 
-function crc32(buffer) {
-  let crc = 0xffffffff;
-  for (const byte of buffer) {
-    crc ^= byte;
-    for (let bit = 0; bit < 8; bit += 1) {
-      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
-    }
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
-function pngChunk(type, data) {
-  const typeBuffer = Buffer.from(type, 'ascii');
-  const length = Buffer.alloc(4);
-  const crc = Buffer.alloc(4);
-  length.writeUInt32BE(data.length, 0);
-  crc.writeUInt32BE(crc32(Buffer.concat([typeBuffer, data])), 0);
-  return Buffer.concat([length, typeBuffer, data, crc]);
-}
-
 function trayModeLabel(mode) {
   const labels = {
     off: 'Off',
@@ -1049,18 +1038,6 @@ function normalizeTrayMode(mode) {
   if (value === 'asleep' || value === 'sleep') return 'sleeping';
   if (['off', 'awake', 'sleeping', 'recording', 'transcribing', 'error'].includes(value)) return value;
   return 'off';
-}
-
-function trayModeColor(mode) {
-  const colors = {
-    off: [118, 124, 135],
-    awake: [36, 181, 116],
-    sleeping: [245, 158, 11],
-    recording: [239, 68, 68],
-    transcribing: [56, 137, 255],
-    error: [220, 38, 38],
-  };
-  return colors[normalizeTrayMode(mode)] || colors.off;
 }
 
 function trayStatusTooltip() {
@@ -1101,65 +1078,14 @@ function updateTrayStatus(mode, status) {
   return trayStatus;
 }
 
-function trayIconPngBuffer(mode = trayStatus.mode) {
-  const size = 32;
-  const raw = Buffer.alloc(size * (1 + size * 4));
-  const [baseR, baseG, baseB] = trayModeColor(mode);
-
-  function setPixel(x, y, r, g, b, a) {
-    const offset = y * (1 + size * 4) + 1 + x * 4;
-    raw[offset] = r;
-    raw[offset + 1] = g;
-    raw[offset + 2] = b;
-    raw[offset + 3] = a;
-  }
-
-  for (let y = 0; y < size; y += 1) {
-    raw[y * (1 + size * 4)] = 0;
-    for (let x = 0; x < size; x += 1) {
-      const dx = x + 0.5 - 16;
-      const dy = y + 0.5 - 16;
-      const distance = Math.sqrt(dx * dx + dy * dy);
-      if (distance <= 15) {
-        const alpha = distance < 14 ? 255 : Math.round((15 - distance) * 255);
-        setPixel(x, y, baseR, baseG, baseB, alpha);
-      }
-    }
-  }
-
-  for (let y = 8; y <= 18; y += 1) {
-    for (let x = 13; x <= 18; x += 1) {
-      const roundedTop = y < 11 && (x < 14 || x > 17);
-      const roundedBottom = y > 15 && (x < 14 || x > 17);
-      if (!roundedTop && !roundedBottom) setPixel(x, y, 255, 255, 255, 255);
-    }
-  }
-  for (let y = 19; y <= 23; y += 1) {
-    for (let x = 15; x <= 16; x += 1) setPixel(x, y, 255, 255, 255, 255);
-  }
-  for (let y = 24; y <= 25; y += 1) {
-    for (let x = 11; x <= 20; x += 1) setPixel(x, y, 255, 255, 255, 255);
-  }
-
-  const header = Buffer.alloc(13);
-  header.writeUInt32BE(size, 0);
-  header.writeUInt32BE(size, 4);
-  header[8] = 8;
-  header[9] = 6;
-  header[10] = 0;
-  header[11] = 0;
-  header[12] = 0;
-
-  return Buffer.concat([
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    pngChunk('IHDR', header),
-    pngChunk('IDAT', zlib.deflateSync(raw)),
-    pngChunk('IEND', Buffer.alloc(0)),
-  ]);
+function appIconImage(size) {
+  const image = nativeImage.createFromPath(APP_ICON_PATH);
+  if (image.isEmpty() || !size) return image;
+  return image.resize({ width: size, height: size, quality: 'best' });
 }
 
-function trayIconImage(mode = trayStatus.mode) {
-  const image = nativeImage.createFromBuffer(trayIconPngBuffer(mode));
+function trayIconImage() {
+  const image = appIconImage(process.platform === 'darwin' ? 18 : 32);
   if (process.platform === 'darwin') image.setTemplateImage(false);
   return image;
 }
@@ -1219,6 +1145,7 @@ function createWindow() {
     alwaysOnTop: false,
     skipTaskbar: false,
     show: false,
+    icon: APP_ICON_PATH,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -1342,6 +1269,7 @@ if (!gotSingleInstanceLock) {
   app.whenReady().then(() => {
     const launchPayload = extractPairingPayloadFromArgv(process.argv);
     if (launchPayload) queuePairingPayload(launchPayload);
+    if (process.platform === 'darwin') app.dock?.setIcon(appIconImage(256));
     ensureTray();
     createWindow();
     void startExtensionBridge();
