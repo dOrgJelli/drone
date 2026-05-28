@@ -209,9 +209,10 @@ describe('assistant parity runtime', () => {
 
     await promptAssistantThread(db, user.id, thread.id, { prompt: 'What tools do you have?' }, () => undefined);
 
-    expect(requestBody?.instructions).toContain('Available assistant tools this turn:');
-    expect(requestBody?.instructions).toContain('List drones');
-    expect(requestBody?.instructions).toContain(toolName);
+    const requestJson = JSON.stringify(requestBody);
+    expect(requestJson).toContain('Available assistant tools this turn:');
+    expect(requestJson).toContain('List drones');
+    expect(requestJson).toContain(toolName);
     expect(requestBody?.tools?.some((tool: any) => tool.name === toolName)).toBe(true);
     const requestStartLog = db.listLogs(user.id, 20).find((log) => log.message === 'Assistant provider request_start');
     expect(requestStartLog?.detailsJson).toContain(toolName);
@@ -485,6 +486,7 @@ describe('assistant parity runtime', () => {
     const assistantMessage = db.listMessages(user.id, thread.id).find((message) => message.role === 'assistant');
 
     expect(db.thread(user.id, thread.id)?.status).toBe('error');
+    expect(db.listMessages(user.id, thread.id).some((message) => message.role === 'user' && message.content === 'hello there')).toBe(true);
     expect(assistantMessage?.isError).toBe(true);
     expect(assistantMessage?.content).toContain('OpenAI API key is not configured');
     expect(events.some((event) => event.type === 'error')).toBe(true);
@@ -569,9 +571,13 @@ describe('assistant parity runtime', () => {
     ]);
 
     const waiting = await promptAssistantThread(db, user.id, thread.id, { prompt: 'Patch the notes and prompt.' }, () => undefined);
+    const messagesBeforeApproval = db.listMessages(user.id, thread.id);
 
     expect(db.readArtifact(user.id, thread.id, 'notes/patch.md')?.content).toBe('alpha delta gamma');
     expect(waiting.pendingApprovals).toHaveLength(1);
+    expect(db.thread(user.id, thread.id)?.status).toBe('waiting_for_approval');
+    expect(messagesBeforeApproval.at(-1)?.role).not.toBe('assistant');
+    expect(messagesBeforeApproval.some((message) => message.role === 'assistant' && message.content === 'Done.')).toBe(false);
     await resolveAssistantApproval(db, user.id, waiting.pendingApprovals[0]!.id, true, 'test');
     expect(db.thread(user.id, thread.id)?.systemPrompt).toBe('Keep answers short and direct.');
   });

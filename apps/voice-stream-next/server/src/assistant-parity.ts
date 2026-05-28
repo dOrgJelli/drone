@@ -1,4 +1,22 @@
 import {
+  Agent,
+  type AgentEvent,
+  type AgentMessage,
+  type AgentTool,
+  type AgentToolResult,
+} from '@mariozechner/pi-agent-core';
+import {
+  fauxAssistantMessage,
+  fauxToolCall,
+  getModel,
+  registerFauxProvider,
+  type AssistantMessage as PiAssistantMessage,
+  type Model,
+  type TextContent,
+  type ToolCall,
+  type ToolResultMessage,
+} from '@mariozechner/pi-ai';
+import {
   type AssistantApiKeyView,
   type AssistantApprovalRecord,
   type AssistantMessage,
@@ -139,7 +157,6 @@ const MODEL_OPTIONS: AssistantModelOption[] = [
 ];
 
 const ARTIFACT_MAX_BYTES = 256 * 1024;
-const OPENAI_RESPONSES_ENDPOINT = 'https://api.openai.com/v1/responses';
 const MODEL_TOOL_TEST_ENV = 'VOICE_STREAM_NEXT_TEST_MODEL_TOOL_CALLS';
 
 type ModelToolCall = {
@@ -149,19 +166,6 @@ type ModelToolCall = {
   argumentsJson: string;
 };
 
-type ModelToolResult = {
-  call: ModelToolCall;
-  result: unknown;
-  toolName: string;
-};
-
-type OpenAiStreamResult = {
-  text: string;
-  thinking: string;
-  toolCalls: ModelToolCall[];
-};
-
-type CodexStreamResult = OpenAiStreamResult;
 type ProviderTimingLogger = (phase: string, details?: Record<string, unknown>, level?: 'info' | 'warn' | 'error') => void;
 
 export type AssistantExternalToolExecution = {
@@ -288,13 +292,12 @@ export async function promptAssistantThread(
       return snapshot;
     }
   }
-  const userMessage = db.addMessage(userId, threadId, { role: 'user', content: prompt });
-  emit({ type: 'message', message: userMessage });
-  const run = db.createRun(userId, threadId, { prompt, provider, model, thinkingLevel });
-  emit({ type: 'snapshot', snapshot: assistantSnapshot(db, userId, threadId) });
-
   const command = parseAssistantCommand(prompt);
   if (command) {
+    const userMessage = db.addMessage(userId, threadId, { role: 'user', content: prompt });
+    emit({ type: 'message', message: userMessage });
+    const run = db.createRun(userId, threadId, { prompt, provider, model, thinkingLevel });
+    emit({ type: 'snapshot', snapshot: assistantSnapshot(db, userId, threadId) });
     const result = await executeCommand(db, userId, threadId, run, thread, command, emit);
     if (options.drainQueue !== false) {
       await drainQueuedPrompts(db, userId, threadId, emit);
@@ -303,8 +306,13 @@ export async function promptAssistantThread(
     return result;
   }
 
+  const userMessage = db.addMessage(userId, threadId, { role: 'user', content: prompt });
+  emit({ type: 'message', message: userMessage });
+  const run = db.createRun(userId, threadId, { prompt, provider, model, thinkingLevel });
+  emit({ type: 'snapshot', snapshot: assistantSnapshot(db, userId, threadId) });
+
   try {
-    await runModelDrivenTurn(db, userId, threadId, run, thread, { provider, model, thinkingLevel }, emit);
+    await runModelDrivenTurn(db, userId, threadId, run, thread, { provider, model, thinkingLevel }, emit, { continueFromTranscript: true });
   } catch (error: any) {
     const message = error?.message ?? String(error);
     failRun(db, userId, threadId, run.id, message);
@@ -399,61 +407,38 @@ export async function resolveAssistantApproval(
     content: toolResultText(pending.toolName, result),
     contentJson: JSON.stringify(result),
   });
-  const continuation = await approvalContinuationText(db, userId, pending, thread, result);
-  db.addMessage(userId, pending.threadId, {
-    role: 'assistant',
-    content: continuation,
-    spokenText: thread.voiceEnabled && pending.toolName === 'speak' ? String((result as any).text ?? continuation) : null,
-  });
-  if (pending.runId) finishRun(db, userId, pending.threadId, pending.runId);
+  if (pending.runId && approvalHasModelToolCall(db, userId, pending.threadId, pending.toolCallId)) {
+    const run = db.updateRun(userId, pending.runId, { status: 'running', error: null });
+    db.updateThread(userId, pending.threadId, { status: 'running', error: null });
+    if (run) {
+      try {
+        const latestThread = db.thread(userId, pending.threadId) ?? thread;
+        await runModelDrivenTurn(db, userId, pending.threadId, run, thread, {
+          provider: run.provider,
+          model: run.model,
+          thinkingLevel: run.thinkingLevel,
+        }, () => undefined, { continueFromTranscript: true, approvalContinuation: true, thread: latestThread });
+      } catch (error: any) {
+        const message = error?.message ?? String(error);
+        failRun(db, userId, pending.threadId, pending.runId, message);
+        db.addMessage(userId, pending.threadId, {
+          role: 'assistant',
+          content: `Assistant run failed: ${message}`,
+          isError: true,
+        });
+      }
+    }
+  } else {
+    const continuation = approvedAssistantText(pending.toolName, result);
+    db.addMessage(userId, pending.threadId, {
+      role: 'assistant',
+      content: continuation,
+      spokenText: thread.voiceEnabled && pending.toolName === 'speak' ? String((result as any).text ?? continuation) : null,
+    });
+    if (pending.runId) finishRun(db, userId, pending.threadId, pending.runId);
+  }
   await drainQueuedPrompts(db, userId, pending.threadId, () => undefined);
   return assistantSnapshot(db, userId, pending.threadId);
-}
-
-async function approvalContinuationText(
-  db: VoiceStreamNextDb,
-  userId: string,
-  approval: AssistantApprovalRecord,
-  thread: AssistantThread,
-  result: unknown,
-): Promise<string> {
-  const fallback = approvedAssistantText(approval.toolName, result);
-  const run = approval.runId ? db.listRuns(userId, approval.threadId, 20).find((item) => item.id === approval.runId) : null;
-  const provider = run?.provider ?? thread.provider;
-  const apiKey = provider === 'openai' ? db.assistantApiKey(userId, 'openai') : null;
-  if (provider !== 'openai' || !apiKey) return fallback;
-
-  try {
-    const settings = db.ensureAssistantSettings(userId);
-    const messages = db.listMessages(userId, approval.threadId);
-    const instructions = [
-      thread.voiceEnabled ? settings.voiceSystemPrompt : settings.normalSystemPrompt,
-      thread.systemPrompt ? `Thread system prompt:\n${thread.systemPrompt}` : '',
-    ].filter(Boolean).join('\n\n');
-    const inputText = renderConversation(messages);
-    const followup = renderToolFollowup(inputText, [{
-      call: {
-        id: approval.toolCallId,
-        callId: approval.toolCallId,
-        name: approval.toolName,
-        argumentsJson: approval.argsJson || '{}',
-      },
-      result,
-      toolName: approval.toolName,
-    }]);
-    const final = await streamOpenAiResponse({
-      model: run?.model ?? thread.model,
-      thinkingLevel: run?.thinkingLevel ?? thread.thinkingLevel,
-      instructions,
-      input: followup,
-      tools: [],
-      emit: () => undefined,
-      apiKey,
-    });
-    return final.text.trim() || fallback;
-  } catch {
-    return fallback;
-  }
 }
 
 async function runModelDrivenTurn(
@@ -464,164 +449,449 @@ async function runModelDrivenTurn(
   thread: AssistantThread,
   modelConfig: { provider: string; model: string; thinkingLevel: string },
   emit: (event: PromptEvent) => void,
+  options: { continueFromTranscript?: boolean; approvalContinuation?: boolean; thread?: AssistantThread } = {},
 ): Promise<void> {
+  thread = options.thread ?? db.thread(userId, threadId) ?? thread;
   const settings = db.ensureAssistantSettings(userId);
-  const messages = db.listMessages(userId, threadId);
   const enabledTools = responseToolDefinitions(db, userId, thread);
-  const instructions = [
-    thread.voiceEnabled ? settings.voiceSystemPrompt : settings.normalSystemPrompt,
-    thread.systemPrompt ? `Thread system prompt:\n${thread.systemPrompt}` : '',
-    toolCatalogInstruction(db, userId, enabledTools),
-    enabledTools.length > 0
-      ? 'You may call the provided assistant tools when they help. Prefer tools for artifacts, spoken replies, web searches, fetched URL content, prompt reads/updates, and thread settings instead of describing those actions. Use web_search for current information, documentation, news, prices, or facts that may have changed. Use fetch_content when the user gives a direct URL to read, inspect, summarize, or analyze. Cite source URLs in the final answer.'
-      : '',
-  ].filter(Boolean).join('\n\n');
-  const inputText = renderConversation(messages);
+  const toolInstruction = toolCatalogInstruction(db, userId, enabledTools);
+  const instructions = modelInstructions({ settings, thread, toolInstruction, allowToolCalls: enabledTools.length > 0 });
   const testCalls = testModelToolCalls();
+  const usingTestModel = testCalls.length > 0;
 
-  if (testCalls.length > 0) {
-    const completed = await executeModelToolCalls(db, userId, threadId, run, thread, testCalls, emit);
-    if (!completed) return;
-    const finalText = completed.map((item) => approvedAssistantText(item.toolName, item.result)).join('\n') || 'Done.';
-    const assistantMessage = db.addMessage(userId, threadId, {
-      role: 'assistant',
-      content: finalText,
-      contentJson: assistantContentJson(finalText, ''),
-      spokenText: null,
+  if (modelConfig.provider === 'openai' && !usingTestModel && !db.assistantApiKey(userId, 'openai')) {
+    throw new Error('OpenAI API key is not configured. Add your OpenAI key in assistant settings or connect Codex.');
+  }
+
+  const faux = usingTestModel ? registerFauxProvider({ tokensPerSecond: 0 }) : null;
+  if (faux) {
+    faux.setResponses(options.approvalContinuation
+      ? [testFinalAssistantResponse]
+      : [
+          fauxAssistantMessage(
+            testCalls.map((call) => fauxToolCall(call.name, safeJson(call.argumentsJson) as Record<string, any>, { id: call.callId ?? call.id ?? crypto.randomUUID() })),
+            { stopReason: 'toolUse' },
+          ),
+          testFinalAssistantResponse,
+        ]);
+  }
+
+  const agentModel = faux?.getModel() ?? resolveAgentModel(modelConfig.provider, modelConfig.model);
+  const timing = createProviderTimingLogger(db, userId, threadId, run, {
+    provider: modelConfig.provider,
+    model: modelConfig.model,
+    thinkingLevel: modelConfig.thinkingLevel,
+    requestKind: 'agent',
+  });
+  const context = makeAgentRunContext({ db, userId, threadId, run, thread, emit });
+  const agent = new Agent({
+    initialState: {
+      systemPrompt: instructions,
+      model: agentModel,
+      thinkingLevel: cleanThinkingLevel(modelConfig.thinkingLevel) as any,
+      tools: buildAgentTools(context),
+      messages: messagesToAgentMessages(db, userId, threadId, agentModel),
+    },
+    sessionId: `vsn-${userId}-${threadId}`,
+    transport: modelConfig.provider === 'codex' ? 'sse' : 'auto',
+    toolExecution: 'sequential',
+    getApiKey: async (provider: string) => {
+      if (provider === 'openai-codex') return codexAccessToken(db, userId);
+      if (provider === 'openai') return db.assistantApiKey(userId, 'openai') ?? undefined;
+      return undefined;
+    },
+    onPayload: async (payload, model) => {
+      timing('request_start', {
+        api: model.api,
+        provider: model.provider,
+        payloadChars: JSON.stringify(payload ?? {}).length,
+        toolNames: responseToolNames((payload as any)?.tools ?? []),
+      });
+      return undefined;
+    },
+    onResponse: async (response) => {
+      timing('response_headers', { status: response.status });
+    },
+  });
+
+  agent.subscribe(async (event) => {
+    await persistAgentEvent(context, event);
+  });
+
+  try {
+    if (options.continueFromTranscript) await agent.continue();
+    else await agent.prompt(modelPromptTextFromRun(run));
+  } finally {
+    faux?.unregister();
+  }
+
+  if (agent.state.errorMessage) throw new Error(agent.state.errorMessage);
+
+  if (db.listApprovals(userId, threadId).some((approval) => approval.runId === run.id && approval.status === 'pending')) {
+    db.updateThread(userId, threadId, { status: 'waiting_for_approval', error: null });
+    db.updateRun(userId, run.id, { status: 'waiting_for_approval', error: null });
+    return;
+  }
+  finishRun(db, userId, threadId, run.id);
+}
+
+type AgentRunContext = {
+  db: VoiceStreamNextDb;
+  userId: string;
+  threadId: string;
+  run: AssistantRunRecord;
+  thread: AssistantThread;
+  emit: (event: PromptEvent) => void;
+  toolCallsByModelId: Map<string, AssistantToolCallRecord>;
+  approvalPendingModelIds: Set<string>;
+  persistedToolResultModelIds: Set<string>;
+};
+
+function makeAgentRunContext(input: Omit<AgentRunContext, 'toolCallsByModelId' | 'approvalPendingModelIds' | 'persistedToolResultModelIds'>): AgentRunContext {
+  return {
+    ...input,
+    toolCallsByModelId: new Map(),
+    approvalPendingModelIds: new Set(),
+    persistedToolResultModelIds: new Set(),
+  };
+}
+
+function resolveAgentModel(provider: string, modelId: string): Model<any> {
+  const piProvider = provider === 'codex' ? 'openai-codex' : provider;
+  const model = getModel(piProvider as any, modelId as any) ?? getModel(piProvider as any, 'gpt-5.5' as any);
+  if (!model) throw new Error(`Unknown assistant model: ${provider}/${modelId}`);
+  return model;
+}
+
+function modelPromptTextFromRun(run: AssistantRunRecord): string {
+  return String(run.prompt ?? '').trim();
+}
+
+function testFinalAssistantResponse(context: any): PiAssistantMessage {
+  const messages = Array.isArray(context?.messages) ? context.messages as AgentMessage[] : [];
+  const results = messages
+    .filter((message: AgentMessage): message is ToolResultMessage => message.role === 'toolResult')
+    .slice(-8)
+    .map((message: ToolResultMessage) => message.content.filter((part): part is TextContent => part.type === 'text').map((part: TextContent) => part.text).join('\n').trim())
+    .filter(Boolean);
+  return fauxAssistantMessage(results.join('\n') || 'Done.');
+}
+
+function messagesToAgentMessages(db: VoiceStreamNextDb, userId: string, threadId: string, model: Model<any>): AgentMessage[] {
+  const messages = db.listMessages(userId, threadId);
+  return messages.flatMap((message): AgentMessage[] => {
+    if (message.role === 'user') {
+      return [{
+        role: 'user',
+        content: [{ type: 'text', text: message.content }],
+        timestamp: Date.parse(message.createdAt) || Date.now(),
+      }];
+    }
+    if (message.role === 'assistant') {
+      const content = assistantMessageContentFromDb(message);
+      if (content.length === 0) return [];
+      return [{
+        role: 'assistant',
+        content,
+        api: model.api,
+        provider: model.provider,
+        model: model.id,
+        usage: emptyUsage(),
+        stopReason: content.some((part) => part.type === 'toolCall') ? 'toolUse' : 'stop',
+        timestamp: Date.parse(message.createdAt) || Date.now(),
+      }];
+    }
+    if (message.role === 'toolResult') {
+      const modelToolCallId = modelToolCallIdForLocalToolCall(db, userId, threadId, message.toolCallId ?? '') ?? message.toolCallId ?? '';
+      if (!modelToolCallId) return [];
+      return [{
+        role: 'toolResult',
+        toolCallId: modelToolCallId,
+        toolName: message.toolName ?? 'tool',
+        content: [{ type: 'text', text: message.content }],
+        details: safeJson(message.contentJson),
+        isError: message.isError,
+        timestamp: Date.parse(message.createdAt) || Date.now(),
+      }];
+    }
+    return [];
+  });
+}
+
+function assistantMessageContentFromDb(message: AssistantMessage): PiAssistantMessage['content'] {
+  const parsed = safeJson(message.contentJson);
+  if (Array.isArray(parsed)) {
+    return parsed.flatMap((part): PiAssistantMessage['content'] => {
+      if (!part || typeof part !== 'object') return [];
+      const type = String((part as any).type ?? '');
+      if (type === 'text') return [{ type: 'text', text: String((part as any).text ?? '') }];
+      if (type === 'thinking') return [{ type: 'thinking', thinking: String((part as any).thinking ?? '') }];
+      if (type === 'modelToolCall' || type === 'toolCall') {
+        return [{
+          type: 'toolCall',
+          id: String((part as any).modelCallId ?? (part as any).id ?? ''),
+          name: String((part as any).name ?? ''),
+          arguments: ((part as any).arguments && typeof (part as any).arguments === 'object') ? (part as any).arguments : {},
+        }];
+      }
+      return [];
     });
-    emit({ type: 'message', message: assistantMessage });
-    finishRun(db, userId, threadId, run.id);
+  }
+  return message.content ? [{ type: 'text', text: message.content }] : [];
+}
+
+function modelToolCallIdForLocalToolCall(db: VoiceStreamNextDb, userId: string, threadId: string, localToolCallId: string): string | null {
+  if (!localToolCallId) return null;
+  for (const message of db.listMessages(userId, threadId)) {
+    if (message.role !== 'assistant') continue;
+    const parsed = safeJson(message.contentJson);
+    if (!Array.isArray(parsed)) continue;
+    for (const part of parsed) {
+      if (!part || typeof part !== 'object') continue;
+      const value = part as any;
+      if ((value.type === 'modelToolCall' || value.type === 'toolCall') && String(value.id ?? '') === localToolCallId) {
+        return String(value.modelCallId ?? value.id ?? '');
+      }
+    }
+  }
+  return null;
+}
+
+function approvalHasModelToolCall(db: VoiceStreamNextDb, userId: string, threadId: string, localToolCallId: string): boolean {
+  if (!localToolCallId) return false;
+  for (const message of db.listMessages(userId, threadId)) {
+    if (message.role !== 'assistant') continue;
+    const parsed = safeJson(message.contentJson);
+    if (!Array.isArray(parsed)) continue;
+    if (parsed.some((part) => part && typeof part === 'object' && (part as any).type === 'modelToolCall' && String((part as any).id ?? '') === localToolCallId)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function emptyUsage() {
+  return {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+}
+
+function buildAgentTools(context: AgentRunContext): AgentTool<any>[] {
+  return responseToolDefinitions(context.db, context.userId, context.thread).map((definition: any) => {
+    const name = String(definition?.name ?? '');
+    return {
+      name,
+      label: toolLabel(name, context.db, context.userId),
+      description: String(definition?.description ?? `${name} tool`),
+      parameters: definition?.parameters ?? { type: 'object', properties: {}, required: [], additionalProperties: false },
+      prepareArguments: (args: unknown) => prepareAgentToolArguments(name, args),
+      executionMode: 'sequential',
+      execute: async (toolCallId: string, params: any) => executeAgentTool(context, toolCallId, name, params),
+    };
+  });
+}
+
+function prepareAgentToolArguments(toolName: string, args: unknown): Record<string, any> {
+  const value = args && typeof args === 'object' ? { ...(args as Record<string, any>) } : {};
+  if (toolName === 'assistant_artifacts') {
+    return {
+      action: String(value.action ?? 'read'),
+      path: String(value.path ?? ''),
+      content: String(value.content ?? ''),
+      oldText: String(value.oldText ?? ''),
+      newText: String(value.newText ?? ''),
+      baseRevision: String(value.baseRevision ?? ''),
+    };
+  }
+  if (toolName === 'update_system_prompt') {
+    return {
+      prompt: String(value.prompt ?? ''),
+      oldText: String(value.oldText ?? ''),
+      newText: String(value.newText ?? ''),
+    };
+  }
+  if (toolName === 'set_thinking_level') return { thinkingLevel: String(value.thinkingLevel ?? value.level ?? 'off') };
+  if (toolName === 'web_search') {
+    return {
+      query: String(value.query ?? ''),
+      numResults: value.numResults == null || value.numResults === '' ? 5 : Number(value.numResults),
+      recencyFilter: String(value.recencyFilter ?? ''),
+      domainFilter: Array.isArray(value.domainFilter) ? value.domainFilter : [],
+    };
+  }
+  if (toolName === 'fetch_content') {
+    return {
+      url: String(value.url ?? ''),
+      maxCharacters: value.maxCharacters == null || value.maxCharacters === '' ? 12000 : Number(value.maxCharacters),
+      livecrawl: String(value.livecrawl ?? ''),
+    };
+  }
+  if (toolName === 'speak') return { text: String(value.text ?? '') };
+  return value;
+}
+
+async function executeAgentTool(
+  context: AgentRunContext,
+  modelToolCallId: string,
+  toolName: string,
+  params: unknown,
+): Promise<AgentToolResult<any>> {
+  const toolCall = context.toolCallsByModelId.get(modelToolCallId) ?? await createAgentToolCallRecord(context, {
+    id: modelToolCallId,
+    name: toolName,
+    arguments: params && typeof params === 'object' ? params as Record<string, any> : {},
+  });
+
+  if (context.approvalPendingModelIds.has(modelToolCallId) || toolCall.status === 'waiting_for_approval') {
+    return {
+      content: [{ type: 'text', text: `${toolLabel(toolName, context.db, context.userId)} is waiting for approval.` }],
+      details: { approvalPending: true, localToolCallId: toolCall.id },
+      terminate: true,
+    };
+  }
+
+  try {
+    const latestThread = context.db.thread(context.userId, context.threadId) ?? context.thread;
+    const result = await executeApprovedTool(context.db, context.userId, latestThread, toolName, params, {
+      runId: context.run.id,
+      toolCallId: toolCall.id,
+    });
+    context.db.updateToolCall(context.userId, toolCall.id, { status: 'completed', resultJson: JSON.stringify(result) });
+    return {
+      content: [{ type: 'text', text: toolResultText(toolName, result) }],
+      details: { localToolCallId: toolCall.id, result },
+      terminate: context.approvalPendingModelIds.size > 0,
+    };
+  } catch (error: any) {
+    const failure = { ok: false, error: error?.message ?? String(error) };
+    context.db.updateToolCall(context.userId, toolCall.id, { status: 'failed', resultJson: JSON.stringify(failure) });
+    throw error;
+  }
+}
+
+async function createAgentToolCallRecord(context: AgentRunContext, call: Pick<ToolCall, 'id' | 'name' | 'arguments'>): Promise<AssistantToolCallRecord> {
+  const toolName = normalizeModelToolName(call.name);
+  ensureToolEnabled(context.thread, toolName);
+  ensureCapability(context.thread, toolName);
+  const args = call.arguments ?? {};
+  const needsApproval = await approvalRequiredFor(context.db, context.userId, context.thread, toolName, args);
+  const toolCall = context.db.createToolCall(context.userId, context.threadId, {
+    runId: context.run.id,
+    toolName,
+    args,
+    approvalRequired: needsApproval,
+  });
+  context.toolCallsByModelId.set(call.id, toolCall);
+  context.emit({ type: 'tool_call', toolCall, modelCallId: call.id, args });
+
+  if (needsApproval) {
+    context.approvalPendingModelIds.add(call.id);
+    const approval = context.db.createApproval(context.userId, context.threadId, {
+      runId: context.run.id,
+      toolCallId: toolCall.id,
+      toolName,
+      label: toolLabel(toolName, context.db, context.userId),
+      args,
+    });
+    context.emit({ type: 'approval_pending', approval: approvalView(approval), snapshot: assistantSnapshot(context.db, context.userId, context.threadId) });
+  }
+
+  return toolCall;
+}
+
+async function persistAgentEvent(context: AgentRunContext, event: AgentEvent): Promise<void> {
+  if (event.type === 'message_update') {
+    const messageEvent = event.assistantMessageEvent as any;
+    if (messageEvent.type === 'text_delta' && messageEvent.delta) context.emit({ type: 'delta', delta: String(messageEvent.delta) });
+    if (messageEvent.type === 'thinking_delta' && messageEvent.delta) context.emit({ type: 'thinking_delta', delta: String(messageEvent.delta) });
     return;
   }
 
-  const openAiKey = modelConfig.provider === 'openai' ? db.assistantApiKey(userId, 'openai') : null;
-  if (modelConfig.provider === 'openai' && !openAiKey) throw new Error('OpenAI API key is not configured. Add your OpenAI key in assistant settings or connect Codex.');
-
-  if (modelConfig.provider === 'openai') {
-    const initialTiming = createProviderTimingLogger(db, userId, threadId, run, {
-      provider: 'openai',
-      model: modelConfig.model,
-      thinkingLevel: modelConfig.thinkingLevel,
-      requestKind: 'initial',
+  if (event.type !== 'message_end') return;
+  const message = event.message;
+  if (message.role === 'user') {
+    const dbMessage = context.db.addMessage(context.userId, context.threadId, {
+      role: 'user',
+      content: textFromAgentUserMessage(message),
     });
-    const first = await streamOpenAiResponse({
-      model: modelConfig.model,
-      thinkingLevel: modelConfig.thinkingLevel,
-      instructions,
-      input: inputText,
-      tools: enabledTools,
-      emit,
-      logTiming: initialTiming,
-      apiKey: openAiKey ?? '',
-    });
-    if (first.toolCalls.length > 0) {
-      const completed = await executeModelToolCalls(db, userId, threadId, run, thread, first.toolCalls, emit);
-      if (!completed) return;
-      const followup = renderToolFollowup(inputText, completed);
-      const followupTiming = createProviderTimingLogger(db, userId, threadId, run, {
-        provider: 'openai',
-        model: modelConfig.model,
-        thinkingLevel: modelConfig.thinkingLevel,
-        requestKind: 'followup',
-      });
-      const final = await streamOpenAiResponse({
-        model: modelConfig.model,
-        thinkingLevel: modelConfig.thinkingLevel,
-        instructions,
-        input: followup,
-        tools: [],
-        emit,
-        logTiming: followupTiming,
-        apiKey: openAiKey ?? '',
-      });
-      const finalText = final.text.trim() || completed.map((item) => approvedAssistantText(item.toolName, item.result)).join('\n') || 'Done.';
-      const assistantMessage = db.addMessage(userId, threadId, {
-        role: 'assistant',
-        content: finalText,
-        contentJson: assistantContentJson(finalText, final.thinking),
-        spokenText: null,
-      });
-      emit({ type: 'message', message: assistantMessage });
-      finishRun(db, userId, threadId, run.id);
-      return;
-    }
-    const replyText = first.text.trim();
-    if (replyText) {
-      const assistantMessage = db.addMessage(userId, threadId, {
-        role: 'assistant',
-        content: replyText,
-        contentJson: assistantContentJson(replyText, first.thinking),
-        spokenText: null,
-      });
-      emit({ type: 'message', message: assistantMessage });
-      finishRun(db, userId, threadId, run.id);
-      return;
-    }
-    throw new Error('OpenAI completed without text or tool calls.');
+    context.emit({ type: 'message', message: dbMessage });
+    return;
   }
 
-  if (modelConfig.provider === 'codex') {
-    const initialTiming = createProviderTimingLogger(db, userId, threadId, run, {
-      provider: 'codex',
-      model: modelConfig.model,
-      thinkingLevel: modelConfig.thinkingLevel,
-      requestKind: 'initial',
-    });
-    const first = await streamCodexResponse(db, userId, {
-      model: modelConfig.model,
-      thinkingLevel: modelConfig.thinkingLevel,
-      instructions,
-      input: inputText,
-      tools: enabledTools,
-      emit,
-      logTiming: initialTiming,
-    });
-    if (first.toolCalls.length > 0) {
-      const completed = await executeModelToolCalls(db, userId, threadId, run, thread, first.toolCalls, emit);
-      if (!completed) return;
-      const followup = renderToolFollowup(inputText, completed);
-      const followupTiming = createProviderTimingLogger(db, userId, threadId, run, {
-        provider: 'codex',
-        model: modelConfig.model,
-        thinkingLevel: modelConfig.thinkingLevel,
-        requestKind: 'followup',
-      });
-      const final = await streamCodexResponse(db, userId, {
-        model: modelConfig.model,
-        thinkingLevel: modelConfig.thinkingLevel,
-        instructions,
-        input: followup,
-        tools: [],
-        emit,
-        logTiming: followupTiming,
-      });
-      const finalText = final.text.trim() || completed.map((item) => approvedAssistantText(item.toolName, item.result)).join('\n') || 'Done.';
-      const assistantMessage = db.addMessage(userId, threadId, {
-        role: 'assistant',
-        content: finalText,
-        contentJson: assistantContentJson(finalText, final.thinking),
-        spokenText: null,
-      });
-      emit({ type: 'message', message: assistantMessage });
-      finishRun(db, userId, threadId, run.id);
-      return;
+  if (message.role === 'assistant') {
+    const toolCalls = message.content.filter((part): part is ToolCall => part.type === 'toolCall');
+    for (const call of toolCalls) {
+      if (!context.toolCallsByModelId.has(call.id)) await createAgentToolCallRecord(context, call);
     }
-    const replyText = first.text.trim();
-    if (replyText) {
-      const assistantMessage = db.addMessage(userId, threadId, {
-        role: 'assistant',
-        content: replyText,
-        contentJson: assistantContentJson(replyText, first.thinking),
-        spokenText: null,
-      });
-      emit({ type: 'message', message: assistantMessage });
-      finishRun(db, userId, threadId, run.id);
-      return;
-    }
-    throw new Error('Codex completed without text or tool calls.');
+    const contentJson = assistantContentJsonFromAgentMessage(message, context);
+    const text = textFromAgentAssistantMessage(message) ||
+      (message.errorMessage ? String(message.errorMessage) : '') ||
+      (toolCalls.length > 0 ? `Requested ${toolCalls.map((call) => toolLabel(call.name, context.db, context.userId)).join(', ')}.` : '');
+    const dbMessage = context.db.addMessage(context.userId, context.threadId, {
+      role: 'assistant',
+      content: text,
+      contentJson,
+      isError: Boolean(message.errorMessage),
+      spokenText: context.thread.voiceEnabled ? text : null,
+    });
+    context.emit({ type: 'message', message: dbMessage });
+    return;
   }
 
-  throw new Error(`Unsupported assistant provider: ${modelConfig.provider}`);
+  if (message.role === 'toolResult') {
+    if ((message.details as any)?.approvalPending) return;
+    if (context.persistedToolResultModelIds.has(message.toolCallId)) return;
+    context.persistedToolResultModelIds.add(message.toolCallId);
+    const toolCall = context.toolCallsByModelId.get(message.toolCallId);
+    const result = (message.details as any)?.result ?? message.details ?? {};
+    const content = message.content.filter((part): part is TextContent => part.type === 'text').map((part) => part.text).join('\n');
+    const dbMessage = context.db.addMessage(context.userId, context.threadId, {
+      role: 'toolResult',
+      toolName: message.toolName,
+      toolCallId: toolCall?.id ?? message.toolCallId,
+      isError: message.isError,
+      content,
+      contentJson: JSON.stringify(result),
+    });
+    context.emit({ type: 'message', message: dbMessage });
+    if (toolCall) {
+      const updatedToolCall = context.db.updateToolCall(context.userId, toolCall.id, {
+        status: message.isError ? 'failed' : 'completed',
+        resultJson: JSON.stringify(result),
+      }) ?? toolCall;
+      context.emit({ type: 'tool_result', toolCall: updatedToolCall, result });
+    }
+  }
+}
+
+function textFromAgentUserMessage(message: Extract<AgentMessage, { role: 'user' }>): string {
+  if (typeof message.content === 'string') return message.content;
+  return message.content.filter((part): part is TextContent => part.type === 'text').map((part) => part.text).join('\n');
+}
+
+function textFromAgentAssistantMessage(message: PiAssistantMessage): string {
+  return message.content.filter((part): part is TextContent => part.type === 'text').map((part) => part.text).join('\n').trim();
+}
+
+function assistantContentJsonFromAgentMessage(message: PiAssistantMessage, context: AgentRunContext): string | null {
+  const parts = message.content.flatMap((part): Record<string, unknown>[] => {
+    if (part.type === 'text') return [{ type: 'text', text: part.text }];
+    if (part.type === 'thinking') return [{ type: 'thinking', thinking: part.thinking }];
+    const toolCall = context.toolCallsByModelId.get(part.id);
+    return [{
+      type: 'modelToolCall',
+      id: toolCall?.id ?? part.id,
+      modelCallId: part.id,
+      name: normalizeModelToolName(part.name),
+      arguments: part.arguments,
+    }];
+  });
+  return parts.length > 0 ? JSON.stringify(parts) : null;
 }
 
 function createProviderTimingLogger(
@@ -654,112 +924,6 @@ function createProviderTimingLogger(
   };
 }
 
-function providerErrorMessage(error: any): string {
-  const message = String(error?.message ?? error ?? '').trim();
-  return message || 'assistant provider request failed';
-}
-
-async function streamCodexResponse(
-  db: VoiceStreamNextDb,
-  userId: string,
-  input: {
-    model: string;
-    thinkingLevel: string;
-    instructions: string;
-    input: string;
-    tools: unknown[];
-    emit: (event: PromptEvent) => void;
-    logTiming?: ProviderTimingLogger;
-  },
-): Promise<CodexStreamResult> {
-  input.logTiming?.('request_start', {
-    transport: 'sse',
-    inputChars: input.input.length,
-    instructionsChars: input.instructions.length,
-    toolCount: input.tools.length,
-    toolNames: responseToolNames(input.tools),
-  });
-  const apiKey = await codexAccessToken(db, userId);
-  const ai = await import('@mariozechner/pi-ai');
-  const model = ai.getModel('openai-codex' as any, input.model as any) || ai.getModel('openai-codex' as any, 'gpt-5.5' as any);
-  if (!model) throw new Error(`Unknown Codex model: ${input.model}`);
-
-  const context = {
-    systemPrompt: input.instructions,
-    messages: [{ role: 'user', content: input.input, timestamp: Date.now() }],
-    tools: codexToolDefinitions(input.tools),
-  };
-  const stream = ai.streamSimple(model, context as any, {
-    apiKey,
-    reasoning: codexReasoning(input.thinkingLevel),
-    transport: 'sse',
-    sessionId: `vsn-${userId}`,
-  } as any);
-  let text = '';
-  let thinking = '';
-  const toolCalls: ModelToolCall[] = [];
-  let finalMessage: any = null;
-  let firstEventLogged = false;
-  let firstTextLogged = false;
-  let firstThinkingLogged = false;
-  const logFirstEvent = (eventType: string) => {
-    if (firstEventLogged) return;
-    firstEventLogged = true;
-    input.logTiming?.('first_stream_event', { eventType });
-  };
-  for await (const event of stream as AsyncIterable<any>) {
-    logFirstEvent(String(event?.type ?? 'unknown'));
-    if (event.type === 'text_delta') {
-      const delta = String(event.delta ?? '');
-      text += delta;
-      if (delta && !firstTextLogged) {
-        firstTextLogged = true;
-        input.logTiming?.('first_text_delta', { chars: delta.length });
-      }
-      if (delta) input.emit({ type: 'delta', delta });
-    } else if (event.type === 'thinking_delta' || event.type === 'reasoning_delta') {
-      const delta = String(event.delta ?? event.thinking ?? event.reasoning ?? '');
-      thinking += delta;
-      if (delta && !firstThinkingLogged) {
-        firstThinkingLogged = true;
-        input.logTiming?.('first_thinking_delta', { chars: delta.length });
-      }
-      if (delta) input.emit({ type: 'thinking_delta', delta });
-    } else if (event.type === 'toolcall_end' && event.toolCall) {
-      toolCalls.push({
-        id: event.toolCall.id == null ? null : String(event.toolCall.id),
-        callId: event.toolCall.id == null ? null : String(event.toolCall.id),
-        name: String(event.toolCall.name ?? ''),
-        argumentsJson: JSON.stringify(event.toolCall.arguments ?? {}),
-      });
-      input.logTiming?.('tool_call_received', { toolName: String(event.toolCall.name ?? '') });
-    } else if (event.type === 'done') {
-      finalMessage = event.message;
-    } else if (event.type === 'error') {
-      finalMessage = event.error;
-      input.logTiming?.('provider_error', { error: String(event.error?.errorMessage ?? 'Codex request failed') }, 'error');
-      throw new Error(String(event.error?.errorMessage ?? 'Codex request failed'));
-    }
-  }
-  if (finalMessage?.stopReason === 'error') {
-    input.logTiming?.('provider_error', { error: String(finalMessage.errorMessage ?? 'Codex request failed') }, 'error');
-    throw new Error(String(finalMessage.errorMessage ?? 'Codex request failed'));
-  }
-  if (!text) text = textFromPiAssistantMessage(finalMessage);
-  if (!thinking) thinking = thinkingFromPiAssistantMessage(finalMessage);
-  input.logTiming?.('request_done', {
-    textChars: text.length,
-    thinkingChars: thinking.length,
-    toolCallCount: toolCalls.length,
-    stopReason: String(finalMessage?.stopReason ?? ''),
-  });
-  return {
-    text,
-    thinking,
-    toolCalls: toolCalls.filter((call) => call.name),
-  };
-}
-
 async function codexAccessToken(db: VoiceStreamNextDb, userId: string): Promise<string> {
   const connection = db.codexConnection(userId);
   if (!connection) {
@@ -769,263 +933,6 @@ async function codexAccessToken(db: VoiceStreamNextDb, userId: string): Promise<
   const refreshed = await refreshCodexAccessToken(connection.refreshToken);
   const updated = db.upsertCodexConnection(userId, refreshed);
   return updated.accessToken;
-}
-
-function codexToolDefinitions(tools: unknown[]): unknown[] {
-  return tools.map((tool) => {
-    const value = tool as any;
-    return {
-      name: String(value?.name ?? ''),
-      description: String(value?.description ?? ''),
-      parameters: value?.parameters ?? { type: 'object', properties: {}, required: [] },
-    };
-  }).filter((tool: any) => tool.name);
-}
-
-function codexReasoning(thinkingLevel: string): string | undefined {
-  const level = cleanThinkingLevel(thinkingLevel);
-  return level === 'off' ? undefined : level;
-}
-
-function textFromPiAssistantMessage(message: any): string {
-  if (!message?.content || !Array.isArray(message.content)) return '';
-  return message.content
-    .filter((part: any) => part?.type === 'text' && typeof part.text === 'string')
-    .map((part: any) => part.text)
-    .join('')
-    .trim();
-}
-
-function thinkingFromPiAssistantMessage(message: any): string {
-  if (!message?.content || !Array.isArray(message.content)) return '';
-  return message.content
-    .filter(
-      (part: any) =>
-        (part?.type === 'thinking' || part?.type === 'reasoning') &&
-        (typeof part.thinking === 'string' || typeof part.reasoning === 'string'),
-    )
-    .map((part: any) => String(part.thinking ?? part.reasoning ?? ''))
-    .join('')
-    .trim();
-}
-
-async function executeModelToolCalls(
-  db: VoiceStreamNextDb,
-  userId: string,
-  threadId: string,
-  run: AssistantRunRecord,
-  thread: AssistantThread,
-  calls: ModelToolCall[],
-  emit: (event: PromptEvent) => void,
-): Promise<ModelToolResult[] | null> {
-  const completed: ModelToolResult[] = [];
-  for (const call of calls) {
-    const toolName = normalizeModelToolName(call.name);
-    ensureToolEnabled(thread, toolName);
-    ensureCapability(thread, toolName);
-    const args = safeJson(call.argumentsJson);
-    const needsApproval = await approvalRequiredFor(db, userId, thread, toolName, args);
-    const toolCall = db.createToolCall(userId, threadId, {
-      runId: run.id,
-      toolName,
-      args,
-      approvalRequired: needsApproval,
-    });
-    emit({ type: 'tool_call', toolCall, modelCallId: call.callId ?? call.id, args });
-    const requestMessage = db.addMessage(userId, threadId, {
-      role: 'assistant',
-      content: `Requested ${toolLabel(toolName, db, userId)}.`,
-      contentJson: JSON.stringify([{ type: 'modelToolCall', id: toolCall.id, modelCallId: call.callId ?? call.id, name: toolName, arguments: args }]),
-    });
-    emit({ type: 'message', message: requestMessage });
-
-    if (needsApproval) {
-      const approval = db.createApproval(userId, threadId, {
-        runId: run.id,
-        toolCallId: toolCall.id,
-        toolName,
-        label: toolLabel(toolName, db, userId),
-        args,
-      });
-      const snapshot = assistantSnapshot(db, userId, threadId);
-      emit({ type: 'approval_pending', approval: approvalView(approval), snapshot });
-      return null;
-    }
-
-    const result = await executeApprovedTool(db, userId, thread, toolName, args, {
-      runId: run.id,
-      toolCallId: toolCall.id,
-    });
-    const updatedToolCall = db.updateToolCall(userId, toolCall.id, { status: 'completed', resultJson: JSON.stringify(result) }) ?? toolCall;
-    emit({ type: 'tool_result', toolCall: updatedToolCall, result });
-    const toolResult = db.addMessage(userId, threadId, {
-      role: 'toolResult',
-      toolName,
-      toolCallId: toolCall.id,
-      content: toolResultText(toolName, result),
-      contentJson: JSON.stringify(result),
-    });
-    emit({ type: 'message', message: toolResult });
-    completed.push({ call, result, toolName });
-  }
-  return completed;
-}
-
-async function streamOpenAiResponse(input: {
-  model: string;
-  thinkingLevel: string;
-  instructions: string;
-  input: string;
-  tools: unknown[];
-  emit: (event: PromptEvent) => void;
-  apiKey: string;
-  logTiming?: ProviderTimingLogger;
-}): Promise<OpenAiStreamResult> {
-  const body: Record<string, unknown> = {
-    model: input.model,
-    instructions: input.instructions,
-    input: input.input,
-    stream: true,
-    parallel_tool_calls: false,
-  };
-  if (input.tools.length > 0) {
-    body.tools = input.tools;
-    body.tool_choice = 'auto';
-  }
-  const reasoning = reasoningFor(input.thinkingLevel);
-  if (reasoning) body.reasoning = reasoning;
-
-  input.logTiming?.('request_start', {
-    transport: 'sse',
-    inputChars: input.input.length,
-    instructionsChars: input.instructions.length,
-    toolCount: input.tools.length,
-    toolNames: responseToolNames(input.tools),
-  });
-  const response = await fetch(OPENAI_RESPONSES_ENDPOINT, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${input.apiKey}`,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
-  input.logTiming?.('response_headers', { status: response.status, ok: response.ok });
-  if (!response.ok) {
-    const text = await response.text();
-    input.logTiming?.('provider_error', { status: response.status, error: providerError(text, `OpenAI response failed: ${response.status}`) }, 'error');
-    throw new Error(providerError(text, `OpenAI response failed: ${response.status}`));
-  }
-  if (!response.body) throw new Error('OpenAI response did not include a stream body');
-
-  const toolCallsByKey = new Map<string, ModelToolCall>();
-  const decoder = new TextDecoder();
-  const reader = response.body.getReader();
-  let buffer = '';
-  let text = '';
-  let thinking = '';
-  let firstTextLogged = false;
-  let firstThinkingLogged = false;
-
-  const handleEvent = (event: any) => {
-    const type = String(event?.type ?? '');
-    if (type === 'response.output_text.delta' || type === 'response.text.delta') {
-      const delta = String(event.delta ?? '');
-      if (delta) {
-        text += delta;
-        if (!firstTextLogged) {
-          firstTextLogged = true;
-          input.logTiming?.('first_text_delta', { eventType: type, chars: delta.length });
-        }
-        input.emit({ type: 'delta', delta });
-      }
-      return;
-    }
-    if (type.includes('reasoning') && type.includes('delta')) {
-      const delta = String(event.delta ?? event.text ?? event.summary_text ?? '');
-      if (delta) {
-        thinking += delta;
-        if (!firstThinkingLogged) {
-          firstThinkingLogged = true;
-          input.logTiming?.('first_thinking_delta', { eventType: type, chars: delta.length });
-        }
-        input.emit({ type: 'thinking_delta', delta });
-      }
-      return;
-    }
-    if (type === 'response.output_item.added' && event.item?.type === 'function_call') {
-      const call = modelToolCallFromItem(event.item);
-      toolCallsByKey.set(toolCallKey(event.item, event.output_index), call);
-      return;
-    }
-    if (type === 'response.function_call_arguments.delta') {
-      const key = toolCallKey({ id: event.item_id }, event.output_index);
-      const existing = toolCallsByKey.get(key) ?? {
-        id: event.item_id == null ? null : String(event.item_id),
-        callId: null,
-        name: '',
-        argumentsJson: '',
-      };
-      existing.argumentsJson += String(event.delta ?? '');
-      toolCallsByKey.set(key, existing);
-      return;
-    }
-    if (type === 'response.function_call_arguments.done' && event.item) {
-      const call = modelToolCallFromItem(event.item);
-      toolCallsByKey.set(toolCallKey(event.item, event.output_index), call);
-      input.logTiming?.('tool_call_received', { toolName: call.name });
-      return;
-    }
-    if (type === 'response.completed' && event.response) {
-      if (!text) text = String(event.response.output_text ?? '');
-      for (const item of event.response.output ?? []) {
-        if (item?.type === 'function_call') {
-          toolCallsByKey.set(toolCallKey(item, null), modelToolCallFromItem(item));
-        }
-      }
-    }
-    if (type === 'error') {
-      input.logTiming?.('provider_error', { error: providerError(JSON.stringify(event), 'OpenAI streaming error') }, 'error');
-      throw new Error(providerError(JSON.stringify(event), 'OpenAI streaming error'));
-    }
-  };
-
-  for (;;) {
-    const chunk = await reader.read();
-    if (chunk.done) break;
-    buffer += decoder.decode(chunk.value, { stream: true });
-    let splitIndex = buffer.indexOf('\n\n');
-    while (splitIndex >= 0) {
-      const block = buffer.slice(0, splitIndex);
-      buffer = buffer.slice(splitIndex + 2);
-      const data = sseData(block);
-      if (data && data !== '[DONE]') handleEvent(JSON.parse(data));
-      splitIndex = buffer.indexOf('\n\n');
-    }
-  }
-  buffer += decoder.decode();
-  const data = sseData(buffer);
-  if (data && data !== '[DONE]') handleEvent(JSON.parse(data));
-
-  input.logTiming?.('request_done', {
-    textChars: text.length,
-    thinkingChars: thinking.length,
-    toolCallCount: [...toolCallsByKey.values()].filter((call) => call.name).length,
-  });
-  return {
-    text,
-    thinking,
-    toolCalls: [...toolCallsByKey.values()].filter((call) => call.name),
-  };
-}
-
-function assistantContentJson(text: string, thinking: string): string | null {
-  const parts: Array<Record<string, string>> = [];
-  const cleanThinking = thinking.trim();
-  const cleanText = text.trim();
-  if (cleanThinking) parts.push({ type: 'thinking', thinking: cleanThinking });
-  if (cleanText) parts.push({ type: 'text', text: cleanText });
-  return parts.length > 0 ? JSON.stringify(parts) : null;
 }
 
 function responseToolNames(tools: unknown[]): string[] {
@@ -1185,24 +1092,20 @@ function responseToolDefinitions(db: VoiceStreamNextDb, userId: string, thread: 
   return definitions;
 }
 
-function renderConversation(messages: AssistantMessage[]): string {
-  return messages.map((message) => {
-    const label = message.role === 'toolResult' ? `TOOL ${message.toolName ?? 'tool'}` : message.role.toUpperCase();
-    return `${label}: ${message.content}`;
-  }).join('\n\n');
-}
-
-function renderToolFollowup(inputText: string, results: ModelToolResult[]): string {
-  const toolText = results.map((item) => {
-    const callId = item.call.callId ?? item.call.id ?? item.toolName;
-    return [
-      `FUNCTION CALL: ${item.toolName}`,
-      `CALL ID: ${callId}`,
-      `ARGUMENTS: ${item.call.argumentsJson || '{}'}`,
-      `OUTPUT: ${JSON.stringify(item.result)}`,
-    ].join('\n');
-  }).join('\n\n');
-  return `${inputText}\n\nThe assistant requested tools and the application executed them.\n\n${toolText}\n\nUse the tool outputs to answer the user concisely.`;
+function modelInstructions(input: {
+  settings: AssistantSettingsRecord;
+  thread: AssistantThread;
+  toolInstruction?: string;
+  allowToolCalls: boolean;
+}): string {
+  return [
+    input.thread.voiceEnabled ? input.settings.voiceSystemPrompt : input.settings.normalSystemPrompt,
+    input.thread.systemPrompt ? `Thread system prompt:\n${input.thread.systemPrompt}` : '',
+    input.allowToolCalls ? input.toolInstruction : '',
+    input.allowToolCalls
+      ? 'You may call the provided assistant tools when they help. Prefer tools for artifacts, spoken replies, web searches, fetched URL content, prompt reads/updates, and thread settings instead of describing those actions. Use web_search for current information, documentation, news, prices, or facts that may have changed. Use fetch_content when the user gives a direct URL to read, inspect, summarize, or analyze. Cite source URLs in the final answer. Never write XML, JSON, or pseudo function-call syntax in normal assistant text; use the API tool call channel for tool calls.'
+      : 'No assistant tools are available in this follow-up response. Use the already executed tool outputs to answer the user concisely, and do not write XML, JSON, or pseudo function-call syntax for tool calls.',
+  ].filter(Boolean).join('\n\n');
 }
 
 function testModelToolCalls(): ModelToolCall[] {
@@ -1230,43 +1133,6 @@ function normalizeModelToolName(raw: string): string {
 
 function isBuiltInTool(toolName: string): boolean {
   return ASSISTANT_TOOLS.some((tool) => tool.name === toolName);
-}
-
-function reasoningFor(thinkingLevel: string): { effort: string } | null {
-  const level = cleanThinkingLevel(thinkingLevel);
-  if (level === 'off') return null;
-  return { effort: level };
-}
-
-function providerError(raw: string, fallback: string): string {
-  try {
-    const parsed = JSON.parse(raw);
-    return parsed?.error?.message ?? parsed?.message ?? fallback;
-  } catch {
-    return raw.trim() || fallback;
-  }
-}
-
-function modelToolCallFromItem(item: any): ModelToolCall {
-  return {
-    id: item?.id == null ? null : String(item.id),
-    callId: item?.call_id == null ? item?.id == null ? null : String(item.id) : String(item.call_id),
-    name: String(item?.name ?? ''),
-    argumentsJson: String(item?.arguments ?? ''),
-  };
-}
-
-function toolCallKey(item: any, outputIndex: unknown): string {
-  return String(item?.id ?? item?.call_id ?? outputIndex ?? crypto.randomUUID());
-}
-
-function sseData(block: string): string {
-  return block
-    .split(/\r?\n/)
-    .filter((line) => line.startsWith('data:'))
-    .map((line) => line.slice(5).trimStart())
-    .join('\n')
-    .trim();
 }
 
 function approvalView(approval: AssistantApprovalRecord): AssistantApprovalView {
