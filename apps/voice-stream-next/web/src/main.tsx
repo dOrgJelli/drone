@@ -56,6 +56,8 @@ const ASSISTANT_PROVIDERS: Array<{ id: 'codex' | 'openai'; label: string; title:
   { id: 'openai', label: 'OpenAI', title: 'Use the configured OpenAI API key for OpenAI models.' },
 ];
 
+type AssistantSettingsPromptField = 'normalSystemPrompt' | 'voiceSystemPrompt';
+
 const assistantIconButtonClass =
   'relative flex h-7 w-7 shrink-0 items-center justify-center rounded border border-[var(--border-subtle)] bg-white/[.02] p-0 text-[var(--muted)] transition hover:bg-white/[.05] hover:text-[var(--fg-secondary)] disabled:pointer-events-none disabled:opacity-50';
 const assistantIconButtonActiveClass = '!border-[rgba(74,222,128,.28)] !bg-[rgba(74,222,128,.08)] !text-[var(--green)]';
@@ -862,6 +864,10 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   const [normalSystemPromptDraft, setNormalSystemPromptDraft] = React.useState(ASSISTANT_NORMAL_SYSTEM_PROMPT_DEFAULT);
   const [voiceSystemPromptDraft, setVoiceSystemPromptDraft] = React.useState(ASSISTANT_VOICE_SYSTEM_PROMPT_DEFAULT);
   const [threadSystemPromptDraft, setThreadSystemPromptDraft] = React.useState('');
+  const [assistantSettingsPromptDrafts, setAssistantSettingsPromptDrafts] = React.useState<Record<AssistantSettingsPromptField, string>>({
+    normalSystemPrompt: ASSISTANT_NORMAL_SYSTEM_PROMPT_DEFAULT,
+    voiceSystemPrompt: ASSISTANT_VOICE_SYSTEM_PROMPT_DEFAULT,
+  });
   const [systemPromptSaving, setSystemPromptSaving] = React.useState(false);
   const [promoteSystemPromptSaving, setPromoteSystemPromptSaving] = React.useState(false);
   const [systemPromptError, setSystemPromptError] = React.useState<string | null>(null);
@@ -890,6 +896,10 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   const [pairingDeviceId, setPairingDeviceId] = React.useState<string | null>(null);
   const [approvalSettings, setApprovalSettings] = React.useState<VoiceApprovalFormState>(VOICE_APPROVAL_SETTINGS_DEFAULT);
   const settingsHydratedRef = React.useRef(false);
+  const assistantSettingsPromptDirtyRef = React.useRef<Record<AssistantSettingsPromptField, boolean>>({
+    normalSystemPrompt: false,
+    voiceSystemPrompt: false,
+  });
   const assistantEventRefreshTimerRef = React.useRef<number | null>(null);
   const messagesScrollRef = React.useRef<HTMLDivElement | null>(null);
   const messagesStickToBottomRef = React.useRef(true);
@@ -975,8 +985,20 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
   }, [activeThread?.systemPrompt, activeThread?.voiceEnabled, assistantSnapshotData?.assistantSettings]);
 
   React.useEffect(() => {
+    const normalSystemPrompt = assistantSnapshotData?.assistantSettings.normalSystemPrompt ?? ASSISTANT_NORMAL_SYSTEM_PROMPT_DEFAULT;
+    const voiceSystemPrompt = assistantSnapshotData?.assistantSettings.voiceSystemPrompt ?? ASSISTANT_VOICE_SYSTEM_PROMPT_DEFAULT;
+    setAssistantSettingsPromptDrafts((current) => ({
+      normalSystemPrompt: assistantSettingsPromptDirtyRef.current.normalSystemPrompt ? current.normalSystemPrompt : normalSystemPrompt,
+      voiceSystemPrompt: assistantSettingsPromptDirtyRef.current.voiceSystemPrompt ? current.voiceSystemPrompt : voiceSystemPrompt,
+    }));
+  }, [
+    assistantSnapshotData?.assistantSettings.normalSystemPrompt,
+    assistantSnapshotData?.assistantSettings.voiceSystemPrompt,
+  ]);
+
+  React.useEffect(() => {
     if (systemPromptOpen) seedSystemPromptDrafts();
-  }, [activeThread?.id, seedSystemPromptDrafts, systemPromptOpen]);
+  }, [activeThread?.id, systemPromptOpen]);
 
   function openSystemPromptEditor() {
     seedSystemPromptDrafts();
@@ -1687,7 +1709,10 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
     }
   }
 
-  async function updateAssistantSettings(patch: Partial<NonNullable<AssistantSnapshot['assistantSettings']>>) {
+  async function updateAssistantSettings(
+    patch: Partial<NonNullable<AssistantSnapshot['assistantSettings']>>,
+    options: { clearPromptDirty?: AssistantSettingsPromptField[] } = {},
+  ) {
     setBusy(true);
     setError(null);
     try {
@@ -1698,6 +1723,9 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
           body: JSON.stringify(patch),
         },
       );
+      for (const field of options.clearPromptDirty ?? []) {
+        assistantSettingsPromptDirtyRef.current[field] = false;
+      }
       setAssistantSnapshotData(data.snapshot);
       setNotice('Saved assistant settings.');
     } catch (err: any) {
@@ -3034,27 +3062,31 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                   <label className={assistantFieldLabelClass}>
                     Normal assistant prompt
                     <textarea
-                      value={assistantSnapshotData?.assistantSettings.normalSystemPrompt ?? ''}
+                      value={assistantSettingsPromptDrafts.normalSystemPrompt}
                       onChange={(event) => {
                         const value = event.currentTarget.value;
-                        setAssistantSnapshotData((snapshot) => snapshot
-                          ? { ...snapshot, assistantSettings: { ...snapshot.assistantSettings, normalSystemPrompt: value } }
-                          : snapshot);
+                        assistantSettingsPromptDirtyRef.current.normalSystemPrompt = true;
+                        setAssistantSettingsPromptDrafts((current) => ({ ...current, normalSystemPrompt: value }));
                       }}
-                      onBlur={(event) => void updateAssistantSettings({ normalSystemPrompt: event.currentTarget.value })}
+                      onBlur={(event) => void updateAssistantSettings(
+                        { normalSystemPrompt: event.currentTarget.value },
+                        { clearPromptDirty: ['normalSystemPrompt'] },
+                      )}
                     />
                   </label>
                   <label className={assistantFieldLabelClass}>
                     Voice assistant prompt
                     <textarea
-                      value={assistantSnapshotData?.assistantSettings.voiceSystemPrompt ?? ''}
+                      value={assistantSettingsPromptDrafts.voiceSystemPrompt}
                       onChange={(event) => {
                         const value = event.currentTarget.value;
-                        setAssistantSnapshotData((snapshot) => snapshot
-                          ? { ...snapshot, assistantSettings: { ...snapshot.assistantSettings, voiceSystemPrompt: value } }
-                          : snapshot);
+                        assistantSettingsPromptDirtyRef.current.voiceSystemPrompt = true;
+                        setAssistantSettingsPromptDrafts((current) => ({ ...current, voiceSystemPrompt: value }));
                       }}
-                      onBlur={(event) => void updateAssistantSettings({ voiceSystemPrompt: event.currentTarget.value })}
+                      onBlur={(event) => void updateAssistantSettings(
+                        { voiceSystemPrompt: event.currentTarget.value },
+                        { clearPromptDirty: ['voiceSystemPrompt'] },
+                      )}
                     />
                   </label>
                 </div>

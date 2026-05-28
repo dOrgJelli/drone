@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const DEFAULT_HUB_BASE_URL = 'http://127.0.0.1:8787';
+const DEFAULT_HUB_BASE_URL = 'http://127.0.0.1:5174';
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_IDLE_FOR_MS = 1000;
 const DEFAULT_IDLE_POLL_INTERVAL_MS = 1000;

@@ -1515,15 +1515,17 @@ function openVoiceSocket(target) {
       if (message.type === 'assistant_result') {
         terminalMessageReceived = true;
         showStatus(`Transcript: ${message.transcript || 'empty'} / Reply: ${message.assistantText || 'empty'}`);
-        state.voicePostStopStatus = els.micStatus.textContent || state.voicePostStopStatus;
-        state.voicePostStopMode = 'awake';
+        const returnTarget = voiceResultReturnTarget('awake', els.micStatus.textContent || state.voicePostStopStatus);
+        state.voicePostStopStatus = returnTarget.status;
+        state.voicePostStopMode = returnTarget.mode;
         await finishMicFromServer();
       }
       if (message.type === 'transcript_result') {
         terminalMessageReceived = true;
         showStatus(message.status || 'Transcript patched into chat.');
-        state.voicePostStopStatus = els.micStatus.textContent || state.voicePostStopStatus;
-        state.voicePostStopMode = 'awake';
+        const returnTarget = voiceResultReturnTarget('awake', els.micStatus.textContent || state.voicePostStopStatus);
+        state.voicePostStopStatus = returnTarget.status;
+        state.voicePostStopMode = returnTarget.mode;
         await finishMicFromServer();
       }
       if (message.type === 'terminal_detected') {
@@ -1542,8 +1544,9 @@ function openVoiceSocket(target) {
         } else {
           showStatus('Awake. Waiting for voice command.');
         }
-        state.voicePostStopStatus = els.micStatus.textContent || state.voicePostStopStatus;
-        state.voicePostStopMode = 'awake';
+        const returnTarget = voiceResultReturnTarget('awake', els.micStatus.textContent || state.voicePostStopStatus);
+        state.voicePostStopStatus = returnTarget.status;
+        state.voicePostStopMode = returnTarget.mode;
         await finishMicFromServer();
       }
       if (message.type === 'sleep') {
@@ -1567,8 +1570,9 @@ function openVoiceSocket(target) {
       if (message.type === 'assistant_error') {
         terminalMessageReceived = true;
         showStatus(message.error || 'Voice runtime failed.');
-        state.voicePostStopStatus = els.micStatus.textContent || state.voicePostStopStatus;
-        state.voicePostStopMode = 'awake';
+        const returnTarget = voiceResultReturnTarget('awake', els.micStatus.textContent || state.voicePostStopStatus);
+        state.voicePostStopStatus = returnTarget.status;
+        state.voicePostStopMode = returnTarget.mode;
         await finishMicFromServer();
       }
     } catch {
@@ -1633,9 +1637,12 @@ async function handleTerminalDetected(message, socket, target) {
   } else {
     playLocalVoiceCue('stop_button');
   }
-  state.voicePostStopMode = commandType === 'sleep' ? 'sleeping' : 'awake';
-  state.voicePostStopStatus = status;
-  setMode(commandType === 'sleep' ? 'sleeping' : 'awake', status);
+  const returnTarget = commandType === 'sleep'
+    ? { mode: 'sleeping', status }
+    : voiceResultReturnTarget('awake', status);
+  state.voicePostStopMode = returnTarget.mode;
+  state.voicePostStopStatus = returnTarget.status;
+  setMode(returnTarget.mode, returnTarget.status);
   if (commandType === 'sleep') {
     startWakeListener();
   }
@@ -1690,6 +1697,13 @@ function completeStoppedVoice(nextMode = 'awake', status = '') {
   setMode('awake', status || 'Awake. Waiting for voice command.');
   startWakeListener();
   finishTranscriptionShortcutOverlay();
+}
+
+function voiceResultReturnTarget(defaultMode = 'awake', defaultStatus = '') {
+  if (state.transcriptionShortcutActive && state.voiceTarget === 'clipboard') {
+    return { mode: transcriptionReturnMode(), status: transcriptionReturnStatus() };
+  }
+  return { mode: defaultMode, status: defaultStatus };
 }
 
 function beginTranscriptionShortcutSession(overlayRestore) {
