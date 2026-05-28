@@ -46,7 +46,7 @@ function runPackager() {
   const modelPath = path.resolve(repoRoot, 'apps/voice-stream/android/app/src/main/assets/model-en-us');
   const args = [
     '.',
-    'VoiceStream',
+    'Drone',
     '--out',
     'release/desktop',
     '--overwrite',
@@ -54,7 +54,7 @@ function runPackager() {
     `--extra-resource=${vendorNodeModules}`,
     '--icon=assets/app-icon.png',
     '--protocol=voicestream',
-    '--protocol-name=VoiceStream',
+    '--protocol-name=Drone',
     "--ignore=^/(android|docs|gradle|release|server|web|dist|\\.desktop-vendor)(/|$)",
     "--ignore=^/(build.gradle.kts|settings.gradle.kts|gradle.properties|gradlew|gradlew.bat)$",
   ];
@@ -73,7 +73,7 @@ function latestPackagedDir() {
   const releaseRoot = path.join(appDir, 'release', 'desktop');
   const packagedDir = fs
     .readdirSync(releaseRoot, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && entry.name.startsWith('VoiceStream-'))
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith('Drone-'))
     .map((entry) => path.join(releaseRoot, entry.name))
     .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
   if (!packagedDir) {
@@ -95,28 +95,29 @@ function writeLinuxDesktopInstaller() {
     'ICON_DIR_256="$DATA_HOME/icons/hicolor/256x256/apps"',
     'ICON_DIR_512="$DATA_HOME/icons/hicolor/512x512/apps"',
     'ICON_DIR_1024="$DATA_HOME/icons/hicolor/1024x1024/apps"',
-    'DESKTOP_FILE="$APPLICATIONS_DIR/voicestream.desktop"',
+    'DESKTOP_FILE="$APPLICATIONS_DIR/drone.desktop"',
     'mkdir -p "$APPLICATIONS_DIR" "$ICON_DIR_256" "$ICON_DIR_512" "$ICON_DIR_1024"',
-    'cp "$APP_DIR/resources/app/assets/app-icon-256.png" "$ICON_DIR_256/voicestream.png"',
-    'cp "$APP_DIR/resources/app/assets/app-icon-512.png" "$ICON_DIR_512/voicestream.png"',
-    'cp "$APP_DIR/resources/app/assets/app-icon.png" "$ICON_DIR_1024/voicestream.png"',
+    'cp "$APP_DIR/resources/app/assets/app-icon-256.png" "$ICON_DIR_256/drone.png"',
+    'cp "$APP_DIR/resources/app/assets/app-icon-512.png" "$ICON_DIR_512/drone.png"',
+    'cp "$APP_DIR/resources/app/assets/app-icon.png" "$ICON_DIR_1024/drone.png"',
     'rm -f "$APPLICATIONS_DIR/VoiceStream.desktop"',
+    'rm -f "$APPLICATIONS_DIR/voicestream.desktop"',
     'cat > "$DESKTOP_FILE" <<EOF',
     '[Desktop Entry]',
-    'Name=VoiceStream',
-    'Comment=VoiceStream desktop voice client',
-    'Exec="$APP_DIR/VoiceStream" %U',
-    'Icon=$ICON_DIR_512/voicestream.png',
+    'Name=Drone',
+    'Comment=Drone desktop voice client',
+    'Exec="$APP_DIR/Drone" %U',
+    'Icon=$ICON_DIR_512/drone.png',
     'Terminal=false',
     'Type=Application',
     'Categories=Utility;',
-    'StartupWMClass=VoiceStream',
+    'StartupWMClass=Drone',
     'MimeType=x-scheme-handler/voicestream;',
     'EOF',
     'chmod +x "$DESKTOP_FILE"',
     'command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$APPLICATIONS_DIR" >/dev/null 2>&1 || true',
     'command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q "$DATA_HOME/icons/hicolor" >/dev/null 2>&1 || true',
-    'echo "Installed VoiceStream launcher at $DESKTOP_FILE"',
+    'echo "Installed Drone launcher at $DESKTOP_FILE"',
     '',
   ].join('\n');
   fs.writeFileSync(installerPath, script);
@@ -165,7 +166,7 @@ function publishDesktopDownload() {
 }
 `;
   fs.writeFileSync(path.join(outputDir, 'latest.json'), metadata);
-  console.log(`Published VoiceStream desktop archive to ${latestFile}`);
+  console.log(`Published Drone desktop archive to ${latestFile}`);
 }
 
 fs.rmSync(vendorDir, { recursive: true, force: true });

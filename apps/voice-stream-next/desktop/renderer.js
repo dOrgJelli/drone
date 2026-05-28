@@ -1687,7 +1687,7 @@ function cleanVoiceTarget(target) {
 function recordingStatus(target) {
   if (target === 'patch') return 'Patching voice transcript into chat.';
   if (target === 'clipboard') return 'Recording clipboard transcription.';
-  return 'Streaming microphone frames to the VoiceStream service.';
+  return 'Streaming microphone frames to the Drone service.';
 }
 
 async function copyText(text) {

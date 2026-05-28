@@ -4647,12 +4647,17 @@ function Root() {
       <SignedOut>
         <div className="signin-page">
           <div className="signin-copy">
-            <div className="kicker">Voice Stream</div>
-            <h1>Sign in to Voice Stream</h1>
-            <p>Access assistant threads and paired devices from your workspace.</p>
+            <div className="signin-brand" aria-label="Drone">
+              <span className="signin-brand-mark" aria-hidden="true" />
+              <span>Drone</span>
+            </div>
+            <h1>Sign in to Drone</h1>
+            <p>Access assistant threads, paired devices, and workspace controls.</p>
             <SignedOutDownloadLinks />
           </div>
-          <SignIn routing="hash" />
+          <div className="signin-auth-card">
+            <SignIn routing="hash" />
+          </div>
         </div>
       </SignedOut>
       <SignedIn>

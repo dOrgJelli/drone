@@ -165,11 +165,22 @@ body.is-signed-in .auth-screen {
   min-height: 100vh;
   padding: 28px;
   overflow: hidden;
+  background:
+    linear-gradient(135deg, rgba(167, 139, 250, .07), transparent 40%),
+    linear-gradient(180deg, rgba(255, 255, 255, .025), transparent 58%),
+    var(--bg);
   -webkit-app-region: drag;
 }
 
 .auth-screen::before {
-  display: none;
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: .54;
+  background-image: radial-gradient(circle, rgba(255,255,255,.04) 1px, transparent 1px);
+  background-size: 20px 20px;
+  mask-image: linear-gradient(180deg, rgba(0,0,0,.92), transparent 84%);
 }
 
 .auth-panel {
@@ -179,9 +190,12 @@ body.is-signed-in .auth-screen {
   gap: 22px;
   width: min(520px, calc(100vw - 48px));
   padding: 28px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--panel);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.025), rgba(255,255,255,.01)),
+    var(--panel);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, .26);
   -webkit-app-region: no-drag;
 }
 
@@ -204,6 +218,13 @@ body.is-signed-in .auth-screen {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+#signInButton:hover,
+#signInButton:focus-visible {
+  border-color: rgba(167, 139, 250, .52);
+  background: #b69cff;
+  color: #101216;
 }
 
 .auth-close {
@@ -248,7 +269,10 @@ body.is-signed-in .auth-screen {
   height: 26px;
   border-radius: 6px;
   border: 1px solid rgba(167, 139, 250, .34);
-  background: rgba(167, 139, 250, .14);
+  background:
+    linear-gradient(135deg, rgba(167, 139, 250, .22), rgba(74, 222, 128, .10)),
+    rgba(255, 255, 255, .04);
+  box-shadow: 0 0 24px rgba(167, 139, 250, .10);
 }
 
 .eyebrow {
