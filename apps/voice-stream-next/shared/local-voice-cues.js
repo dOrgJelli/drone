@@ -5,8 +5,7 @@ const LOCAL_VOICE_CUE_TONES = {
   ],
   stop_button: [
     { frequencyHz: 520, durationMs: 70 },
-    { frequencyHz: 330, durationMs: 110 },
-    { frequencyHz: 190, durationMs: 220 },
+    { frequencyHz: 260, durationMs: 150 },
   ],
   unlock: [
     { frequencyHz: 360, durationMs: 70 },
@@ -33,6 +32,16 @@ const LOCAL_VOICE_CUE_TONES = {
     { frequencyHz: 520, durationMs: 70 },
     { frequencyHz: 0, durationMs: 45 },
     { frequencyHz: 700, durationMs: 90 },
+  ],
+  clipboard_recording_start: [
+    { frequencyHz: 360, durationMs: 55 },
+    { frequencyHz: 540, durationMs: 70 },
+    { frequencyHz: 720, durationMs: 95 },
+  ],
+  clipboard_transcription_success: [
+    { frequencyHz: 640, durationMs: 55 },
+    { frequencyHz: 820, durationMs: 70 },
+    { frequencyHz: 1040, durationMs: 120 },
   ],
 };
 
