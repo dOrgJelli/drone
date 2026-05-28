@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import path from 'node:path';
 
 import { buildApp } from './app.js';
+import { extensionToolName } from './assistant-extensions.js';
 import { VoiceStreamNextDb } from './db.js';
 
 const devHeaders = {
@@ -86,6 +87,80 @@ describe('voice integration', () => {
 
     const dashboard = await fetch(`${baseUrl}/api/dashboard`, { headers: devHeaders }).then((response) => response.json());
     expect(dashboard.clientStatuses.some((entry: any) => entry.deviceId === registered.device.id && entry.status === 'Ready for commands')).toBe(true);
+  });
+
+  test('enables newly registered extension tool routes for assistant use', async () => {
+    const registered = await fetch(`${baseUrl}/api/devices`, {
+      method: 'POST',
+      headers: devHeaders,
+      body: JSON.stringify({ deviceType: 'desktop', displayName: 'Extension Desktop' }),
+    }).then((response) => response.json());
+
+    const wsUrl = new URL(`/api/devices/${registered.device.id}/extensions`, baseUrl);
+    wsUrl.protocol = 'ws:';
+    wsUrl.searchParams.set('token', registered.token);
+    wsUrl.searchParams.set('clientVersion', '12');
+
+    const socket = new WebSocket(wsUrl);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.addEventListener('open', () => resolve());
+        socket.addEventListener('error', () => reject(new Error('extension websocket failed to open')));
+      });
+      socket.send(JSON.stringify({
+        type: 'extension_hello',
+        manifests: [{
+          id: 'drone-hub',
+          name: 'Drone Hub',
+          version: '0.1.0',
+          tools: [{
+            name: 'list_drones',
+            label: 'List drones',
+            description: 'List local Drone Hub drones.',
+            approval: 'never',
+            supportedTargets: ['device', 'any_device'],
+            defaultTarget: 'device',
+            inputSchema: {
+              type: 'object',
+              properties: {},
+              required: [],
+              additionalProperties: false,
+            },
+          }, {
+            name: 'server_only',
+            label: 'Server only',
+            description: 'Exercise server-target route defaults.',
+            approval: 'never',
+            supportedTargets: ['server'],
+            defaultTarget: 'server',
+            inputSchema: {
+              type: 'object',
+              properties: {},
+              required: [],
+              additionalProperties: false,
+            },
+          }],
+        }],
+      }));
+
+      const user = db.userByClerkId('dev_voice_integration_example_local');
+      expect(user).toBeTruthy();
+      const toolName = extensionToolName('drone-hub', 'list_drones');
+      const serverToolName = extensionToolName('drone-hub', 'server_only');
+      await waitForCondition('extension route', () => Boolean(db.assistantExtensionToolRoute(user!.id, toolName)));
+      const route = db.assistantExtensionToolRoute(user!.id, toolName);
+      const serverRoute = db.assistantExtensionToolRoute(user!.id, serverToolName);
+
+      expect(route?.enabled).toBe(true);
+      expect(route?.targetKind).toBe('device');
+      expect(route?.targetDeviceId).toBe(registered.device.id);
+      expect(serverRoute?.enabled).toBe(false);
+      expect(serverRoute?.targetKind).toBe('server');
+    } finally {
+      if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+        socket.close();
+      }
+    }
   });
 
   test('auto-finishes patch streams when a finish phrase is detected during recording', async () => {

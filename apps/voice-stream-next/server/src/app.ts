@@ -1668,7 +1668,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
               if (!db.assistantExtensionToolRoute(device.userId, toolName)) {
                 db.upsertAssistantExtensionToolRoute(device.userId, {
                   toolName,
-                  enabled: false,
+                  enabled: tool.defaultTarget !== 'server',
                   targetKind: tool.defaultTarget,
                   targetDeviceId: tool.defaultTarget === 'device' ? device.id : null,
                 });
