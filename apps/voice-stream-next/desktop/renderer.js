@@ -42,6 +42,10 @@ const state = {
   voiceSessionId: null,
   voiceTarget: 'assistant',
   voiceSuppressCommands: false,
+  transcriptionShortcutActive: false,
+  transcriptionReturnMode: null,
+  transcriptionReturnStatus: '',
+  transcriptionOverlayRestore: null,
   mode: 'off',
   voiceSettings: null,
   recognition: null,
@@ -232,6 +236,7 @@ function sanitizeShortcutBinding(value, fallback = null) {
     ctrl: mod ? false : value.ctrl === true,
     meta: mod ? false : value.meta === true,
     alt: value.alt === true,
+    altGraph: value.altGraph === true,
     shift: value.shift === true,
   };
 }
@@ -246,6 +251,7 @@ function numpadShortcutKeyFromCode(code) {
     NumpadSubtract: 'numsub',
     NumpadMultiply: 'nummult',
     NumpadDivide: 'numdiv',
+    NumpadEnter: 'numenter',
   };
   return map[value] || '';
 }
@@ -257,14 +263,16 @@ function shortcutKeyFromKeyboardEvent(event) {
 function shortcutBindingFromKeyboardEvent(event) {
   const key = shortcutKeyFromKeyboardEvent(event);
   if (!key || MODIFIER_ONLY_SHORTCUT_KEYS.has(key)) return null;
+  const altGraph = typeof event.getModifierState === 'function' && event.getModifierState('AltGraph');
   const hasSinglePrimaryModifier = event.ctrlKey !== event.metaKey;
-  const usePortablePrimaryModifier = hasSinglePrimaryModifier;
+  const usePortablePrimaryModifier = hasSinglePrimaryModifier && !altGraph;
   return {
     key,
     mod: usePortablePrimaryModifier,
-    ctrl: usePortablePrimaryModifier ? false : event.ctrlKey,
+    ctrl: usePortablePrimaryModifier || altGraph ? false : event.ctrlKey,
     meta: usePortablePrimaryModifier ? false : event.metaKey,
-    alt: event.altKey,
+    alt: altGraph ? false : event.altKey,
+    altGraph,
     shift: event.shiftKey,
   };
 }
@@ -273,13 +281,17 @@ function isShortcutMatch(binding, event) {
   if (!binding) return false;
   const eventKey = shortcutKeyFromKeyboardEvent(event);
   if (!eventKey || eventKey !== binding.key) return false;
+  const eventAltGraph = typeof event.getModifierState === 'function' && event.getModifierState('AltGraph');
+  const eventCtrl = eventAltGraph ? false : event.ctrlKey;
+  const eventAlt = eventAltGraph ? false : event.altKey;
   if (binding.mod) {
     if (!(event.ctrlKey || event.metaKey)) return false;
   } else {
-    if (event.ctrlKey !== binding.ctrl) return false;
+    if (eventCtrl !== binding.ctrl) return false;
     if (event.metaKey !== binding.meta) return false;
   }
-  if (event.altKey !== binding.alt) return false;
+  if (eventAlt !== binding.alt) return false;
+  if (eventAltGraph !== (binding.altGraph === true)) return false;
   if (event.shiftKey !== binding.shift) return false;
   return true;
 }
@@ -291,6 +303,7 @@ function shortcutKeyLabel(key) {
   if (key === 'numsub') return 'Numpad -';
   if (key === 'nummult') return 'Numpad *';
   if (key === 'numdiv') return 'Numpad /';
+  if (key === 'numenter') return 'Numpad Enter';
   if (key === 'space') return 'Space';
   if (key === 'escape') return 'Esc';
   if (key === 'arrowup') return 'Up';
@@ -318,6 +331,7 @@ function formatShortcutBinding(binding) {
   if (binding.ctrl) parts.push('Ctrl');
   if (binding.meta) parts.push('Meta');
   if (binding.alt) parts.push('Alt');
+  if (binding.altGraph) parts.push('AltGr');
   if (binding.shift) parts.push('Shift');
   parts.push(shortcutKeyLabel(binding.key));
   return parts.join('+');
@@ -711,7 +725,11 @@ function updateVoiceButtons() {
     transcribing: ['Working', 'Please wait'],
     error: ['Voice error', 'Retry'],
   };
-  const [modeLabel, actionLabel] = labels[state.mode] || ['Voice', 'Toggle'];
+  const [modeLabel, actionLabel] = state.voiceTarget === 'clipboard' && state.mode === 'recording'
+    ? ['Recording', 'Transcription']
+    : state.voiceTarget === 'clipboard' && state.mode === 'transcribing'
+      ? ['Transcribing', 'Copying']
+      : labels[state.mode] || ['Voice', 'Toggle'];
   els.primaryVoiceMode.textContent = modeLabel;
   els.primaryVoiceAction.textContent = actionLabel;
   els.primaryVoiceButton.disabled = state.mode === 'transcribing';
@@ -1643,10 +1661,10 @@ async function finishMicFromServer() {
 function completeStoppedVoice(nextMode = 'awake', status = '') {
   clearVoiceFinalizeTimer();
   const socket = state.voiceSocket;
-    state.voiceSocket = null;
-    state.voiceSessionId = null;
-    state.voiceSuppressCommands = false;
-    resetVoiceStreamState();
+  state.voiceSocket = null;
+  state.voiceSessionId = null;
+  state.voiceSuppressCommands = false;
+  resetVoiceStreamState();
   if (socket && socket.readyState === WebSocket.OPEN) {
     try {
       socket.close(1000, 'client finalized');
@@ -1659,16 +1677,71 @@ function completeStoppedVoice(nextMode = 'awake', status = '') {
     resetApprovalCollection();
     preRollBuffer.clear();
     setMode('off', 'Off.');
+    finishTranscriptionShortcutOverlay();
     return;
   }
   if (nextMode === 'sleeping') {
     resetApprovalCollection();
     setMode('sleeping', status || 'Sleeping.');
     startWakeListener();
+    finishTranscriptionShortcutOverlay();
     return;
   }
   setMode('awake', status || 'Awake. Waiting for voice command.');
   startWakeListener();
+  finishTranscriptionShortcutOverlay();
+}
+
+function beginTranscriptionShortcutSession(overlayRestore) {
+  state.transcriptionShortcutActive = true;
+  state.transcriptionReturnMode = ['off', 'awake', 'sleeping'].includes(state.mode) ? state.mode : 'awake';
+  state.transcriptionReturnStatus = els.micStatus.textContent || '';
+  state.transcriptionOverlayRestore = overlayRestore?.temporaryOverlay
+    ? { restoreWindowMode: overlayRestore.restoreWindowMode || 'hidden' }
+    : null;
+}
+
+function transcriptionReturnMode() {
+  return state.transcriptionReturnMode === 'off' || state.transcriptionReturnMode === 'sleeping' || state.transcriptionReturnMode === 'awake'
+    ? state.transcriptionReturnMode
+    : 'awake';
+}
+
+function transcriptionReturnStatus() {
+  const mode = transcriptionReturnMode();
+  if (mode === 'off') return 'Off.';
+  if (state.transcriptionReturnStatus) return state.transcriptionReturnStatus;
+  if (mode === 'sleeping') return 'Sleeping.';
+  return 'Awake. Waiting for voice command.';
+}
+
+function finishTranscriptionShortcutOverlay() {
+  if (!state.transcriptionShortcutActive) return;
+  const overlayRestore = state.transcriptionOverlayRestore;
+  state.transcriptionShortcutActive = false;
+  state.transcriptionReturnMode = null;
+  state.transcriptionReturnStatus = '';
+  state.transcriptionOverlayRestore = null;
+  restoreTemporaryTranscriptionOverlay(overlayRestore, 650);
+}
+
+function restoreTemporaryTranscriptionOverlay(overlayRestore, delayMs = 0) {
+  if (!overlayRestore?.temporaryOverlay || !desktop.restoreTemporaryOverlay) return;
+  const restorePayload = { restoreWindowMode: overlayRestore.restoreWindowMode || 'hidden' };
+  const restore = () => {
+    void desktop.restoreTemporaryOverlay(restorePayload).then(applyWindowState).catch(() => undefined);
+  };
+  if (delayMs > 0) {
+    window.setTimeout(restore, delayMs);
+    return;
+  }
+  restore();
+}
+
+async function prepareFocusedWindowTranscriptionOverlay() {
+  if (state.compact || !desktop.compactWindow) return null;
+  await desktop.compactWindow().then(applyWindowState).catch(() => undefined);
+  return { temporaryOverlay: true, restoreWindowMode: 'expanded' };
 }
 
 function floatToPcm16(input) {
@@ -2089,7 +2162,11 @@ function renderMeter() {
 
 async function togglePrimaryVoice() {
   if (state.mode === 'recording' || state.mode === 'transcribing') {
-    await stopMic('awake');
+    if (state.transcriptionShortcutActive && state.voiceTarget === 'clipboard') {
+      await stopMic(transcriptionReturnMode(), { finalStatus: transcriptionReturnStatus() });
+    } else {
+      await stopMic('awake');
+    }
     return;
   }
   if (state.mode === 'awake') {
@@ -2099,27 +2176,39 @@ async function togglePrimaryVoice() {
   await enterAwake();
 }
 
-async function toggleTranscriptionShortcut() {
+async function toggleTranscriptionShortcut(overlayRestore = null) {
   const now = Date.now();
-  if (now - state.lastTranscriptionShortcutAt < 300) return;
+  if (now - state.lastTranscriptionShortcutAt < 300) {
+    restoreTemporaryTranscriptionOverlay(overlayRestore, 650);
+    return;
+  }
   state.lastTranscriptionShortcutAt = now;
   if (!state.config?.deviceId || !state.config?.deviceToken) {
     showStatus('Connect this desktop before recording transcription.');
+    restoreTemporaryTranscriptionOverlay(overlayRestore, 650);
     return;
   }
   if (state.mode === 'transcribing') {
     showStatus('Voice transcription is already running.');
+    restoreTemporaryTranscriptionOverlay(overlayRestore, 650);
     return;
   }
   if (state.mode === 'recording') {
     if (state.voiceTarget !== 'clipboard') {
       showStatus('Assistant voice is already recording.');
+      restoreTemporaryTranscriptionOverlay(overlayRestore, 650);
       return;
     }
-    await stopMic('awake', { cue: 'stop_button', finalStatus: 'Transcribing voice recording.' });
+    await stopMic(transcriptionReturnMode(), { cue: 'stop_button', finalStatus: transcriptionReturnStatus() });
     return;
   }
-  await startMic('clipboard', { cue: 'clipboard_recording_start', ignoreCommands: true });
+  beginTranscriptionShortcutSession(overlayRestore);
+  try {
+    await startMic('clipboard', { cue: 'clipboard_recording_start', ignoreCommands: true });
+  } catch (error) {
+    finishTranscriptionShortcutOverlay();
+    throw error;
+  }
 }
 
 if (els.saveButton) {
@@ -2340,7 +2429,10 @@ document.addEventListener('keydown', (event) => {
   if (editable) return;
   if (!isShortcutMatch(state.config?.transcriptionShortcut, event)) return;
   event.preventDefault();
-  void toggleTranscriptionShortcut().catch((err) => showStatus(err?.message || 'Could not toggle transcription.'));
+  void (async () => {
+    const overlayRestore = state.mode === 'recording' ? null : await prepareFocusedWindowTranscriptionOverlay();
+    await toggleTranscriptionShortcut(overlayRestore);
+  })().catch((err) => showStatus(err?.message || 'Could not toggle transcription.'));
 });
 if (navigator.mediaDevices?.addEventListener) {
   navigator.mediaDevices.addEventListener('devicechange', () => {
@@ -2359,8 +2451,8 @@ if (desktop.onWindowState) {
 }
 
 if (desktop.onTranscriptionShortcut) {
-  desktop.onTranscriptionShortcut(() => {
-    void toggleTranscriptionShortcut().catch((err) => showStatus(err?.message || 'Could not toggle transcription.'));
+  desktop.onTranscriptionShortcut((payload) => {
+    void toggleTranscriptionShortcut(payload).catch((err) => showStatus(err?.message || 'Could not toggle transcription.'));
   });
 }
 

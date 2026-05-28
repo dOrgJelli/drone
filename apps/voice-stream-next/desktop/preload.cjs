@@ -17,11 +17,12 @@ contextBridge.exposeInMainWorld('voiceStreamDesktop', {
   expandWindow: () => ipcRenderer.invoke('window:expand'),
   signedOutWindow: () => ipcRenderer.invoke('window:signedOut'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
+  restoreTemporaryOverlay: (payload) => ipcRenderer.invoke('window:restoreTemporaryOverlay', payload),
   setTrayStatus: (status) => ipcRenderer.invoke('tray:status', status),
   shortcutStatus: () => ipcRenderer.invoke('shortcut:status'),
   resetTranscriptionShortcut: () => ipcRenderer.invoke('shortcut:resetTranscription'),
   onTranscriptionShortcut: (callback) => {
-    const listener = () => callback();
+    const listener = (_event, payload) => callback(payload);
     ipcRenderer.on('shortcut:transcription', listener);
     return () => ipcRenderer.removeListener('shortcut:transcription', listener);
   },
