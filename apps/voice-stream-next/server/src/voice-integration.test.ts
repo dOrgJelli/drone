@@ -95,6 +95,15 @@ describe('voice integration', () => {
       headers: devHeaders,
       body: JSON.stringify({ deviceType: 'desktop', displayName: 'Extension Desktop' }),
     }).then((response) => response.json());
+    const user = db.userByClerkId('dev_voice_integration_example_local');
+    expect(user).toBeTruthy();
+    const repairedToolName = extensionToolName('drone-hub', 'repair_me');
+    db.upsertAssistantExtensionToolRoute(user!.id, {
+      toolName: repairedToolName,
+      enabled: false,
+      targetKind: 'device',
+      targetDeviceId: registered.device.id,
+    });
 
     const wsUrl = new URL(`/api/devices/${registered.device.id}/extensions`, baseUrl);
     wsUrl.protocol = 'ws:';
@@ -127,6 +136,19 @@ describe('voice integration', () => {
               additionalProperties: false,
             },
           }, {
+            name: 'repair_me',
+            label: 'Repair me',
+            description: 'Exercise old disabled route repair.',
+            approval: 'never',
+            supportedTargets: ['device', 'any_device'],
+            defaultTarget: 'device',
+            inputSchema: {
+              type: 'object',
+              properties: {},
+              required: [],
+              additionalProperties: false,
+            },
+          }, {
             name: 'server_only',
             label: 'Server only',
             description: 'Exercise server-target route defaults.',
@@ -143,17 +165,18 @@ describe('voice integration', () => {
         }],
       }));
 
-      const user = db.userByClerkId('dev_voice_integration_example_local');
-      expect(user).toBeTruthy();
       const toolName = extensionToolName('drone-hub', 'list_drones');
       const serverToolName = extensionToolName('drone-hub', 'server_only');
       await waitForCondition('extension route', () => Boolean(db.assistantExtensionToolRoute(user!.id, toolName)));
       const route = db.assistantExtensionToolRoute(user!.id, toolName);
+      const repairedRoute = db.assistantExtensionToolRoute(user!.id, repairedToolName);
       const serverRoute = db.assistantExtensionToolRoute(user!.id, serverToolName);
 
       expect(route?.enabled).toBe(true);
       expect(route?.targetKind).toBe('device');
       expect(route?.targetDeviceId).toBe(registered.device.id);
+      expect(repairedRoute?.enabled).toBe(true);
+      expect(repairedRoute?.targetDeviceId).toBe(registered.device.id);
       expect(serverRoute?.enabled).toBe(false);
       expect(serverRoute?.targetKind).toBe('server');
     } finally {
