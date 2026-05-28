@@ -592,7 +592,7 @@ async function postAssistantThreadPromptFromExtension(extensionId, threadId, pro
   const config = readConfig();
   const cleanThreadId = String(threadId || '').trim();
   const cleanPrompt = String(prompt || '').trim();
-  if (!config.deviceId || !config.deviceToken) throw new Error('desktop device is not paired with Voice Stream Next');
+  if (!config.deviceId || !config.deviceToken) throw new Error('desktop device is not paired with Drone');
   if (!cleanThreadId) throw new Error('threadId is required');
   if (!cleanPrompt) throw new Error('prompt is required');
   if (typeof fetch !== 'function') throw new Error('fetch is not available in this desktop runtime');
@@ -1066,14 +1066,14 @@ function trayModeColor(mode) {
 function trayStatusTooltip() {
   const label = trayModeLabel(trayStatus.mode);
   const detail = String(trayStatus.status || '').trim();
-  return detail && detail !== label ? `VoiceStream: ${label}\n${detail}` : `VoiceStream: ${label}`;
+  return detail && detail !== label ? `Drone: ${label}\n${detail}` : `Drone: ${label}`;
 }
 
 function trayStatusMenuTemplate() {
   return [
     { label: `Status: ${trayModeLabel(trayStatus.mode)}`, enabled: false },
     { type: 'separator' },
-    { label: 'Show VoiceStream', click: showMainWindow },
+    { label: 'Show Drone', click: showMainWindow },
     { type: 'separator' },
     {
       label: 'Quit',
@@ -1212,7 +1212,7 @@ function createWindow() {
     ...initialBounds,
     minWidth: fullWindow.minWidth,
     minHeight: fullWindow.minHeight,
-    title: 'VoiceStream',
+    title: 'Drone',
     backgroundColor: '#101216',
     frame: false,
     resizable: true,

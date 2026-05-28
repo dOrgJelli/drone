@@ -1525,22 +1525,115 @@ pre {
 }
 
 .signin-page {
+  position: relative;
+  isolation: isolate;
   color: var(--fg);
-  background: var(--bg);
+  background:
+    linear-gradient(135deg, rgba(167, 139, 250, .07), transparent 38%),
+    linear-gradient(180deg, rgba(255,255,255,.025), transparent 54%),
+    var(--bg);
+  padding: 40px 0;
+}
+
+.signin-page::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: .54;
+  background-image: radial-gradient(circle, rgba(255,255,255,.04) 1px, transparent 1px);
+  background-size: 20px 20px;
+  mask-image: linear-gradient(180deg, rgba(0,0,0,.92), transparent 84%);
 }
 
 .signin-copy {
+  display: grid;
+  gap: 18px;
+  padding: 0 0 0 22px;
   border-left: 4px solid var(--accent);
+}
+
+.signin-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  width: max-content;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.signin-brand-mark {
+  width: 32px;
+  height: 32px;
+  border: 1px solid rgba(167, 139, 250, .34);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(167, 139, 250, .22), rgba(74, 222, 128, .10)),
+    rgba(255, 255, 255, .04);
+  box-shadow: 0 0 28px rgba(167, 139, 250, .12);
 }
 
 .signin-copy h1 {
   color: var(--fg);
   font-family: inherit;
   font-size: clamp(34px, 5vw, 64px);
+  line-height: .98;
 }
 
 .signin-copy p {
   color: var(--fg-secondary);
+  margin-top: 0;
+}
+
+.signin-auth-card {
+  display: grid;
+  justify-items: stretch;
+}
+
+.signin-auth-card :where(.cl-rootBox, .cl-cardBox, .cl-card) {
+  width: 100%;
+}
+
+.signin-auth-card .cl-card {
+  border-color: var(--border);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.025), rgba(255,255,255,.01)),
+    var(--panel-alt);
+}
+
+.signin-auth-card .cl-headerTitle {
+  font-family: var(--sans);
+  font-weight: 780;
+}
+
+.signin-auth-card .cl-socialButtonsBlockButton {
+  border-color: var(--border);
+  background: rgba(255,255,255,.035);
+  color: var(--fg);
+  transition: border-color .16s ease, background .16s ease, color .16s ease, transform .16s ease;
+}
+
+.signin-auth-card .cl-socialButtonsBlockButton:hover,
+.signin-auth-card .cl-socialButtonsBlockButton:focus-visible {
+  border-color: rgba(167, 139, 250, .36) !important;
+  background: var(--accent) !important;
+  color: #101216 !important;
+  transform: translateY(-1px);
+}
+
+.signin-auth-card .cl-formButtonPrimary {
+  transition: border-color .16s ease, background .16s ease, color .16s ease, transform .16s ease;
+}
+
+.signin-auth-card .cl-formButtonPrimary:hover,
+.signin-auth-card .cl-formButtonPrimary:focus-visible {
+  border-color: rgba(167, 139, 250, .52) !important;
+  background: #b69cff !important;
+  color: #101216 !important;
+  transform: translateY(-1px);
 }
 
 .download-links {

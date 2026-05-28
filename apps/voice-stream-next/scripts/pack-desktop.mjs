@@ -46,14 +46,14 @@ function runPackager() {
   const modelPath = path.resolve(repoRoot, 'apps/voice-stream/android/app/src/main/assets/model-en-us');
   const args = [
     '.',
-    'VoiceStream',
+    'Drone',
     '--out',
     'release/desktop',
     '--overwrite',
     `--extra-resource=${modelPath}`,
     `--extra-resource=${vendorNodeModules}`,
     '--protocol=voicestream',
-    '--protocol-name=VoiceStream',
+    '--protocol-name=Drone',
     "--ignore=^/(android|docs|gradle|release|server|web|dist|\\.desktop-vendor)(/|$)",
     "--ignore=^/(build.gradle.kts|settings.gradle.kts|gradle.properties|gradlew|gradlew.bat)$",
   ];
@@ -81,7 +81,7 @@ function publishDesktopDownload() {
   const releaseRoot = path.join(appDir, 'release', 'desktop');
   const packagedDir = fs
     .readdirSync(releaseRoot, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && entry.name.startsWith('VoiceStream-'))
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith('Drone-'))
     .map((entry) => path.join(releaseRoot, entry.name))
     .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
   if (!packagedDir) {
@@ -118,7 +118,7 @@ function publishDesktopDownload() {
 }
 `;
   fs.writeFileSync(path.join(outputDir, 'latest.json'), metadata);
-  console.log(`Published VoiceStream desktop archive to ${latestFile}`);
+  console.log(`Published Drone desktop archive to ${latestFile}`);
 }
 
 fs.rmSync(vendorDir, { recursive: true, force: true });
