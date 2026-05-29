@@ -1053,9 +1053,7 @@ export async function buildApp(options: AppOptions = {}): Promise<{ app: Fastify
       const body = jsonBody(req);
       const current = db.ensureVoiceSettings(ctx.user.id);
       const settings = db.updateVoiceSettings(ctx.user.id, {
-        unlockCode: cleanCode(body.unlockCode, 'unlock code'),
         lockCode: cleanCode(body.lockCode, 'lock code'),
-        lockedOffCode: cleanCode(body.offCode ?? body.lockedOffCode ?? current.lockedOffCode, 'off code'),
       });
       return { ok: true, settings };
     }),

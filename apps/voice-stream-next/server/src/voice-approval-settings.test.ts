@@ -20,22 +20,31 @@ function tempDataDir(): string {
 }
 
 describe('parseVoiceApprovalSettings', () => {
-  test('rejects duplicate approval codes', () => {
+  test('rejects duplicate phrases', () => {
     expect(
       parseVoiceApprovalSettings({
         ...VOICE_APPROVAL_SETTINGS_DEFAULT,
-        unlockCode: '1234',
-        lockCode: '1234',
+        unlockPhrase: 'approval code',
       }),
     ).toBeNull();
   });
 
-  test('accepts custom timing and trigger phrase settings', () => {
+  test('normalizes phrase punctuation and casing', () => {
+    const parsed = parseVoiceApprovalSettings({
+      ...VOICE_APPROVAL_SETTINGS_DEFAULT,
+      unlockPhrase: '  Wake Up Now!  ',
+      shutdownPhrase: 'Shut Down, Completely.',
+    });
+    expect(parsed?.unlockPhrase).toBe('wake up now');
+    expect(parsed?.shutdownPhrase).toBe('shut down completely');
+  });
+
+  test('accepts custom timing and phrase settings', () => {
     const parsed = parseVoiceApprovalSettings({
       triggerPhrase: 'access code',
-      unlockCode: '1111',
+      unlockPhrase: 'wake up now',
+      shutdownPhrase: 'shut down completely',
       lockCode: '2222',
-      lockedOffCode: '3333',
       minDigits: 3,
       maxDigits: 6,
       stableMs: 500,
@@ -46,9 +55,9 @@ describe('parseVoiceApprovalSettings', () => {
     });
     expect(parsed).toEqual({
       triggerPhrase: 'access code',
-      unlockCode: '1111',
+      unlockPhrase: 'wake up now',
+      shutdownPhrase: 'shut down completely',
       lockCode: '2222',
-      lockedOffCode: '3333',
       minDigits: 3,
       maxDigits: 6,
       stableMs: 500,
@@ -96,9 +105,9 @@ describe('voice approval settings API', () => {
   test('persists custom settings via POST and reloads them on GET', async () => {
     const custom = {
       triggerPhrase: 'gate code',
-      unlockCode: '5678',
+      unlockPhrase: 'please wake up now',
+      shutdownPhrase: 'power down completely',
       lockCode: '8765',
-      lockedOffCode: '9999',
       minDigits: 4,
       maxDigits: 6,
       stableMs: 700,
@@ -131,7 +140,7 @@ describe('voice approval settings API', () => {
       method: 'POST',
       url: '/api/settings/voice-approval',
       headers: devHeaders,
-      body: JSON.stringify({ settings: { triggerPhrase: '', unlockCode: '1' } }),
+      body: JSON.stringify({ settings: { triggerPhrase: '', lockCode: '1' } }),
     });
     expect(response.statusCode).toBe(400);
   });
@@ -152,7 +161,7 @@ describe('voice approval settings API', () => {
       body: JSON.stringify({
         deviceId: pairing.device.id,
         token: pairing.token,
-        code: '1234',
+        code: '4321',
         source: 'android',
         protocolVersion: 1,
       }),
@@ -162,7 +171,7 @@ describe('voice approval settings API', () => {
     const user = db.userByClerkId('dev_approval_settings_example_local');
     expect(user).not.toBeNull();
     expect(db.listApprovalCodes(user!.id, 1)[0]).toMatchObject({
-      code: '1234',
+      code: '4321',
       source: 'android',
     });
   });

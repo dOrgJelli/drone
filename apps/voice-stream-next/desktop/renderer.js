@@ -15,6 +15,22 @@ const DEFAULT_TRANSCRIPTION_SHORTCUT = {
   alt: false,
   shift: true,
 };
+const DEFAULT_AWAKE_SLEEP_TOGGLE_SHORTCUT = {
+  key: 'a',
+  mod: true,
+  ctrl: false,
+  meta: false,
+  alt: false,
+  shift: true,
+};
+const DEFAULT_TURN_OFF_SHORTCUT = {
+  key: 'o',
+  mod: true,
+  ctrl: false,
+  meta: false,
+  alt: false,
+  shift: true,
+};
 const MODIFIER_ONLY_SHORTCUT_KEYS = new Set(['shift', 'control', 'ctrl', 'alt', 'meta', 'os']);
 
 const preRollBuffer = new PcmCaptureBuffer(PRE_ROLL_MAX_BYTES);
@@ -54,7 +70,7 @@ const state = {
   wakeProcessor: null,
   wakeUnsubscribe: null,
   wakeStarting: false,
-  capturingShortcut: false,
+  capturingShortcutKey: null,
   shortcutStatus: null,
   lastTranscriptionShortcutAt: 0,
   lastRecognizedText: '',
@@ -112,6 +128,14 @@ const els = {
   transcriptionShortcutClear: document.querySelector('#transcriptionShortcutClear'),
   transcriptionShortcutReset: document.querySelector('#transcriptionShortcutReset'),
   transcriptionShortcutStatus: document.querySelector('#transcriptionShortcutStatus'),
+  awakeSleepToggleShortcutCapture: document.querySelector('#awakeSleepToggleShortcutCapture'),
+  awakeSleepToggleShortcutClear: document.querySelector('#awakeSleepToggleShortcutClear'),
+  awakeSleepToggleShortcutReset: document.querySelector('#awakeSleepToggleShortcutReset'),
+  awakeSleepToggleShortcutStatus: document.querySelector('#awakeSleepToggleShortcutStatus'),
+  turnOffShortcutCapture: document.querySelector('#turnOffShortcutCapture'),
+  turnOffShortcutClear: document.querySelector('#turnOffShortcutClear'),
+  turnOffShortcutReset: document.querySelector('#turnOffShortcutReset'),
+  turnOffShortcutStatus: document.querySelector('#turnOffShortcutStatus'),
   extensionsConfigInput: document.querySelector('#extensionsConfigInput'),
   addExtensionFileButton: document.querySelector('#addExtensionFileButton'),
   extensionDropzone: document.querySelector('#extensionDropzone'),
@@ -422,6 +446,8 @@ function applyConfig(config) {
   state.config = {
     ...config,
     transcriptionShortcut: sanitizeShortcutBinding(config?.transcriptionShortcut, DEFAULT_TRANSCRIPTION_SHORTCUT),
+    awakeSleepToggleShortcut: sanitizeShortcutBinding(config?.awakeSleepToggleShortcut, DEFAULT_AWAKE_SLEEP_TOGGLE_SHORTCUT),
+    turnOffShortcut: sanitizeShortcutBinding(config?.turnOffShortcut, DEFAULT_TURN_OFF_SHORTCUT),
   };
   if (els.serverUrlInput) els.serverUrlInput.value = config.serverUrl;
   if (els.deviceNameInput) els.deviceNameInput.value = config.deviceName;
@@ -455,48 +481,154 @@ function applyConfig(config) {
   }
 }
 
-function renderShortcutSettings() {
-  const binding = sanitizeShortcutBinding(state.config?.transcriptionShortcut, DEFAULT_TRANSCRIPTION_SHORTCUT);
-  if (els.transcriptionShortcutCapture && !state.capturingShortcut) {
-    els.transcriptionShortcutCapture.textContent = formatShortcutBinding(binding);
-  }
-  if (els.transcriptionShortcutClear) {
-    els.transcriptionShortcutClear.disabled = !binding;
-  }
-  renderShortcutStatus(state.shortcutStatus);
+function normalizeShortcutStatusPayload(status) {
+  if (!status) return null;
+  if (status.transcription || status.awakeSleepToggle || status.turnOff) return status;
+  if (typeof status.registered === 'boolean') return { transcription: status };
+  return status;
 }
 
-function renderShortcutStatus(status) {
-  if (!els.transcriptionShortcutStatus) return;
+function renderShortcutSettings() {
+  const specs = [
+    {
+      configKey: 'transcriptionShortcut',
+      defaultBinding: DEFAULT_TRANSCRIPTION_SHORTCUT,
+      captureEl: els.transcriptionShortcutCapture,
+      clearEl: els.transcriptionShortcutClear,
+      statusEl: els.transcriptionShortcutStatus,
+      statusKey: 'transcription',
+      disabledLabel: 'Background transcription shortcut is disabled.',
+    },
+    {
+      configKey: 'awakeSleepToggleShortcut',
+      defaultBinding: DEFAULT_AWAKE_SLEEP_TOGGLE_SHORTCUT,
+      captureEl: els.awakeSleepToggleShortcutCapture,
+      clearEl: els.awakeSleepToggleShortcutClear,
+      statusEl: els.awakeSleepToggleShortcutStatus,
+      statusKey: 'awakeSleepToggle',
+      disabledLabel: 'Awake and sleep toggle shortcut is disabled.',
+    },
+    {
+      configKey: 'turnOffShortcut',
+      defaultBinding: DEFAULT_TURN_OFF_SHORTCUT,
+      captureEl: els.turnOffShortcutCapture,
+      clearEl: els.turnOffShortcutClear,
+      statusEl: els.turnOffShortcutStatus,
+      statusKey: 'turnOff',
+      disabledLabel: 'Turn off shortcut is disabled.',
+    },
+  ];
+  const statuses = normalizeShortcutStatusPayload(state.shortcutStatus);
+  for (const spec of specs) {
+    const binding = sanitizeShortcutBinding(state.config?.[spec.configKey], spec.defaultBinding);
+    if (spec.captureEl && state.capturingShortcutKey !== spec.configKey) {
+      spec.captureEl.textContent = formatShortcutBinding(binding);
+    }
+    if (spec.clearEl) spec.clearEl.disabled = !binding;
+    renderShortcutStatusEl(spec.statusEl, binding, statuses?.[spec.statusKey], spec.disabledLabel);
+  }
+}
+
+function renderShortcutStatusEl(statusEl, binding, status, disabledLabel) {
+  if (!statusEl) return;
   if (!status) {
-    els.transcriptionShortcutStatus.className = 'shortcut-status muted';
-    els.transcriptionShortcutStatus.textContent = 'Checking shortcut registration.';
+    statusEl.className = 'shortcut-status muted';
+    statusEl.textContent = 'Checking shortcut registration.';
     return;
   }
-  if (!state.config?.transcriptionShortcut) {
-    els.transcriptionShortcutStatus.className = 'shortcut-status muted';
-    els.transcriptionShortcutStatus.textContent = 'Background transcription shortcut is disabled.';
+  if (!binding) {
+    statusEl.className = 'shortcut-status muted';
+    statusEl.textContent = disabledLabel;
     return;
   }
   if (status.registered) {
-    els.transcriptionShortcutStatus.className = 'shortcut-status ok';
-    els.transcriptionShortcutStatus.textContent = `Registered globally: ${status.label || formatShortcutBinding(state.config.transcriptionShortcut)}.`;
+    statusEl.className = 'shortcut-status ok';
+    statusEl.textContent = `Registered globally: ${status.label || formatShortcutBinding(binding)}.`;
     return;
   }
-  els.transcriptionShortcutStatus.className = 'shortcut-status error';
-  els.transcriptionShortcutStatus.textContent = status.error || 'Shortcut could not be registered globally.';
+  statusEl.className = 'shortcut-status error';
+  statusEl.textContent = status.error || 'Shortcut could not be registered globally.';
 }
 
-async function saveTranscriptionShortcut(binding) {
+async function saveConfigShortcut(configKey, binding) {
   if (!state.config) return;
   const next = await desktop.writeConfig({
     ...state.config,
-    transcriptionShortcut: sanitizeShortcutBinding(binding, null),
+    [configKey]: sanitizeShortcutBinding(binding, null),
   });
   applyConfig(next);
   if (desktop.shortcutStatus) {
     state.shortcutStatus = await desktop.shortcutStatus().catch(() => state.shortcutStatus);
     renderShortcutSettings();
+  }
+}
+
+async function saveTranscriptionShortcut(binding) {
+  return saveConfigShortcut('transcriptionShortcut', binding);
+}
+
+function bindShortcutControls({
+  configKey,
+  defaultBinding,
+  captureEl,
+  clearEl,
+  resetEl,
+  resetInvoker,
+}) {
+  if (!captureEl) return;
+  captureEl.addEventListener('click', () => {
+    state.capturingShortcutKey = configKey;
+    captureEl.classList.add('is-capturing');
+    captureEl.textContent = 'Press keys...';
+    captureEl.focus();
+  });
+  captureEl.addEventListener('blur', () => {
+    if (state.capturingShortcutKey !== configKey) return;
+    state.capturingShortcutKey = null;
+    captureEl.classList.remove('is-capturing');
+    renderShortcutSettings();
+  });
+  captureEl.addEventListener('keydown', (event) => {
+    if (state.capturingShortcutKey !== configKey) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.key === 'Escape') {
+      state.capturingShortcutKey = null;
+      captureEl.classList.remove('is-capturing');
+      renderShortcutSettings();
+      return;
+    }
+    if (event.key === 'Backspace' || event.key === 'Delete') {
+      state.capturingShortcutKey = null;
+      captureEl.classList.remove('is-capturing');
+      void saveConfigShortcut(configKey, null).catch((err) => showStatus(err?.message || 'Could not save shortcut.'));
+      return;
+    }
+    const next = shortcutBindingFromKeyboardEvent(event);
+    if (!next) return;
+    state.capturingShortcutKey = null;
+    captureEl.classList.remove('is-capturing');
+    void saveConfigShortcut(configKey, next).catch((err) => showStatus(err?.message || 'Could not save shortcut.'));
+  });
+  if (clearEl) {
+    clearEl.addEventListener('click', () => {
+      void saveConfigShortcut(configKey, null).catch((err) => showStatus(err?.message || 'Could not clear shortcut.'));
+    });
+  }
+  if (resetEl) {
+    resetEl.addEventListener('click', () => {
+      if (resetInvoker) {
+        void resetInvoker()
+          .then((result) => {
+            if (result?.config) applyConfig(result.config);
+            state.shortcutStatus = normalizeShortcutStatusPayload(result?.status || state.shortcutStatus);
+            renderShortcutSettings();
+          })
+          .catch((err) => showStatus(err?.message || 'Could not reset shortcut.'));
+        return;
+      }
+      void saveConfigShortcut(configKey, defaultBinding).catch((err) => showStatus(err?.message || 'Could not reset shortcut.'));
+    });
   }
 }
 
@@ -974,8 +1106,8 @@ function handleUpdatePayload(update) {
   }
 }
 
-async function loadVoiceSettings() {
-  if (state.voiceSettings) return state.voiceSettings;
+async function loadVoiceSettings(forceReload = false) {
+  if (!forceReload && state.voiceSettings) return state.voiceSettings;
   const data = await api('/api/settings/voice-approval');
   state.voiceSettings = data.settings;
   state.approvalRecognizer.configure({
@@ -1175,7 +1307,7 @@ function toggleSettingsPanel() {
     }
     if (desktop.shortcutStatus) {
       void desktop.shortcutStatus().then((status) => {
-        state.shortcutStatus = status;
+        state.shortcutStatus = normalizeShortcutStatusPayload(status);
         renderShortcutSettings();
       }).catch(() => undefined);
     }
@@ -1559,7 +1691,7 @@ function openVoiceSocket(target) {
           });
         }
         const settings = await loadVoiceSettings().catch(() => null);
-        const status = settings ? `Sleep: ${settings.unlockCode} awake, ${settings.lockedOffCode} off.` : 'Sleeping.';
+        const status = 'Sleeping. Say your unlock or shutdown phrase.';
         if (state.mode !== 'sleeping') {
           playLocalVoiceCue('sleep');
         }
@@ -1631,7 +1763,7 @@ async function handleTerminalDetected(message, socket, target) {
         : 'Awake. Finishing voice request.';
   if (commandType === 'sleep') {
     const settings = await loadVoiceSettings().catch(() => null);
-    status = settings ? `Sleep: ${settings.unlockCode} awake, ${settings.lockedOffCode} off.` : 'Sleeping.';
+    status = 'Sleeping. Say your unlock or shutdown phrase.';
     resetApprovalCollection();
     playLocalVoiceCue('sleep');
   } else {
@@ -1869,9 +2001,7 @@ function scheduleApprovalFinalize() {
 }
 
 function showCollectingStatus(partialCode) {
-  const nextStatus = partialCode
-    ? (state.mode === 'sleeping' ? `Unlock: ${partialCode}` : `Approval: ${partialCode}`)
-    : (state.mode === 'sleeping' ? 'Unlock code...' : 'Approval code...');
+  const nextStatus = partialCode ? `Approval: ${partialCode}` : 'Approval code...';
   showStatus(nextStatus);
 }
 
@@ -1933,10 +2063,16 @@ async function logDesktopEvent(level, message, details) {
   }).catch(() => {});
 }
 
+async function applyDesktopVoskGrammar(mode, settings) {
+  if (!settings || !desktop.setVoskGrammar) return;
+  await desktop.setVoskGrammar(mode, settings).catch(() => null);
+}
+
 async function enterAwake() {
   resetApprovalCollection();
-  await loadVoiceSettings().catch(() => null);
+  const settings = await loadVoiceSettings(true).catch(() => null);
   setMode('awake', 'Awake. Say "hey Sebastian" to start recording.');
+  await applyDesktopVoskGrammar('awake', settings);
   startWakeListener();
 }
 
@@ -1950,8 +2086,9 @@ async function enterSleep() {
   }
   resetApprovalCollection();
   playLocalVoiceCue('sleep');
-  const settings = await loadVoiceSettings().catch(() => null);
-  setMode('sleeping', settings ? `Sleep: ${settings.unlockCode} awake, ${settings.lockedOffCode} off.` : 'Sleeping.');
+  const settings = await loadVoiceSettings(true).catch(() => null);
+  setMode('sleeping', 'Sleeping. Say your unlock or shutdown phrase.');
+  await applyDesktopVoskGrammar('sleep', settings);
   startWakeListener();
 }
 
@@ -1969,21 +2106,12 @@ async function turnOff(options = {}) {
 
 async function processApprovalCode(code) {
   const settings = await loadVoiceSettings();
-  if (state.mode === 'sleeping' && code === settings.unlockCode) {
-    playLocalVoiceCue('unlock');
-    setMode('awake', 'Unlocked.');
-    return;
-  }
-  if (code === settings.lockedOffCode) {
-    await turnOff({ cue: 'sleeping_off' });
-    return;
-  }
-  if (state.mode !== 'sleeping' && code === settings.lockCode) {
-    await enterSleep();
-    return;
-  }
   if (state.mode === 'sleeping') {
-    showStatus(`Sleep: ${settings.unlockCode} awake, ${settings.lockedOffCode} off.`);
+    showStatus('Sleeping. Say your unlock or shutdown phrase.');
+    return;
+  }
+  if (code === settings.lockCode) {
+    await enterSleep();
     return;
   }
   playLocalVoiceCue('status');
@@ -1993,10 +2121,31 @@ async function processApprovalCode(code) {
 }
 
 async function processPhraseText(text, finalizeNow = false) {
-  if (acceptApprovalText(text, finalizeNow)) return;
+  const settings = await loadVoiceSettings().catch(() => null);
+  if (state.mode !== 'sleeping' && acceptApprovalText(text, finalizeNow)) return;
   if (state.mode === 'recording') {
     showStatus('Recording. Wake commands are ignored until capture stops.');
     void logDesktopEvent('info', 'Wake phrase ignored while recording', { text });
+    return;
+  }
+  if (state.mode === 'sleeping' && settings && globalThis.VoicePhrases) {
+    const sleepMatch = globalThis.VoicePhrases.sleepPhraseMatch(text, settings.unlockPhrase, settings.shutdownPhrase);
+    if (sleepMatch === 'unlock') {
+      playLocalVoiceCue('unlock');
+      setMode('awake', 'Unlocked.');
+      const awakeSettings = await loadVoiceSettings(true).catch(() => settings);
+      await applyDesktopVoskGrammar('awake', awakeSettings);
+      return;
+    }
+    if (sleepMatch === 'shutdown') {
+      await turnOff({ cue: 'sleeping_off' });
+      return;
+    }
+    showStatus('Sleeping. Say your unlock or shutdown phrase.');
+    return;
+  }
+  if (settings && globalThis.VoicePhrases?.matchesPhrase(text, settings.shutdownPhrase)) {
+    await turnOff({ cue: 'sleeping_off' });
     return;
   }
   const match = wakePhraseMatch(text);
@@ -2014,10 +2163,6 @@ async function processPhraseText(text, finalizeNow = false) {
   if (match === 'status') {
     playLocalVoiceCue('status');
     showStatus(`Mode: ${state.mode}. Device: ${state.config?.deviceId ? state.config.deviceId.slice(0, 12) : 'unpaired'}.`);
-    return;
-  }
-  if (state.mode === 'sleeping') {
-    showStatus('Sleeping. Press Wake or say the unlock code.');
     return;
   }
   if (state.mode === 'off') enterAwake();
@@ -2284,67 +2429,36 @@ if (els.shortcutsSettingsTab) {
     selectSettingsTab('shortcuts');
     if (desktop.shortcutStatus) {
       void desktop.shortcutStatus().then((status) => {
-        state.shortcutStatus = status;
+        state.shortcutStatus = normalizeShortcutStatusPayload(status);
         renderShortcutSettings();
       }).catch(() => undefined);
     }
   });
 }
-if (els.transcriptionShortcutCapture) {
-  els.transcriptionShortcutCapture.addEventListener('click', () => {
-    state.capturingShortcut = true;
-    els.transcriptionShortcutCapture.classList.add('is-capturing');
-    els.transcriptionShortcutCapture.textContent = 'Press keys...';
-    els.transcriptionShortcutCapture.focus();
-  });
-  els.transcriptionShortcutCapture.addEventListener('blur', () => {
-    state.capturingShortcut = false;
-    els.transcriptionShortcutCapture.classList.remove('is-capturing');
-    renderShortcutSettings();
-  });
-  els.transcriptionShortcutCapture.addEventListener('keydown', (event) => {
-    if (!state.capturingShortcut) return;
-    event.preventDefault();
-    event.stopPropagation();
-    if (event.key === 'Escape') {
-      state.capturingShortcut = false;
-      els.transcriptionShortcutCapture.classList.remove('is-capturing');
-      renderShortcutSettings();
-      return;
-    }
-    if (event.key === 'Backspace' || event.key === 'Delete') {
-      state.capturingShortcut = false;
-      els.transcriptionShortcutCapture.classList.remove('is-capturing');
-      void saveTranscriptionShortcut(null).catch((err) => showStatus(err?.message || 'Could not save shortcut.'));
-      return;
-    }
-    const next = shortcutBindingFromKeyboardEvent(event);
-    if (!next) return;
-    state.capturingShortcut = false;
-    els.transcriptionShortcutCapture.classList.remove('is-capturing');
-    void saveTranscriptionShortcut(next).catch((err) => showStatus(err?.message || 'Could not save shortcut.'));
-  });
-}
-if (els.transcriptionShortcutClear) {
-  els.transcriptionShortcutClear.addEventListener('click', () => {
-    void saveTranscriptionShortcut(null).catch((err) => showStatus(err?.message || 'Could not clear shortcut.'));
-  });
-}
-if (els.transcriptionShortcutReset) {
-  els.transcriptionShortcutReset.addEventListener('click', () => {
-    if (!desktop.resetTranscriptionShortcut) {
-      void saveTranscriptionShortcut(DEFAULT_TRANSCRIPTION_SHORTCUT).catch((err) => showStatus(err?.message || 'Could not reset shortcut.'));
-      return;
-    }
-    void desktop.resetTranscriptionShortcut()
-      .then((result) => {
-        if (result?.config) applyConfig(result.config);
-        state.shortcutStatus = result?.status || state.shortcutStatus;
-        renderShortcutSettings();
-      })
-      .catch((err) => showStatus(err?.message || 'Could not reset shortcut.'));
-  });
-}
+bindShortcutControls({
+  configKey: 'transcriptionShortcut',
+  defaultBinding: DEFAULT_TRANSCRIPTION_SHORTCUT,
+  captureEl: els.transcriptionShortcutCapture,
+  clearEl: els.transcriptionShortcutClear,
+  resetEl: els.transcriptionShortcutReset,
+  resetInvoker: desktop.resetTranscriptionShortcut ? () => desktop.resetTranscriptionShortcut() : null,
+});
+bindShortcutControls({
+  configKey: 'awakeSleepToggleShortcut',
+  defaultBinding: DEFAULT_AWAKE_SLEEP_TOGGLE_SHORTCUT,
+  captureEl: els.awakeSleepToggleShortcutCapture,
+  clearEl: els.awakeSleepToggleShortcutClear,
+  resetEl: els.awakeSleepToggleShortcutReset,
+  resetInvoker: desktop.resetAwakeSleepToggleShortcut ? () => desktop.resetAwakeSleepToggleShortcut() : null,
+});
+bindShortcutControls({
+  configKey: 'turnOffShortcut',
+  defaultBinding: DEFAULT_TURN_OFF_SHORTCUT,
+  captureEl: els.turnOffShortcutCapture,
+  clearEl: els.turnOffShortcutClear,
+  resetEl: els.turnOffShortcutReset,
+  resetInvoker: desktop.resetTurnOffShortcut ? () => desktop.resetTurnOffShortcut() : null,
+});
 if (els.inputDeviceSelect) {
   els.inputDeviceSelect.addEventListener('change', () => {
     renderDevicePicker(els.inputDeviceSelect);
@@ -2436,11 +2550,21 @@ document.addEventListener('keydown', (event) => {
     closeSettingsPanel();
     return;
   }
-  if (event.repeat || state.capturingShortcut) return;
+  if (event.repeat || state.capturingShortcutKey) return;
   const target = event.target;
   const editable = target instanceof HTMLElement &&
     (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName));
   if (editable) return;
+  if (isShortcutMatch(state.config?.awakeSleepToggleShortcut, event)) {
+    event.preventDefault();
+    void togglePrimaryVoice().catch((err) => showStatus(err?.message || 'Could not toggle voice state.'));
+    return;
+  }
+  if (isShortcutMatch(state.config?.turnOffShortcut, event)) {
+    event.preventDefault();
+    void turnOff().catch((err) => showStatus(err?.message || 'Could not turn voice off.'));
+    return;
+  }
   if (!isShortcutMatch(state.config?.transcriptionShortcut, event)) return;
   event.preventDefault();
   void (async () => {
@@ -2470,9 +2594,21 @@ if (desktop.onTranscriptionShortcut) {
   });
 }
 
+if (desktop.onAwakeSleepToggleShortcut) {
+  desktop.onAwakeSleepToggleShortcut(() => {
+    void togglePrimaryVoice().catch((err) => showStatus(err?.message || 'Could not toggle voice state.'));
+  });
+}
+
+if (desktop.onTurnOffShortcut) {
+  desktop.onTurnOffShortcut(() => {
+    void turnOff().catch((err) => showStatus(err?.message || 'Could not turn voice off.'));
+  });
+}
+
 if (desktop.onShortcutStatus) {
   desktop.onShortcutStatus((status) => {
-    state.shortcutStatus = status;
+    state.shortcutStatus = normalizeShortcutStatusPayload(status);
     renderShortcutSettings();
   });
 }
@@ -2487,7 +2623,7 @@ desktop.readConfig().then((config) => {
   void refreshAudioDevicePickers();
   if (desktop.shortcutStatus) {
     void desktop.shortcutStatus().then((status) => {
-      state.shortcutStatus = status;
+      state.shortcutStatus = normalizeShortcutStatusPayload(status);
       renderShortcutSettings();
     }).catch(() => undefined);
   }

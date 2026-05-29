@@ -107,6 +107,26 @@
                     <button id="transcriptionShortcutReset" class="secondary mini-button" type="button">Reset</button>
                   </div>
                   <p id="transcriptionShortcutStatus" class="shortcut-status muted">Checking shortcut registration.</p>
+                  <div>
+                    <span class="device-picker-title">Toggle awake and sleep</span>
+                    <p class="shortcut-help">From off, this turns voice on awake. When awake it goes to sleep; when sleeping it goes back to awake.</p>
+                  </div>
+                  <div class="shortcut-row">
+                    <button id="awakeSleepToggleShortcutCapture" class="shortcut-capture" type="button" data-shortcut-capture="true">Ctrl/Cmd+Shift+A</button>
+                    <button id="awakeSleepToggleShortcutClear" class="secondary mini-button" type="button">Clear</button>
+                    <button id="awakeSleepToggleShortcutReset" class="secondary mini-button" type="button">Reset</button>
+                  </div>
+                  <p id="awakeSleepToggleShortcutStatus" class="shortcut-status muted">Checking shortcut registration.</p>
+                  <div>
+                    <span class="device-picker-title">Turn voice off</span>
+                    <p class="shortcut-help">Stops listening and turns voice off from any awake or sleep state.</p>
+                  </div>
+                  <div class="shortcut-row">
+                    <button id="turnOffShortcutCapture" class="shortcut-capture" type="button" data-shortcut-capture="true">Ctrl/Cmd+Shift+O</button>
+                    <button id="turnOffShortcutClear" class="secondary mini-button" type="button">Clear</button>
+                    <button id="turnOffShortcutReset" class="secondary mini-button" type="button">Reset</button>
+                  </div>
+                  <p id="turnOffShortcutStatus" class="shortcut-status muted">Checking shortcut registration.</p>
                 </div>
               </div>
             </div>
@@ -148,6 +168,7 @@
 
     </main>
     <script src="../shared/approval-code.js"></script>
+    <script src="../shared/voice-phrases.js"></script>
     <script src="../shared/pcm-capture-buffer.js"></script>
     <script src="../shared/local-voice-cues.js"></script>
     <script src="../shared/pairing-payload-parser.js"></script>

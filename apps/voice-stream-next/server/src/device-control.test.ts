@@ -451,7 +451,8 @@ describe('voice session device validation', () => {
       });
       expect(bootstrapResponse.statusCode).toBe(200);
       expect(bootstrapResponse.json().device.id).toBe(claimed.device.id);
-      expect(bootstrapResponse.json().settings.unlockCode).toBeTruthy();
+      expect(bootstrapResponse.json().settings.unlockPhrase).toBeTruthy();
+      expect(bootstrapResponse.json().settings.shutdownPhrase).toBeTruthy();
 
       const secondRequestResponse = await built.app.inject({
         method: 'POST',

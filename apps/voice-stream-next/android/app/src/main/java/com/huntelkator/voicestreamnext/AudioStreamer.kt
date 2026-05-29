@@ -78,6 +78,8 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
             if (active.get() && awakeMode) {
                 currentOnStatus = onStatus
                 sleeping = false
+                applyWakeDetectorSettingsIfReady()
+                refreshApprovalSettings { applyWakeDetectorSettingsIfReady() }
                 onStatus("Awake: waiting for \"hey sebastian\"")
             }
             return
@@ -86,14 +88,15 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
         currentOnStatus = onStatus
         awakeMode = true
         sleeping = false
-        approvalSettings = runCatching { api.voiceApprovalSettings() }.getOrDefault(VoiceApprovalSettings())
-        approvalCodeSettings = approvalSettings.toApprovalCodeSettings()
-        approvalCodeRecognizer.configure(approvalCodeSettings)
+        refreshApprovalSettingsBlocking()
         wakeDetector = VoskWakeWordDetector(
             context,
             { status -> onStatus(status) },
-            { text -> handleLocalRecognizerText(text, onStatus) },
-        ).also { it.prepare() }
+            { text -> mainHandler.post { handleLocalRecognizerText(text, onStatus) } },
+        ).also { detector ->
+            applyWakeDetectorSettingsIfReady()
+            detector.prepare()
+        }
         onStatus("Awake: waiting for \"hey sebastian\"")
         thread(name = "VoiceStreamNextAwakeAudio") {
             runRecorder(onStatus, detectWake = true)
@@ -133,6 +136,8 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
         if (sleeping) return true
         sleeping = true
         resetApprovalCollection()
+        applyWakeDetectorSettingsIfReady()
+        refreshApprovalSettings { applyWakeDetectorSettingsIfReady() }
         cuePlayer.play(LocalCue.SLEEP)
         if (recording.get() && onStatus != null) {
             endRecording(onStatus, sleepingStatus())
@@ -146,6 +151,7 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
         val onStatus = currentOnStatus ?: return false
         if (!active.get() || !awakeMode) return false
         sleeping = false
+        applyWakeDetectorSettingsIfReady()
         if (recording.get()) {
             endRecording(onStatus, "Awake: waiting for \"hey sebastian\"")
             closeSocket("recording stopped", sendEnd = false)
@@ -329,6 +335,8 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
             commandType == "sleep" -> {
                 sleeping = true
                 resetApprovalCollection()
+                applyWakeDetectorSettingsIfReady()
+                refreshApprovalSettings { applyWakeDetectorSettingsIfReady() }
                 cuePlayer.play(LocalCue.SLEEP)
                 sleepingStatus()
             }
@@ -390,6 +398,8 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
         val wasSleeping = sleeping
         sleeping = true
         resetApprovalCollection()
+        applyWakeDetectorSettingsIfReady()
+        refreshApprovalSettings { applyWakeDetectorSettingsIfReady() }
         if (!wasSleeping) {
             cuePlayer.play(LocalCue.SLEEP)
         }
@@ -482,7 +492,26 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
             wakeDetector?.reset()
             return
         }
+        mainHandler.post { handleWakePhrase(phrase, onStatus) }
+    }
+
+    private fun handleWakePhrase(phrase: WakePhrase, onStatus: (String) -> Unit) {
+        if (!active.get()) return
         when {
+            phrase.hasUnlock && sleeping -> {
+                sleeping = false
+                applyWakeDetectorSettingsIfReady()
+                refreshApprovalSettings { applyWakeDetectorSettingsIfReady() }
+                wakeDetector?.reset()
+                cuePlayer.play(LocalCue.UNLOCK)
+                onStatus("Awake: waiting for \"hey sebastian\"")
+            }
+            phrase.hasShutdown -> {
+                wakeDetector?.reset()
+                cuePlayer.play(LocalCue.SLEEPING_OFF)
+                onStatus("Off")
+                stop()
+            }
             phrase.hasStart && !sleeping -> {
                 sleeping = false
                 wakeDetector?.reset()
@@ -502,8 +531,11 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
             phrase.hasSleep -> {
                 wakeDetector?.reset()
                 if (sleeping) return
-                cuePlayer.play(LocalCue.SLEEP)
                 sleeping = true
+                resetApprovalCollection()
+                applyWakeDetectorSettingsIfReady()
+                refreshApprovalSettings { applyWakeDetectorSettingsIfReady() }
+                cuePlayer.play(LocalCue.SLEEP)
                 if (recording.get()) {
                     endRecording(onStatus, sleepingStatus())
                 } else {
@@ -518,7 +550,7 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
     }
 
     private fun handleLocalRecognizerText(text: String, onStatus: (String) -> Unit) {
-        if (!active.get()) return
+        if (!active.get() || sleeping) return
         val update = approvalCodeRecognizer.accept(text, SystemClock.elapsedRealtime())
         handleApprovalUpdate(update, onStatus)
         if (approvalCodeRecognizer.isCollecting) {
@@ -541,9 +573,7 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
             ApprovalCodeUpdate.None -> Unit
             is ApprovalCodeUpdate.Collecting -> {
                 val text = if (update.partialCode.isBlank()) {
-                    if (sleeping) "Unlock code..." else "Approval code..."
-                } else if (sleeping) {
-                    "Unlock: ${update.partialCode}"
+                    "Approval code..."
                 } else {
                     "Approval: ${update.partialCode}"
                 }
@@ -557,23 +587,12 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
     private fun handleApprovalCode(code: String, onStatus: (String) -> Unit) {
         val settings = approvalSettings
         when {
-            sleeping && code == settings.unlockCode -> {
-                sleeping = false
-                wakeDetector?.reset()
-                cuePlayer.play(LocalCue.UNLOCK)
-                onStatus("Awake: waiting for \"hey sebastian\"")
-            }
-            code == settings.offCode -> {
-                cuePlayer.play(LocalCue.SLEEPING_OFF)
-                active.set(false)
-                recording.set(false)
-                outgoingReady.set(false)
-                closeSocket("approval off", sendEnd = true)
-                runCatching { recorder?.stop() }
-                onStatus("Off")
-            }
-            !sleeping && code == settings.lockCode -> {
+            sleeping -> onStatus(sleepingStatus())
+            code == settings.lockCode -> {
                 sleeping = true
+                resetApprovalCollection()
+                applyWakeDetectorSettingsIfReady()
+                refreshApprovalSettings { applyWakeDetectorSettingsIfReady() }
                 cuePlayer.play(LocalCue.SLEEP)
                 if (recording.get()) {
                     endRecording(onStatus, sleepingStatus())
@@ -581,13 +600,44 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
                     onStatus(sleepingStatus())
                 }
             }
-            !sleeping -> {
+            else -> {
                 cuePlayer.play(LocalCue.STATUS)
                 val text = "Approval sent: $code"
                 emitStatus(onStatus, text, approvalStatus = text)
                 thread(name = "VoiceStreamApprovalUpload") {
                     runCatching { api.uploadApprovalCode(code) }
                 }
+            }
+        }
+    }
+
+    private fun applyWakeDetectorSettingsIfReady() {
+        if (!active.get()) return
+        val detector = wakeDetector ?: return
+        val settings = approvalSettings
+        detector.applyListeningSettings(
+            sleepModeEnabled = sleeping,
+            unlock = settings.unlockPhrase,
+            shutdown = settings.shutdownPhrase,
+            approvalTrigger = settings.triggerPhrase,
+        )
+    }
+
+    private fun refreshApprovalSettingsBlocking() {
+        val settings = runCatching { api.voiceApprovalSettings() }.getOrDefault(VoiceApprovalSettings())
+        approvalSettings = settings
+        approvalCodeSettings = settings.toApprovalCodeSettings()
+        approvalCodeRecognizer.configure(approvalCodeSettings)
+    }
+
+    private fun refreshApprovalSettings(onUpdated: (() -> Unit)? = null) {
+        thread(name = "VoiceStreamApprovalSettingsRefresh") {
+            val settings = runCatching { api.voiceApprovalSettings() }.getOrDefault(VoiceApprovalSettings())
+            mainHandler.post {
+                approvalSettings = settings
+                approvalCodeSettings = settings.toApprovalCodeSettings()
+                approvalCodeRecognizer.configure(approvalCodeSettings)
+                onUpdated?.invoke()
             }
         }
     }
@@ -660,8 +710,7 @@ class AudioStreamer(private val context: Context, private val api: VoiceStreamAp
     }
 
     private fun sleepingStatus(): String {
-        val settings = approvalSettings
-        return "Sleep: ${settings.unlockCode} awake, ${settings.offCode} off"
+        return "Sleeping. Say your unlock or shutdown phrase."
     }
 
     private fun encode(value: String): String {

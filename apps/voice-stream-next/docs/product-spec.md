@@ -234,11 +234,11 @@ Initial command set:
 - sleep phrase: `go to sleep`
 - status phrase: `status`, `check status`, and close variants
 - approval trigger phrase: `approval code`
-- unlock code: `1234`
-- lock code: `4321`
-- locked-off code: `0000`
+- sleep unlock phrase: `wake up now`
+- shutdown phrase: `shut down completely`
+- sleep lock code: `4321`
 
-Approval codes remain numeric. Lock, unlock, and off codes should be per-user settings from the start, with the current values seeded as defaults. Users can edit those codes from web settings.
+Approval codes remain numeric for assistant approvals. Sleep unlock and shutdown use spoken phrases. The sleep lock code still uses the approval-code digit flow to enter sleep from awake. Phrases and the lock code are per-user settings with the values above as defaults. Users can edit them from web settings.
 
 Behavior should match the current voice stack unless a later spec calls out a deliberate change. Do not add a new push-to-talk-first interaction model in the initial product.
 

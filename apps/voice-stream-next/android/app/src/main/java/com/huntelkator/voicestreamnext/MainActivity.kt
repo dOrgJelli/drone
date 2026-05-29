@@ -85,8 +85,6 @@ class MainActivity : ComponentActivity() {
     private lateinit var fileRefreshButton: Button
 
     private val wakeController = WakeToggleController()
-    private val approvalCodeRecognizer = ApprovalCodeRecognizer()
-    @Volatile private var approvalSettings = VoiceApprovalSettings()
     @Volatile private var updateCheckRunning = false
     private val cuePlayer = LocalCuePlayer()
     private var pendingStartAwake = false
@@ -1156,19 +1154,12 @@ class MainActivity : ComponentActivity() {
         showStatus("Foreground voice service started.")
     }
 
-    private fun refreshApprovalSettings() {
-        val settings = runCatching { api.voiceApprovalSettings() }.getOrDefault(VoiceApprovalSettings())
-        approvalSettings = settings
-        approvalCodeRecognizer.configure(settings.toApprovalCodeSettings())
-    }
-
     private fun startAwakeService() {
         val deviceId = api.pairedDeviceId()
         if (deviceId.isBlank()) {
             showStatus("Pair this device first.")
             return
         }
-        refreshApprovalSettings()
         wakeController.startAwake()
         cuePlayer.play(LocalCue.WAKE)
         updateSessionUi(SessionMode.LOADING, "Waking local detector.")
@@ -1200,66 +1191,6 @@ class MainActivity : ComponentActivity() {
         cuePlayer.play(LocalCue.STOP_BUTTON)
         showStatus("Off.")
         updateSessionUi(SessionMode.OFF, "Off.")
-    }
-
-    private fun tryHandleApprovalText(text: String, finalizeNow: Boolean = false): Boolean {
-        val now = SystemClock.elapsedRealtime()
-        var update = approvalCodeRecognizer.accept(text, now)
-        if (approvalCodeRecognizer.isCollecting && finalizeNow) {
-            update = approvalCodeRecognizer.flush(now + approvalSettings.stableMs)
-        }
-        return when (update) {
-            ApprovalCodeUpdate.None -> approvalCodeRecognizer.isCollecting
-            is ApprovalCodeUpdate.Collecting -> {
-                showCollectingStatus(update.partialCode)
-                true
-            }
-            ApprovalCodeUpdate.Cancelled -> {
-                showStatus("Approval cancelled")
-                updateApprovalUi("Approval cancelled")
-                true
-            }
-            is ApprovalCodeUpdate.Completed -> {
-                processApprovalCode(update.code)
-                true
-            }
-        }
-    }
-
-    private fun showCollectingStatus(partialCode: String) {
-        val sleeping = wakeController.state == WakeState.SLEEPING
-        val text = if (partialCode.isBlank()) {
-            if (sleeping) "Unlock code..." else "Approval code..."
-        } else if (sleeping) {
-            "Unlock: $partialCode"
-        } else {
-            "Approval: $partialCode"
-        }
-        showStatus(text)
-        updateApprovalUi(text)
-    }
-
-    private fun processApprovalCode(code: String) = runApi("Processing approval code") {
-        val settings = approvalSettings
-        when {
-            wakeController.state == WakeState.SLEEPING && code == settings.unlockCode -> runOnUiThread {
-                wakeController.startAwake()
-                cuePlayer.play(LocalCue.UNLOCK)
-                showStatus("Unlocked.")
-                updateApprovalUi("")
-            }
-            code == settings.offCode -> runOnUiThread { turnOff() }
-            wakeController.state != WakeState.SLEEPING && code == settings.lockCode -> runOnUiThread { enterSleep() }
-            wakeController.state != WakeState.SLEEPING -> {
-                api.uploadApprovalCode(code)
-                cuePlayer.play(LocalCue.STATUS)
-                runOnUiThread {
-                    showStatus("Approval code uploaded.")
-                    updateApprovalUi("Approval sent: $code")
-                }
-            }
-            else -> showStatus("Sleeping.")
-        }
     }
 
     private fun openWebDashboard() {

@@ -12,6 +12,8 @@ class WakeParityTest {
         assertEquals(WakePhrase.CLIPBOARD, WakePhraseMatcher.match("can you transcribe this"))
         assertEquals(WakePhrase.SLEEP, WakePhraseMatcher.match("go to sleep"))
         assertNull(WakePhraseMatcher.match("hello there"))
+        assertNull(WakePhraseMatcher.match("hey"))
+        assertNull(WakePhraseMatcher.match("sebastian"))
     }
 
     @Test
@@ -19,6 +21,33 @@ class WakeParityTest {
         assertNull(WakePhraseMatcher.match("status"))
         assertNull(WakePhraseMatcher.match("status check"))
         assertNull(WakePhraseMatcher.match("check status"))
+    }
+
+    @Test
+    fun matchesConfiguredSleepPhrases() {
+        assertEquals(
+            WakePhrase.UNLOCK,
+            WakePhraseMatcher.matchSleep(
+                "please wake up now",
+                VoicePhraseDefaults.unlockPhrase,
+                VoicePhraseDefaults.shutdownPhrase,
+            ),
+        )
+        assertEquals(
+            WakePhrase.SHUTDOWN,
+            WakePhraseMatcher.matchSleep(
+                "shut down completely",
+                VoicePhraseDefaults.unlockPhrase,
+                VoicePhraseDefaults.shutdownPhrase,
+            ),
+        )
+        assertNull(
+            WakePhraseMatcher.matchSleep(
+                "hey sebastian",
+                VoicePhraseDefaults.unlockPhrase,
+                VoicePhraseDefaults.shutdownPhrase,
+            ),
+        )
     }
 
     @Test
@@ -34,18 +63,10 @@ class WakeParityTest {
     }
 
     @Test
-    fun approvalCodeRecognizesModeTransitionCodes() {
-        val unlockRecognizer = ApprovalCodeRecognizer(stableMs = 500, collectTimeoutMs = 3_000)
-        unlockRecognizer.accept("approval code one two three four", 0)
-        assertEquals(ApprovalCodeUpdate.Completed("1234"), unlockRecognizer.flush(600))
-
+    fun approvalCodeRecognizesLockCode() {
         val lockRecognizer = ApprovalCodeRecognizer(stableMs = 500, collectTimeoutMs = 3_000)
         lockRecognizer.accept("approval code four three two one", 0)
         assertEquals(ApprovalCodeUpdate.Completed("4321"), lockRecognizer.flush(600))
-
-        val offRecognizer = ApprovalCodeRecognizer(stableMs = 500, collectTimeoutMs = 3_000)
-        offRecognizer.accept("approval code zero zero zero zero", 0)
-        assertEquals(ApprovalCodeUpdate.Completed("0000"), offRecognizer.flush(600))
     }
 
     @Test

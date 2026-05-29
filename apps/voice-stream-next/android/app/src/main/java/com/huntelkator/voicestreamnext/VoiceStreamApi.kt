@@ -71,9 +71,9 @@ data class AssistantFilesResult(
 )
 data class VoiceApprovalSettings(
     val triggerPhrase: String = "approval code",
-    val unlockCode: String = "1234",
+    val unlockPhrase: String = VoicePhraseDefaults.unlockPhrase,
+    val shutdownPhrase: String = VoicePhraseDefaults.shutdownPhrase,
     val lockCode: String = "4321",
-    val offCode: String = "0000",
     val minDigits: Int = 4,
     val maxDigits: Int = 8,
     val stableMs: Long = 900,
@@ -334,9 +334,13 @@ class VoiceStreamApi(private val context: Context) {
         val settings = request("GET", "/api/settings/voice-approval").getJSONObject("settings")
         return VoiceApprovalSettings(
             triggerPhrase = settings.optString("triggerPhrase", "approval code").trim().ifBlank { "approval code" },
-            unlockCode = settings.optString("unlockCode", "1234").filter { it.isDigit() }.ifBlank { "1234" },
+            unlockPhrase = PhraseMatcher.normalizePhrase(
+                settings.optString("unlockPhrase", VoicePhraseDefaults.unlockPhrase),
+            ).ifBlank { VoicePhraseDefaults.unlockPhrase },
+            shutdownPhrase = PhraseMatcher.normalizePhrase(
+                settings.optString("shutdownPhrase", VoicePhraseDefaults.shutdownPhrase),
+            ).ifBlank { VoicePhraseDefaults.shutdownPhrase },
             lockCode = settings.optString("lockCode", "4321").filter { it.isDigit() }.ifBlank { "4321" },
-            offCode = settings.optString("lockedOffCode", "0000").filter { it.isDigit() }.ifBlank { "0000" },
             minDigits = settings.optInt("minDigits", 4).coerceIn(1, 12),
             maxDigits = settings.optInt("maxDigits", 8).coerceIn(1, 12),
             stableMs = settings.optLong("stableMs", 900).coerceIn(250, 3_000),

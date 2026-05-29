@@ -21,10 +21,22 @@ contextBridge.exposeInMainWorld('voiceStreamDesktop', {
   setTrayStatus: (status) => ipcRenderer.invoke('tray:status', status),
   shortcutStatus: () => ipcRenderer.invoke('shortcut:status'),
   resetTranscriptionShortcut: () => ipcRenderer.invoke('shortcut:resetTranscription'),
+  resetAwakeSleepToggleShortcut: () => ipcRenderer.invoke('shortcut:resetAwakeSleepToggle'),
+  resetTurnOffShortcut: () => ipcRenderer.invoke('shortcut:resetTurnOff'),
   onTranscriptionShortcut: (callback) => {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on('shortcut:transcription', listener);
     return () => ipcRenderer.removeListener('shortcut:transcription', listener);
+  },
+  onAwakeSleepToggleShortcut: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on('shortcut:toggleAwakeSleep', listener);
+    return () => ipcRenderer.removeListener('shortcut:toggleAwakeSleep', listener);
+  },
+  onTurnOffShortcut: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on('shortcut:turnOff', listener);
+    return () => ipcRenderer.removeListener('shortcut:turnOff', listener);
   },
   onShortcutStatus: (callback) => {
     const listener = (_event, status) => callback(status);
@@ -40,6 +52,7 @@ contextBridge.exposeInMainWorld('voiceStreamDesktop', {
   startVosk: () => ipcRenderer.invoke('vosk:start'),
   stopVosk: () => ipcRenderer.invoke('vosk:stop'),
   resetVosk: () => ipcRenderer.invoke('vosk:reset'),
+  setVoskGrammar: (mode, settings) => ipcRenderer.invoke('vosk:setGrammar', mode, settings),
   sendVoskFrame: (frame) => ipcRenderer.send('vosk:frame', frame),
   onVoskStatus: (callback) => {
     const listener = (_event, status) => callback(status);
