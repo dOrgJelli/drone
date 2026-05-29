@@ -1043,9 +1043,9 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
       if (!settingsHydratedRef.current) {
         setApprovalSettings({
           triggerPhrase: data.settings.triggerPhrase,
-          unlockCode: data.settings.unlockCode,
+          unlockPhrase: data.settings.unlockPhrase,
+          shutdownPhrase: data.settings.shutdownPhrase,
           lockCode: data.settings.lockCode,
-          lockedOffCode: data.settings.lockedOffCode,
           minDigits: data.settings.minDigits,
           maxDigits: data.settings.maxDigits,
           stableMs: data.settings.stableMs,
@@ -1667,9 +1667,9 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
       });
       setApprovalSettings({
         triggerPhrase: data.settings.triggerPhrase,
-        unlockCode: data.settings.unlockCode,
+        unlockPhrase: data.settings.unlockPhrase,
+        shutdownPhrase: data.settings.shutdownPhrase,
         lockCode: data.settings.lockCode,
-        lockedOffCode: data.settings.lockedOffCode,
         minDigits: data.settings.minDigits,
         maxDigits: data.settings.maxDigits,
         stableMs: data.settings.stableMs,
@@ -3322,32 +3322,32 @@ function AppShell({ client, identitySlot }: { client: ApiClient; identitySlot: R
                     />
                   </label>
                   <label className={assistantFieldLabelClass}>
-                    Unlock
+                    Sleep unlock phrase
                     <input
-                      value={approvalSettings.unlockCode}
+                      value={approvalSettings.unlockPhrase}
                       onChange={(event) => {
-                        const value = codeValue(event.currentTarget.value);
-                        setApprovalSettings((prev) => ({ ...prev, unlockCode: value }));
+                        const value = event.currentTarget.value;
+                        setApprovalSettings((prev) => ({ ...prev, unlockPhrase: value }));
                       }}
                     />
                   </label>
                   <label className={assistantFieldLabelClass}>
-                    Lock
+                    Shutdown phrase
+                    <input
+                      value={approvalSettings.shutdownPhrase}
+                      onChange={(event) => {
+                        const value = event.currentTarget.value;
+                        setApprovalSettings((prev) => ({ ...prev, shutdownPhrase: value }));
+                      }}
+                    />
+                  </label>
+                  <label className={assistantFieldLabelClass}>
+                    Sleep lock code
                     <input
                       value={approvalSettings.lockCode}
                       onChange={(event) => {
                         const value = codeValue(event.currentTarget.value);
                         setApprovalSettings((prev) => ({ ...prev, lockCode: value }));
-                      }}
-                    />
-                  </label>
-                  <label className={assistantFieldLabelClass}>
-                    Off
-                    <input
-                      value={approvalSettings.lockedOffCode}
-                      onChange={(event) => {
-                        const value = codeValue(event.currentTarget.value);
-                        setApprovalSettings((prev) => ({ ...prev, lockedOffCode: value }));
                       }}
                     />
                   </label>
@@ -3713,8 +3713,8 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
 
   function showCollectingStatus(partialCode: string) {
     const nextStatus = partialCode
-      ? (modeRef.current === 'sleeping' ? `Unlock: ${partialCode}` : `Approval: ${partialCode}`)
-      : (modeRef.current === 'sleeping' ? 'Unlock code...' : 'Approval code...');
+      ? `Approval: ${partialCode}`
+      : 'Approval code...';
     setStatus(nextStatus);
     void reportDesktopStatus(modeRef.current, nextStatus);
   }
@@ -3925,7 +3925,7 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
               await copyText(message.transcriptText || '');
             }
             const settings = voiceSettings;
-            await finishVoiceFromServer(settings ? `Sleep: ${settings.unlockCode} awake, ${settings.lockedOffCode} off.` : 'Sleeping.', 'sleeping');
+            await finishVoiceFromServer('Sleeping. Say your unlock or shutdown phrase.', 'sleeping');
             void onRefresh();
           } else if (message.type === 'assistant_error') {
             await finishVoiceFromServer(message.error || 'Voice runtime failed.');
@@ -3977,20 +3977,23 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
     startWakeListener();
   }
 
-  function enterAwake() {
+  async function enterAwake() {
     resetApprovalCollection();
     setMode('awake');
     void reportDesktopStatus('awake', 'Awake. Listening for voice commands.');
+    const settings = await loadVoiceSettings().catch(() => null);
+    if (settings) void window.voiceStreamDesktop?.setVoskGrammar?.('awake', settings);
     startWakeListener();
   }
 
-  function enterSleep() {
+  async function enterSleep() {
     if (streaming) void stopVoice('sleeping');
     resetApprovalCollection();
     setMode('sleeping');
-    const settings = voiceSettings;
-    setStatus(settings ? `Sleep: ${settings.unlockCode} awake, ${settings.lockedOffCode} off.` : 'Sleeping.');
-    void reportDesktopStatus('sleeping', settings ? `Sleep: ${settings.unlockCode} awake, ${settings.lockedOffCode} off.` : 'Sleeping.');
+    const settings = await loadVoiceSettings().catch(() => null);
+    setStatus('Sleeping. Say your unlock or shutdown phrase.');
+    void reportDesktopStatus('sleeping', 'Sleeping. Say your unlock or shutdown phrase.');
+    if (settings) void window.voiceStreamDesktop?.setVoskGrammar?.('sleep', settings);
     startWakeListener();
   }
 
@@ -4005,9 +4008,30 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
 
   async function processPhraseText(text: string, finalizeNow = false) {
     const currentMode = modeRef.current;
-    if (acceptApprovalText(text, finalizeNow)) return;
+    const settings = await loadVoiceSettings().catch(() => null);
+    if (currentMode !== 'sleeping' && acceptApprovalText(text, finalizeNow)) return;
     if (currentMode === 'recording') {
       setStatus('Recording. Voice commands are ignored until capture stops.');
+      return;
+    }
+    if (currentMode === 'sleeping' && settings) {
+      const sleepMatch = sleepPhraseMatch(text, settings.unlockPhrase, settings.shutdownPhrase);
+      if (sleepMatch === 'unlock') {
+        setMode('awake');
+        setStatus('Unlocked.');
+        const awakeSettings = await loadVoiceSettings().catch(() => settings);
+        if (awakeSettings) void window.voiceStreamDesktop?.setVoskGrammar?.('awake', awakeSettings);
+        return;
+      }
+      if (sleepMatch === 'shutdown') {
+        turnOff();
+        return;
+      }
+      setStatus('Sleeping. Say your unlock or shutdown phrase.');
+      return;
+    }
+    if (settings && matchesPhrase(text, settings.shutdownPhrase)) {
+      turnOff();
       return;
     }
     const match = wakePhraseMatch(text);
@@ -4021,10 +4045,6 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
     }
     if (match === 'status') {
       setStatus(`Mode: ${currentMode}. Device: ${device?.id ? device.id.slice(0, 12) : 'unpaired'}.`);
-      return;
-    }
-    if (currentMode === 'sleeping') {
-      setStatus('Sleeping. Press Wake or say the unlock code.');
       return;
     }
     if (currentMode === 'off') enterAwake();
@@ -4165,21 +4185,12 @@ function DesktopVoicePanel({ client, onRefresh }: { client: ApiClient; onRefresh
   async function processApprovalCode(code: string) {
     const settings = voiceSettings ?? await loadVoiceSettings();
     const currentMode = modeRef.current;
-    if (currentMode === 'sleeping' && code === settings.unlockCode) {
-      setMode('awake');
-      setStatus('Unlocked.');
-      return;
-    }
-    if (code === settings.lockedOffCode) {
-      turnOff();
-      return;
-    }
-    if (currentMode !== 'sleeping' && code === settings.lockCode) {
-      enterSleep();
-      return;
-    }
     if (currentMode === 'sleeping') {
-      setStatus(`Sleep: ${settings.unlockCode} awake, ${settings.lockedOffCode} off.`);
+      setStatus('Sleeping. Say your unlock or shutdown phrase.');
+      return;
+    }
+    if (code === settings.lockCode) {
+      enterSleep();
       return;
     }
     await client.request('/api/voice/approval-codes', {
@@ -4266,8 +4277,31 @@ type VoiceStreamTarget = 'assistant' | 'patch' | 'clipboard';
 // Keep the status command path available, but do not match spoken status phrases locally.
 const ENABLE_STATUS_WAKE_COMMAND = false;
 
+function phraseWords(text: string): string[] {
+  return text.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+}
+
+function matchesPhrase(text: string, phrase: string): boolean {
+  const target = phraseWords(phrase);
+  const words = phraseWords(text);
+  if (target.length === 0 || words.length < target.length) return false;
+  return words.some((_, index) => {
+    if (index + target.length > words.length) return false;
+    for (let offset = 0; offset < target.length; offset += 1) {
+      if (words[index + offset] !== target[offset]) return false;
+    }
+    return true;
+  });
+}
+
+function sleepPhraseMatch(text: string, unlockPhrase: string, shutdownPhrase: string): 'unlock' | 'shutdown' | null {
+  if (matchesPhrase(text, unlockPhrase)) return 'unlock';
+  if (matchesPhrase(text, shutdownPhrase)) return 'shutdown';
+  return null;
+}
+
 function wakePhraseMatch(text: string): 'start' | 'patch' | 'clipboard' | 'sleep' | 'status' | null {
-  const words = text.toLowerCase().split(/[^a-z]+/).filter(Boolean);
+  const words = phraseWords(text);
   const compact = words.join('');
   if (words.some((word, index) => word === 'go' && words[index + 1] === 'to' && words[index + 2] === 'sleep')) return 'sleep';
   if (words.some((word, index) => (word === 'hey' || word === 'hay') && (words[index + 1] === 'sebastian' || words[index + 1] === 'sebastien'))) return 'start';

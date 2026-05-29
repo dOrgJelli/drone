@@ -16,8 +16,6 @@ let normalWindowBounds = null;
 let tray = null;
 let isQuitting = false;
 let trayStatus = { mode: 'off', status: 'Off.' };
-let transcriptionShortcutAccelerator = '';
-let transcriptionShortcutStatus = { registered: false, accelerator: '', label: 'Not set', error: '' };
 let extensionBridge = { socket: null, reconnectTimer: null, stopped: false, reconnectDelayMs: 1000 };
 const extensionHost = {
   loading: null,
@@ -57,49 +55,31 @@ const defaultTranscriptionShortcut = {
   shift: true,
 };
 
+const defaultAwakeSleepToggleShortcut = {
+  key: 'a',
+  mod: true,
+  ctrl: false,
+  meta: false,
+  alt: false,
+  shift: true,
+};
+
+const defaultTurnOffShortcut = {
+  key: 'o',
+  mod: true,
+  ctrl: false,
+  meta: false,
+  alt: false,
+  shift: true,
+};
+
 const sampleRate = 16_000;
-// Keep status grammar easy to restore, but do not detect spoken status commands locally.
-const enableStatusWakeCommand = false;
-const statusWakeGrammar = [
-  'status',
-  'state us',
-  'state is',
-  'status check',
-  'check status',
-];
-const wakeGrammar = [
-  'hey sebastian',
-  'hey sebastien',
-  'hay sebastian',
-  'hay sebastien',
-  'hey',
-  'hay',
-  'sebastian',
-  'sebastien',
-  'patch me in',
-  'can you transcribe',
-  'transcribe',
-  'go to sleep',
-  'go',
-  'to',
-  'sleep',
-  'approval',
-  'code',
-  'approval code',
-  'zero',
-  'oh',
-  'one',
-  'two',
-  'three',
-  'four',
-  'five',
-  'six',
-  'seven',
-  'eight',
-  'nine',
-  '[unk]',
-  ...(enableStatusWakeCommand ? statusWakeGrammar : []),
-];
+const voicePhrases = require('../shared/voice-phrases.js');
+const defaultVoicePhraseSettings = voicePhrases.VOICE_PHRASE_DEFAULTS;
+let currentVoskGrammar = voicePhrases.buildAwakeWakeGrammar({
+  triggerPhrase: 'approval code',
+  shutdownPhrase: defaultVoicePhraseSettings.shutdownPhrase,
+});
 
 const defaultConfig = {
   serverUrl: process.env.VOICE_STREAM_NEXT_SERVER_URL || 'http://127.0.0.1:3299',
@@ -116,6 +96,8 @@ const defaultConfig = {
   inputDeviceId: '',
   outputDeviceId: '',
   transcriptionShortcut: defaultTranscriptionShortcut,
+  awakeSleepToggleShortcut: defaultAwakeSleepToggleShortcut,
+  turnOffShortcut: defaultTurnOffShortcut,
   extensionBridgeEnabled: true,
   extensions: [],
   authSavedAt: '',
@@ -145,6 +127,8 @@ function createInstallationId() {
 function normalizeConfig(nextConfig) {
   const config = { ...defaultConfig, ...nextConfig };
   config.transcriptionShortcut = sanitizeShortcutBinding(config.transcriptionShortcut, defaultTranscriptionShortcut);
+  config.awakeSleepToggleShortcut = sanitizeShortcutBinding(config.awakeSleepToggleShortcut, defaultAwakeSleepToggleShortcut);
+  config.turnOffShortcut = sanitizeShortcutBinding(config.turnOffShortcut, defaultTurnOffShortcut);
   if (!String(config.installationId || '').trim()) {
     config.installationId = createInstallationId();
   }
@@ -368,7 +352,7 @@ async function ensureVoskRecognizer() {
     voskState.recognizer = new voskState.vosk.Recognizer({
       model: voskState.model,
       sampleRate,
-      grammar: wakeGrammar,
+      grammar: currentVoskGrammar,
     });
     voskState.modelPath = modelPath;
     voskState.error = '';
@@ -453,10 +437,33 @@ function startVoskWorker(modelPath, originalError) {
       type: 'start',
       modelPath,
       sampleRate,
-      grammar: wakeGrammar,
+      grammar: currentVoskGrammar,
     });
   });
   return voskState.workerStarting;
+}
+
+function resolveVoskGrammar(mode, settings = {}) {
+  const triggerPhrase = String(settings.triggerPhrase || 'approval code').trim();
+  const unlockPhrase = String(settings.unlockPhrase || defaultVoicePhraseSettings.unlockPhrase).trim();
+  const shutdownPhrase = String(settings.shutdownPhrase || defaultVoicePhraseSettings.shutdownPhrase).trim();
+  if (mode === 'sleep') {
+    return voicePhrases.buildSleepWakeGrammar({ unlockPhrase, shutdownPhrase });
+  }
+  return voicePhrases.buildAwakeWakeGrammar({ triggerPhrase, shutdownPhrase });
+}
+
+async function applyVoskGrammar(mode, settings = {}) {
+  currentVoskGrammar = resolveVoskGrammar(mode, settings);
+  if (voskState.workerReady && voskState.worker) {
+    releaseVosk();
+    return ensureVoskRecognizer();
+  }
+  if (voskState.recognizer) {
+    releaseVosk();
+    return ensureVoskRecognizer();
+  }
+  return statusForVosk(false);
 }
 
 function requireVosk() {
@@ -611,43 +618,77 @@ function sendWindowState(win) {
   win.webContents.send('window:state', windowStatePayload());
 }
 
-function sendTranscriptionShortcutStatus(win = mainWindow) {
-  if (!win || win.isDestroyed()) return;
-  win.webContents.send('shortcut:status', transcriptionShortcutStatus);
+function createShortcutRegistration({ defaultBinding, configKey, onTrigger }) {
+  let registeredAccelerator = '';
+  let status = { registered: false, accelerator: '', label: 'Not set', error: '' };
+
+  function register() {
+    if (!app.isReady()) return status;
+    if (registeredAccelerator) {
+      globalShortcut.unregister(registeredAccelerator);
+      registeredAccelerator = '';
+    }
+
+    const config = readConfig();
+    const binding = sanitizeShortcutBinding(config[configKey], defaultBinding);
+    const accelerator = shortcutBindingToAccelerator(binding);
+    const label = formatShortcutBinding(binding);
+    if (!binding || !accelerator) {
+      status = {
+        registered: false,
+        accelerator: '',
+        label,
+        error: binding ? unsupportedShortcutRegistrationError(binding) : '',
+      };
+      sendShortcutStatuses();
+      return status;
+    }
+
+    const registered = globalShortcut.register(accelerator, onTrigger);
+    registeredAccelerator = registered ? accelerator : '';
+    status = {
+      registered,
+      accelerator,
+      label,
+      error: registered ? '' : 'The operating system or another app is already using this shortcut.',
+    };
+    sendShortcutStatuses();
+    return status;
+  }
+
+  return { register, getStatus: () => status, defaultBinding, configKey };
 }
 
-function registerTranscriptionShortcut() {
-  if (!app.isReady()) return transcriptionShortcutStatus;
-  if (transcriptionShortcutAccelerator) {
-    globalShortcut.unregister(transcriptionShortcutAccelerator);
-    transcriptionShortcutAccelerator = '';
-  }
-
-  const config = readConfig();
-  const binding = sanitizeShortcutBinding(config.transcriptionShortcut, defaultTranscriptionShortcut);
-  const accelerator = shortcutBindingToAccelerator(binding);
-  const label = formatShortcutBinding(binding);
-  if (!binding || !accelerator) {
-    transcriptionShortcutStatus = {
-      registered: false,
-      accelerator: '',
-      label,
-      error: binding ? unsupportedShortcutRegistrationError(binding) : '',
-    };
-    sendTranscriptionShortcutStatus();
-    return transcriptionShortcutStatus;
-  }
-
-  const registered = globalShortcut.register(accelerator, triggerTranscriptionShortcut);
-  transcriptionShortcutAccelerator = registered ? accelerator : '';
-  transcriptionShortcutStatus = {
-    registered,
-    accelerator,
-    label,
-    error: registered ? '' : 'The operating system or another app is already using this shortcut.',
+function allShortcutStatuses() {
+  return {
+    transcription: transcriptionShortcutRegistration.getStatus(),
+    awakeSleepToggle: awakeSleepToggleShortcutRegistration.getStatus(),
+    turnOff: turnOffShortcutRegistration.getStatus(),
   };
-  sendTranscriptionShortcutStatus();
-  return transcriptionShortcutStatus;
+}
+
+function sendShortcutStatuses(win = mainWindow) {
+  if (!win || win.isDestroyed()) return;
+  win.webContents.send('shortcut:status', allShortcutStatuses());
+}
+
+function registerAllGlobalShortcuts() {
+  transcriptionShortcutRegistration.register();
+  awakeSleepToggleShortcutRegistration.register();
+  turnOffShortcutRegistration.register();
+  return allShortcutStatuses();
+}
+
+function triggerRendererShortcut(channel) {
+  const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : createWindow({ compactShowInactive: true });
+  const send = () => {
+    if (!win.isDestroyed()) win.webContents.send(channel);
+  };
+  if (win.webContents.isLoading()) {
+    win.webContents.once('did-finish-load', send);
+  } else {
+    send();
+  }
 }
 
 function triggerTranscriptionShortcut() {
@@ -666,6 +707,32 @@ function triggerTranscriptionShortcut() {
     send();
   }
 }
+
+function triggerAwakeSleepToggleShortcut() {
+  triggerRendererShortcut('shortcut:toggleAwakeSleep');
+}
+
+function triggerTurnOffShortcut() {
+  triggerRendererShortcut('shortcut:turnOff');
+}
+
+const transcriptionShortcutRegistration = createShortcutRegistration({
+  defaultBinding: defaultTranscriptionShortcut,
+  configKey: 'transcriptionShortcut',
+  onTrigger: triggerTranscriptionShortcut,
+});
+
+const awakeSleepToggleShortcutRegistration = createShortcutRegistration({
+  defaultBinding: defaultAwakeSleepToggleShortcut,
+  configKey: 'awakeSleepToggleShortcut',
+  onTrigger: triggerAwakeSleepToggleShortcut,
+});
+
+const turnOffShortcutRegistration = createShortcutRegistration({
+  defaultBinding: defaultTurnOffShortcut,
+  configKey: 'turnOffShortcut',
+  onTrigger: triggerTurnOffShortcut,
+});
 
 function restoreTemporaryOverlay(win, restoreWindowMode) {
   if (!win || win.isDestroyed()) return windowStatePayload();
@@ -1430,7 +1497,7 @@ if (!gotSingleInstanceLock) {
   ipcMain.handle('pairing:takePending', () => pendingPairingPayloads.splice(0));
   ipcMain.handle('config:write', (_event, config) => {
     const saved = writeConfig(config);
-    registerTranscriptionShortcut();
+    registerAllGlobalShortcuts();
     restartExtensionBridge();
     return saved;
   });
@@ -1478,11 +1545,21 @@ if (!gotSingleInstanceLock) {
   });
   ipcMain.handle('window:restoreTemporaryOverlay', (event, payload) => restoreTemporaryOverlay(windowFromEvent(event), payload?.restoreWindowMode));
   ipcMain.handle('tray:status', (_event, payload) => updateTrayStatus(payload?.mode, payload?.status));
-  ipcMain.handle('shortcut:status', () => transcriptionShortcutStatus);
+  ipcMain.handle('shortcut:status', () => allShortcutStatuses());
   ipcMain.handle('shortcut:resetTranscription', () => {
     const config = writeConfig({ ...readConfig(), transcriptionShortcut: defaultTranscriptionShortcut });
-    registerTranscriptionShortcut();
-    return { ok: true, config, status: transcriptionShortcutStatus };
+    registerAllGlobalShortcuts();
+    return { ok: true, config, status: allShortcutStatuses() };
+  });
+  ipcMain.handle('shortcut:resetAwakeSleepToggle', () => {
+    const config = writeConfig({ ...readConfig(), awakeSleepToggleShortcut: defaultAwakeSleepToggleShortcut });
+    registerAllGlobalShortcuts();
+    return { ok: true, config, status: allShortcutStatuses() };
+  });
+  ipcMain.handle('shortcut:resetTurnOff', () => {
+    const config = writeConfig({ ...readConfig(), turnOffShortcut: defaultTurnOffShortcut });
+    registerAllGlobalShortcuts();
+    return { ok: true, config, status: allShortcutStatuses() };
   });
   ipcMain.handle('vosk:status', () => statusForVosk());
   ipcMain.handle('vosk:start', () => ensureVoskRecognizer());
@@ -1494,6 +1571,7 @@ if (!gotSingleInstanceLock) {
     resetVosk();
     return statusForVosk();
   });
+  ipcMain.handle('vosk:setGrammar', (_event, mode, settings = {}) => applyVoskGrammar(mode, settings));
   ipcMain.on('vosk:frame', (event, frame) => handleVoskFrame(event.sender, frame));
 
   app.whenReady().then(() => {
@@ -1502,7 +1580,7 @@ if (!gotSingleInstanceLock) {
     if (process.platform === 'darwin') app.dock?.setIcon(appIconImage(256));
     ensureTray();
     createWindow();
-    registerTranscriptionShortcut();
+    registerAllGlobalShortcuts();
     void startExtensionBridge();
   });
 

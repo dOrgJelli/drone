@@ -500,9 +500,9 @@ function rowUser(row: any): UserProfile {
 function rowVoiceSettings(row: any): VoiceSettings {
   return {
     triggerPhrase: String(row.trigger_phrase ?? VOICE_APPROVAL_SETTINGS_DEFAULT.triggerPhrase),
-    unlockCode: String(row.unlock_code ?? VOICE_APPROVAL_SETTINGS_DEFAULT.unlockCode),
+    unlockPhrase: String(row.unlock_phrase ?? VOICE_APPROVAL_SETTINGS_DEFAULT.unlockPhrase),
+    shutdownPhrase: String(row.shutdown_phrase ?? VOICE_APPROVAL_SETTINGS_DEFAULT.shutdownPhrase),
     lockCode: String(row.lock_code ?? VOICE_APPROVAL_SETTINGS_DEFAULT.lockCode),
-    lockedOffCode: String(row.off_code ?? VOICE_APPROVAL_SETTINGS_DEFAULT.lockedOffCode),
     minDigits: Number(row.min_digits ?? VOICE_APPROVAL_SETTINGS_DEFAULT.minDigits),
     maxDigits: Number(row.max_digits ?? VOICE_APPROVAL_SETTINGS_DEFAULT.maxDigits),
     stableMs: Number(row.stable_ms ?? VOICE_APPROVAL_SETTINGS_DEFAULT.stableMs),
@@ -1081,6 +1081,8 @@ export class VoiceStreamNextDb {
           unlock_code,
           lock_code,
           off_code,
+          unlock_phrase,
+          shutdown_phrase,
           trigger_phrase,
           min_digits,
           max_digits,
@@ -1098,6 +1100,8 @@ export class VoiceStreamNextDb {
           $unlockCode,
           $lockCode,
           $offCode,
+          $unlockPhrase,
+          $shutdownPhrase,
           $triggerPhrase,
           $minDigits,
           $maxDigits,
@@ -1114,9 +1118,11 @@ export class VoiceStreamNextDb {
       .run({
         $id: newId('vset'),
         $userId: userId,
-        $unlockCode: defaults.unlockCode,
+        $unlockCode: '',
         $lockCode: defaults.lockCode,
-        $offCode: defaults.lockedOffCode,
+        $offCode: '',
+        $unlockPhrase: defaults.unlockPhrase,
+        $shutdownPhrase: defaults.shutdownPhrase,
         $triggerPhrase: defaults.triggerPhrase,
         $minDigits: defaults.minDigits,
         $maxDigits: defaults.maxDigits,
@@ -1133,14 +1139,14 @@ export class VoiceStreamNextDb {
 
   updateVoiceSettings(
     userId: string,
-    input: { unlockCode: string; lockCode: string; offCode?: string; lockedOffCode?: string },
+    input: { lockCode: string; unlockPhrase?: string; shutdownPhrase?: string },
   ): VoiceSettings {
     const current = this.ensureVoiceSettings(userId);
     return this.updateVoiceApprovalSettings(userId, {
       ...current,
-      unlockCode: input.unlockCode,
       lockCode: input.lockCode,
-      lockedOffCode: input.lockedOffCode ?? input.offCode ?? current.lockedOffCode,
+      unlockPhrase: input.unlockPhrase ?? current.unlockPhrase,
+      shutdownPhrase: input.shutdownPhrase ?? current.shutdownPhrase,
     });
   }
 
@@ -1151,9 +1157,9 @@ export class VoiceStreamNextDb {
       .query(
         `
         UPDATE voice_settings
-        SET unlock_code = $unlockCode,
-            lock_code = $lockCode,
-            off_code = $lockedOffCode,
+        SET lock_code = $lockCode,
+            unlock_phrase = $unlockPhrase,
+            shutdown_phrase = $shutdownPhrase,
             trigger_phrase = $triggerPhrase,
             min_digits = $minDigits,
             max_digits = $maxDigits,
@@ -1167,9 +1173,9 @@ export class VoiceStreamNextDb {
       `,
       )
       .run({
-        $unlockCode: input.unlockCode,
         $lockCode: input.lockCode,
-        $lockedOffCode: input.lockedOffCode,
+        $unlockPhrase: input.unlockPhrase,
+        $shutdownPhrase: input.shutdownPhrase,
         $triggerPhrase: input.triggerPhrase,
         $minDigits: input.minDigits,
         $maxDigits: input.maxDigits,

@@ -1,8 +1,8 @@
 export type VoiceApprovalSettings = {
   triggerPhrase: string;
-  unlockCode: string;
+  unlockPhrase: string;
+  shutdownPhrase: string;
   lockCode: string;
-  lockedOffCode: string;
   minDigits: number;
   maxDigits: number;
   stableMs: number;
@@ -14,7 +14,7 @@ export type VoiceApprovalSettings = {
 
 export type VoiceApprovalSettingsLimits = {
   triggerPhraseMaxChars: number;
-  codeMaxDigits: number;
+  phraseMaxChars: number;
   minDigitsMin: number;
   minDigitsMax: number;
   maxDigitsMin: number;
@@ -33,9 +33,9 @@ export type VoiceApprovalSettingsLimits = {
 
 export const VOICE_APPROVAL_SETTINGS_DEFAULT: VoiceApprovalSettings = {
   triggerPhrase: 'approval code',
-  unlockCode: '1234',
+  unlockPhrase: 'wake up now',
+  shutdownPhrase: 'shut down completely',
   lockCode: '4321',
-  lockedOffCode: '0000',
   minDigits: 4,
   maxDigits: 8,
   stableMs: 900,
@@ -47,7 +47,7 @@ export const VOICE_APPROVAL_SETTINGS_DEFAULT: VoiceApprovalSettings = {
 
 export const VOICE_APPROVAL_SETTINGS_LIMITS: VoiceApprovalSettingsLimits = {
   triggerPhraseMaxChars: 64,
-  codeMaxDigits: 8,
+  phraseMaxChars: 128,
   minDigitsMin: 1,
   minDigitsMax: 8,
   maxDigitsMin: 1,
@@ -64,18 +64,29 @@ export const VOICE_APPROVAL_SETTINGS_LIMITS: VoiceApprovalSettingsLimits = {
   postPromptCommandSuppressionMsMax: 5_000,
 };
 
-function normalizeTriggerPhrase(raw: unknown): string {
-  const text = typeof raw === 'string' ? raw.trim().replace(/\s+/g, ' ') : '';
+function normalizePhrase(raw: unknown, maxChars: number): string {
+  const text = typeof raw === 'string'
+    ? raw.toLowerCase().trim().replace(/[^a-z0-9\s]+/g, ' ').replace(/\s+/g, ' ').trim()
+    : '';
   if (!text) return '';
-  return text.length > VOICE_APPROVAL_SETTINGS_LIMITS.triggerPhraseMaxChars
-    ? text.slice(0, VOICE_APPROVAL_SETTINGS_LIMITS.triggerPhraseMaxChars).trim()
-    : text;
+  return text.length > maxChars ? text.slice(0, maxChars).trim() : text;
+}
+
+function phraseWordCount(phrase: string): number {
+  return phrase
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean).length;
+}
+
+function normalizeTriggerPhrase(raw: unknown): string {
+  return normalizePhrase(raw, VOICE_APPROVAL_SETTINGS_LIMITS.triggerPhraseMaxChars);
 }
 
 function normalizeCode(raw: unknown): string {
   const text = typeof raw === 'string' || typeof raw === 'number' ? String(raw).replace(/\D/g, '') : '';
   if (!text) return '';
-  return text.slice(0, VOICE_APPROVAL_SETTINGS_LIMITS.codeMaxDigits);
+  return text.slice(0, VOICE_APPROVAL_SETTINGS_LIMITS.maxDigitsMax);
 }
 
 function parseIntegerInRange(raw: unknown, min: number, max: number): number | null {
@@ -90,9 +101,15 @@ export function parseVoiceApprovalSettings(raw: unknown): VoiceApprovalSettings 
   if (!raw || typeof raw !== 'object') return null;
   const value = raw as Record<string, unknown>;
   const triggerPhrase = normalizeTriggerPhrase(value.triggerPhrase);
-  const unlockCode = normalizeCode(value.unlockCode);
+  const unlockPhrase = normalizePhrase(
+    value.unlockPhrase ?? value.unlockCode,
+    VOICE_APPROVAL_SETTINGS_LIMITS.phraseMaxChars,
+  );
+  const shutdownPhrase = normalizePhrase(
+    value.shutdownPhrase ?? value.lockedOffCode ?? value.offCode ?? value.offPhrase,
+    VOICE_APPROVAL_SETTINGS_LIMITS.phraseMaxChars,
+  );
   const lockCode = normalizeCode(value.lockCode);
-  const lockedOffCode = normalizeCode(value.lockedOffCode ?? value.offCode);
   const minDigits = parseIntegerInRange(value.minDigits, VOICE_APPROVAL_SETTINGS_LIMITS.minDigitsMin, VOICE_APPROVAL_SETTINGS_LIMITS.minDigitsMax);
   const maxDigits = parseIntegerInRange(value.maxDigits, VOICE_APPROVAL_SETTINGS_LIMITS.maxDigitsMin, VOICE_APPROVAL_SETTINGS_LIMITS.maxDigitsMax);
   const stableMs = parseIntegerInRange(value.stableMs, VOICE_APPROVAL_SETTINGS_LIMITS.stableMsMin, VOICE_APPROVAL_SETTINGS_LIMITS.stableMsMax);
@@ -118,9 +135,9 @@ export function parseVoiceApprovalSettings(raw: unknown): VoiceApprovalSettings 
   );
   if (
     !triggerPhrase ||
-    !unlockCode ||
+    !unlockPhrase ||
+    !shutdownPhrase ||
     !lockCode ||
-    !lockedOffCode ||
     minDigits == null ||
     maxDigits == null ||
     stableMs == null ||
@@ -132,14 +149,15 @@ export function parseVoiceApprovalSettings(raw: unknown): VoiceApprovalSettings 
     return null;
   }
   if (maxDigits < minDigits) return null;
-  const codeSet = new Set([unlockCode, lockCode, lockedOffCode]);
-  if (codeSet.size !== 3) return null;
-  if ([unlockCode, lockCode, lockedOffCode].some((code) => code.length > maxDigits)) return null;
+  if (phraseWordCount(unlockPhrase) < 2 || phraseWordCount(shutdownPhrase) < 2) return null;
+  if (lockCode.length > maxDigits) return null;
+  const distinctPhrases = new Set([triggerPhrase.toLowerCase(), unlockPhrase.toLowerCase(), shutdownPhrase.toLowerCase()]);
+  if (distinctPhrases.size !== 3) return null;
   return {
     triggerPhrase,
-    unlockCode,
+    unlockPhrase,
+    shutdownPhrase,
     lockCode,
-    lockedOffCode,
     minDigits,
     maxDigits,
     stableMs,
@@ -155,9 +173,9 @@ export function voiceApprovalSettingsResponse(settings: VoiceApprovalSettings & 
     ok: true as const,
     settings: {
       triggerPhrase: settings.triggerPhrase,
-      unlockCode: settings.unlockCode,
+      unlockPhrase: settings.unlockPhrase,
+      shutdownPhrase: settings.shutdownPhrase,
       lockCode: settings.lockCode,
-      lockedOffCode: settings.lockedOffCode,
       minDigits: settings.minDigits,
       maxDigits: settings.maxDigits,
       stableMs: settings.stableMs,
